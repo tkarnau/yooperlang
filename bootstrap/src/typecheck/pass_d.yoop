@@ -207,7 +207,7 @@ function checkBodyAgainst(
   let retType: TypeId = TYPE_VOID_ID;
   let paramTypes: Vec<TypeId> = vec.vecNew(0);
   switch (typeAt(ref prog, signature)) {
-    case Type.Func { params: p, ret: r, variadic: v }: {
+    case Type.Func { params: p, ret: r, variadic: v, isAsync: fnAsync }: {
       retType = r;
       paramTypes = p;
     }
@@ -217,8 +217,15 @@ function checkBodyAgainst(
   if (declNode.childD != 0) {
     // `?` needs the enclosing function's return type, and it can sit at any
     // depth of an expression - so the answer is ambient rather than threaded
-    // through every expression helper. See the fields on Program.
-    beginFunction(ref prog, declNode.name, retType);
+    // through every expression helper. See the fields on Program. `await` is
+    // the second question with exactly that shape, so it rides along: whether
+    // THIS body may suspend comes off the signature, not off a second walk of
+    // the kind prefixes.
+    beginFunction(
+      ref prog, declNode.name, retType,
+      funcTypeIsAsync(ref prog, signature),
+      declIsTaskBody(ref tm, declNode)
+    );
     disposable scope: LocalScope = scopeNew();
     bindParams(ref prog, ref tm, ref ast, declNode, ref paramTypes, ref scope);
     checkBlock(ref prog, ref tm, ref ast, declNode.childD, retType, ref scope);
@@ -558,7 +565,22 @@ function checkExpr(
       }
     }
     case ASTNodeKind.CALL_EXPRESSION: {
+      // The `await` handoff is taken HERE, before the callee is resolved and
+      // long before the arguments are checked - which is what makes the flag a
+      // one-step signal rather than an ambient mode. `await f(g())` awaits f;
+      // by the time `g()` reaches this line the flag is already false.
+      const awaited = prog.awaitPending;
+      prog.awaitPending = false;
+      const prevAwaited = prog.callWasAwaited;
+      prog.callWasAwaited = awaited;
       resolved = checkCall(ref prog, ref tm, ref ast, expr, exprId, expected, ref scope);
+      prog.callWasAwaited = prevAwaited;
+    }
+    case ASTNodeKind.AWAIT_EXPRESSION: {
+      resolved = checkAwait(ref prog, ref tm, ref ast, expr, ref scope);
+    }
+    case ASTNodeKind.WAIT_EXPRESSION: {
+      resolved = checkWait(ref prog, ref tm, ref ast, expr, ref scope);
     }
     case ASTNodeKind.REF_EXPRESSION: {
       resolved = checkRefExpr(ref prog, ref tm, ref ast, expr, ref scope);
@@ -711,9 +733,9 @@ function checkCall(
   switch (scopeLookup(ref scope, expr.name)) {
     case Option.Some { value: localType }: {
       switch (typeAt(ref prog, localType)) {
-        case Type.Func { params: p, ret: r, variadic: v }: {
+        case Type.Func { params: p, ret: r, variadic: v, isAsync: fnAsync }: {
           map.mapInsert(ref tm.indirectCalls, uint64(exprId), true);
-          checkArgsAgainstFunc(ref prog, ref tm, ref ast, expr, localType, expr.name, ref scope);
+          checkArgsAgainstFunc(ref prog, ref tm, ref ast, expr, exprId, localType, expr.name, ref scope);
           return r;
         }
         default: { }
@@ -811,7 +833,7 @@ function instantiateCallee(
   // them against the substituted signature once it is built, which is where an
   // untyped literal finally pins.
   switch (typeAt(ref prog, info.template)) {
-    case Type.Func { params: p, ret: r, variadic: v }: {
+    case Type.Func { params: p, ret: r, variadic: v, isAsync: fnAsync }: {
       if (expr.childA != 0) {
         const args = nodeAt(ref ast, expr.childA);
         let a: usize = 0;
@@ -925,7 +947,28 @@ function checkAgainstSignature(
     }
   }
 
-  return checkArgsAgainstFunc(ref prog, ref tm, ref ast, expr, funcType, calleeName, ref scope);
+  // THE TASK-SPAWN CARVE-OUT. A `task` body is pausable, so its signature is a
+  // coroutine's and rule 3 would demand an `await` - but a task's call site is
+  // a SPAWN onto the scheduler, not an inline drive, and `pooled h = worker(1)`
+  // is how every one of them is written. The reference makes the same carve-out
+  // and keys it on the callee's declared return being `Task<T>`; the bootstrap
+  // keys it on the KIND clause that produces that return, which is the same
+  // fact one step earlier.
+  const spawns = map.mapContainsKey(ref prog.taskSymbols, uint64(symId));
+  if (spawns) {
+    prog.callWasAwaited = true;
+  }
+  const ret = checkArgsAgainstFunc(
+    ref prog, ref tm, ref ast, expr, exprId, funcType, calleeName, ref scope
+  );
+  // ...and the OTHER half of `provides Task`: the call evaluates to `Task<T>`
+  // while the body still returns T. Wrapped here rather than stored on the
+  // signature (which is what the reference does) because the body's check reads
+  // that same signature - see the note at the top of task.yoop.
+  if (spawns && ret != TYPE_ERROR_ID) {
+    return internTask(ref prog, ret);
+  }
+  return ret;
 }
 
 // The arity and type check, against a Func type that is already resolved.
@@ -936,6 +979,7 @@ function checkArgsAgainstFunc(
   ref tm: TypedModule,
   ref ast: AST,
   expr: ASTNode,
+  exprId: NodeId,
   funcType: TypeId,
   calleeName: string,
   ref scope: LocalScope
@@ -944,7 +988,7 @@ function checkArgsAgainstFunc(
   let ret: TypeId = TYPE_ERROR_ID;
   let variadic = false;
   switch (typeAt(ref prog, funcType)) {
-    case Type.Func { params: p, ret: r, variadic: v }: {
+    case Type.Func { params: p, ret: r, variadic: v, isAsync: fnAsync }: {
       params = p;
       ret = r;
       variadic = v;
@@ -954,6 +998,15 @@ function checkArgsAgainstFunc(
       return TYPE_ERROR_ID;
     }
   }
+
+  // ASYNC COLORING, asked here because this is the one funnel every call shape
+  // reaches - a plain name, `ns.f(...)`, `Trait.method(...)`, a bound method on
+  // an opaque receiver, and a call through a function VALUE. Asked BEFORE the
+  // arguments are checked, so `prog.callWasAwaited` still describes this call
+  // rather than one nested in an argument.
+  checkCallColoring(
+    ref prog, ref tm, expr, exprId, funcType, calleeName, prog.callWasAwaited
+  );
 
   let given: usize = 0;
   if (expr.childA != 0) {
@@ -1300,7 +1353,7 @@ function checkTraitCall(
       return TYPE_ERROR_ID;
     }
     map.mapInsert(ref tm.calleeReceiver, uint64(exprId), receiverType);
-    return checkArgsAgainstFunc(ref prog, ref tm, ref ast, expr, bound, expr.name, ref scope);
+    return checkArgsAgainstFunc(ref prog, ref tm, ref ast, expr, exprId, bound, expr.name, ref scope);
   }
 
   const method = lookupMethod(ref prog, receiverType, expr.name);
@@ -1317,7 +1370,7 @@ function checkTraitCall(
   // answer, and the symbol name follows from it plus the method name.
   map.mapInsert(ref tm.calleeReceiver, uint64(exprId), receiverType);
 
-  return checkArgsAgainstFunc(ref prog, ref tm, ref ast, expr, method, expr.name, ref scope);
+  return checkArgsAgainstFunc(ref prog, ref tm, ref ast, expr, exprId, method, expr.name, ref scope);
 }
 
 // `printf` is a compiler builtin on both sides rather than an extern anyone has
@@ -1385,6 +1438,20 @@ function checkVarDeclInner(
   }
 
   const initType = checkExpr(ref prog, ref tm, ref ast, stmt.childB, declared, ref scope);
+
+  // A SPAWN bound to a name. `pooled h = worker(1)` and `joined d = worker(2)`
+  // bind the HANDLE; `const v: int32 = worker(3)` spawns and joins on the spot
+  // and binds the RESULT, which is why that one is not a type mismatch even
+  // though `Task<int32>` is not an `int32`. Which of the three is decided by
+  // the kind's clauses - see taskBindOf.
+  const bind = taskBindOf(ref prog, ref ast, stmt, declared, initType);
+  if (bind == TaskBind.IMMEDIATE) {
+    checkTaskSpawnBinding(ref prog, ref ast, stmt, bind);
+    bindLocal(ref prog, ref scope, stmt, declared);
+    vec.vecSet(ref tm.resolvedTypes, stmtId, declared);
+    return;
+  }
+
   let finalType = initType;
   if (declared != TYPE_ERROR_ID) {
     finalType = declared;
@@ -1393,9 +1460,39 @@ function checkVarDeclInner(
     }
   }
 
-  checkDisposableBinding(ref prog, ref tm, ref ast, stmt, finalType);
+  if (bind == TaskBind.NONE) {
+    checkDisposableBinding(ref prog, ref tm, ref ast, stmt, finalType);
+  } else {
+    // A handle binding skips checkDisposableBinding on purpose: the kind's
+    // `mustCall join` names a method that `Task<T>` does not and cannot have -
+    // it is a compiler type with no methods at all, so the compiler is the one
+    // thing that can honor the clause.
+    checkTaskSpawnBinding(ref prog, ref ast, stmt, bind);
+  }
   bindLocal(ref prog, ref scope, stmt, finalType);
   vec.vecSet(ref tm.resolvedTypes, stmtId, finalType);
+}
+
+// What every handle binding owes: a FRESH spawn on the right.
+//
+// The reference lets a `pooled` binding copy an existing handle
+// (`pooled h2 = h1;`) and emits a retain for it. Nothing in the corpus writes
+// one, so it is refused BY NAME here rather than half-built - a copy with no
+// retain is a use-after-free the moment either binding's scope ends.
+function checkTaskSpawnBinding(
+  ref prog: Program,
+  ref ast: AST,
+  stmt: ASTNode,
+  bind: TaskBind
+): void {
+  if (nodeAt(ref ast, stmt.childB).kind == ASTNodeKind.CALL_EXPRESSION) {
+    return;
+  }
+  reportError(
+    ref prog,
+    `"${stmt.name}" binds a Task<T> handle that is not a fresh spawn - copying a handle needs the refcount retain the bootstrap does not emit yet, so only a direct call to a \`task\` function may appear here`,
+    stmt.sourceLoc
+  );
 }
 
 // A binding whose kind demands a scope-end call has to HAVE that method.
@@ -2478,7 +2575,7 @@ function funcFieldOf(ref prog: Program, ownerType: TypeId, fieldName: string): T
     return TYPE_ERROR_ID;
   }
   switch (typeAt(ref prog, found.typeId)) {
-    case Type.Func { params: p, ret: r, variadic: v }: { return found.typeId; }
+    case Type.Func { params: p, ret: r, variadic: v, isAsync: fnAsync }: { return found.typeId; }
     default: { return TYPE_ERROR_ID; }
   }
 }
@@ -2499,9 +2596,9 @@ function checkIndirectCall(
   // Recorded for codegen: the callee is the FIELD's contents, so there is no
   // symbol to look up and nothing else can tell it that.
   map.mapInsert(ref tm.indirectCalls, uint64(exprId), true);
-  checkArgsAgainstFunc(ref prog, ref tm, ref ast, expr, funcType, expr.name, ref scope);
+  checkArgsAgainstFunc(ref prog, ref tm, ref ast, expr, exprId, funcType, expr.name, ref scope);
   switch (typeAt(ref prog, funcType)) {
-    case Type.Func { params: p, ret: r, variadic: v }: { return r; }
+    case Type.Func { params: p, ret: r, variadic: v, isAsync: fnAsync }: { return r; }
     default: { return TYPE_ERROR_ID; }
   }
 }

@@ -133,6 +133,7 @@ function registerFileShells(
           } else {
             const externShell = internType(ref prog, Type.Func {
               params: vec.vecNew(0), ret: TYPE_ERROR_ID, variadic: false,
+              isAsync: false,
             });
             bindName(
               ref prog, ref tm, externNode, Symbol.Func { typeId: externShell }, visible
@@ -182,7 +183,9 @@ function registerFileShells(
         registerKind(ref prog, {
           name: declNode.name,
           pausable: hasClause(ref m.ast, declNode, PAUSABLE_CLAUSE),
+          providesTask: clauseArgumentIs(ref m.ast, declNode, PROVIDES_CLAUSE, TASK_SUBJECT),
           disposeMethod: clauseArgument(ref m.ast, declNode, MUST_CALL_CLAUSE),
+          refcounted: hasClause(ref m.ast, declNode, REFCOUNTED_CLAUSE),
           appliesToRegion: clauseArgumentIs(ref m.ast, declNode, APPLIES_TO_CLAUSE, REGION_SUBJECT),
         });
         bindName(ref prog, ref tm, declNode, Symbol.Kind { kindId: 0 }, exported);
@@ -254,6 +257,7 @@ function registerFunctionShell(
     params: vec.vecNew(0),
     ret: TYPE_ERROR_ID,
     variadic: false,
+    isAsync: false,
   });
   bindName(ref prog, ref tm, declNode, Symbol.Func { typeId: shellId }, exported);
 }
@@ -355,6 +359,7 @@ function registerGenericShell(
         params: vec.vecNew(0),
         ret: TYPE_ERROR_ID,
         variadic: false,
+        isAsync: false,
       });
     }
     case GenericSort.VARIANT: {
@@ -451,6 +456,13 @@ const PAUSABLE_CLAUSE: string = "pausable";
 const MUST_CALL_CLAUSE: string = "mustCall";
 const APPLIES_TO_CLAUSE: string = "appliesTo";
 const REGION_SUBJECT: string = "region";
+// `provides Task;` on `kind task`. The clause names the TYPE a call to a
+// function carrying the kind evaluates to, which is what turns a call into a
+// spawn - see KindInfo.providesTask.
+const PROVIDES_CLAUSE: string = "provides";
+const TASK_SUBJECT: string = "Task";
+// `refcounted retain release;` on `kind pooled`. See KindInfo.refcounted.
+const REFCOUNTED_CLAUSE: string = "refcounted";
 
 // The FIRST word after a clause's leading one: the `dispose` in
 // `mustCall dispose beforeScopeEnd;`, the `region` in `appliesTo region;`.
@@ -497,5 +509,11 @@ function isKnownIntrinsic(name: string): bool {
     str.stringEq(name, "stringAsBytes") ||
     str.stringEq(name, "stringFromBytesUnchecked") ||
     str.stringEq(name, "bytesAsStringUnchecked") ||
-    str.stringEq(name, "arraySlice");
+    str.stringEq(name, "arraySlice") ||
+    // The SUSPEND PRIMITIVE. `await intr.suspendNow()` parks the enclosing
+    // coroutine right there and hands the worker thread back; it is an
+    // intrinsic because it lowers to a bare `llvm.coro.suspend` and there is no
+    // symbol a call could reach. Everything above it in std - awaitReadable,
+    // awaitWritable - is ordinary yoop built on this one line.
+    str.stringEq(name, "suspendNow");
 }

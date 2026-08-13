@@ -126,7 +126,14 @@ export variant Type propagates<disposable> {
   Array     { elem: TypeId },
   Task      { result: TypeId },
   UnsafePtr { pointee: TypeId },          // pointee 0 = opaque `unsafe_ptr` (no <T>)
-  Func      { params: Vec<TypeId>, ret: TypeId, variadic: bool },
+  // `isAsync` says the function is a COROUTINE - it carries a pausable kind
+  // (`async`, `task`), it is called through `await`, and it lowers to the
+  // coroutine ABI rather than the ordinary one. It rides on the TYPE rather
+  // than in a side table because that is the only place every reader can see
+  // it: a method's signature travels cross-module inside `Type.Struct.methods`
+  // and a name table cannot follow it there. Being part of interning is also
+  // what makes a sync impl of an async trait method a type mismatch for free.
+  Func      { params: Vec<TypeId>, ret: TypeId, variadic: bool, isAsync: bool },
   FuncPtr   { params: Vec<TypeId>, ret: TypeId },   // `(p: T) => R` value type
   Namespace { module: ModuleId },         // `import * as ns`; exports on the scope
 

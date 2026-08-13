@@ -1,0 +1,226 @@
+module codegen;
+
+// An `async` function is an LLVM switched-resume COROUTINE. This file is the
+// FRAME: the prologue that opens one, the trailer every exit falls into, and
+// the `declare` lines the intrinsics need. The await lowering is await_op.yoop
+// and the raw instructions are instr_coro.yoop.
+//
+// The ABI, unchanged from the reference (plans/async-coroutines.md):
+//
+//     async f(a: A): T      ->   define ptr @f(A %a.arg, ptr %__ret) presplitcoroutine
+//
+// It returns the HANDLE, not the result. The result goes through `%__ret`, a
+// slot the CALLER owns - which is what keeps it alive across the caller's own
+// suspends, and what lets a `void` async function use one ABI rather than two.
+//
+// There is NO INITIAL SUSPEND. Calling an async function runs it eagerly until
+// it hits a real suspend point, so a call that never blocks completes with no
+// resume at all and costs one frame allocation.
+//
+// The shape:
+//
+//     define ptr @m__fetch(i32 %n.arg, ptr %__ret) presplitcoroutine {
+//     entry:
+//       %t1 = call token @llvm.coro.id(i32 0, ptr null, ptr null, ptr null)
+//       %t2 = call i64 @llvm.coro.size.i64()
+//       %t3 = call ptr @malloc(i64 %t2)
+//       %t4 = call ptr @llvm.coro.begin(token %t1, ptr %t3)
+//       %n.1.addr = alloca i32              ; hoisted here, AFTER coro.begin
+//       store i32 %n.arg, ptr %n.1.addr
+//       br label %L1
+//     L1:                                    ; the body
+//       ...
+//       store i32 %t8, ptr %__ret            ; a `return` writes the slot
+//       br label %L2                         ;   and falls into the trailer
+//     L2:                                    ; final suspend
+//       ...
+//
+// Allocas landing after `coro.begin` is not cosmetic: the coro passes move
+// frame-resident allocas into the frame, and one emitted before `begin` is not
+// one of them. The bootstrap hoists every alloca to the top of `entry:`, so the
+// prologue instructions are appended to the HEADER buffer, which is the one
+// place that sits above the hoisted allocas.
+
+import { Text }, * as text from "std/core/text.yoop";
+
+// The labels and temps every exit out of one coroutine branches to. Carried on
+// the Cx because a `return` can appear at any depth of the body and a nested
+// `await` needs the same two unwind edges.
+//
+// `active: false` is an ordinary function, which is most of them.
+export type CoroFrame {
+  active: bool,
+  idTemp: usize,        // the `coro.id` token, needed again by `coro.free`
+  hdlTemp: usize,       // the handle - the function's return value
+  bodyLabel: usize,     // where `entry:` branches once the allocas are past
+  finalLabel: usize,    // the final suspend; every `return` branches here
+  cleanupLabel: usize,  // frees the frame; a destroyed suspend lands here
+  suspendLabel: usize,  // returns the handle; a plain suspend lands here
+}
+
+export function noCoroFrame(): CoroFrame {
+  return {
+    active: false, idTemp: 0, hdlTemp: 0, bodyLabel: 0,
+    finalLabel: 0, cleanupLabel: 0, suspendLabel: 0,
+  };
+}
+
+// The `presplitcoroutine` function attribute. Without it the coro passes leave
+// the intrinsics in place and clang rejects the module.
+export const CORO_FN_ATTR: string = " presplitcoroutine";
+
+// The caller-owned result slot, by the name the ABI gives it. A `.`-free name
+// on purpose - it is a real LLVM parameter, so it can collide with a yoop
+// binding called `__ret`, and there is nothing in the language stopping one.
+export const CORO_RET_PARAM: string = "__ret";
+
+// Open a coroutine: id, size, storage, handle. Appends to the HEADER buffer,
+// so it must be called after emitFunctionOpen and before any alloca.
+export function beginCoroFrame(ref cx: Cx): CoroFrame {
+  const idTemp = freshTemp(cx.e);
+  emitCoroId(ref cx, idTemp);
+  const sizeTemp = freshTemp(cx.e);
+  emitCoroSize(ref cx, sizeTemp);
+  const memTemp = freshTemp(cx.e);
+  emitCoroFrameAlloc(ref cx, memTemp, sizeTemp);
+  const hdlTemp = freshTemp(cx.e);
+  emitCoroBegin(ref cx, hdlTemp, idTemp, memTemp);
+  return {
+    active: true,
+    idTemp: idTemp,
+    hdlTemp: hdlTemp,
+    bodyLabel: freshLabel(cx.e),
+    finalLabel: freshLabel(cx.e),
+    cleanupLabel: freshLabel(cx.e),
+    suspendLabel: freshLabel(cx.e),
+  };
+}
+
+// Close `entry:` and open the body block. Called after the parameter stores,
+// which is what puts the hoisted allocas between `coro.begin` and this branch.
+export function openCoroBody(ref cx: Cx): void {
+  emitBr(ref cx, cx.coro.bodyLabel);
+  emitLabel(ref cx, cx.coro.bodyLabel);
+}
+
+// A `return` inside a coroutine. There is no `ret <value>`: the value goes to
+// the caller's slot and control falls into the shared final-suspend trailer,
+// which is what hands the handle back.
+//
+//   store i32 %t8, ptr %__ret
+//   br label %L2
+//
+// A void coroutine stores nothing and branches straight there - the slot still
+// exists (one ABI) and is simply never written.
+export function emitCoroReturn(ref cx: Cx, retTy: string, value: Operand, hasValue: bool): void {
+  if (hasValue && !text.equals(retTy, "void")) {
+    emitStoreToRetSlot(ref cx, retTy, value);
+  }
+  emitBr(ref cx, cx.coro.finalLabel);
+}
+
+//   store i32 %t8, ptr %__ret
+export function emitStoreToRetSlot(ref cx: Cx, ty: string, value: Operand): void {
+  startInstr(ref cx);
+  part(ref cx, "store ");
+  part(ref cx, ty);
+  part(ref cx, " ");
+  operand(ref cx, value);
+  part(ref cx, ", ptr %");
+  part(ref cx, CORO_RET_PARAM);
+  endInstr(ref cx);
+}
+
+// The three trailer blocks every coroutine ends with:
+//
+//   L2:                                     ; final suspend
+//     %t9 = call i8 @llvm.coro.suspend(token none, i1 true)
+//     switch i8 %t9, label %L4 [
+//       i8 0, label %L3
+//       i8 1, label %L3
+//     ]
+//   L3:                                     ; cleanup
+//     %t10 = call ptr @llvm.coro.free(token %t1, ptr %t4)
+//     call void @free(ptr %t10)
+//     br label %L4
+//   L4:                                     ; suspend
+//     call i1 @llvm.coro.end(ptr %t4, i1 false)
+//     ret ptr %t4
+//
+// Both edges out of the FINAL suspend go to cleanup, which is the difference
+// from an ordinary one: a coroutine parked at its final suspend can only be
+// destroyed, so "resumed" and "destroyed" mean the same thing there.
+export function emitCoroTrailer(ref cx: Cx): void {
+  emitLabel(ref cx, cx.coro.finalLabel);
+  const suspTemp = freshTemp(cx.e);
+  emitCoroSuspend(ref cx, suspTemp, true);
+  emitCoroSuspendSwitch(
+    ref cx, suspTemp, cx.coro.suspendLabel, cx.coro.cleanupLabel, cx.coro.cleanupLabel
+  );
+
+  emitLabel(ref cx, cx.coro.cleanupLabel);
+  const memTemp = freshTemp(cx.e);
+  emitCoroFree(ref cx, memTemp, cx.coro.idTemp, cx.coro.hdlTemp);
+  emitFreeCall(ref cx, memTemp);
+  emitBr(ref cx, cx.coro.suspendLabel);
+
+  emitLabel(ref cx, cx.coro.suspendLabel);
+  emitCoroEnd(ref cx, cx.coro.hdlTemp);
+  emitRet(ref cx, "ptr", Operand.Temp { id: cx.coro.hdlTemp });
+}
+
+// The `declare` lines the coroutine intrinsics and the frame allocator need.
+//
+// Through `externDeclare` like every other C symbol, for the reason that table
+// exists: `malloc` and `free` are also what a template literal declares and
+// what std/core/alloc.yoop declares, and one LLVM module may declare a symbol
+// exactly once. The `llvm.coro.*` names cannot collide with a user's - a yoop
+// identifier has no `.` in it - but they go through the same door so a program
+// with two async functions declares them once.
+export function declareCoroIntrinsics(ref e: Emitter): string {
+  const err0 = declareOne(ref e, "malloc", "ptr", ["i64"]);
+  if (err0.len > 0) {
+    return err0;
+  }
+  const err1 = declareOne(ref e, "free", "void", ["ptr"]);
+  if (err1.len > 0) {
+    return err1;
+  }
+  const err2 = declareOne(ref e, "llvm.coro.id", "token", ["i32", "ptr", "ptr", "ptr"]);
+  if (err2.len > 0) {
+    return err2;
+  }
+  const err3 = declareOne(ref e, "llvm.coro.size.i64", "i64", []);
+  if (err3.len > 0) {
+    return err3;
+  }
+  const err4 = declareOne(ref e, "llvm.coro.begin", "ptr", ["token", "ptr"]);
+  if (err4.len > 0) {
+    return err4;
+  }
+  const err5 = declareOne(ref e, "llvm.coro.suspend", "i8", ["token", "i1"]);
+  if (err5.len > 0) {
+    return err5;
+  }
+  const err6 = declareOne(ref e, "llvm.coro.free", "ptr", ["token", "ptr"]);
+  if (err6.len > 0) {
+    return err6;
+  }
+  const err7 = declareOne(ref e, "llvm.coro.end", "i1", ["ptr", "i1"]);
+  if (err7.len > 0) {
+    return err7;
+  }
+  const err8 = declareOne(ref e, "llvm.coro.resume", "void", ["ptr"]);
+  if (err8.len > 0) {
+    return err8;
+  }
+  const err9 = declareOne(ref e, "llvm.coro.destroy", "void", ["ptr"]);
+  if (err9.len > 0) {
+    return err9;
+  }
+  return declareOne(ref e, "llvm.coro.done", "i1", ["ptr"]);
+}
+
+function declareOne(ref e: Emitter, name: string, ret: string, params: string[]): string {
+  return externDeclare(ref e, name, ret, params, false);
+}

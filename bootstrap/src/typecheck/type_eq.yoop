@@ -99,10 +99,12 @@ function sameTypeStructurally(ref prog: Program, a: TypeId, b: TypeId): bool {
     // types match on parameter TYPES, return type and `...`, which is what
     // lets a field declared `(a: K, b: K) => bool` accept a function whose
     // parameters are called something else.
-    case Type.Func { params: aParams, ret: aRet, variadic: aVariadic }: {
+    case Type.Func { params: aParams, ret: aRet, variadic: aVariadic, isAsync: aAsync }: {
       switch (typeAt(ref prog, b)) {
-        case Type.Func { params: bParams, ret: bRet, variadic: bVariadic }: {
-          return aVariadic == bVariadic &&
+        case Type.Func { params: bParams, ret: bRet, variadic: bVariadic, isAsync: bAsync }: {
+          // Asyncness is part of the signature, so two Funcs that differ only
+          // in it are NOT structurally the same - matching internFunc.
+          return aVariadic == bVariadic && aAsync == bAsync &&
             sameTypeStructurally(ref prog, aRet, bRet) &&
             sameTypeListStructurally(ref prog, ref aParams, ref bParams);
         }

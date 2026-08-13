@@ -34,6 +34,11 @@ export variant Operand {
   // `%v.3.addr` - a local's slot ADDRESS rather than its value. What `ref x`
   // evaluates to: a borrow is the address, and the slot already is one.
   SlotAddr { name: string, id: usize },
+  // `%ts` - an LLVM value by BARE name. One thing needs it: the per-task
+  // thunk's handle parameter. A thunk has no yoop body, so its parameter is
+  // never spilled to a slot and never lands in a temp, and every other operand
+  // shape here spells a decoration this one must not have.
+  Named { name: string },
   // `null` - LLVM spells a null pointer constant exactly that way.
   Null,
   None,                       // a void call's non-result
@@ -102,6 +107,10 @@ export function pushOperand(ref out: Text, op: Operand): void {
         text.pushUint(ref out, uint64(i));
         text.push(ref out, ".addr");
       }
+    }
+    case Operand.Named { name: n }: {
+      text.pushByte(ref out, '%');
+      text.push(ref out, n);
     }
     case Operand.None: { text.push(ref out, "void"); }
   }

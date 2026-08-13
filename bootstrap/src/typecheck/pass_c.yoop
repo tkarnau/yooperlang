@@ -316,6 +316,13 @@ function fillFunctionSignature(
     // variadic - the parser refuses `...` outside an extern - so `false` here
     // is the answer and not a placeholder.
     variadic: declNode.kind == ASTNodeKind.EXTERN_FUNCTION_DECL && declNode.flagA,
+    // A PAUSABLE kind prefix makes the signature a coroutine's, and that is
+    // part of the TYPE rather than a side table: a call site in another module
+    // resolves the symbol and reads the Func, and there is no name table it
+    // could consult instead. `async function suspendNow(): void;` inside an
+    // `extern "intrinsic"` block reaches this the same way an ordinary decl
+    // does, because a kind prefix is parsed identically in both.
+    isAsync: declIsPausable(ref prog, ref ast, declNode),
   });
 }
 
@@ -655,6 +662,17 @@ export function checkFunctionKinds(
       case Option.Some { value: info }: {
         if (info.pausable) {
           map.mapInsert(ref tm.pausableNames, declNode.name, true);
+        }
+        if (info.providesTask) {
+          map.mapInsert(ref tm.taskNames, declNode.name, true);
+          // The same fact, program-wide and keyed by SYMBOL, for the call side:
+          // `pooled h = worker(1)` in another module has to read it, and a
+          // per-module name table cannot answer that.
+          const symId = lookupOwnName(ref tm, declNode.name);
+          if (symId != SYMBOL_NONE_ID) {
+            map.mapInsert(ref prog.taskSymbols, uint64(symId), true);
+          }
+          checkTaskDecl(ref prog, ref tm, declNode);
         }
       }
       case Option.None: {

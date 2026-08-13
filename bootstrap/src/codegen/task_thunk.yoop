@@ -1,0 +1,144 @@
+module codegen;
+
+/*
+  The PER-TASK THUNK, and the three coroutine trampolines the scheduler drives
+  tasks through.
+
+  A worker thread cannot call a task body directly: the body is a coroutine, so
+  its signature is `ptr (args..., ptr __ret)` and its arguments live in the
+  handle rather than in registers. The thunk is the adapter, and it is generated
+  per task function because only there are the argument types known:
+
+    define void @main_1__compute__thunk(ptr %ts) {
+    entry:
+      %t1 = getelementptr inbounds %Task_main_1__compute, ptr %ts, i32 0, i32 9
+      %t2 = load i32, ptr %t1
+      %t3 = getelementptr inbounds %Task_main_1__compute, ptr %ts, i32 0, i32 8
+      %t4 = call ptr @main_1__compute(i32 %t2, ptr %t3)
+      %t5 = getelementptr inbounds %Task_main_1__compute, ptr %ts, i32 0, i32 6
+      store ptr %t4, ptr %t5
+      call void @yoop_task_settle(ptr %ts)
+      ret void
+    }
+
+  Two things in that are worth saying out loud.
+
+  The body is handed the HANDLE'S OWN result slot as its `__ret`. So a coroutine
+  that runs straight through has already written its result exactly where `wait`
+  looks for it, with no copy and nothing to keep alive in between.
+
+  The thunk STARTS the coroutine and returns; it does not drive it to
+  completion. `yoop_task_settle` is what decides whether the step finished or
+  merely suspended, and that is the whole reason a task blocked on I/O gives its
+  worker thread back instead of holding it.
+*/
+
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import { ASTNode } from "../ast";
+
+// The thunk's single parameter, by the name the emitted IR gives it. A `.`-free
+// spelling that no yoop binding can collide with, because a thunk has no yoop
+// body and therefore no locals at all.
+export const THUNK_HANDLE_PARAM: string = "ts";
+
+// One thunk, emitted straight after the task body it adapts.
+export function emitTaskThunk(ref cx: Cx, declNode: ASTNode): string {
+  disposable meta: TaskMeta = taskMetaOf(ref cx, declNode.name);
+  if (!meta.found) {
+    return internalError("no task layout for", declNode.name);
+  }
+
+  beginFunctionBuffers(cx.e);
+  emitThunkOpen(ref cx, cx.tm.moduleId, taskThunkSymbolName(declNode.name));
+
+  disposable args: Vec<CallArg> = vec.vecNew(meta.argTys.len + 1);
+  let i: usize = 0;
+  while (i < meta.argTys.len) {
+    const argTy = vec.vecGet(ref meta.argTys, i);
+    const addr = freshTemp(cx.e);
+    emitGepTaskField(ref cx, addr, meta.structName, THUNK_HANDLE_PARAM, TASK_FIELD_ARG0 + i);
+    const value = freshTemp(cx.e);
+    emitLoadFromPtr(ref cx, value, argTy, addr);
+    vec.vecPush(ref args, { ty: argTy, value: Operand.Temp { id: value } });
+    i += 1;
+  }
+
+  // The result slot, passed as the body's `__ret`.
+  const resultAddr = freshTemp(cx.e);
+  emitGepTaskField(ref cx, resultAddr, meta.structName, THUNK_HANDLE_PARAM, TASK_FIELD_RESULT);
+  vec.vecPush(ref args, { ty: "ptr", value: Operand.Temp { id: resultAddr } });
+
+  const handle = freshTemp(cx.e);
+  emitCall(ref cx, handle, "ptr", cx.tm.moduleId, declNode.name, ref args);
+
+  // Stash the coroutine handle where a later resume can find it. It belongs to
+  // the TASK rather than to any one worker's stack: a task that suspends
+  // resumes on whichever worker picks it up next.
+  const coroAddr = freshTemp(cx.e);
+  emitGepTaskField(ref cx, coroAddr, meta.structName, THUNK_HANDLE_PARAM, TASK_FIELD_CORO);
+  emitStoreToPtr(ref cx, "ptr", Operand.Temp { id: handle }, coroAddr);
+
+  emitTaskSettle(ref cx, Operand.Named { name: THUNK_HANDLE_PARAM });
+  emitRetVoid(ref cx);
+  emitFunctionClose(ref cx);
+  return "";
+}
+
+// The three ordinary functions the C scheduler drives a coroutine through.
+//
+// They exist because `llvm.coro.resume` and friends are INTRINSICS: they can
+// only appear inside IR, so the runtime cannot call them, and it must not
+// hard-code the frame layout either. `main` hands these over as function
+// pointers right after `yoop_runtime_init`.
+//
+// EXTERNAL linkage, and that is load-bearing. Nothing inside the module ever
+// calls them - only the C side does, from another translation unit - so a
+// discardable linkage would let globaldce delete all three and the link would
+// fail on three undefined symbols. Emitted once per program.
+export const CORO_RESUME_TRAMPOLINE: string = "yoop_coro_resume";
+export const CORO_DESTROY_TRAMPOLINE: string = "yoop_coro_destroy";
+export const CORO_DONE_TRAMPOLINE: string = "yoop_coro_done";
+
+export function emitCoroTrampolines(ref e: Emitter): string {
+  const err = declareCoroIntrinsics(ref e);
+  if (err.len > 0) {
+    return err;
+  }
+  emitGlobal(ref e, "define void @yoop_coro_resume(ptr %h) {");
+  emitGlobal(ref e, "  call void @llvm.coro.resume(ptr %h)");
+  emitGlobal(ref e, "  ret void");
+  emitGlobal(ref e, "}");
+  emitGlobal(ref e, "define void @yoop_coro_destroy(ptr %h) {");
+  emitGlobal(ref e, "  call void @llvm.coro.destroy(ptr %h)");
+  emitGlobal(ref e, "  ret void");
+  emitGlobal(ref e, "}");
+  emitGlobal(ref e, "define i32 @yoop_coro_done(ptr %h) {");
+  emitGlobal(ref e, "  %d = call i1 @llvm.coro.done(ptr %h)");
+  emitGlobal(ref e, "  %z = zext i1 %d to i32");
+  emitGlobal(ref e, "  ret i32 %z");
+  emitGlobal(ref e, "}");
+  return "";
+}
+
+// The `declare` lines the spawn calls into. Emitted once per program, and only
+// for a program that has a task - see Emitter.hasTasks.
+export function emitTaskRuntimeDeclarations(ref e: Emitter): string {
+  let err = externDeclare(ref e, "yoop_runtime_init", "void", [], false);
+  if (err.len > 0) { return err; }
+  err = externDeclare(ref e, "yoop_runtime_shutdown", "void", [], false);
+  if (err.len > 0) { return err; }
+  err = externDeclare(ref e, "yoop_runtime_set_coro_ops", "void", ["ptr", "ptr", "ptr"], false);
+  if (err.len > 0) { return err; }
+  err = externDeclare(ref e, "yoop_task_submit", "void", ["ptr", "ptr"], false);
+  if (err.len > 0) { return err; }
+  err = externDeclare(ref e, "yoop_task_wait", "void", ["ptr"], false);
+  if (err.len > 0) { return err; }
+  err = externDeclare(ref e, "yoop_task_settle", "void", ["ptr"], false);
+  if (err.len > 0) { return err; }
+  err = externDeclare(ref e, "yoop_task_alloc", "ptr", ["i64"], false);
+  if (err.len > 0) { return err; }
+  err = externDeclare(ref e, "yoop_task_release", "void", ["ptr"], false);
+  if (err.len > 0) { return err; }
+  return externDeclare(ref e, "yoop_task_free_sync_pair", "void", ["ptr"], false);
+}

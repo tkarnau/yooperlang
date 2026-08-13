@@ -291,6 +291,312 @@ suite function aTopOfRangeUsizeConstKeepsItsValue(): void {
   }
 }
 
+// ----- coroutines ------------------------------------------------------------
+//
+// The async lowering is asserted on the IR TEXT rather than by running a
+// program, and that is not a shortcut: a coroutine can only be REACHED from
+// another coroutine (that is the whole coloring rule), and the only bridge from
+// `main` into one is `task` + `wait`, which the bootstrap refuses by name. So
+// there is no runnable async program to make a slice fixture out of yet - see
+// item 3.3 in plans/bootstrap-completion.md.
+//
+// What IS asserted here is every part of the shape that would be silently wrong
+// if it were missing: the ABI, the frame, the trailer, the drive loop and the
+// bare suspend. The lowering was additionally verified end to end against a
+// hand-written C driver - two suspends propagating through two frames, resumed
+// from the top - which is recorded in the plan doc.
+
+const ASYNC_KIND: string = "kind async { appliesTo function; pausable; } ";
+const SUSPEND_INTRINSIC: string = "extern \"intrinsic\" from \"compiler\" { async function suspendNow(): void; } ";
+
+suite function anAsyncFunctionIsACoroutine(): void {
+  const src = `${ASYNC_KIND}async double(x: int32): int32 { return x * 2; }`;
+
+  let test theory: Case = t.asserts("it carries the coroutine ABI and attribute") {
+    disposable e: Emitted = emitSource(src);
+    theory.isSuccessful = occurrences(text.view(ref e.ir),
+      "define ptr @test__double(i32 %x.arg, ptr %__ret) presplitcoroutine {") == 1;
+    theory.detail = `codegen said "${e.error}"; the define line is not the async one`;
+  }
+  // Without `presplitcoroutine` the coro passes never run and clang rejects the
+  // leftover intrinsics, so this is not a cosmetic assertion.
+  let test theory: Case = t.asserts("the frame is opened before anything else") {
+    disposable e: Emitted = emitSource(src);
+    const ir = text.view(ref e.ir);
+    theory.isSuccessful = occurrences(ir, "call token @llvm.coro.id(") == 1 &&
+      occurrences(ir, "call ptr @llvm.coro.begin(") == 1 &&
+      occurrences(ir, "call i64 @llvm.coro.size.i64()") == 1;
+    theory.detail = "the coro prologue is not all there";
+  }
+  // The ALLOCAS have to land after `coro.begin`, or the coro passes do not move
+  // them into the frame and a local does not survive a suspend. The bootstrap
+  // hoists allocas to the top of `entry:`, so this is the one ordering that
+  // needed a buffer of its own.
+  let test theory: Case = t.asserts("the parameter alloca sits AFTER coro.begin") {
+    disposable e: Emitted = emitSource(src);
+    const ir = text.view(ref e.ir);
+    const begin = text.indexOfFrom(ir, "llvm.coro.begin", 0);
+    const alloca = text.indexOfFrom(ir, "%x.1.addr = alloca", 0);
+    theory.isSuccessful = begin < alloca && alloca < ir.len;
+    theory.detail = `coro.begin at ${begin}, the alloca at ${alloca}`;
+  }
+  let test theory: Case = t.asserts("a `return` stores to the caller's slot rather than returning") {
+    disposable e: Emitted = emitSource(src);
+    const ir = text.view(ref e.ir);
+    theory.isSuccessful = occurrences(ir, "store i32 %t6, ptr %__ret") == 1 &&
+      occurrences(ir, "ret ptr %t4") == 1;
+    theory.detail = "the return does not go through the result slot";
+  }
+  let test theory: Case = t.asserts("the trailer frees the frame and ends the coroutine") {
+    disposable e: Emitted = emitSource(src);
+    const ir = text.view(ref e.ir);
+    theory.isSuccessful = occurrences(ir, "call i8 @llvm.coro.suspend(token none, i1 true)") == 1 &&
+      occurrences(ir, "call ptr @llvm.coro.free(") == 1 &&
+      occurrences(ir, "call i1 @llvm.coro.end(") == 1;
+    theory.detail = "the coro trailer is not all there";
+  }
+  // The intrinsics go through the SAME `declare` table every other C symbol
+  // does, so two coroutines in one module declare them once.
+  let test theory: Case = t.asserts("two coroutines share one set of declares") {
+    disposable e: Emitted = emitSource(
+      `${ASYNC_KIND}async a(): int32 { return 1; } async b(): int32 { return 2; }`
+    );
+    const ir = text.view(ref e.ir);
+    theory.isSuccessful = occurrences(ir, "declare i1 @llvm.coro.done(ptr)") == 1 &&
+      occurrences(ir, "declare ptr @malloc(i64)") == 1;
+    theory.detail = "an intrinsic is declared more than once - clang rejects the second";
+  }
+  // An ORDINARY function in the same module must be untouched. The reference
+  // pins the same thing on its HTTP handler.
+  let test theory: Case = t.asserts("an ordinary function beside one is NOT a coroutine") {
+    disposable e: Emitted = emitSource(
+      `${ASYNC_KIND}async a(): int32 { return 1; } function plain(): int32 { return 2; }`
+    );
+    const ir = text.view(ref e.ir);
+    theory.isSuccessful = occurrences(ir, "define i32 @test__plain() {") == 1 &&
+      occurrences(ir, "presplitcoroutine") == 1;
+    theory.detail = "the plain function did not keep the ordinary ABI";
+  }
+}
+
+suite function awaitDrivesTheCalleeAndPropagatesItsSuspend(): void {
+  const src = `${ASYNC_KIND}async inner(): int32 { return 1; } async outer(): int32 { return await inner(); }`;
+
+  let test theory: Case = t.asserts("the call passes a result slot and takes a handle back") {
+    disposable e: Emitted = emitSource(src);
+    theory.isSuccessful = occurrences(text.view(ref e.ir),
+      "call ptr @test__inner(ptr %sc.1.addr)") == 1;
+    theory.detail = `codegen said "${e.error}"; the async call site is not the ABI shape`;
+  }
+  // The drive loop is the whole feature: without it the caller would run on
+  // past a callee that has not finished.
+  let test theory: Case = t.asserts("it tests `done`, and resumes on the way round") {
+    disposable e: Emitted = emitSource(src);
+    const ir = text.view(ref e.ir);
+    theory.isSuccessful = occurrences(ir, "call i1 @llvm.coro.done(ptr %t") == 1 &&
+      occurrences(ir, "call void @llvm.coro.resume(ptr %t") == 1;
+    theory.detail = "the await has no drive loop";
+  }
+  // PROPAGATION. The caller suspends ITSELF when the callee is not done, which
+  // is what carries a suspend up a call chain - and it is a NON-final suspend,
+  // so `coro.done` on the caller stays false.
+  let test theory: Case = t.asserts("the caller suspends itself when the callee has not finished") {
+    disposable e: Emitted = emitSource(src);
+    const ir = text.view(ref e.ir);
+    theory.isSuccessful = occurrences(ir, "call i8 @llvm.coro.suspend(token none, i1 false)") == 1;
+    theory.detail = "there is no non-final suspend, so a callee's suspend would not propagate";
+  }
+  let test theory: Case = t.asserts("the result is read BEFORE the frame is destroyed") {
+    disposable e: Emitted = emitSource(src);
+    const ir = text.view(ref e.ir);
+    const load = text.indexOfFrom(ir, "load i32, ptr %sc.1.addr", 0);
+    const destroy = text.indexOfFrom(ir, "call void @llvm.coro.destroy(", 0);
+    theory.isSuccessful = load < destroy && destroy < ir.len;
+    theory.detail = `the load is at ${load} and the destroy at ${destroy}`;
+  }
+}
+
+// `await suspendNow()` is the suspend PRIMITIVE - a bare `coro.suspend` with no
+// callee to drive. Everything in std that parks a task is built on this one
+// line, so it is the difference between async that composes and async that can
+// actually give a worker thread back.
+suite function theSuspendPrimitiveIsABareSuspend(): void {
+  const src = `${ASYNC_KIND}${SUSPEND_INTRINSIC}async park(): int32 { await suspendNow(); return 1; }`;
+
+  let test theory: Case = t.asserts("it emits a suspend and no call at all") {
+    disposable e: Emitted = emitSource(src);
+    const ir = text.view(ref e.ir);
+    theory.isSuccessful = occurrences(ir, "call i8 @llvm.coro.suspend(token none, i1 false)") == 1 &&
+      occurrences(ir, "@test__suspendNow") == 0;
+    theory.detail = `codegen said "${e.error}"; an intrinsic must not become a call`;
+  }
+  let test theory: Case = t.asserts("it does not test `done` - there is nothing being driven") {
+    disposable e: Emitted = emitSource(src);
+    theory.isSuccessful = occurrences(text.view(ref e.ir), "call i1 @llvm.coro.done(ptr %t") == 0;
+    theory.detail = "a bare suspend grew a drive loop";
+  }
+}
+
+// ----- the SPAWN --------------------------------------------------------------
+
+const TASK_KINDS: string = "kind task { appliesTo function; pausable; provides Task; } kind pooled { appliesTo binding; refcounted retain release; } kind joined { appliesTo binding; mustCall join beforeScopeEnd; } ";
+
+// THE BYTE OFFSETS. The C runtime reaches the handle's prefix through
+// `(char*)h + 16` and friends, so a field in the wrong place is a corrupted
+// mutex pointer at run time rather than a link error. Pinning the emitted type
+// definition is the only check available for that, and it is worth having:
+// nothing else in the tree would notice.
+suite function theTaskHandleStructMatchesTheRuntimeLayout(): void {
+  const src = `${TASK_KINDS}task worker(n: int32): int32 { return n; }`;
+
+  let test theory: Case = t.asserts("the handle is the prefix, then the result, then the args") {
+    disposable e: Emitted = emitSource(src);
+    theory.isSuccessful = occurrences(text.view(ref e.ir),
+      "%Task_test__worker = type { ptr, i8, [3 x i8], i32, ptr, ptr, ptr, ptr, i32, i32 }") == 1;
+    theory.detail = `codegen said "${e.error}"; the handle layout is not the runtime's`;
+  }
+  // A task body IS a coroutine - that half landed with `async` - so this pins
+  // that a `provides Task` kind did not quietly turn it back into a function.
+  let test theory: Case = t.asserts("the body is still emitted as a coroutine") {
+    disposable e: Emitted = emitSource(src);
+    theory.isSuccessful = occurrences(text.view(ref e.ir),
+      "define ptr @test__worker(i32 %n.arg, ptr %__ret) presplitcoroutine {") == 1;
+    theory.detail = "a task body is not a coroutine";
+  }
+}
+
+// The THUNK is what a worker thread actually calls: the body's arguments live
+// in the handle rather than in registers, and the body hands back a coroutine
+// handle rather than a result.
+suite function eachTaskGetsAThunk(): void {
+  const src = `${TASK_KINDS}task worker(n: int32): int32 { return n; }`;
+
+  let test theory: Case = t.asserts("it loads the args out of the handle") {
+    disposable e: Emitted = emitSource(src);
+    const ir = text.view(ref e.ir);
+    theory.isSuccessful = occurrences(ir, "define void @test__worker__thunk(ptr %ts) {") == 1 &&
+      occurrences(ir, "%t1 = getelementptr inbounds %Task_test__worker, ptr %ts, i32 0, i32 9") == 1;
+    theory.detail = `codegen said "${e.error}"; the thunk does not unpack its arguments`;
+  }
+  // The body writes its result STRAIGHT into the handle's slot, so a finished
+  // coroutine has already put it where `wait` looks. No copy, and nothing to
+  // keep alive across a suspend.
+  let test theory: Case = t.asserts("the body is handed the handle's own result slot") {
+    disposable e: Emitted = emitSource(src);
+    const ir = text.view(ref e.ir);
+    theory.isSuccessful = occurrences(ir, "%t3 = getelementptr inbounds %Task_test__worker, ptr %ts, i32 0, i32 8") == 1 &&
+      occurrences(ir, "%t4 = call ptr @test__worker(i32 %t2, ptr %t3)") == 1;
+    theory.detail = "the thunk does not pass the result slot as the body's __ret";
+  }
+  // The thunk STARTS the coroutine and returns. `settle` is what decides
+  // whether that step finished or merely parked, which is the whole reason a
+  // task blocked on I/O gives its worker thread back.
+  let test theory: Case = t.asserts("it stashes the handle and settles rather than driving") {
+    disposable e: Emitted = emitSource(src);
+    const ir = text.view(ref e.ir);
+    theory.isSuccessful = occurrences(ir, "%t5 = getelementptr inbounds %Task_test__worker, ptr %ts, i32 0, i32 6") == 1 &&
+      occurrences(ir, "call void @yoop_task_settle(ptr %ts)") == 1 &&
+      occurrences(ir, "call void @llvm.coro.resume(ptr %t4)") == 0;
+    theory.detail = "the thunk drives the coroutine itself instead of settling";
+  }
+}
+
+// The three binding forms differ in exactly one thing: where the handle lives
+// and what the scope owes it.
+suite function theThreeBindingFormsDifferInStorage(): void {
+  let test theory: Case = t.asserts("`pooled` heap-allocates and releases at scope end") {
+    disposable e: Emitted = emitSource(
+      `${TASK_KINDS}task w(): int32 { return 1; } function main(): int32 { pooled h = w(); return 0; }`
+    );
+    const ir = text.view(ref e.ir);
+    theory.isSuccessful = occurrences(ir, "call ptr @yoop_task_alloc(i64 %t") == 1 &&
+      occurrences(ir, "call void @yoop_task_release(ptr %t") == 1;
+    theory.detail = `codegen said "${e.error}"; a pooled handle is not refcounted on the heap`;
+  }
+  let test theory: Case = t.asserts("`joined` uses a stack slot and joins at scope end") {
+    disposable e: Emitted = emitSource(
+      `${TASK_KINDS}task w(): int32 { return 1; } function main(): int32 { joined d = w(); return 0; }`
+    );
+    const ir = text.view(ref e.ir);
+    theory.isSuccessful = occurrences(ir, "alloca %Task_test__w") == 1 &&
+      occurrences(ir, "call ptr @yoop_task_alloc") == 0 &&
+      occurrences(ir, "call void @yoop_task_wait(ptr %t") == 1 &&
+      occurrences(ir, "call void @yoop_task_free_sync_pair(ptr %t") == 1;
+    theory.detail = "a joined handle is not a stack handle joined at scope end";
+  }
+  // The immediate form spawns and joins in ONE statement, so there is nothing
+  // left for the scope to owe - and the binding is the result rather than the
+  // handle.
+  let test theory: Case = t.asserts("an annotated binding spawns and joins on the spot") {
+    disposable e: Emitted = emitSource(
+      `${TASK_KINDS}task w(): int32 { return 1; } function main(): int32 { const v: int32 = w(); return v; }`
+    );
+    const ir = text.view(ref e.ir);
+    theory.isSuccessful = occurrences(ir, "call void @yoop_task_submit(ptr %sc.1.addr") == 1 &&
+      occurrences(ir, "call void @yoop_task_wait(ptr %sc.1.addr)") == 1 &&
+      occurrences(ir, "%v.2.addr = alloca i32") == 1;
+    theory.detail = `codegen said "${e.error}"; the immediate form is not a spawn joined in place`;
+  }
+}
+
+// `wait` reaches the result at BYTE 48 of the handle rather than through the
+// typed struct gep. The prefix layout is universal, so one path is right
+// everywhere - including where the originating task function is not knowable.
+suite function waitJoinsAndReadsTheResultSlot(): void {
+  const src = `${TASK_KINDS}task w(): int32 { return 1; } function main(): int32 { pooled h = w(); return wait h; }`;
+
+  let test theory: Case = t.asserts("it blocks, then loads from byte 48") {
+    disposable e: Emitted = emitSource(src);
+    const ir = text.view(ref e.ir);
+    theory.isSuccessful = occurrences(ir, "call void @yoop_task_wait(ptr %t") == 1 &&
+      occurrences(ir, "= getelementptr inbounds i8, ptr %t") == 1 &&
+      occurrences(ir, ", i64 48") == 1;
+    theory.detail = `codegen said "${e.error}"; the join does not read the result slot`;
+  }
+}
+
+// `main` is where the scheduler is started and stopped. Without the coroutine
+// ops installed, `yoop_task_settle` has no way to ask whether a step finished,
+// so it treats every one as complete - which signals a suspended task done with
+// an empty result slot.
+suite function mainInstallsAndTearsDownTheScheduler(): void {
+  let test theory: Case = t.asserts("a program with a task starts the runtime and hands over the ops") {
+    disposable e: Emitted = emitSource(
+      `${TASK_KINDS}task w(): int32 { return 1; } function main(): int32 { pooled h = w(); return 0; }`
+    );
+    const ir = text.view(ref e.ir);
+    theory.isSuccessful = occurrences(ir, "call void @yoop_runtime_init()") == 1 &&
+      occurrences(ir,
+        "call void @yoop_runtime_set_coro_ops(ptr @yoop_coro_resume, ptr @yoop_coro_destroy, ptr @yoop_coro_done)") == 1 &&
+      occurrences(ir, "call void @yoop_runtime_shutdown()") == 1 &&
+      occurrences(ir, "define void @yoop_coro_resume(ptr %h) {") == 1;
+    theory.detail = `codegen said "${e.error}"; main does not install the scheduler`;
+  }
+  // A program with no task pays for none of it. The reference emits all of it
+  // unconditionally; the bootstrap does not, because linking the runtime means
+  // compiling fourteen C files.
+  let test theory: Case = t.asserts("a program with NO task installs nothing") {
+    disposable e: Emitted = emitSource("function main(): int32 { return 0; }");
+    const ir = text.view(ref e.ir);
+    theory.isSuccessful = occurrences(ir, "yoop_runtime_init") == 0 &&
+      occurrences(ir, "yoop_coro_resume") == 0 && !e.needsRuntime;
+    theory.detail = "a task-free program grew the scheduler";
+  }
+}
+
+// A spawn has to say where its handle lives, so a task call anywhere a binding
+// does not cover is refused BY NAME. Emitting it as an ordinary call would run
+// the body on this thread and hand back a coroutine handle typed as the result.
+suite function aTaskCallOutsideABindingIsRefusedByName(): void {
+  let test theory: Case = t.asserts("a bare task call names the binding forms") {
+    disposable e: Emitted = emitSource(
+      `${TASK_KINDS}task w(): int32 { return 1; } function main(): int32 { w(); return 0; }`
+    );
+    theory.isSuccessful = text.indexOfFrom(e.error, "outside a handle BINDING", 0) < e.error.len;
+    theory.detail = `codegen said "${e.error}"`;
+  }
+}
+
 type Emitted implements Disposable propagates<disposable> {
   ir: Text,               // empty when `error` is set
   error: string,          // "" when codegen succeeded

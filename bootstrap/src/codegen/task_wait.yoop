@@ -1,0 +1,92 @@
+module codegen;
+
+/*
+  `wait h` - the JOIN, and the scope-end cleanup a handle binding owes.
+
+  This is the bridge out of the scheduler and back into ordinary code, and it is
+  the only one: an `async` function can only be reached through `await`, and
+  `await` only from inside another coroutine, so a spawn joined by a `wait` is
+  how a program with no async `main` gets any of it to run at all.
+
+    %t1 = load ptr, ptr %h.1.addr
+    call void @yoop_task_wait(ptr %t1)
+    %t2 = getelementptr inbounds i8, ptr %t1, i64 48
+    %t3 = load i32, ptr %t2
+
+  The result comes out at BYTE 48 of every task handle, always - never through
+  the typed struct gep. The prefix layout is universal, and a `wait` may be
+  handed a `Task<T>` whose originating task function this site cannot name (a
+  parameter, a value passed along), so one path that is right everywhere beats
+  two that agree. The reference has both and falls back to this one.
+*/
+
+import { ASTNode, NodeId } from "../ast";
+import { TYPE_ERROR_ID } from "../typecheck";
+
+export function emitWait(ref cx: Cx, expr: ASTNode, exprId: NodeId, ref out: Operand): string {
+  let handle: Operand = Operand.None;
+  const err = emitExpr(ref cx, expr.childA, ref handle);
+  if (err.len > 0) {
+    return err;
+  }
+  emitTaskWaitCall(ref cx, handle);
+
+  const resultTy = typeOf(ref cx, exprId);
+  const resultAddr = freshTemp(cx.e);
+  emitGepTaskByteOffset(ref cx, resultAddr, handle, TASK_RESULT_BYTE_OFFSET);
+  const value = freshTemp(cx.e);
+  emitLoadFromPtr(ref cx, value, resultTy, resultAddr);
+  out = Operand.Temp { id: value };
+  return "";
+}
+
+// What a handle binding owes at the end of its scope, as a PendingDispose the
+// ordinary unwinder emits. Two actions, and they are not the same shape:
+//
+//   joined   join, then free the mutex/cond pair the submit allocated. The
+//            handle itself is an alloca and goes with the frame.
+//   pooled   drop this binding's reference. The worker holds the other one, so
+//            whichever finishes last is what actually frees the handle.
+//
+// A joined binding that was never joined would leave a task the program is
+// about to forget still running against a frame that is about to go, which is
+// why the obligation rides on the same stack a `disposable` uses: every exit -
+// the closing brace, a `return`, a `break` - unwinds it.
+export function recordTaskCleanup(ref d: DisposeStack, name: string, slot: usize, action: usize): void {
+  disposeRecord(ref d, {
+    name: name,
+    slot: slot,
+    ownerType: TYPE_ERROR_ID,
+    method: "",
+    viaField: false,
+    fieldIndex: 0,
+    slotType: "",
+    taskAction: action,
+  });
+}
+
+//   %t1 = load ptr, ptr %d.1.addr
+//   call void @yoop_task_wait(ptr %t1)
+//   call void @yoop_task_free_sync_pair(ptr %t1)
+//
+// or, for a pooled handle:
+//
+//   %t1 = load ptr, ptr %h.1.addr
+//   call void @yoop_task_release(ptr %t1)
+export function emitTaskCleanup(ref cx: Cx, entry: PendingDispose): void {
+  const handle = freshTemp(cx.e);
+  emitLoad(ref cx, handle, "ptr", entry.name, entry.slot);
+  const value = Operand.Temp { id: handle };
+  if (entry.taskAction == TASK_ACTION_RELEASE) {
+    emitTaskRelease(ref cx, value);
+    return;
+  }
+  emitTaskWaitCall(ref cx, value);
+  emitTaskFreeSyncPair(ref cx, value);
+}
+
+// What `PendingDispose.taskAction` holds. NONE is every ordinary disposal,
+// which is a method call rather than anything to do with the scheduler.
+export const TASK_ACTION_NONE: usize = 0;
+export const TASK_ACTION_JOIN: usize = 1;
+export const TASK_ACTION_RELEASE: usize = 2;

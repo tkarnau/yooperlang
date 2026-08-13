@@ -54,6 +54,17 @@ export type Cx {
   // THIS type's `Err` case and returns it, so it needs the type and not just
   // the LLVM spelling `retTy` already carries down the walk.
   fnRet: TypeId,
+  // The coroutine frame, when the function being emitted is an `async` one.
+  // Ambient for the same reason `fnRet` is: a `return` and an `await` can each
+  // sit at any depth of the body, and both branch to the SAME trailer blocks.
+  // `active: false` for an ordinary function, which is most of them.
+  coro: CoroFrame,
+  // Whether the function being emitted is the ENTRY POINT of a program that has
+  // a task in it. Two things read it and both are about the scheduler's
+  // lifetime: `main` opens with init plus the coroutine trampolines, and every
+  // `return` out of it closes with shutdown. False everywhere else, including
+  // in `main` when the program has nothing to schedule.
+  inMain: bool,
 }
 
 // `Cx.instance` when the code being emitted is not inside a generic function.

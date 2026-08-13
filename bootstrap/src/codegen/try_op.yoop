@@ -160,6 +160,15 @@ function emitErrReturn(
   if (uerr.len > 0) {
     return uerr;
   }
+  // In a COROUTINE there is no `ret <value>`: the Err goes to the caller-owned
+  // slot and control falls into the shared final-suspend trailer, exactly as a
+  // written `return` does. Emitting a bare `ret` here would hand the caller a
+  // variant where it expects a coroutine HANDLE, and leave the frame unfreed.
+  // The reference hit the same thing and fixed it the same way.
+  if (cx.coro.active) {
+    emitCoroReturn(ref cx, retTy, Operand.Temp { id: built }, true);
+    return "";
+  }
   emitRet(ref cx, retTy, Operand.Temp { id: built });
   return "";
 }

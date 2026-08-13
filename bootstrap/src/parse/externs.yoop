@@ -124,9 +124,18 @@ export function parseExternBlock(ref ps: ParserState): Result<NodeId, ParsingErr
 // generic over what it allocates, and a C extern never is.
 //
 //   flagA   the signature is VARIADIC - it ended in `...`
+//   childE  the KIND_PREFIX list, for `async function suspendNow(): void;`
+//
+// KIND PREFIXES are allowed here for one reason: the suspend PRIMITIVE is an
+// intrinsic and it has to be async, because `await intr.suspendNow()` is how
+// library code parks a task. That is the same three spellings a method takes
+// (`function f`, `async f`, `async function f`), so it reuses the same helper -
+// which is also what makes `async function suspendNow` parse rather than
+// reporting "expected FUNCTION, got IDENT" about a line std actually writes.
 function parseExternFunction(ref ps: ParserState): Result<NodeId, ParsingError> {
-  SelfLexing.expect(ref ps, TokenTags.FUNCTION)?;
+  const prefixes = parseMethodKindPrefixes(ref ps)?;
   let node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.EXTERN_FUNCTION_DECL);
+  node.childE = prefixes;
   node.name = parseIdentAsName(ref ps)?;
   node.childA = parseTypeParamList(ref ps)?;
 

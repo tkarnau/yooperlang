@@ -128,6 +128,88 @@ source file:
     0     fail to LINK a runtime symbol
     206   stop earlier, at a named parse or typecheck refusal
 
+**Re-probed after 3.5, the TASK HALF. The corpus is now 435 files - six
+additions, all of them this item's (`typecheck/task.yoop`, `codegen/task.yoop`,
+`codegen/task_spawn.yoop`, `codegen/task_thunk.yoop`, `codegen/task_wait.yoop`,
+`codegen/instr_task.yoop`):**
+
+    163   compile all the way to an executable
+    169   reach clang and fail ONLY for having no `main`, so 332 files are done
+    1     reaches clang and produces invalid IR - still `enum_eq.yoop`
+    0     fail to LINK a runtime symbol
+    102   stop earlier, at a named parse or typecheck refusal
+
+68 distinct refusal sites, down from 81 - the largest single drop the plan has
+recorded, and all of it is one refusal disappearing: the 19 `wait` sites are
+gone and none of the 435 files stops at a `wait` any more.
+
+TWO corpus files moved all the way to an executable, and both of them RUN a
+task: `ref_forwarding.yoop` prints the `viaTask=14` its own comment has always
+claimed, and `runtime_introspect.yoop` gets `counter=5000` out of a task
+bumping a borrowed counter on a worker thread. The other six new "done" files
+are this item's own source.
+
+The remaining refusal distribution. Two columns, because after this item they
+disagree sharply and each answers a different question - DISTINCT SITES is how
+many separate unanswered questions are left, FILES is how much of the corpus
+each one holds up:
+
+    sites  files
+       13     13  building a vtable VALUE (3.4)
+       11     11  `@precompile` (out of scope, refused by name)
+        7      7  `@derive(display)` expansion (3.1)
+        5      5  `unknown kind` - std AUTOLOADS, not a feature gap
+        4     13  `expr? "context"` (refused by name, 1.3)
+        4      6  module const/let needing comptime
+        2      4  `union` decls (refused by name, sized, deferred)
+        2      4  `export "C" function` (refused by name)
+        1     21  the `waitUntil` / `cancel` / `armComplete` / `isDone`
+                  intrinsics - ONE line in std/core/concurrency.yoop, and the
+                  critical path by a wide margin
+       18     18  a long tail of one-file parse and typecheck refusals
+
+That last row is why the site count fell so far: 3.3's 19 `wait` sites were 19
+DIFFERENT lines pointing at one unbuilt mechanism, and what replaced them is a
+single line pointing at four named intrinsics.
+
+**Re-probed after 3.3, the ASYNC HALF. The corpus was 429 files - four
+additions, all of them this item's (`typecheck/async.yoop`, `codegen/coro.yoop`,
+`codegen/instr_coro.yoop`, `codegen/await_op.yoop`):**
+
+    161   compile all the way to an executable
+    163   reach clang and fail ONLY for having no `main`, so 324 files are done
+    1     reaches clang and produces invalid IR - still `enum_eq.yoop`
+    0     fail to LINK a runtime symbol
+    104   stop earlier, at a named parse or typecheck refusal
+
+81 distinct refusal sites, down from 83.
+
+**Zero corpus files moved, and that is the honest headline.** The four new
+"done" files are this item's own source. Every one of the 13 `await` refusal
+sites is gone - none of the 429 stops at an `await` now - and every file that
+was stopping on one landed on `wait`, on the vtable gap, or on
+`expr? "context"` instead. The distribution says it exactly:
+
+    before          after
+    13 `await`       0
+    11 `wait`       19   (all of them the new NAMED refusal)
+    10 vtable       13   (files now get past their awaits and hit 3.4)
+     3 `expr? "..."` 4
+
+That is the shape this plan has recorded six times and stated as a rule:
+**the bootstrap's corpus is one deep import closure, so unblocking a layer moves
+the pile to whatever the next layer had never been asked about, and files leave
+the pile only when a LEAF finally compiles.** The reason it bit harder here than
+usual is specific and worth knowing: `std/core/concurrency.yoop` is imported by
+the whole net / tls / http stack, and its `awaitTask` ends in `return wait h;` -
+so one line in one file gates every async consumer in the tree on the task half.
+That line is the new critical path, at 11 files.
+
+The distinct-site count is the honest measure of this item, and by it the async
+half did what it set out to: 13 sites removed, and the 19 that replaced them are
+a single named refusal pointing at one written-up plan item (3.5) rather than at
+13 different unanswered questions.
+
 **Re-probed after 3.2, 2.12 and the SELF-COMPILE. The corpus is now 425 files -
 three additions (`typecheck/iterable.yoop`, `typecheck/propagate.yoop`,
 `codegen/loop_iter.yoop`):**
@@ -2031,14 +2113,167 @@ about `for ... in` needs a trait as a value. The lesson is the one 2.10 already
 taught and this item ignored: **re-measure a blocked item before believing what
 blocked it.** Both times the answer was "it was never blocked".
 
-**3.3 `async`, `await`, and coroutines.** The largest single item, and the one
-the earlier passes deliberately stopped short of. `async` is already a KIND, not
-a keyword, and a function carrying a pausable kind is refused by codegen BY NAME
-rather than emitted as an ordinary function - so the refusal is in the right
-place and the work is to replace it. Needs `await` as an expression (2 sites
-today, 12 probe failures), the `llvm.coro.*` lowering, and the runtime's task
-struct. plans/async-coroutines.md is the design; the runtime C side already
-exists and links.
+**3.3 `async`, `await`, and coroutines - DONE 2026-08-13 for the ASYNC HALF.**
+The last big feature, and the only item so far that was split in two rather than
+finished: `async` + `await` + the coroutine lowering landed; `task` + `wait` did
+not, and is now item 3.5 below.
+
+**MEASURED FIRST, and the measurement is what split it.** Across `std/`,
+`examples/pass/` and `bootstrap/src/`: 176 `await` sites in 30 files, 39 real
+`wait` EXPRESSION sites, 22 files declaring an `async` function, 29 declaring a
+`task`. Then the question that decided the shape - which files need which half:
+
+    8    files WRITE `await` and no task syntax at all: std/net/tcp,
+         std/net/socket_ffi, std/http/client, std/http/router,
+         std/https/client, std/tls/stream, std/core/traits,
+         std/core/concurrency.
+    29   files declare a `task`. All but one (std/http/server) are
+         `examples/pass/` mains.
+
+**And that first number is the trap this plan has fallen into six times, so it
+is worth writing down again: it is a count of what each file SPELLS, not of what
+it NEEDS.** Seven of those eight import `std/core/concurrency.yoop`, whose
+`awaitTask` ends in `return wait h;` - so at CLOSURE level the whole net / tls /
+http stack is gated on the task half regardless. Only `std/core/traits.yoop`
+comes free. The async half moved the critical path rather than finishing files,
+which is the shape every earlier item had, and the two lines it moved to are
+`std/core/concurrency.yoop:174` (`wait`, item 3.5) and `std/http/client.yoop:195`
+(`expr? "context"`, a 1.3 leftover).
+
+The two halves still serve two different populations - that part held - and
+`await` is the one the bootstrap's own dependency direction runs through.
+
+**They are DIFFERENT MECHANISMS, and that is the finding worth carrying.**
+`await` drives a coroutine INLINE from inside another coroutine, propagating its
+suspension into the current frame - pure codegen, no runtime at all. `wait`
+JOINS a handle from ORDINARY code: a task call site is a SPAWN, which needs the
+task handle struct whose byte offsets the C runtime hard-codes (thunk at 0,
+state at 8, refcount at 12, mutex at 16, cond at 24, coroutine handle at 32,
+allocator context at 40, result at 48), a per-task thunk, and
+`yoop_task_submit` / `yoop_task_wait`. They SHARE exactly one thing - a task
+body is pausable, so it is a coroutine and this item's lowering emits it
+correctly - and nothing else.
+
+**The consequence, stated plainly because it is the one real cost of the split:
+there is no runnable async program yet.** `main` cannot be async (the
+reference's rule 4), and the coloring rules mean an async function can only be
+reached from another async function - so `task` + `wait` is the ONLY bridge from
+ordinary code into async, and it is refused. That is the coloring rule working
+as designed, not a gap in it. (Item 3.5 built the bridge, and it is what made
+this half testable end to end.)
+
+WHAT THE REFERENCE DOES, followed rather than re-litigated - this item was
+explicitly "follow the spirit of the JS reference's design". Read off
+plans/async-coroutines.md and `src/jsyoopcodegen/codegen.js`, and confirmed by
+compiling probe programs:
+
+  - an `async f(a: A): T` lowers to
+    `define ptr @f(A %a, ptr %__ret) presplitcoroutine`. It returns the HANDLE;
+    the result goes through a slot the CALLER owns, which is what keeps it alive
+    across the caller's own suspends. A `void` async function takes the slot too
+    and never writes it, so there is ONE ABI rather than two.
+  - NO INITIAL SUSPEND. Calling one runs it eagerly to its first real suspend
+    point, so a call that never blocks costs one frame allocation and no resume.
+  - `await g(args)`: allocate the result slot in OUR frame, call, then loop -
+    test `coro.done`, and if the callee is not finished suspend OURSELVES,
+    resuming the callee on each resume. That loop is the whole feature: it is
+    what carries a suspend four frames down back up to the task body, and it is
+    why the runtime holds one handle per task instead of tracking the interior
+    of a call chain.
+  - three COLORING rules: `await` only inside a pausable function; the operand
+    must be a CALL to one; such a function must be called through `await`. Rules
+    2 and 3 together are what make coloring checkable one call at a time.
+  - a `task` CALL is carved OUT of rule 3 - it is a spawn, not an await. The
+    reference keys that on the callee's declared return being `Task<T>`; the
+    bootstrap keys it on the `provides Task` kind clause that produces that
+    return, which is the same fact one step earlier.
+  - `await f(x)?` needs a SWAP. The postfix `?` binds inside the operand parse,
+    so what comes back is `await (f(x)?)` - propagate first, then await what is
+    left - which is backwards. The reference swaps the two nodes; so does the
+    bootstrap, because 15 sites in std spell it this way and it is most of
+    std/http rather than an edge case.
+
+**Where the machinery went, and the one design decision that was not the
+reference's spelling.** `isAsync` rides on `Type.Func` and is part of INTERNING.
+That was the fork: a per-module `pausableNames` table already existed and would
+have been a smaller change. It cannot work, for two reasons found by measuring
+rather than by reasoning. A call site in another module resolves a SYMBOL and
+reads its Func - `std/net/tcp` awaits `ffiRecvAsync` from `std/net/socket_ffi` -
+and a per-module name table cannot follow it there. And a METHOD's signature
+travels inside `Type.Struct.methods`, which is a `Map<string, TypeId>` and has
+nowhere for a side flag to ride; `await Readable.read(...)` is 7 sites in std.
+Putting it on the type costs 33 mechanical edits and buys both, plus one thing
+for free: asyncness being part of interning makes a SYNC impl of an ASYNC trait
+method a different type, which is the reference's "asyncness is part of
+signature equality" with no rule written anywhere.
+
+Files, following the codegen readability rules: `typecheck/async.yoop` (the
+coloring), `codegen/coro.yoop` (the frame - prologue, trailer, the return
+through the slot, the declares), `codegen/instr_coro.yoop` (one function per
+`llvm.coro.*` instruction, each with a sample of its output),
+`codegen/await_op.yoop` (the drive loop and the suspend primitive).
+
+**The suspend PRIMITIVE is built too, and it is what makes "actually suspends"
+true rather than "would suspend if anything drove it".** `await
+intr.suspendNow()` lowers to a lone non-final `coro.suspend` - no callee, no
+drive loop - and everything in std that parks a task (`awaitReadable`,
+`awaitWritable`, `armComplete`) is ordinary yoop written on top of that one
+line. Getting there needed one parser change: an `extern "intrinsic"` signature
+now takes a kind prefix, because `async function suspendNow(): void;` is how std
+declares it and the extern parser demanded `function` first.
+
+**VERIFIED END TO END, against a hand-written C driver.** The emitted IR was
+linked with a 15-line C `main` that drives the top handle and nothing else:
+
+    outer enter
+    inner enter n=21
+    [driver] resume 1
+    inner resumed
+    [driver] resume 2
+    inner resumed twice
+    outer got 42
+    [driver] done after 2 resumes, result=43
+
+That is the whole design working: `outer` and `inner` both run eagerly to
+`inner`'s first suspend; `inner` parks; `outer` sees `!done` and parks too, so
+the suspend PROPAGATES; the driver resumes only `outer`, whose drive loop
+resumes `inner`; and the chain walks itself back both times. The driver pokes
+the frame's resume pointer directly, which the real runtime never does - it
+receives codegen-emitted trampolines instead, and those belong with 3.5.
+
+Tests, at three levels. Ten parse assertions (`await` as a prefix at 70, the
+precedence, the `?` swap in both directions, the `wait` refusal, kind prefixes
+on an extern signature). Nine typecheck assertions (all three coloring rules,
+the nested-argument case that proves the `await` handoff is one step rather than
+a mode, the task-spawn carve-out, and trait/impl asyncness in both directions).
+Fourteen codegen IR assertions (the ABI line, the frame, allocas landing after
+`coro.begin`, the return through `%__ret`, the trailer, one set of declares for
+two coroutines, an ordinary function beside one staying ordinary, the call
+shape, the drive loop, the propagating non-final suspend, load-before-destroy,
+the bare suspend, and the task refusal). Plus a slice fixture,
+`async_coroutine.yoop`, which asserts what a slice fixture CAN assert here:
+that a module full of coroutines links, runs, and leaves the ordinary code
+beside them alone. Its header says plainly that it does not assert suspension
+and why.
+
+Two DIVERGENCES, both supersets:
+
+  - an `extern "intrinsic"` signature takes ANY pausable kind prefix here; the
+    reference accepts only the literal word `async` there. That is why the slice
+    fixture declares its own `resumable` kind and leaves the suspend primitive
+    to the unit tests - a fixture asserted against both compilers has to stay
+    inside the intersection.
+  - a sync impl of an async trait method is refused, and the bootstrap checks
+    ONLY that clause of signature equality rather than the whole signature
+    (comparing the rest is a gap it already had). It cannot be left out: the two
+    spellings lower to different calling conventions, so getting it wrong is a
+    call through a mismatched signature - a crash, not a diagnostic.
+
+Refused BY NAME, each because emitting it would compile and then be wrong:
+`task` decls and methods (codegen, naming the spawn machinery), `wait h` (the
+parser, naming the same), and an INDIRECT async call through a function value or
+a vtable slot. The first two of those were replaced by item 3.5 below; a `task`
+METHOD and the indirect call are still refused.
 
 **3.4 Building a vtable VALUE - the erasure machinery. SIZED 2026-08-13, 10
 files, 10 sites.** `Reader.from(ref s)`, and its sibling `PredVT.fromFn(f0,
@@ -2084,6 +2319,144 @@ parser, since `from` is a keyword and cannot be a member name; `X.fromFn(...)`
 in pass D, since `fromFn` is an ordinary IDENT that parses fine and would
 otherwise report "is not an imported namespace" - a true statement about the
 wrong thing.
+
+**3.5 The TASK half - `task`, `wait`, and the spawn. DONE 2026-08-13.** Split
+out of 3.3, sized there, and built exactly to that sizing - all six pieces, in
+the order they were written down, with no step turning out to be bigger or
+smaller than it looked. That is the first time in this plan that has happened,
+and the reason is worth naming: 3.3 measured the two mechanisms apart before
+either was built, so this item started from a design rather than from a guess.
+
+**What it makes true, and it is the headline: there is a runnable async program
+now.** Before this, `main` could not be async and a coroutine was reachable only
+through `await`, so nothing in the corpus could get one to run at all - the
+async half moved the critical path without finishing a single file. `wait` is
+the bridge, and with it a coroutine parks, the scheduler resumes it, and the
+answer comes back correct end to end.
+
+The six pieces, as built:
+
+  1. **`Task<T>` at the call site.** Wrapped in `checkCall`, right where 3.3's
+     spawn carve-out already looks the callee up in `prog.taskSymbols`. The
+     reference stores an EXTERNAL return type on the signature beside the
+     declared one; the bootstrap wraps one step later instead, because pass D
+     checks a body against that same signature and codegen reads its `ret` for
+     the `%__ret` slot - so storing `Task<T>` there would mean unwrapping it in
+     both. `Task<T>` is also spellable in an annotation now, as a BUILTIN
+     generic name like `unsafe_ptr<T>`.
+  2. **The handle STRUCT, per task FUNCTION** (not per result type - the args
+     ride in the handle, so two tasks returning `int32` with different
+     parameters are two layouts). `%Task_<mod>__<fn> = type { ptr, i8,
+     [3 x i8], i32, ptr, ptr, ptr, ptr, T, args... }`, emitted by a pre-pass
+     over the graph so it is above every body and so `main` can be told whether
+     the program has anything to schedule. The byte offsets are pinned in
+     `codegen.test.yoop`, which is the only check available: the C side reads
+     them through `(char*)h + 16` and would happily read the wrong one.
+  3. **The per-task THUNK**, emitted straight after the body it adapts. Loads
+     the args out of the handle, hands the body the handle's OWN result slot as
+     its `__ret`, stashes the returned coroutine handle at field 6, calls
+     `yoop_task_settle`. It STARTS the coroutine and returns rather than
+     driving it, which is what lets a parked task give its worker back.
+  4. **The coroutine TRAMPOLINES**, emitted once per program with external
+     linkage, and `yoop_runtime_set_coro_ops` in `main` right after
+     `yoop_runtime_init`.
+  5. **The BINDING kinds**, decided by CLAUSES rather than names: `refcounted`
+     means pooled (heap, `yoop_task_alloc`, released at scope end), `mustCall`
+     means joined (alloca, joined at scope end), and an annotated binding with
+     no prefix is the IMMEDIATE form (spawn and join in one statement, binding
+     the result). Keying on clauses is not a stylistic choice - a `Task<T>` has
+     no methods for `mustCall join` to name, so the compiler is the only thing
+     that can honor either clause, which is exactly what makes the mapping
+     unambiguous. The scope-end obligation rides on the same DisposeStack an
+     ordinary `disposable` uses, so `return`, `break` and `continue` unwind it
+     with no new machinery.
+  6. **`wait h`** - `yoop_task_wait` then a load from BYTE 48, always, never
+     through the typed gep. The reference has both paths and falls back to this
+     one; the bootstrap has only it, because the prefix layout is universal and
+     a `wait` may be handed a handle whose originating task function the site
+     cannot name.
+
+**Two DIVERGENCES, both deliberate.** The scheduler prologue in `main` is
+emitted only for a program that HAS a task, where the reference emits it
+unconditionally - the bootstrap already links the runtime's C sources on demand,
+and making every hello-world compile fourteen C files to install an unused
+worker pool is a real cost for no observable difference. And a `wait` folds into
+a binary expression here (`wait a + wait b`) where the reference returns from
+the prefix immediately; the bootstrap's `ref x` has had that shape all along, it
+is a superset either way, and the one place it bites is a slice fixture, which
+has to stay inside the intersection.
+
+Refused BY NAME, each because emitting it would compile and then be wrong: a
+CROSS-MODULE spawn (the handle layout and thunk belong to the declaring module -
+the reference refuses it in the same place), a task call outside a handle
+binding (`worker(1);` on its own would run the body on this thread), copying a
+handle into a second binding (`pooled b = a;` needs a refcount retain, and one
+without it is a use-after-free rather than a leak), `wait` inside a task body
+(it would block a worker, which is the thing coroutines exist to avoid - the
+reference's rule, and `async` alone is not enough to refuse on, since std's
+`awaitTask` is async and ends in one), a `task` METHOD, `task main`, and a task
+returning void (the result slot would have no LLVM spelling).
+
+Not in this item, and each still refused by name: `waitUntil`, `cancel`,
+`armComplete`, `isDone`, `pooled` as a PARAMETER or FIELD, and
+`propagates<pooled>`.
+
+**One BUG found and deliberately not fixed**, per the rule about not fixing
+every bug you find: a runtime race between releasing a waiter and the worker
+finishing its bookkeeping on the same handle. It is in `yoop_runtime.c`, it
+predates this item, and the JS reference reproduces it at the same rate on the
+same program - so it is not something the lowering does differently. Written up
+in the follow-ups list below with its backtrace and how to reproduce it.
+
+Tests at three levels. Six parse assertions (the node kind, the precedence, and
+that there is NO `?` swap, unlike `await`). Fifteen typecheck assertions (the
+call is a handle and the body is not, all three binding forms, the copy
+refusal, `wait` on a non-handle, `wait` in a task body versus in a plain async
+function, `task main`, a void task, and `Task<T>` as an annotation). Eleven
+codegen IR assertions, of which the handle layout is the one nothing else in the
+tree could catch. Plus the slice fixture below.
+
+**`bootstrap/tests/slice/task_spawn.yoop` is the fixture 3.3 could not write.**
+Six tasks in flight at once across the machine's worker threads, and every
+number in its `.expected` would be WRONG rather than merely late if a piece were
+missing: a task that never ran leaves its result slot zero, a `wait` that
+returned early reads it before the worker wrote it, and `twoSteps` comes back 40
+instead of 42 if the scheduler cannot resume a suspended coroutine, because both
+`+ 1`s happen after the parks. The assertion is order-INDEPENDENT by
+construction - nothing prints from inside a task body, `main` prints joined
+results and a sum - so it says the same thing on one core and on thirty-two.
+
+**And `async_coroutine.yoop` was strengthened, which was the other half of the
+brief.** Its header used to say it could not assert that a coroutine suspends
+and resumes because there was no way to reach one from `main`. It now spawns two
+tasks that await the coroutines it declares, so composition, a loop around an
+await, an early return and the void ABI are each checked by their RESULT rather
+than by the IR alone. Genuine parking stays in `task_spawn.yoop`, because the
+suspend primitive needs an `extern "intrinsic"` signature and a wakeup arranged
+through the runtime.
+
+**The new CRITICAL PATH is `std/core/concurrency.yoop:32`, and it is this item's
+own out-of-scope list.** All 19 `wait` sites are gone and all 29 files that were
+gated on one moved; where they moved to is the honest measure:
+
+    21   `std/core/concurrency.yoop:32` - the `waitUntil` intrinsic, and with it
+         `cancel`, `armComplete` and `isDone`. Named in the sizing as not in
+         this item, and now the single line the whole net / tls / http stack
+         stops at.
+    10   `std/http/client.yoop:195` - `expr? "context"`, a 1.3 leftover
+     5   `unknown kind "task"` / `"async"` - std AUTOLOADS. Those files never
+         import `std/core/kinds.yoop` because the reference gives it to every
+         module for free, so a kind PREFIX resolves to nothing here. Not a
+         concurrency gap at all.
+     2   compile all the way to an executable now:
+         `examples/pass/ref_forwarding.yoop` and
+         `examples/pass/runtime_introspect.yoop`
+
+The first of those two is worth naming, because it is an independent check of
+this whole item: it spawns a task taking a `ref Counter`, bumps it ten times on
+a worker, joins, and prints `viaTask=14`. That number is in a comment at the
+bottom of the file, written years before any of this, and the bootstrap now
+produces it.
 
 ---
 
@@ -2139,9 +2512,12 @@ a byte-stable one:
   - the whole slice suite, 131 fixtures, run THROUGH stage3 against the same
     hand-written `.expected` files. All pass. `YOOP_BOOT_COMPILER=<path> npm run
     test:slice` is the switch, and it exists for exactly this.
-  - the surface probe over all 425 files, run with stage1 and again with
-    stage3. The two reports are byte-identical: same 161 executables, same 159
-    no-main libraries, same 82 refusal sites, same messages in the same order.
+  - the surface probe over all files, run with stage1 and again with stage3.
+    The two reports are byte-identical. Measured at 425 files when this landed
+    (161 / 159 / 82 sites) and re-measured at 429 after 3.3 (161 / 163 / 81
+    sites), which is the first time the fixpoint was re-confirmed across a
+    feature that changes how a whole FUNCTION is emitted rather than how an
+    expression is.
   - stage3 builds and runs `hello.yoop`.
 
 **It is now a permanent test.** `src/selfhost.test.js`, six assertions, about 16
@@ -2157,6 +2533,86 @@ larger `examples/pass/` programs, and the playground items - run them through th
 self-hosted compiler and fix what falls out. Two playground programs are known
 stale for unrelated reasons (an async conversion), noted in plans/README.md.
 
+**4.4 The edit-verify loop - DONE 2026-08-13. 271 seconds to 161.** Not a
+language feature; it is the thing every other item pays for many times over, so
+it earns a number. Measured end to end first, serially, on a 14-core M-series
+machine, and the measurement is most of the finding:
+
+    command                                before    after
+    node src/yoopiler.js .../main.yoop      4.93s     4.72s
+    --test bootstrap/src/parse              2.25s     2.20s
+    --test bootstrap/src/typecheck          5.32s     5.28s
+    --test bootstrap/src/source_graph       1.62s     1.62s
+    --test bootstrap/src/lex                0.80s     0.82s
+    --test bootstrap/src/codegen            4.92s     4.95s
+    --test bootstrap/src  (ALL 857)             -     7.83s
+    npm run test:slice                     61.58s    17.87s
+    npm run test:parity                     2.89s     2.70s
+    npm run test:selfhost                  18.17s    18.33s
+    npm run test:unit                      61.99s    18.12s
+    npm test                               77.01s    46.55s
+    scripts/probe_surface.sh               91.62s    62.56s
+
+Three changes, in the order they paid:
+
+  - **`npm run test:slice` was SERIAL and was the longest pole in the whole
+    suite.** node:test runs test FILES in parallel and every test WITHIN a file
+    sequentially, so one file was serializing 134 compile-link-run cycles while
+    the other 25 files finished in seconds. `execFileSync` was the only reason;
+    the fixtures share nothing, each writes `<stem>_bs` / `<stem>_js` into one
+    temp dir and none binds a port. Making the helper async and putting
+    `concurrency` on the describe - the same shape `e2e.test.js` already had -
+    took it from 60.1s to 17.9s, and `npm test` from 77s to 47s with it.
+    It PLATEAUS at about seven workers (18.8s at 7, 18.0s at 12, 18.4s at 28),
+    so the cap is not what limits it; the remaining floor is the ~5s
+    `before()` build that nothing can overlap plus the JS reference's half of
+    each fixture, which costs 675ms against the bootstrap's 139ms.
+  - **`--emit-ir` on the bootstrap driver**, and the probe uses it. The two
+    questions the link used to answer as a side effect are now asked directly:
+    `clang -S -emit-llvm` says whether the IR is valid, and a `define ... @main(`
+    line says whether there is a `main` to link. All 435 files classify
+    IDENTICALLY to the linking probe, message for message, and the one `bad-ir`
+    file now says "invalid IR: icmp requires integer operands" where it used to
+    say "clang failed (exit 256)".
+  - **`--test bootstrap/src` runs all 857 Yoop unit tests off ONE build of the
+    graph**, in 7.8s against the 14.9s the five per-module commands take between
+    them. No code change - the driver already accepted it and nothing said so.
+
+**What did NOT pay, and the honest version of why.** The brief expected the
+probe to fall well under 20 seconds once the link was gone. It fell to 63, and
+the reason is that the probe was never clang-bound the way the write-up above it
+assumed. Total CPU across the run went from 619 core-seconds to 454, and 442 of
+those 454 are the bootstrap compiler itself: every corpus file compiles its
+whole import closure, so a file in `bootstrap/src/` compiles the entire compiler
+before it can be classified (`typecheck/pass_d.yoop` emits 3.2MB of IR and takes
+3.2 seconds in the compiler against 1.1 in clang). The `clang -S -emit-llvm`
+validation that replaced the link costs about 3% of what is left. Getting the
+probe materially below a minute now means making the bootstrap faster, which is
+a different item.
+
+Two more things measured and left alone:
+
+  - **The rebuild is irreducible in the places anyone would look.** Of its 4.8
+    seconds, 2.1 is graph load through typecheck, 0.9 is codegen and 1.8 is
+    clang linking a 6MB `.ll`. The clang half is the compiler being built and
+    the other half is the JS reference, which is being retired.
+  - **Caching the runtime's compiled C sources buys nothing here.** e2e prebuilds
+    them (`prebuiltRuntimeObjects`) and it looked like the same trick would help
+    every link, but all 14 of them compile in 0.30s - a rounding error against a
+    1.8s link, and a cross-invocation object cache in a shipping compiler is a
+    staleness bug waiting to happen.
+
+Raising the probe's worker count past 12 does nothing either (63.4s at 12, 68.1s
+at 14, 65.5s at 20), which fits: the machine is 10 performance cores plus 4
+efficiency ones, and 12 workers already only reach about 7x throughput.
+
+**Determinism was PROVEN, not assumed**, since a parallel harness that is
+occasionally wrong is worse than a slow one. 24 full slice runs - 12 at the
+default 12 workers, 6 at 4 and 6 at 28 - each reporting 140 pass / 0 fail /
+1 skip, with the sorted set of test names byte-identical across every run.
+Ordering varies, which is what concurrency means; membership and outcome do
+not.
+
 ---
 
 ## How each step is done
@@ -2167,6 +2623,32 @@ reference already produces working programs, so the bootstrap does not have to
 be the place every question gets settled. Get it compiling, write down what is
 unresolved, and come back once it self-hosts - a great many of these are far
 easier to fix from a compiler that works than from one that does not.
+
+0. **Run the probe with `scripts/probe_surface.sh`**, not a hand-rolled loop.
+   It compiles every non-test file under `std/`, `examples/pass/` and
+   `bootstrap/src/` and prints one line per file plus a summary. Usage:
+
+       node src/yoopiler.js bootstrap/src/main.yoop -o /tmp/yoopiler_boot
+       scripts/probe_surface.sh                    # defaults to that compiler
+       scripts/probe_surface.sh /tmp/stage3 8      # a built stage, 8 workers
+
+   It is PARALLEL because the probe is subprocess-bound rather than
+   compute-bound - the compiler is fast and most of the wall clock is spent
+   waiting on clang, so a serial loop used about 15% of one core. That took it
+   from roughly 7 minutes to about 85 seconds. It also does NOT LINK, as of
+   4.4 below: `--emit-ir` stops the compiler short of clang, `clang -S
+   -emit-llvm` answers the validity question the link used to answer by
+   failing, and a `define ... @main(` line in the IR answers the other one. 63
+   seconds. Two things the hand-rolled loops kept getting wrong and this does
+   not: every worker needs its OWN `-o` path (they all wrote `/tmp/sp`, which
+   is a race the moment it goes parallel), and the stale `.ll` has to be
+   removed BEFORE the compile as well as after, because a reused PID would
+   otherwise read the previous holder's output as this file's.
+
+   Categories: `ok` produced valid IR defining a `main`; `no-main` produced
+   valid IR with none, so its code is fully handled and `done` counts it;
+   `bad-ir` is a real codegen bug; `refused` stopped at a named refusal.
+   `sites` counts distinct `file:line:message` among the last two.
 
 1. **Measure first.** Probe the sites; do not infer the shape from one example.
    Attribute a blocker to the file it is IN, not to the probe that hit it. The
@@ -2291,11 +2773,58 @@ are already named refusals in the compiler will announce themselves.
   diagnostics off the self-compile. Worth knowing as a shape: **a self-compile
   diagnostic naming a std type may be a missing import in the bootstrap's own
   source rather than anything about the compiler.**
-- **std AUTOLOADS.** The reference pulls std/core/types.yoop and
-  std/core/traits.yoop into every module; the bootstrap has neither. Two places
-  work around it today - the `Result` import above, and `Into` being matched by
-  NAME in typecheck/fallible.yoop rather than resolved as a symbol. Building it
-  is also prerequisite 1 of item 3.1.
+- **std AUTOLOADS.** The reference pulls std/core/types.yoop,
+  std/core/traits.yoop and std/core/kinds.yoop into every module; the bootstrap
+  has none of them. Three places work around it today - the `Result` import
+  above, `Into` being matched by NAME in typecheck/fallible.yoop rather than
+  resolved as a symbol, and every corpus file that has to import
+  `std/core/kinds.yoop` to name a kind the reference gives it for free. That
+  last one surfaced with 3.5: five files now stop at `unknown kind "task"` or
+  `unknown kind "async"`, which is a missing autoload rather than a missing
+  feature. It is also prerequisite 1 of item 3.1, so one piece of work unblocks
+  both.
+- **A full SIGNATURE check on a trait impl.** The bootstrap checks that a
+  claimed trait's methods EXIST by name, and (as of 3.3) that their asyncness
+  matches - and nothing else. Two methods with the same name and different
+  parameter types still satisfy each other. Asyncness had to be added because the
+  two spellings lower to different calling conventions; the rest is a
+  pre-existing gap and comparing the whole Func TypeId is the fix, once someone
+  has checked it does not break an impl in std that differs by a `ref`.
+- **The `await` handoff is a Program-level BOOL pair rather than a node id.**
+  `awaitPending` is set by `await` and taken by the very next CALL_EXPRESSION
+  `checkExpr` reaches, which is that operand; `callWasAwaited` then lives for
+  the span of one call and is saved and restored around nested ones. It is right
+  for every shape in the corpus and the nested-argument test pins it, but a node
+  id would be right by construction rather than by argument. Worth swapping if
+  `await` ever stops directly wrapping its call.
+- **A RUNTIME RACE between releasing a waiter and finishing the worker's
+  bookkeeping on the same handle. Found by 3.5, present in BOTH compilers, and
+  not this item's to fix.** `yoop_task_settle` flips the state byte and
+  broadcasts, so a `wait` returns immediately - but `run_task_step` has not
+  finished with the handle yet: it still reads the allocator-context slot at
+  byte 40 afterwards. If the waiter reuses that handle in the meantime (a
+  `joined` binding is one alloca, hoisted, so every iteration of a loop reuses
+  it) or drops its last reference, the worker reads a slot that is no longer
+  the task's. The backtrace is
+  `run_task_step -> yoop_ctx_discard_task -> yoop_arena_destroy -> free` on a
+  pointer libmalloc says was never allocated.
+
+  Reproduced with a loop whose body holds a `joined` handle and whose `if`
+  returns early through a `pooled` one: about 4 crashes in 50 runs, and the JS
+  reference crashes at the same rate on the same program, which is what says
+  the lowering is not the problem. It needs more than about 8 workers -
+  `YOOP_NUM_WORKERS` at 1, 2 or 4 never reproduced it in 180 runs. Both slice
+  fixtures are clean over 450 runs each at 1, 2, 10, 14 and 32 workers, so it
+  does not make the suite flaky; the shapes that trigger it are not in it.
+
+  The fix belongs in `runtime/yoop_runtime.c`: the handle's post-step
+  bookkeeping has to happen BEFORE `signal_done` releases anyone, or the
+  allocator context has to be lifted off the handle for the duration.
+- **A COROUTINE that returns a large struct or an array by value** is untested.
+  The ABI writes the result through `%__ret`, so it should be the shape that
+  needs no special case at all - but nothing in the corpus does it and no
+  fixture covers it. `Result<uint8[], string>` in std/net is the first thing
+  that will.
 - **A `while` whose condition is CONSTANTLY true by any route but the literal**
   (`while (1 == 1)`, `while (SOME_CONST)`) is treated as an ordinary loop, so a
   function whose every exit is a `return` from inside one is refused for having
@@ -2304,35 +2833,40 @@ are already named refusals in the compiler will announce themselves.
 
 ---
 
-## Tasks before being done here: 6 / 29
+## Tasks before being done here: 5 / 31
 
-**Six in-scope items left, of twenty-nine tracked.** This is the work IN
-FLIGHT, not the follow-ups above - those are deliberately deferred past
-self-hosting and are not counted here.
+**Five in-scope items left, of thirty-one tracked.** This is the work IN FLIGHT,
+not the follow-ups above - those are deliberately deferred past self-hosting and
+are not counted here.
 
 Open:
 
     2.2  whatever the next surface probe finds (a rolling bucket)
-    3.1  `@derive(display)` expansion
-    3.3  `async`, `await`, coroutines - the largest single item, and now by far
-         the largest: 24 of the 82 remaining refusal sites are `await` or `wait`
+    3.1  `@derive(display)` expansion - its prerequisite, std AUTOLOADS, is
+         also what five files stop at after 3.5
     3.4  building a vtable VALUE, the erasure machinery - sized, 11 sites
     4.1  the layer-2 AST parity dump
     4.3  the complex tests and the playground programs
 
-Closed since the last count: 3.2 (`Iterable<T>` in a `for ... in` - the last
-half of generic trait dispatch), 2.12 (propagated disposal, new, promoted out of
-the follow-ups) and **4.2, the self-compile milestone**.
+Closed since the last count: **4.4, the edit-verify loop.** It was added and
+closed in the same pass, which is why the denominator moved and the numerator
+did not. It is the only item here that is not about the language: waiting on
+compile-and-verify was the largest single cost anyone working on the bootstrap
+paid, and a full pass over every command an agent runs went from 271 seconds to
+161.
 
-**The denominator grew by one and the numerator dropped by two, and the item
-that closed was the MILESTONE.** Everything left is either a named feature with
-a written-up shape (3.1, 3.3, 3.4) or a sweep (2.2, 4.1, 4.3). Nothing left
-blocks the compiler from building itself.
+Before that: **3.5, the task half - `task`, `wait`, the handle struct and the
+spawn.** It is the item that made async RUNNABLE: `main` cannot be async and a
+coroutine is reachable only through `await`, so until a spawn could be joined
+there was no way for any of 3.3's machinery to execute.
+
+Everything left is either a named feature with a written-up shape (3.1, 3.4) or
+a sweep (2.2, 4.1, 4.3). Nothing left blocks the compiler from building itself.
 
 **Keep this counter current.** Update BOTH numbers whenever an item closes or a
 new one is added, in the same edit that marks the item itself - a stale counter
-is worse than none. Expect the denominator to GROW: nine of the twenty-nine were
-not visible when this plan was written, because each landed feature exposes the
-next blocker behind it. That is the process working, not scope creep. An item
-that turns out to be deferred rather than done moves to the follow-ups list and
-comes OFF both numbers.
+is worse than none. Expect the denominator to GROW: ten of the thirty were not
+visible when this plan was written, because each landed feature exposes the next
+blocker behind it. That is the process working, not scope creep. An item that
+turns out to be deferred rather than done moves to the follow-ups list and comes
+OFF both numbers.

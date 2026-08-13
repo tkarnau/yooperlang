@@ -8,6 +8,7 @@ module codegen;
 import { Vec }, * as vec from "std/core/vec.yoop";
 import { Text }, * as text from "std/core/text.yoop";
 import { ASTNode, ASTNodeKind, NodeId, childAt, nodeAt, kindName } from "../ast";
+import { TaskBind, taskBindOf } from "../typecheck";
 
 // Walks a BLOCK's statement list.
 //
@@ -159,6 +160,14 @@ function emitReturn(ref cx: Cx, stmt: ASTNode, retTy: string): string {
     if (verr.len > 0) {
       return verr;
     }
+    // In a coroutine there is no `ret <value>` anywhere: the result goes to the
+    // caller-owned slot and control falls into the shared final-suspend
+    // trailer, which is the block that hands the handle back. See coro.yoop.
+    if (cx.coro.active) {
+      emitCoroReturn(ref cx, retTy, Operand.None, false);
+      return "";
+    }
+    emitSchedulerShutdown(ref cx);
     emitRetVoid(ref cx);
     return "";
   }
@@ -174,8 +183,25 @@ function emitReturn(ref cx: Cx, stmt: ASTNode, retTy: string): string {
   if (uerr.len > 0) {
     return uerr;
   }
+  if (cx.coro.active) {
+    emitCoroReturn(ref cx, retTy, value, true);
+    return "";
+  }
+  emitSchedulerShutdown(ref cx);
   emitRet(ref cx, retTy, value);
   return "";
+}
+
+// `call void @yoop_runtime_shutdown()` on the way out of `main`, and only
+// there. It joins the worker threads and drains the queue, so a task nobody
+// waited on is finished rather than killed halfway through by process exit.
+// Before EVERY `ret` in main rather than at one exit, because main may have
+// several - the reference does the same.
+function emitSchedulerShutdown(ref cx: Cx): void {
+  if (!cx.inMain) {
+    return;
+  }
+  emitRuntimeShutdown(ref cx);
 }
 
 // `let x: T = expr;` is a stack slot plus a store. Without an initializer it is
@@ -183,6 +209,19 @@ function emitReturn(ref cx: Cx, stmt: ASTNode, retTy: string): string {
 function emitVarDecl(ref cx: Cx, stmt: ASTNode, stmtId: NodeId): string {
   const ty = typeOf(ref cx, stmtId);
   const hasInit = stmt.childB != 0;
+
+  // `pooled h = f(a)`, `joined d = f(a)`, `const v: T = f(a)` - a SPAWN rather
+  // than an initializer. The classifier is typecheck's, asked again here for
+  // the same reason `fallibleShapeOf` is: the answer is a property of the type
+  // and the kind's clauses, so this is a lookup and not a second typecheck.
+  if (hasInit) {
+    const bind = taskBindOf(
+      cx.prog, cx.ast, stmt, resolvedTypeAt(ref cx, stmtId), resolvedTypeAt(ref cx, stmt.childB)
+    );
+    if (bind != TaskBind.NONE) {
+      return emitTaskBinding(ref cx, stmt, stmtId, bind);
+    }
+  }
 
   let value: Operand = Operand.None;
   if (hasInit) {

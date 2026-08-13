@@ -12,6 +12,7 @@ import { Map }, * as map from "std/collections/map.yoop";
 import { Text }, * as text from "std/core/text.yoop";
 import { disposable } from "std/core/kinds.yoop";
 import { ASTNode, NodeId, childAt, nodeAt, ASTNodeKind } from "../ast";
+import { isTaskType } from "../typecheck";
 
 // Arguments are lowered FIRST - each may emit its own instructions, and those
 // have to land before the call. Their operands are held as values, so nothing
@@ -34,6 +35,17 @@ function emitCallExpr(ref cx: Cx, expr: ASTNode, exprId: NodeId, ref out: Operan
   // can be one: `ns.usize(x)` reaches a member of `ns`, whatever it is named.
   if (expr.childB == 0 && isPrimTypeName(expr.name)) {
     return emitCast(ref cx, expr, exprId, ref out);
+  }
+  // A `task` call is a SPAWN, not a call, and the spawn lowering lives on the
+  // BINDING - it has to know where the handle goes and what the scope owes it.
+  // Reaching here means the spawn appeared somewhere no binding covers
+  // (`worker(1);` on its own, or nested in an argument), which would otherwise
+  // emit a direct call to a coroutine and run the body on this thread.
+  if (isTaskType(cx.prog, resolvedTypeAt(ref cx, exprId))) {
+    return unsupportedHere(
+      "a `task` call outside a handle BINDING - a spawn has to say where its handle lives, so write `pooled h = ...`, `joined h = ...` or `const v: T = ...`",
+      expr.name
+    );
   }
 
   disposable args: Vec<CallArg> = vec.vecNew(4);

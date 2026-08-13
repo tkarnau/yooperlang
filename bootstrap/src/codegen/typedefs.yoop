@@ -179,7 +179,7 @@ function externSignature(
   ref variadic: bool
 ): string {
   switch (externFuncType(ref prog, ref tm, name)) {
-    case Type.Func { params: p, ret: r, variadic: v }: {
+    case Type.Func { params: p, ret: r, variadic: v, isAsync: fnAsync }: {
       let i: usize = 0;
       while (i < p.len) {
         vec.vecPush(ref params, llvmType(ref prog, vec.vecGet(ref p, i)));

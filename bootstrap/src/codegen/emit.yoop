@@ -47,6 +47,16 @@ export type Emitter propagates<disposable> {
   // allocator context, the errno bridge. The LINK step reads it: a program
   // without one links its own IR and nothing else.
   usesRuntime: bool,
+  // Whether the program declares any `task` function at all. Set once, by the
+  // pre-pass that emits the handle struct definitions, and read by `main`: the
+  // scheduler prologue (init, the coroutine trampolines, shutdown) is emitted
+  // only for a program that has something to schedule.
+  //
+  // A DIVERGENCE from the reference, which emits all of it unconditionally.
+  // The bootstrap already links the runtime's C sources only on demand, and
+  // making every hello-world compile fourteen C files to install a worker pool
+  // it never uses is a real cost for no observable difference.
+  hasTasks: bool,
 }
 
 export function emitterNew(): Emitter propagates<disposable> {
@@ -67,6 +77,7 @@ export function emitterNew(): Emitter propagates<disposable> {
     usesPrintf: false,
     usesStringBuilder: false,
     usesRuntime: false,
+    hasTasks: false,
   };
 }
 
@@ -154,7 +165,7 @@ export function llvmType(ref prog: Program, rawId: TypeId): string {
     case Type.Ref { inner: i }: { return "ptr"; }
     // A function VALUE is its address. LLVM's opaque pointers mean the
     // signature is not part of the type - it appears at the call site instead.
-    case Type.Func { params: p, ret: r, variadic: v }: { return "ptr"; }
+    case Type.Func { params: p, ret: r, variadic: v, isAsync: fnAsync }: { return "ptr"; }
     case Type.UnsafePtr { pointee: p }: { return "ptr"; }
     // An unpinned `null`, which only reaches codegen in a comparison against a
     // pointer - and `ptr` is what that compares as.

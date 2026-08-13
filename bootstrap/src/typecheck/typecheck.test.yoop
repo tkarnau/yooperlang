@@ -1992,6 +1992,230 @@ suite function kindPrefixesResolveAgainstTheRegistry(): void {
   }
 }
 
+// ----- async coloring --------------------------------------------------------
+//
+// Three rules, and between them they are what makes a suspend safe:
+//
+//   1. `await e` only inside a function carrying a pausable kind
+//   2. `e` must be a CALL to a function carrying one
+//   3. such a function has to be called THROUGH `await`
+//
+// 2 and 3 together mean there is no way to reach an async function except from
+// inside another one - so a frame that suspends always has a caller frame able
+// to suspend with it. See typecheck/async.yoop.
+//
+// `async` is not a keyword here either: every source below declares the KIND,
+// because that is all `async` is.
+
+const ASYNC_KIND: string = "kind async { appliesTo function; pausable; } ";
+const TASK_KIND: string = "kind task { appliesTo function; pausable; provides Task; } ";
+const POOLED_KIND: string = "kind pooled { appliesTo binding; } ";
+
+suite function asyncColoringRules(): void {
+  let ok = checkSource(`${ASYNC_KIND}async inner(): int32 { return 1; } async outer(): int32 { return await inner(); }`);
+  let test theory: Case = t.asserts("an async function awaiting another is clean") {
+    theory.isSuccessful = ok.diagnostics.len == 0;
+    theory.detail = `reported ${ok.diagnostics.len}: ${firstDiagnostic(ref ok)}`;
+  }
+
+  // RULE 1.
+  let outside = checkSource(`${ASYNC_KIND}async inner(): int32 { return 1; } function plain(): int32 { return await inner(); }`);
+  let test theory: Case = t.asserts("`await` outside a pausable function is refused, naming the function") {
+    theory.isSuccessful = diagnosticsMention(ref outside, "only legal inside a function carrying a pausable kind") &&
+      diagnosticsMention(ref outside, "\"plain\"");
+    theory.detail = `reported ${outside.diagnostics.len}: ${firstDiagnostic(ref outside)}`;
+  }
+
+  // RULE 2, the SYNTACTIC half - there is no coroutine to drive.
+  let notACall = checkSource(`${ASYNC_KIND}async f(x: int32): int32 { return await x; }`);
+  let test theory: Case = t.asserts("`await` on something that is not a call is refused") {
+    theory.isSuccessful = diagnosticsMention(ref notACall, "takes a CALL to an async function");
+    theory.detail = `reported ${notACall.diagnostics.len}: ${firstDiagnostic(ref notACall)}`;
+  }
+
+  // RULE 2, the TYPE half.
+  let ordinary = checkSource(`${ASYNC_KIND}function plain(): int32 { return 1; } async f(): int32 { return await plain(); }`);
+  let test theory: Case = t.asserts("`await` on an ORDINARY call is refused, and says to drop it") {
+    theory.isSuccessful = diagnosticsMention(ref ordinary, "is an ordinary function - drop the \"await\"");
+    theory.detail = `reported ${ordinary.diagnostics.len}: ${firstDiagnostic(ref ordinary)}`;
+  }
+
+  // RULE 3. The one that keeps an async call from silently never suspending.
+  let bare = checkSource(`${ASYNC_KIND}async inner(): int32 { return 1; } async outer(): int32 { return inner(); }`);
+  let test theory: Case = t.asserts("a bare call to an async function is refused, naming the callee") {
+    theory.isSuccessful = diagnosticsMention(ref bare, "has to be called through \"await\"") &&
+      diagnosticsMention(ref bare, "\"inner\"");
+    theory.detail = `reported ${bare.diagnostics.len}: ${firstDiagnostic(ref bare)}`;
+  }
+
+  // The handoff is ONE STEP, which is what makes `await f(g())` mean "await f".
+  // If the flag were an ambient mode, `g()` would read as awaited and the
+  // missing-await on it would go unreported.
+  let nested = checkSource(`${ASYNC_KIND}async g(): int32 { return 1; } function h(n: int32): int32 { return n; } async f(): int32 { return await asyncTake(h(g())); } async asyncTake(n: int32): int32 { return n; }`);
+  let test theory: Case = t.asserts("an async call inside an awaited call's ARGUMENT is still refused") {
+    theory.isSuccessful = diagnosticsMention(ref nested, "\"g\"") &&
+      diagnosticsMention(ref nested, "has to be called through \"await\"");
+    theory.detail = `reported ${nested.diagnostics.len}: ${firstDiagnostic(ref nested)}`;
+  }
+}
+
+// THE TASK-SPAWN CARVE-OUT. A `task` body is pausable, so rule 3 would demand
+// an `await` on `pooled h = worker(1)` - but a task's call site is a SPAWN, not
+// an inline drive, and that is how every one of them is written. The reference
+// makes the same carve-out.
+suite function aTaskCallIsASpawnAndNotAnAwait(): void {
+  const src = `${TASK_KIND}${POOLED_KIND}task worker(n: int32): int32 { return n; } function main(): int32 { pooled h = worker(1); return 0; }`;
+  let prog = checkSource(src);
+  let test theory: Case = t.asserts("spawning a task needs no `await`") {
+    theory.isSuccessful = !diagnosticsMention(ref prog, "has to be called through \"await\"");
+    theory.detail = `reported ${prog.diagnostics.len}: ${firstDiagnostic(ref prog)}`;
+  }
+}
+
+// ----- the TASK half: `Task<T>`, the binding forms, and `wait` ---------------
+
+const JOINED_KIND: string = "kind joined { appliesTo binding; mustCall join beforeScopeEnd; } ";
+const POOLED_RC_KIND: string = "kind pooled { appliesTo binding; refcounted retain release; } ";
+
+// `provides Task` rewrites the CALL, not the body: `task f(): T` still returns
+// T from inside, and only its call site evaluates to `Task<T>`. Both halves
+// matter - getting the first wrong makes every task body a type error, and the
+// second is what makes `wait` have anything to join.
+suite function aTaskCallEvaluatesToATaskHandle(): void {
+  let body = checkSource(`${TASK_KIND}task worker(n: int32): int32 { return n; }`);
+  let test theory: Case = t.asserts("the BODY still returns its declared type") {
+    theory.isSuccessful = body.diagnostics.len == 0;
+    theory.detail = `reported ${body.diagnostics.len}: ${firstDiagnostic(ref body)}`;
+  }
+  // The CALL is a handle, proved by joining it: `wait` refuses anything that is
+  // not one, so an unannotated binding that waits cleanly is the whole claim.
+  let handle = checkSource(`${TASK_KIND}task worker(n: int32): int32 { return n; } function main(): int32 { const h = worker(1); return wait h; }`);
+  let test theory: Case = t.asserts("the CALL is a Task<T>, joinable with `wait`") {
+    theory.isSuccessful = handle.diagnostics.len == 0;
+    theory.detail = `reported ${handle.diagnostics.len}: ${firstDiagnostic(ref handle)}`;
+  }
+  // And it is NOT the declared return: `worker(1) * 2` would be arithmetic on a
+  // handle, which has to be a type error rather than a silent int.
+  let asInt = checkSource(`${TASK_KIND}task worker(n: int32): int32 { return n; } function main(): int32 { const h = worker(1); return h * 2; }`);
+  let test theory: Case = t.asserts("a handle is not the T it will produce") {
+    theory.isSuccessful = asInt.diagnostics.len > 0;
+    theory.detail = `reported ${asInt.diagnostics.len}, wanted arithmetic on a handle to be refused`;
+  }
+}
+
+// The three binding forms are told apart by the kind's CLAUSES, never by its
+// name - the rule everything else about kinds follows. A `Task<T>` has no
+// methods at all, so a clause naming one can only be honored by the compiler,
+// which is exactly what makes the mapping unambiguous.
+suite function theHandleBindingFormsComeFromTheKindsClauses(): void {
+  const decl = `${TASK_KIND}${POOLED_RC_KIND}${JOINED_KIND}task worker(n: int32): int32 { return n; } `;
+  let pooled = checkSource(`${decl}function main(): int32 { pooled h = worker(1); return 0; }`);
+  let test theory: Case = t.asserts("a `refcounted` kind takes a handle with no complaint") {
+    theory.isSuccessful = pooled.diagnostics.len == 0;
+    theory.detail = `reported ${pooled.diagnostics.len}: ${firstDiagnostic(ref pooled)}`;
+  }
+  // A `mustCall join` kind would otherwise demand a `join` METHOD on the
+  // binding's type, and `Task<T>` has none and cannot have one.
+  let joined = checkSource(`${decl}function main(): int32 { joined d = worker(1); return 0; }`);
+  let test theory: Case = t.asserts("a `mustCall` kind does not demand a method on Task<T>") {
+    theory.isSuccessful = joined.diagnostics.len == 0;
+    theory.detail = `reported ${joined.diagnostics.len}: ${firstDiagnostic(ref joined)}`;
+  }
+  // The IMMEDIATE form: annotated with the RESULT type, which is a mismatch on
+  // its face and is exactly what says "spawn and join here".
+  let immediate = checkSource(`${decl}function main(): int32 { const v: int32 = worker(1); return v; }`);
+  let test theory: Case = t.asserts("an annotated binding takes the RESULT, not the handle") {
+    theory.isSuccessful = immediate.diagnostics.len == 0;
+    theory.detail = `reported ${immediate.diagnostics.len}: ${firstDiagnostic(ref immediate)}`;
+  }
+  // A COPY of an existing handle needs a refcount retain, which is not emitted.
+  // Refused by name rather than half-built: a copy with no retain is a
+  // use-after-free the moment either binding's scope ends.
+  let copied = checkSource(`${decl}function main(): int32 { pooled a = worker(1); pooled b = a; return 0; }`);
+  let test theory: Case = t.asserts("copying a handle into a second binding is refused by name") {
+    theory.isSuccessful = diagnosticsMention(ref copied, "not a fresh spawn");
+    theory.detail = `reported ${copied.diagnostics.len}: ${firstDiagnostic(ref copied)}`;
+  }
+}
+
+// `wait h` yields the handle's T, and refuses two things: an operand that is
+// not a handle, and appearing inside a TASK body - where blocking the worker is
+// the one thing the whole coroutine machinery exists to avoid.
+suite function waitJoinsAHandle(): void {
+  const decl = `${TASK_KIND}${POOLED_RC_KIND}${ASYNC_KIND}task worker(n: int32): int32 { return n; } `;
+  let ok = checkSource(`${decl}function main(): int32 { pooled h = worker(1); return wait h; }`);
+  let test theory: Case = t.asserts("`wait h` has the handle's result type") {
+    theory.isSuccessful = ok.diagnostics.len == 0;
+    theory.detail = `reported ${ok.diagnostics.len}: ${firstDiagnostic(ref ok)}`;
+  }
+  let notAHandle = checkSource(`${decl}function main(): int32 { const n: int32 = 1; return wait n; }`);
+  let test theory: Case = t.asserts("waiting on something that is not a handle is refused") {
+    theory.isSuccessful = diagnosticsMention(ref notAHandle, "joins a Task<T> handle");
+    theory.detail = `reported ${notAHandle.diagnostics.len}: ${firstDiagnostic(ref notAHandle)}`;
+  }
+  let inTask = checkSource(`${decl}task joiner(): int32 { pooled h = worker(1); return wait h; }`);
+  let test theory: Case = t.asserts("`wait` inside a task body is refused, pointing at `await`") {
+    theory.isSuccessful = diagnosticsMention(ref inTask, "not allowed inside a task body");
+    theory.detail = `reported ${inTask.diagnostics.len}: ${firstDiagnostic(ref inTask)}`;
+  }
+  // An `async` function that is NOT a task may wait freely - std's `awaitTask`
+  // ends in one, as the fallback for being called off a worker.
+  let inAsync = checkSource(`${decl}async joiner(): int32 { pooled h = worker(1); return wait h; }`);
+  let test theory: Case = t.asserts("`wait` inside a plain async function is allowed") {
+    theory.isSuccessful = !diagnosticsMention(ref inAsync, "not allowed inside a task body");
+    theory.detail = `reported ${inAsync.diagnostics.len}: ${firstDiagnostic(ref inAsync)}`;
+  }
+}
+
+// Two things a `task` declaration may not be, both the reference's rules. A
+// void task is the one that matters most: the handle's result slot is sized by
+// the declared return, and `void` has no LLVM spelling a struct field can take.
+suite function aTaskDeclHasTwoRefusals(): void {
+  let asMain = checkSource(`${TASK_KIND}task main(): int32 { return 0; }`);
+  let test theory: Case = t.asserts("`main` cannot be a task") {
+    theory.isSuccessful = diagnosticsMention(ref asMain, "cannot be a task");
+    theory.detail = `reported ${asMain.diagnostics.len}: ${firstDiagnostic(ref asMain)}`;
+  }
+  let voidTask = checkSource(`${TASK_KIND}task w(): void { return; }`);
+  let test theory: Case = t.asserts("a task cannot return void") {
+    theory.isSuccessful = diagnosticsMention(ref voidTask, "cannot return void");
+    theory.detail = `reported ${voidTask.diagnostics.len}: ${firstDiagnostic(ref voidTask)}`;
+  }
+}
+
+// `Task<T>` is spellable in an ANNOTATION - a builtin generic name like
+// `unsafe_ptr<T>`, since nothing declares it and there is no symbol to look up.
+suite function taskIsSpellableAsAnAnnotation(): void {
+  const decl = `${TASK_KIND}${POOLED_RC_KIND}task worker(n: int32): int32 { return n; } `;
+  let ok = checkSource(`${decl}function join(h: Task<int32>): int32 { return wait h; }`);
+  let test theory: Case = t.asserts("a `Task<int32>` parameter joins to an int32") {
+    theory.isSuccessful = ok.diagnostics.len == 0;
+    theory.detail = `reported ${ok.diagnostics.len}: ${firstDiagnostic(ref ok)}`;
+  }
+  let wrongArity = checkSource(`${decl}function join(h: Task): int32 { return wait h; }`);
+  let test theory: Case = t.asserts("a bare `Task` is refused - it takes one argument") {
+    theory.isSuccessful = diagnosticsMention(ref wrongArity, "takes one type argument");
+    theory.detail = `reported ${wrongArity.diagnostics.len}: ${firstDiagnostic(ref wrongArity)}`;
+  }
+}
+
+// ASYNCNESS IS PART OF THE SIGNATURE, so a sync impl of an async trait method is
+// an ordinary signature mismatch. That falls out of interning rather than being
+// a rule anywhere: two Func types differing only in asyncness are two types.
+suite function asyncnessIsPartOfASignature(): void {
+  const readerTrait = "trait Reader { async read(ref self): int32; } ";
+  let matching = checkSource(`${ASYNC_KIND}${readerTrait}type R implements Reader { n: int32, async read(ref self): int32 { return self.n; } }`);
+  let test theory: Case = t.asserts("an async impl of an async trait method matches") {
+    theory.isSuccessful = matching.diagnostics.len == 0;
+    theory.detail = `reported ${matching.diagnostics.len}: ${firstDiagnostic(ref matching)}`;
+  }
+  let mismatched = checkSource(`${ASYNC_KIND}${readerTrait}type R implements Reader { n: int32, function read(ref self): int32 { return self.n; } }`);
+  let test theory: Case = t.asserts("a SYNC impl of an async trait method is refused") {
+    theory.isSuccessful = mismatched.diagnostics.len > 0;
+    theory.detail = `reported ${mismatched.diagnostics.len}, wanted a signature mismatch`;
+  }
+}
+
 // ----- intrinsics ------------------------------------------------------------
 
 suite function intrinsicExternsAreTheirOwnThing(): void {

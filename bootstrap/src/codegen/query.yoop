@@ -21,7 +21,7 @@ import { Program, TypedModule, TypeId, Type, Symbol, symbolAt, typeAt, TYPE_VOID
   lookupField, isStructType, isVariantType, lookupVariantCase, variantCaseFieldNamed,
   variantModuleIdOf, variantDeclNameOf, funcInstanceAt, genericAt, substitute,
   DeclId, DECL_NONE_ID, GenericSort, derefType, lookupMethod, methodSymbolName,
-  anyOpenArg, findFuncInstance,
+  anyOpenArg, findFuncInstance, funcTypeIsAsync,
   nominalModuleOf, isValueEnumType, lookupEnumCase,
   IterableWalk, iterableWalkOf } from "../typecheck";
 import { ASTNode, childAt, nodeAt } from "../ast";
@@ -122,7 +122,7 @@ export function returnTypeIdOf(ref cx: Cx, name: string): TypeId {
   if (cx.instance != NO_FUNC_INSTANCE) {
     let inst = funcInstanceAt(cx.prog, cx.instance);
     switch (typeAt(cx.prog, inst.funcType)) {
-      case Type.Func { params: p, ret: r, variadic: v }: { return r; }
+      case Type.Func { params: p, ret: r, variadic: v, isAsync: fnAsync }: { return r; }
       default: { return TYPE_VOID_ID; }
     }
   }
@@ -132,7 +132,7 @@ export function returnTypeIdOf(ref cx: Cx, name: string): TypeId {
       switch (symbolAt(cx.prog, symId)) {
         case Symbol.Func { typeId: t }: {
           switch (typeAt(cx.prog, t)) {
-            case Type.Func { params: p, ret: r, variadic: v }: {
+            case Type.Func { params: p, ret: r, variadic: v, isAsync: fnAsync }: {
               return r;
             }
             default: { return TYPE_VOID_ID; }
@@ -142,6 +142,31 @@ export function returnTypeIdOf(ref cx: Cx, name: string): TypeId {
       }
     }
   }
+}
+
+// Whether a top-level function's signature is a coroutine's. Off the TYPE
+// rather than off `tm.pausableNames`, because inside a monomorphization the
+// signature is the instance's and the decl's name says nothing about it.
+export function funcIsAsync(ref cx: Cx, name: string): bool {
+  if (cx.instance != NO_FUNC_INSTANCE) {
+    return funcTypeIsAsync(cx.prog, funcInstanceAt(cx.prog, cx.instance).funcType);
+  }
+  switch (map.mapGet(ref cx.tm.names, name)) {
+    case Option.None: { return false; }
+    case Option.Some { value: symId }: {
+      switch (symbolAt(cx.prog, symId)) {
+        case Symbol.Func { typeId: t }: { return funcTypeIsAsync(cx.prog, t); }
+        default: { return false; }
+      }
+    }
+  }
+}
+
+// The method twin, read off the receiver's method table for the same reason
+// `methodReturnTypeIdOf` is: a method is not a module-level name.
+export function methodIsAsync(ref cx: Cx, declNode: ASTNode): bool {
+  const owner = methodOwnerOf(ref cx, declNode);
+  return funcTypeIsAsync(cx.prog, lookupMethod(cx.prog, owner, declNode.name));
 }
 
 // True when a name spells a primitive type, which is what makes `usize(x)` a
@@ -241,7 +266,7 @@ export type VariadicCallee {
 // must spell the same type.
 export function variadicCalleeOf(ref cx: Cx, name: string, ref out: Vec<string>): VariadicCallee {
   switch (calleeFuncType(ref cx, name)) {
-    case Type.Func { params: p, ret: r, variadic: v }: {
+    case Type.Func { params: p, ret: r, variadic: v, isAsync: fnAsync }: {
       if (!v) {
         return { isVariadic: false, isBuiltinPrintf: false };
       }
@@ -405,7 +430,7 @@ export function methodReturnTypeOf(ref cx: Cx, declNode: ASTNode): string {
 export function methodReturnTypeIdOf(ref cx: Cx, declNode: ASTNode): TypeId {
   const owner = methodOwnerOf(ref cx, declNode);
   switch (typeAt(cx.prog, lookupMethod(cx.prog, owner, declNode.name))) {
-    case Type.Func { params: p, ret: r, variadic: v }: { return r; }
+    case Type.Func { params: p, ret: r, variadic: v, isAsync: fnAsync }: { return r; }
     default: { return TYPE_VOID_ID; }
   }
 }

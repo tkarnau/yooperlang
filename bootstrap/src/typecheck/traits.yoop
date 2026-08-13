@@ -343,6 +343,9 @@ export function checkMethodKinds(
         if (info.pausable) {
           map.mapInsert(ref tm.pausableMethods, uint64(memberId), true);
         }
+        if (info.providesTask) {
+          map.mapInsert(ref tm.taskMethods, uint64(memberId), true);
+        }
       }
       case Option.None: {
         reportError(
@@ -457,10 +460,28 @@ export function checkTraitsSatisfied(
       case Type.Trait { decl: d, methods: mm, typeParams: tp, extendsTraits: et }: {
         let it: MapIter<string, TypeId> = map.mapIter(ref mm);
         for entry in it {
-          if (lookupMethod(ref prog, ownerType, entry.key) == TYPE_ERROR_ID) {
+          const impl = lookupMethod(ref prog, ownerType, entry.key);
+          if (impl == TYPE_ERROR_ID) {
             reportError(
               ref prog,
               `"${declNode.name}" claims to implement "${d.name}" but has no "${entry.key}" method`,
+              declNode.sourceLoc
+            );
+            continue;
+          }
+          // ASYNCNESS has to match. The bootstrap does not compare the rest of
+          // the two signatures - that is a gap it already had - but this one
+          // clause cannot be left out, because the two spellings lower to
+          // DIFFERENT ABIs: an async trait method is dispatched as a coroutine
+          // (a `ptr` handle back, a caller-owned result slot) and a sync impl
+          // is emitted as an ordinary function. Getting it wrong is a call
+          // through a mismatched signature, which is a crash rather than a
+          // diagnostic. The reference gets this from full signature equality;
+          // here it is the one clause of it that is load-bearing today.
+          if (funcTypeIsAsync(ref prog, impl) != funcTypeIsAsync(ref prog, entry.value)) {
+            reportError(
+              ref prog,
+              `"${declNode.name}.${entry.key}" does not match "${d.name}.${entry.key}" - one carries a pausable kind such as \`async\` and the other does not, and the two lower to different calling conventions`,
               declNode.sourceLoc
             );
           }
@@ -541,5 +562,11 @@ function funcTypeOfSignature(
     params: params,
     ret: resolveTypeAnnotation(ref prog, ref tm, ref ast, sigNode.childC),
     variadic: false,
+    // A trait method SIGNATURE and an impl's METHOD_DECL both come through
+    // here, and asyncness is part of interning - so a sync impl of an async
+    // trait method interns to a different TypeId and fails the existing
+    // signature check with no extra rule anywhere. That is the reference's
+    // "asyncness is part of signature equality" for free.
+    isAsync: declIsPausable(ref prog, ref ast, sigNode),
   });
 }

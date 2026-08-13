@@ -1,0 +1,130 @@
+// Coroutines - what an `async` function lowers to.
+//
+// WHAT THIS FIXTURE ASSERTS, and what it deliberately does not.
+//
+// It asserts that a module holding coroutines still LINKS and RUNS: clang
+// accepts the emitted `presplitcoroutine` functions, the coro passes split
+// them, the intrinsics are declared exactly once, and the ordinary code beside
+// them is untouched. Invalid coroutine IR fails the build here rather than in a
+// unit test that only reads text.
+//
+// It also asserts that every coroutine below RUNS and returns the right answer,
+// which it could not when it was first written: `main` cannot be async and a
+// pausable function is reachable only through `await`, so until `task` + `wait`
+// landed (item 3.5) there was no way to reach one from ordinary code at all.
+// The `run` and `check` tasks at the bottom are that bridge. Composition, a
+// loop around an await, an early return and the void ABI are each checked by
+// their result rather than by the IR alone.
+//
+// What it still does not assert is a coroutine PARKING and being resumed by the
+// scheduler - nothing here suspends. `task_spawn.yoop` is where that lives,
+// because the suspend primitive needs an `extern "intrinsic"` signature and a
+// wakeup arranged through the runtime.
+//
+// `async` is not a keyword. It is an ordinary kind, and `pausable` is the one
+// clause the compiler reads - so the kind below is a USER's, spelled
+// `resumable` rather than `async` for one practical reason: the JS reference
+// autoloads std/core/kinds.yoop into every module, so declaring `async` here
+// again is a redeclaration there. `resumable` proves the more interesting thing
+// anyway, which is that nothing in either compiler keys on the name.
+//
+// `task` and `pooled` are IMPORTED rather than declared for the same reason in
+// reverse: those two are the ones the compiler pairs with the runtime, and the
+// reference matches a handle-binding kind by the traits it requires - which
+// only the real declarations in std carry.
+//
+// The SUSPEND PRIMITIVE (`await suspendNow()`) is not here, and that is the
+// intersection rule at work: the bootstrap lets any pausable kind prefix an
+// `extern "intrinsic"` signature, and the reference accepts only the literal
+// word `async` there. A fixture asserted against both has to stay inside what
+// they share; the primitive is covered in codegen.test.yoop instead.
+
+import { task, pooled } from "std/core/kinds.yoop";
+
+kind resumable {
+  appliesTo function;
+  pausable;
+}
+
+extern "C" from "stdio.h" {
+  function printf(fmt: string, ...): int32;
+}
+
+// A leaf coroutine. The kind prefix REPLACES `function`.
+resumable double(x: int32): int32 {
+  return x * 2;
+}
+
+// Composition: `addAndDouble` awaits `double`, so `double`'s suspension - if it
+// had one - would propagate into this frame and on to whoever awaits this one.
+resumable addAndDouble(a: int32, b: int32): int32 {
+  let sum: int32 = a + b;
+  return await double(sum);
+}
+
+// Locals crossing an await, and a loop around one. The coro passes have to move
+// `total` and `i` into the frame; a local left on the stack would be garbage
+// after a resume.
+resumable sumTo(n: int32): int32 {
+  let total: int32 = 0;
+  for (let i: int32 = 1; i <= n; i += 1) {
+    total = total + await double(i);
+  }
+  return total;
+}
+
+// A branch and an early return inside a coroutine. A `return` is not a `ret`
+// here - it stores to the caller-owned slot and falls into the shared final
+// suspend - so a second exit path is a second branch to the same trailer.
+resumable pick(n: int32): int32 {
+  if (n < 0) {
+    return 0;
+  }
+  return await double(n);
+}
+
+// A VOID coroutine still takes the caller-owned result slot and never writes
+// it, so there is one ABI rather than two.
+resumable announce(): void {
+  return;
+}
+
+// Async and ordinary code mix freely in one module. This one must NOT come out
+// as a coroutine - the reference pins the same property on its HTTP handler.
+function plainHelper(x: int32): int32 {
+  return x - 5;
+}
+
+// THE BRIDGE. A task body is pausable, so it may await these; its call site is
+// a spawn, so ordinary code may reach it. Between them that is the only route
+// from `main` into any of the above, which is why nothing here ran until the
+// task half existed.
+task run(n: int32): int32 {
+  return await sumTo(n);
+}
+
+// The shapes a single result would not cover: a void coroutine (which takes the
+// caller-owned slot and never writes it), an early return, and a call that
+// composes two coroutines.
+task check(): int32 {
+  await announce();
+  const low: int32 = await pick(-5);
+  const high: int32 = await pick(6);
+  const composed: int32 = await addAndDouble(3, 4);
+  return low + high + composed;
+}
+
+function main(): int32 {
+  printf("plain %d\n", plainHelper(20));
+
+  pooled r = run(4);
+  const sum: int32 = wait r;
+  printf("sumTo %d\n", sum);
+
+  pooled k = check();
+  const checked: int32 = wait k;
+  printf("check %d\n", checked);
+
+  printf("done\n");
+  return 0;
+}

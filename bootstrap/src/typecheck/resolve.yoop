@@ -100,6 +100,26 @@ function resolveTypeName(ref prog: Program, ref tm: TypedModule, ref ast: AST, a
     );
   }
 
+  // `Task<T>` - the handle a `task` call evaluates to. A BUILTIN generic name
+  // like `unsafe_ptr<T>` rather than a declared one: nothing declares it, so
+  // there is no symbol to look up and the spelling IS the type. Same treatment
+  // in the reference.
+  if (str.stringEq(annot.name, TASK_TYPE_NAME)) {
+    if (annot.childA == 0) {
+      reportError(ref prog, `"Task" takes one type argument`, annot.sourceLoc);
+      return TYPE_ERROR_ID;
+    }
+    const taskArgs = nodeAt(ref ast, annot.childA);
+    if (taskArgs.childCount != 1) {
+      reportError(ref prog, `"Task" takes one type argument`, annot.sourceLoc);
+      return TYPE_ERROR_ID;
+    }
+    return internTask(
+      ref prog,
+      resolveTypeAnnotation(ref prog, ref tm, ref ast, childAt(ref ast, taskArgs, 0))
+    );
+  }
+
   switch (primKindOfName(annot.name)) {
     case Option.Some { value: k }: {
       if (annot.childA != 0) {
@@ -475,7 +495,7 @@ export function formatType(ref prog: Program, id: TypeId): string {
       return `enum ${d.name}`;
     }
     case Type.ErrorT: { return "<error>"; }
-    case Type.Func { params: p, ret: r, variadic: v }: {
+    case Type.Func { params: p, ret: r, variadic: v, isAsync: fnAsync }: {
       return `(${formatTypeList(ref prog, ref p)}) => ${formatType(ref prog, r)}`;
     }
     // A type PARAMETER reads as its own name, which is what a bound diagnostic
@@ -831,6 +851,10 @@ function resolveFuncTypeAnnotation(
     params: params,
     ret: resolveTypeAnnotation(ref prog, ref tm, ref ast, annot.childB),
     variadic: false,
+    // A `=>` ANNOTATION is never written `async`. The reference has the same
+    // rule and states it for vtables: the trait is the authority on a slot's
+    // asyncness, not the annotation spelling it.
+    isAsync: false,
   });
 }
 

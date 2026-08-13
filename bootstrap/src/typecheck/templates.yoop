@@ -71,7 +71,7 @@ export function displayMethodOf(ref prog: Program, t: TypeId): TypeId {
     return TYPE_ERROR_ID;
   }
   switch (typeAt(ref prog, method)) {
-    case Type.Func { params: ps, ret: r, variadic: v }: {
+    case Type.Func { params: ps, ret: r, variadic: v, isAsync: fnAsync }: {
       switch (typeAt(ref prog, r)) {
         case Type.Prim { prim: p }: {
           switch (p) {

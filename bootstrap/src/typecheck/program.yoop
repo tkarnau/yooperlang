@@ -59,6 +59,20 @@ export type TypedModule propagates<disposable> {
   // not unique in a module - two types may each declare `read`, and a plain
   // function may be called `read` as well - so the name table cannot hold them.
   pausableMethods: Map<uint64, bool>,
+  // The subset of the two above whose kind also `provides Task` - a `task`
+  // body. Those are coroutines like every other pausable function, but their
+  // CALL SITE is a spawn onto the scheduler rather than an inline drive, so
+  // emitting the coroutine without the spawn would compile and never run.
+  // Refused by name in codegen; see codegen/coro.yoop.
+  taskNames: Map<string, bool>,
+  taskMethods: Map<uint64, bool>,
+  // CALL nodes whose callee is ASYNC. Two readers, which is why it is a
+  // decoration rather than a question asked twice: pass D uses it for the
+  // coloring rules (an async call outside an `await`, an `await` on an
+  // ordinary call), and CODEGEN uses it to emit the coroutine ABI at the call -
+  // an extra `ptr` result slot argument and a `ptr` handle back.
+  // Sparse and keyed by `uint64(nodeId)`, like the other call decorations.
+  asyncCalls: Map<uint64, bool>,
   // Call nodes whose callee is a VALUE - a function-typed struct field - rather
   // than a name. Codegen reads the field and calls through it; without this it
   // would look for a symbol named after the field and emit `call @hash`.
@@ -140,6 +154,28 @@ export type Program propagates<disposable> {
   // the one writer.
   currentReturn: TypeId,
   currentFn: string,
+  // Whether the body being checked belongs to a function carrying a PAUSABLE
+  // kind. Ambient for the same reason `currentReturn` is: an `await` may sit at
+  // any depth of an expression, so threading the flag would mean adding a
+  // parameter to every expression helper between here and there.
+  currentIsAsync: bool,
+  // Whether that same body is a `task` body specifically - the subset of the
+  // above whose kind also `provides Task`. One question reads it: `wait` is
+  // refused inside a task body, because blocking a worker there is the thing
+  // coroutines exist to avoid. `async` alone is not enough to refuse on - std's
+  // `awaitTask` is async and ends in a `wait`.
+  currentIsTask: bool,
+  // Set by `await` immediately before its operand is checked, and taken by the
+  // very next CALL_EXPRESSION that reaches checkExpr - which is that operand.
+  // One bool rather than a node id because the handoff is exactly one step: a
+  // call in an ARGUMENT is checked after the flag has already been taken, so
+  // `await f(g())` awaits f and not g.
+  awaitPending: bool,
+  // The same flag, after the CALL took it: "this call is the operand of an
+  // `await`". Separate from `awaitPending` because the two live for different
+  // spans - the first for exactly one step, the second for the whole of one
+  // call's checking, saved and restored around any call nested in an argument.
+  callWasAwaited: bool,
   // Every `kind` declared anywhere in the graph, by NAME.
   //
   // Ambient rather than scoped, because a kind prefix is reached by name and
@@ -161,6 +197,11 @@ export type Program propagates<disposable> {
   // declared it. Codegen lowers each call to instructions rather than emitting
   // a call, which is also why these are deliberately never in `externNames`.
   intrinsics: Map<string, bool>,
+  // Function SYMBOLS whose kind `provides Task` - a `task` body. Program-level
+  // and keyed by SymbolId rather than per-module and keyed by name, because the
+  // question is asked at a CALL site in a module that may not be the one that
+  // declared it. See the task-spawn carve-out in checkAgainstSignature.
+  taskSymbols: Map<uint64, bool>,
   // registry: InstantiationRegistry - deferred until generics land in the bootstrap.
 }
 
@@ -174,11 +215,25 @@ export type Program propagates<disposable> {
 export type KindInfo {
   name: string,
   pausable: bool,
+  // `provides Task;` - the clause that makes a CALL to the function evaluate to
+  // `Task<T>` rather than to T, which is the whole difference between `task`
+  // and `async`. Both are pausable, so `pausable` alone cannot tell them apart,
+  // and the two lower completely differently: an `async` call is driven inline
+  // by `await`, a `task` call is a SPAWN. The bootstrap builds the first and
+  // refuses the second by name.
+  providesTask: bool,
   // `mustCall dispose beforeScopeEnd;` - the method a binding carrying this
   // kind gets called on it when its scope ends, or "" for a kind that asks for
   // nothing. This is the clause that makes a kind MEAN something at run time:
   // every other one is recorded and read by nobody.
   disposeMethod: string,
+  // `refcounted retain release;` - the clause on `pooled`. A binding carrying
+  // it holds a REFCOUNTED handle, so its storage is the heap and its scope end
+  // is a release rather than a call. Read together with `disposeMethod` by
+  // task.yoop, which is the one place either clause means something on a
+  // `Task<T>`: a task handle is a compiler type with no methods at all, so the
+  // compiler is the only thing that can supply what these two ask for.
+  refcounted: bool,
   // `appliesTo region;` rather than `binding`. A region kind can be written
   // anonymously in front of a block (`ephemeral arenaScope(N) { ... }`); a
   // binding kind must be given a name.
@@ -193,9 +248,19 @@ export function beginFile(ref prog: Program, absPath: string): void {
 
 // The function whose body pass D is about to walk. Paired with `currentFile`
 // and set for the same reason - see the fields on Program.
-export function beginFunction(ref prog: Program, name: string, retType: TypeId): void {
+export function beginFunction(
+  ref prog: Program,
+  name: string,
+  retType: TypeId,
+  isAsync: bool,
+  isTask: bool
+): void {
   prog.currentFn = name;
   prog.currentReturn = retType;
+  prog.currentIsAsync = isAsync;
+  prog.currentIsTask = isTask;
+  prog.awaitPending = false;
+  prog.callWasAwaited = false;
 }
 
 // The reserved singletons are pushed here, in the order ids.yoop declares them.
@@ -231,6 +296,7 @@ export function initProgram(): Program propagates<disposable> {
 
   let typeParams: Map<string, TypeId> = map.mapNew(0, map.stringKeyOps());
   let kinds: Map<string, KindInfo> = map.mapNew(0, map.stringKeyOps());
+  let taskSymbols: Map<uint64, bool> = map.mapNew(0, map.uint64KeyOps());
   let intrinsics: Map<string, bool> = map.mapNew(0, map.stringKeyOps());
   let derivedDisplay: Map<string, bool> = map.mapNew(0, map.stringKeyOps());
   let prog: Program = {
@@ -244,8 +310,13 @@ export function initProgram(): Program propagates<disposable> {
     typeParams: typeParams,
     currentFile: "",
     currentReturn: TYPE_ERROR_ID,
+    currentIsAsync: false,
+    currentIsTask: false,
+    awaitPending: false,
+    callWasAwaited: false,
     currentFn: "",
     kinds: kinds,
+    taskSymbols: taskSymbols,
     derivedDisplay: derivedDisplay,
     intrinsics: intrinsics,
   };
@@ -263,6 +334,9 @@ export function initTypedModule(moduleId: string): TypedModule propagates<dispos
   let externNames: Map<string, bool> = map.mapNew(0, map.stringKeyOps());
   let pausableNames: Map<string, bool> = map.mapNew(0, map.stringKeyOps());
   let pausableMethods: Map<uint64, bool> = map.mapNew(0, map.uint64KeyOps());
+  let taskNames: Map<string, bool> = map.mapNew(0, map.stringKeyOps());
+  let taskMethods: Map<uint64, bool> = map.mapNew(0, map.uint64KeyOps());
+  let asyncCalls: Map<uint64, bool> = map.mapNew(0, map.uint64KeyOps());
   let indirectCalls: Map<uint64, bool> = map.mapNew(0, map.uint64KeyOps());
   let derefUses: Map<uint64, bool> = map.mapNew(0, map.uint64KeyOps());
   let reborrowUses: Map<uint64, bool> = map.mapNew(0, map.uint64KeyOps());
@@ -277,6 +351,9 @@ export function initTypedModule(moduleId: string): TypedModule propagates<dispos
     externNames: externNames,
     pausableNames: pausableNames,
     pausableMethods: pausableMethods,
+    taskNames: taskNames,
+    taskMethods: taskMethods,
+    asyncCalls: asyncCalls,
     indirectCalls: indirectCalls,
     derefUses: derefUses,
     reborrowUses: reborrowUses,
@@ -338,17 +415,23 @@ export function internArray(ref prog: Program, elem: TypeId): TypeId {
 //
 // The comparison is on parameter TYPES and the return type. Names never enter
 // it - a function type is positional.
+// ASYNCNESS is part of the comparison, which is what makes a sync function and
+// an async one with otherwise identical signatures two different types. That
+// falls straight out into the trait rule the reference states separately: a
+// sync impl of an async trait method is a signature mismatch with no extra
+// check anywhere.
 export function internFunc(
   ref prog: Program,
   ref params: Vec<TypeId>,
   ret: TypeId,
-  variadic: bool
+  variadic: bool,
+  isAsync: bool
 ): TypeId {
   let i: usize = 0;
   while (i < prog.types.len) {
     switch (typeAt(ref prog, i)) {
-      case Type.Func { params: p, ret: r, variadic: v }: {
-        if (r == ret && v == variadic && sameTypeList(ref p, ref params)) {
+      case Type.Func { params: p, ret: r, variadic: v, isAsync: a }: {
+        if (r == ret && v == variadic && a == isAsync && sameTypeList(ref p, ref params)) {
           return i;
         }
       }
@@ -361,7 +444,7 @@ export function internFunc(
   // segfault once (see the VariantCase note in bootstrap/README.md).
   let owned: Vec<TypeId> = vec.vecFromArray(vec.vecAsArray(ref params));
   return internType(ref prog, Type.Func {
-    params: owned, ret: ret, variadic: variadic,
+    params: owned, ret: ret, variadic: variadic, isAsync: isAsync,
   });
 }
 

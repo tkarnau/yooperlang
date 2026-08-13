@@ -158,6 +158,12 @@ function emitExprInner(ref cx: Cx, exprId: NodeId, ref out: Operand): string {
     case ASTNodeKind.TRY_OP: {
       return emitTryOp(ref cx, expr, exprId, ref out);
     }
+    case ASTNodeKind.AWAIT_EXPRESSION: {
+      return emitAwait(ref cx, expr, exprId, ref out);
+    }
+    case ASTNodeKind.WAIT_EXPRESSION: {
+      return emitWait(ref cx, expr, exprId, ref out);
+    }
     default: {
       return internalError("codegen cannot emit expression", kindName(expr.kind));
     }

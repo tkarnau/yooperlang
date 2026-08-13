@@ -1,0 +1,214 @@
+module codegen;
+
+// The instruction catalogue for the SPAWN. Same house rules as instr.yoop: one
+// function per instruction, named for what it emits, with a sample of its
+// output, and no decisions - operands and types arrive as arguments.
+//
+// Everything here is an ordinary `call` into runtime/yoop_runtime.c. The
+// coroutine intrinsics a task BODY is made of live in instr_coro.yoop; these
+// are the other side of the boundary, the part written in C because it owns
+// threads and a queue.
+
+//   call void @yoop_task_submit(ptr %sc.1.addr, ptr @main_1__compute__thunk)
+//
+// Hand a filled-in handle to the scheduler. The runtime allocates the handle's
+// mutex and condvar here and pushes it onto the run queue; the thunk pointer is
+// passed as well as stored so the queue never has to gep.
+export function emitTaskSubmit(ref cx: Cx, handle: Operand, thunkHome: string, thunkName: string): void {
+  startInstr(ref cx);
+  part(ref cx, "call void @yoop_task_submit(ptr ");
+  operand(ref cx, handle);
+  part(ref cx, ", ptr ");
+  operand(ref cx, Operand.FuncRef { home: thunkHome, name: thunkName });
+  part(ref cx, ")");
+  endInstr(ref cx);
+}
+
+//   call void @yoop_task_wait(ptr %t3)
+//
+// Block until the handle's state byte flips. Re-entrant: a caller with nothing
+// else to do drains the run queue on its own thread rather than parking, which
+// is what keeps a nested join off the deadlock cliff.
+export function emitTaskWaitCall(ref cx: Cx, handle: Operand): void {
+  emitRuntimeCall1(ref cx, "yoop_task_wait", handle);
+}
+
+//   call void @yoop_task_free_sync_pair(ptr %t3)
+//
+// Release the mutex/cond pair `submit` allocated. For a STACK handle only - a
+// pooled one frees its pair when the refcount hits zero.
+export function emitTaskFreeSyncPair(ref cx: Cx, handle: Operand): void {
+  emitRuntimeCall1(ref cx, "yoop_task_free_sync_pair", handle);
+}
+
+//   call void @yoop_task_release(ptr %t3)
+export function emitTaskRelease(ref cx: Cx, handle: Operand): void {
+  emitRuntimeCall1(ref cx, "yoop_task_release", handle);
+}
+
+//   call void @yoop_task_settle(ptr %ts)
+//
+// The end of one task STEP. The runtime decides there whether the coroutine
+// reached its final suspend (signal completion, destroy the frame) or merely
+// parked. The single place that distinction is made, which is why the thunk
+// ends with it rather than testing `coro.done` itself.
+export function emitTaskSettle(ref cx: Cx, handle: Operand): void {
+  emitRuntimeCall1(ref cx, "yoop_task_settle", handle);
+}
+
+//   %t2 = call ptr @yoop_task_alloc(i64 %t1)
+//
+// calloc plus a refcount of 2 - one for the binding, one for the worker.
+export function emitTaskAlloc(ref cx: Cx, dest: usize, sizeTemp: usize): void {
+  startInstr(ref cx);
+  temp(ref cx, dest);
+  part(ref cx, " = call ptr @yoop_task_alloc(i64 ");
+  temp(ref cx, sizeTemp);
+  part(ref cx, ")");
+  endInstr(ref cx);
+}
+
+//   %t1 = getelementptr %Task_main_1__compute, ptr null, i32 1
+//   %t2 = ptrtoint ptr %t1 to i64
+//
+// sizeof, spelled the way LLVM IR spells it: the address of element 1 of a null
+// array of the type IS its size. Two instructions and no target knowledge -
+// which is the point, since the struct's size depends on the result type's
+// alignment and codegen never computes a layout.
+export function emitSizeOfStruct(ref cx: Cx, dest: usize, gepTemp: usize, structTy: string): void {
+  startInstr(ref cx);
+  temp(ref cx, gepTemp);
+  part(ref cx, " = getelementptr ");
+  part(ref cx, structTy);
+  part(ref cx, ", ptr null, i32 1");
+  endInstr(ref cx);
+
+  startInstr(ref cx);
+  temp(ref cx, dest);
+  part(ref cx, " = ptrtoint ptr ");
+  temp(ref cx, gepTemp);
+  part(ref cx, " to i64");
+  endInstr(ref cx);
+}
+
+//   store %Task_main_1__compute zeroinitializer, ptr %sc.1.addr
+//
+// A stack handle starts life as whatever was on the stack, and the runtime
+// reads its refcount and state before the compiler writes either. One store of
+// zeroinitializer is the cheapest way to make that safe; a pooled handle comes
+// from calloc and needs none.
+export function emitStoreZeroInit(ref cx: Cx, structTy: string, slotName: string, slotId: usize): void {
+  startInstr(ref cx);
+  part(ref cx, "store ");
+  part(ref cx, structTy);
+  part(ref cx, " zeroinitializer, ptr ");
+  slot(ref cx, slotName, slotId);
+  endInstr(ref cx);
+}
+
+//   %t5 = getelementptr inbounds i8, ptr %t4, i64 48
+//
+// A CONSTANT byte offset into the handle, which is how `wait` reaches the
+// result slot: the prefix layout is universal, so byte 48 is the answer for
+// every task struct in the program and the site never has to name one.
+// emitGepByteOffset in instr_str.yoop is the moving-cursor twin - same
+// instruction, a temp for the offset instead of a literal.
+export function emitGepTaskByteOffset(ref cx: Cx, dest: usize, base: Operand, offset: usize): void {
+  startInstr(ref cx);
+  temp(ref cx, dest);
+  part(ref cx, " = getelementptr inbounds i8, ptr ");
+  operand(ref cx, base);
+  part(ref cx, ", i64 ");
+  num(ref cx, offset);
+  endInstr(ref cx);
+}
+
+//   define void @main_1__compute__thunk(ptr %ts) {
+//   entry:
+//
+// A thunk's own signature. Its own emitter rather than emitFunctionOpen's,
+// because that one names every parameter `<name>.arg` for the spill a yoop body
+// needs, and a thunk has no body to spill for.
+export function emitThunkOpen(ref cx: Cx, homeModule: string, name: string): void {
+  headerPart(ref cx, "define void @");
+  headerPart(ref cx, homeModule);
+  headerPart(ref cx, SYMBOL_MODULE_SEPARATOR);
+  headerPart(ref cx, name);
+  headerPart(ref cx, "(ptr %");
+  headerPart(ref cx, THUNK_HANDLE_PARAM);
+  headerPart(ref cx, ") {");
+  headerEnd(ref cx);
+  headerPart(ref cx, "entry:");
+  headerEnd(ref cx);
+}
+
+//   %t1 = getelementptr inbounds %Task_main_1__compute, ptr %ts, i32 0, i32 9
+//
+// One field of the handle, through a bare NAMED pointer. The struct-field geps
+// in instr_mem.yoop all address a slot, a temp or an operand; a thunk's handle
+// is none of those.
+export function emitGepTaskField(
+  ref cx: Cx,
+  dest: usize,
+  structTy: string,
+  baseName: string,
+  index: usize
+): void {
+  startInstr(ref cx);
+  temp(ref cx, dest);
+  part(ref cx, " = getelementptr inbounds ");
+  part(ref cx, structTy);
+  part(ref cx, ", ptr %");
+  part(ref cx, baseName);
+  part(ref cx, ", i32 0, i32 ");
+  num(ref cx, index);
+  endInstr(ref cx);
+}
+
+//   call void @yoop_runtime_init()
+export function emitRuntimeInit(ref cx: Cx): void {
+  emitRuntimeCall0(ref cx, "yoop_runtime_init");
+}
+
+//   call void @yoop_runtime_shutdown()
+export function emitRuntimeShutdown(ref cx: Cx): void {
+  emitRuntimeCall0(ref cx, "yoop_runtime_shutdown");
+}
+
+//   call void @yoop_runtime_set_coro_ops(ptr @yoop_coro_resume, ptr @yoop_coro_destroy, ptr @yoop_coro_done)
+//
+// Hand the scheduler the three trampolines. It cannot call an `llvm.coro.*`
+// intrinsic itself - they only exist inside the coroutine that owns the frame -
+// and it must not link against these by name either, because the C runtime has
+// to build standalone. Function pointers are the whole bridge.
+export function emitSetCoroOps(ref cx: Cx): void {
+  startInstr(ref cx);
+  part(ref cx, "call void @yoop_runtime_set_coro_ops(ptr @");
+  part(ref cx, CORO_RESUME_TRAMPOLINE);
+  part(ref cx, ", ptr @");
+  part(ref cx, CORO_DESTROY_TRAMPOLINE);
+  part(ref cx, ", ptr @");
+  part(ref cx, CORO_DONE_TRAMPOLINE);
+  part(ref cx, ")");
+  endInstr(ref cx);
+}
+
+//   call void @yoop_task_wait(ptr %t3)
+function emitRuntimeCall1(ref cx: Cx, name: string, arg: Operand): void {
+  startInstr(ref cx);
+  part(ref cx, "call void @");
+  part(ref cx, name);
+  part(ref cx, "(ptr ");
+  operand(ref cx, arg);
+  part(ref cx, ")");
+  endInstr(ref cx);
+}
+
+//   call void @yoop_runtime_init()
+function emitRuntimeCall0(ref cx: Cx, name: string): void {
+  startInstr(ref cx);
+  part(ref cx, "call void @");
+  part(ref cx, name);
+  part(ref cx, "()");
+  endInstr(ref cx);
+}

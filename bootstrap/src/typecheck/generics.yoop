@@ -447,8 +447,13 @@ export function instantiateFunction(ref prog: Program, origin: DeclId, ref args:
   // `Vec<T>` in a parameter or return type as readily as into a bare `T`.
   let params: Vec<TypeId> = vec.vecNew(0);
   let ret: TypeId = TYPE_ERROR_ID;
+  // Carried through substitution rather than recomputed: a monomorphized
+  // instance is the template's signature with its parameters replaced, and
+  // asyncness is part of that signature. Losing it here would make every
+  // generic async function's instance an ordinary one.
+  let instAsync = false;
   switch (typeAt(ref prog, info.template)) {
-    case Type.Func { params: p, ret: r, variadic: v }: {
+    case Type.Func { params: p, ret: r, variadic: v, isAsync: fnAsync }: {
       let substituted: Vec<TypeId> = vec.vecNew(p.len);
       let a: usize = 0;
       while (a < p.len) {
@@ -457,12 +462,13 @@ export function instantiateFunction(ref prog: Program, origin: DeclId, ref args:
       }
       params = substituted;
       ret = substitute(ref prog, r, ref info.params, ref args);
+      instAsync = fnAsync;
     }
     default: { }
   }
 
   const funcType = internType(ref prog, Type.Func {
-    params: params, ret: ret, variadic: false,
+    params: params, ret: ret, variadic: false, isAsync: instAsync,
   });
 
   vec.vecPush(ref prog.funcInstances, {
@@ -591,6 +597,12 @@ export function substitute(ref prog: Program, id: TypeId, ref params: Vec<TypeId
     case Type.Ref { inner: i }: {
       return internRef(ref prog, substitute(ref prog, i, ref params, ref args));
     }
+    // `Task<T>` inside a generic signature - `awaitTask<T>(h: Task<T>): T`.
+    // Substituted like the other structural types, so an instantiation talks
+    // about `Task<int32>` rather than about the template's parameter.
+    case Type.Task { result: r }: {
+      return internTask(ref prog, substitute(ref prog, r, ref params, ref args));
+    }
     // An OPEN instance: `Pair<A, B>` used inside `Box<A>`'s body. Substituting
     // its arguments and re-instantiating is what turns `Box<A>` into
     // `Box<int>` when A does.
@@ -604,14 +616,14 @@ export function substitute(ref prog: Program, id: TypeId, ref params: Vec<TypeId
     // `KeyOps<K>.hash`. Substituting through it is what turns
     // `(ref Vec_T) => void` into `(ref Vec_string) => void`, and without it a
     // method survives instantiation still talking about the template.
-    case Type.Func { params: fp, ret: fr, variadic: fv }: {
+    case Type.Func { params: fp, ret: fr, variadic: fv, isAsync: fnAsync }: {
       let params2: Vec<TypeId> = vec.vecNew(fp.len);
       let i: usize = 0;
       while (i < fp.len) {
         vec.vecPush(ref params2, substitute(ref prog, vec.vecGet(ref fp, i), ref params, ref args));
         i += 1;
       }
-      return internFunc(ref prog, ref params2, substitute(ref prog, fr, ref params, ref args), fv);
+      return internFunc(ref prog, ref params2, substitute(ref prog, fr, ref params, ref args), fv, fnAsync);
     }
     // A TRAIT is deliberately NOT substituted here, even though an applied one
     // (`Comparable<T>`) does have arguments that move. A trait method's `ref
@@ -725,7 +737,7 @@ function typeMentionsTypeParam(ref prog: Program, id: TypeId): bool {
       if (pointee == 0) { return false; }
       return typeMentionsTypeParam(ref prog, pointee);
     }
-    case Type.Func { params: ps, ret: r, variadic: v }: {
+    case Type.Func { params: ps, ret: r, variadic: v, isAsync: fnAsync }: {
       return anyTypeParam(ref prog, ref ps) || typeMentionsTypeParam(ref prog, r);
     }
     case Type.FuncPtr { params: ps, ret: r }: {
@@ -756,7 +768,7 @@ export function firstTypeParamOwner(ref prog: Program, id: TypeId): DeclId {
       if (pointee == 0) { return DECL_NONE_ID; }
       return firstTypeParamOwner(ref prog, pointee);
     }
-    case Type.Func { params: ps, ret: r, variadic: v }: {
+    case Type.Func { params: ps, ret: r, variadic: v, isAsync: fnAsync }: {
       const inParams = ownerInArgs(ref prog, ref ps);
       if (inParams != DECL_NONE_ID) { return inParams; }
       return firstTypeParamOwner(ref prog, r);

@@ -3,7 +3,7 @@
 
   The self-hosted yooperlang compiler.
 
-    yoopiler_boot <entry.yoop> [-o <out>]
+    yoopiler_boot <entry.yoop> [-o <out>] [--emit-ir]
 
   Runs the whole pipeline - module graph, lex, parse, typecheck, codegen, link -
   and produces an executable. The language subset it accepts is small and grows
@@ -13,6 +13,7 @@
 
 import * as log from "std/log.yoop";
 import * as env from "std/env.yoop";
+import * as str from "std/core/strings.yoop";
 import { Vec }, * as vec from "std/core/vec.yoop";
 import { disposable } from "std/core/kinds.yoop";
 import { Result } from "std/core/types.yoop";
@@ -22,24 +23,23 @@ import { loadModuleGraph, LoadGraphResult, discoverStdRoot } from "./source_grap
 import { typecheckProgram, Program } from "./typecheck";
 import { Severity, formatLocation } from "./diagnostics";
 import { codegenProgram } from "./codegen";
-import { linkExecutable } from "./link";
+import { linkExecutable, writeIrFile } from "./link";
+
+const USAGE: string = "usage: yoopiler_boot <entry.yoop> [-o <out>] [--emit-ir]";
 
 function main(): int {
-  if (env.argCount() < 2) {
-    log.error("usage: yoopiler_boot <entry.yoop> [-o <out>]");
+  const cli = parseCommandLine();
+  if (cli.error.len > 0) {
+    log.error(cli.error);
+    log.error(USAGE);
     return 2;
-  }
-  const entryPath = env.argAt(1);
-  let outPath = "a.out";
-  if (env.argCount() >= 4) {
-    outPath = env.argAt(3);   // `-o <out>`
   }
 
   // Where `std/...` resolves. Discovered once here and handed to the graph, so
   // the layer that RESOLVES paths never has to probe for a directory.
   const stdRoot = discoverStdRoot(env.argAt(0));
 
-  switch (loadModuleGraph(entryPath, stdRoot)) {
+  switch (loadModuleGraph(cli.entry, stdRoot)) {
     case LoadGraphResult.Err { error: e }: {
       log.error(`${e}`);
       return 1;
@@ -61,23 +61,92 @@ function main(): int {
         case Result.Ok { value: out }: {
           log.info("llvm IR: ok");
           disposable irText: Text = out.ir;
-          disposable irPath: Text = text.fromString(outPath);
+          disposable irPath: Text = text.fromString(cli.out);
           text.push(ref irPath, ".ll");
           disposable libs: Vec<string> = out.linkLibraries;
+
+          // --emit-ir stops HERE, one step short of clang. The `.ll` is written
+          // where a linking run would have written it, so the two modes leave
+          // the same artifact behind and only the executable is missing.
+          if (cli.emitIr) {
+            const writeErr = writeIrFile(ref irText, text.view(ref irPath));
+            if (writeErr.len > 0) {
+              log.error(writeErr);
+              return 1;
+            }
+            log.info(`llvm IR written to ${text.view(ref irPath)}`);
+            return 0;
+          }
+
           const linkErr = linkExecutable(
-            ref irText, text.view(ref irPath), outPath, out.needsRuntime,
+            ref irText, text.view(ref irPath), cli.out, out.needsRuntime,
             ref libs, env.argAt(0)
           );
           if (linkErr.len > 0) {
             log.error(linkErr);
             return 1;
           }
-          log.info(`compiled: ${outPath}`);
+          log.info(`compiled: ${cli.out}`);
           return 0;
         }
       }
     }
   }
+}
+
+// A parsed command line. `error` is "" when the line is usable, and otherwise
+// is the whole complaint - the caller prints it and the usage line and stops.
+type CliArgs {
+  entry: string,
+  out: string,
+  emitIr: bool,
+  error: string,
+}
+
+/*
+  The command line, as a real scan rather than the fixed positions this used to
+  read (`argAt(1)` was the entry and `argAt(3)` was the output, whatever stood
+  at `argAt(2)`). `<entry> -o <out>` still means exactly what it did; what is
+  new is that a flag may stand anywhere in the line and an unrecognized one is
+  refused BY NAME instead of being taken for an input file.
+
+  `--emit-ir` is the bootstrap's own spelling - the reference has no equivalent
+  (its `--keep-ir` keeps a temp copy of the IR and still links). It exists
+  because most of what compiles a corpus file only wants to know whether
+  codegen succeeded, and the link is the expensive half.
+*/
+function parseCommandLine(): CliArgs {
+  let args: CliArgs = { entry: "", out: "a.out", emitIr: false, error: "" };
+  const argc = env.argCount();
+  let i: int32 = 1;
+  while (i < argc) {
+    const a = env.argAt(i);
+    if (str.stringEq(a, "-o")) {
+      if (i + 1 >= argc) {
+        args.error = "-o needs a path";
+        return args;
+      }
+      args.out = env.argAt(i + 1);
+      i += 2;
+    } else if (str.stringEq(a, "--emit-ir")) {
+      args.emitIr = true;
+      i += 1;
+    } else if (str.stringStartsWith(a, "-")) {
+      args.error = `unknown option ${a}`;
+      return args;
+    } else {
+      if (args.entry.len > 0) {
+        args.error = `more than one input file: ${a}`;
+        return args;
+      }
+      args.entry = a;
+      i += 1;
+    }
+  }
+  if (args.entry.len == 0) {
+    args.error = "no input file";
+  }
+  return args;
 }
 
 // Prints every accumulated diagnostic and returns the error count. Warnings do

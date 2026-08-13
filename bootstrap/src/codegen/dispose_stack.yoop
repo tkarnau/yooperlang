@@ -54,6 +54,13 @@ export type PendingDispose {
   viaField: bool,     // gep into a field of the binding first
   fieldIndex: usize,  // which field, when viaField
   slotType: string,   // the BINDING's LLVM type, for that gep
+  // A `pooled` / `joined` TASK HANDLE owes the scheduler something instead of a
+  // method call - a release, or a join plus freeing the sync pair. It rides on
+  // this stack rather than on one of its own because the question "what does
+  // this scope owe" has one answer and `return` / `break` / `continue` already
+  // unwind it correctly. TASK_ACTION_NONE for every ordinary disposal; see
+  // task_wait.yoop.
+  taskAction: usize,
 }
 
 // A stack of scopes, and nothing else.

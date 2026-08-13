@@ -2222,6 +2222,131 @@ function firstStatement(ref ast: AST): ASTNode {
   return nodeAt(ref ast, childAt(ref ast, statements, 0));
 }
 
+// ----- `await`, and the `wait` it is not ------------------------------------
+
+// `await g(args)` is a PREFIX operator at 70 - the same tight precedence `-`,
+// `!` and `~` take. What that buys is stated in expressions.yoop; what is
+// checked here is that it produces its own node kind and that the operand it
+// captures stops where it should.
+suite function awaitIsAPrefixExpression(): void {
+  let ast = parseOk("async f(): int { return await g(1); }");
+  let test theory: Case = t.asserts("`await g(1)` is an AWAIT_EXPRESSION over the call") {
+    const await1 = returnedExpression(ref ast);
+    const operand = nodeAt(ref ast, await1.childA);
+    theory.isSuccessful = await1.kind == ASTNodeKind.AWAIT_EXPRESSION &&
+      operand.kind == ASTNodeKind.CALL_EXPRESSION && str.stringEq(operand.name, "g");
+    theory.detail = `the expression is ${await1.kind} over ${operand.kind} "${operand.name}"`;
+  }
+
+  // 70 binds tighter than every binary operator, so the `+` is the OUTER node
+  // and the await captures only the call. Getting this wrong would await the
+  // sum, which is not a call at all.
+  let sum = parseOk("async f(): int { return await g(1) + 2; }");
+  let test theory: Case = t.asserts("`await g(1) + 2` is `(await g(1)) + 2`") {
+    const top = returnedExpression(ref sum);
+    const left = nodeAt(ref sum, top.childA);
+    theory.isSuccessful = top.kind == ASTNodeKind.BINARY_EXPRESSION &&
+      left.kind == ASTNodeKind.AWAIT_EXPRESSION;
+    theory.detail = `the outer node is ${top.kind} with ${left.kind} on the left`;
+  }
+
+  let stmt = parseOk("async f(): void { await g(); }");
+  let test theory: Case = t.asserts("`await g();` stands alone as a statement") {
+    const first = firstStatement(ref stmt);
+    const inner = nodeAt(ref stmt, first.childA);
+    theory.isSuccessful = first.kind == ASTNodeKind.EXPRESSION_STATEMENT &&
+      inner.kind == ASTNodeKind.AWAIT_EXPRESSION;
+    theory.detail = `the statement is ${first.kind} holding ${inner.kind}`;
+  }
+}
+
+// `await f(x)?` has to come out as `(await f(x))?` and not `await (f(x)?)`.
+//
+// The postfix `?` binds INSIDE the operand parse, so the natural result is the
+// backwards one: propagate first, then await whatever is left. `f(x)` is the
+// thing to await and the `?` applies to its RESULT. The reference swaps the two
+// nodes for the same reason, and 15 sites in std spell it this way - so getting
+// it wrong is not an edge case, it is most of std/http.
+suite function awaitAndTryOpSwap(): void {
+  let ast = parseOk("async f(): int { return await g(1)?; }");
+  let test theory: Case = t.asserts("the OUTER node is the `?`") {
+    const top = returnedExpression(ref ast);
+    theory.isSuccessful = top.kind == ASTNodeKind.TRY_OP;
+    theory.detail = `the outer node is ${top.kind}, wanted TRY_OP`;
+  }
+  let test theory: Case = t.asserts("the `?` wraps the await, which wraps the call") {
+    const top = returnedExpression(ref ast);
+    const await1 = nodeAt(ref ast, top.childA);
+    const call = nodeAt(ref ast, await1.childA);
+    theory.isSuccessful = await1.kind == ASTNodeKind.AWAIT_EXPRESSION &&
+      call.kind == ASTNodeKind.CALL_EXPRESSION && str.stringEq(call.name, "g");
+    theory.detail = `TRY_OP over ${await1.kind} over ${call.kind} "${call.name}"`;
+  }
+}
+
+// `wait h` JOINS a task handle - a different MECHANISM from `await`, and the
+// parser's only job is to keep them apart: same prefix shape, same precedence,
+// its own node kind.
+suite function waitIsAPrefixExpression(): void {
+  let ast = parseOk("function main(): int { return wait h; }");
+  let test theory: Case = t.asserts("`wait h` is a WAIT_EXPRESSION over its operand") {
+    const w = returnedExpression(ref ast);
+    const operand = nodeAt(ref ast, w.childA);
+    theory.isSuccessful = w.kind == ASTNodeKind.WAIT_EXPRESSION &&
+      operand.kind == ASTNodeKind.IDENT && str.stringEq(operand.name, "h");
+    theory.detail = `the expression is ${w.kind} over ${operand.kind} "${operand.name}"`;
+  }
+
+  // Precedence 70, the same as `await`, so a binary operator after the operand
+  // belongs to the enclosing expression rather than to the join.
+  let sum = parseOk("function main(): int { return wait h + 2; }");
+  let test theory: Case = t.asserts("`wait h + 2` is `(wait h) + 2`") {
+    const top = returnedExpression(ref sum);
+    const left = nodeAt(ref sum, top.childA);
+    theory.isSuccessful = top.kind == ASTNodeKind.BINARY_EXPRESSION &&
+      left.kind == ASTNodeKind.WAIT_EXPRESSION;
+    theory.detail = `the outer node is ${top.kind} with ${left.kind} on the left`;
+  }
+
+  // NO `?` swap, unlike `await`. `await f(x)?` has to become `(await f(x))?`
+  // because the `?` belongs to the call's RESULT; a `wait` operand is a handle
+  // and the natural nesting is already the right one.
+  let tryOp = parseOk("function main(): int { return wait h?; }");
+  let test theory: Case = t.asserts("`wait h?` keeps the `?` INSIDE, unlike await") {
+    const top = returnedExpression(ref tryOp);
+    const inner = nodeAt(ref tryOp, top.childA);
+    theory.isSuccessful = top.kind == ASTNodeKind.WAIT_EXPRESSION &&
+      inner.kind == ASTNodeKind.TRY_OP;
+    theory.detail = `the outer node is ${top.kind} over ${inner.kind}`;
+  }
+}
+
+// The SUSPEND PRIMITIVE is an intrinsic and it has to be async, so an extern
+// signature takes a kind prefix. All three spellings a method takes work here
+// for the same reason - it is the same helper.
+suite function anExternSignatureTakesAKindPrefix(): void {
+  let ast = parseOk("extern \"intrinsic\" from \"compiler\" { async function suspendNow(): void; }");
+  let test theory: Case = t.asserts("`async function suspendNow()` parses inside an extern block") {
+    const block = topLevel(ref ast, 0);
+    const sig = nodeAt(ref ast, childAt(ref ast, block, 0));
+    theory.isSuccessful = sig.kind == ASTNodeKind.EXTERN_FUNCTION_DECL &&
+      str.stringEq(sig.name, "suspendNow") && sig.childE != 0;
+    theory.detail = `the member is ${sig.kind} "${sig.name}" with prefix slot ${sig.childE}`;
+  }
+  let bare = parseOk("extern \"intrinsic\" from \"compiler\" { async suspendNow(): void; }");
+  let test theory: Case = t.asserts("the prefix may REPLACE the `function` keyword too") {
+    const sig = nodeAt(ref bare, childAt(ref bare, topLevel(ref bare, 0), 0));
+    theory.isSuccessful = sig.kind == ASTNodeKind.EXTERN_FUNCTION_DECL && sig.childE != 0;
+    theory.detail = `the member is ${sig.kind} with prefix slot ${sig.childE}`;
+  }
+  let plain = parseOk("extern \"C\" from \"stdio.h\" { function puts(s: string): int; }");
+  let test theory: Case = t.asserts("an unprefixed signature still carries no prefix list") {
+    const sig = nodeAt(ref plain, childAt(ref plain, topLevel(ref plain, 0), 0));
+    theory.isSuccessful = sig.kind == ASTNodeKind.EXTERN_FUNCTION_DECL && sig.childE == 0;
+    theory.detail = `prefix slot ${sig.childE}, wanted 0`;
+  }
+}
+
 // The i-th member of `type T { ... }` at the top of the file.
 function typeMember(ref ast: AST, i: usize): ASTNode {
   const decl = topLevel(ref ast, 0);

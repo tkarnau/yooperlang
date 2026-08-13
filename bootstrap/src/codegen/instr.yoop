@@ -304,6 +304,50 @@ export function emitFunctionOpen(
   headerEnd(ref cx);
 }
 
+// The COROUTINE form of the same line. Three differences, and each is the async
+// ABI saying one thing:
+//
+//   define ptr @m__fetch(i32 %n.arg, ptr %__ret) presplitcoroutine {
+//   entry:
+//
+//   * `ptr` return - an async function hands back its HANDLE, not its result.
+//   * a trailing `ptr %__ret` - the caller-owned slot the result is written
+//     into. A `void` async function takes it too and never writes it, so there
+//     is one ABI rather than two.
+//   * `presplitcoroutine` - without it the coro passes leave the intrinsics in
+//     place and clang rejects the module.
+export function emitCoroFunctionOpen(
+  ref cx: Cx,
+  homeModule: string,
+  name: string,
+  ref params: Vec<ParamInfo>
+): void {
+  headerPart(ref cx, "define ptr @");
+  if (homeModule.len > 0) {
+    headerPart(ref cx, homeModule);
+    headerPart(ref cx, SYMBOL_MODULE_SEPARATOR);
+  }
+  headerPart(ref cx, name);
+  headerPart(ref cx, "(");
+  let i: usize = 0;
+  while (i < params.len) {
+    const p = vec.vecGet(ref params, i);
+    headerPart(ref cx, p.ty);
+    headerPart(ref cx, " %");
+    headerPart(ref cx, p.name);
+    headerPart(ref cx, ".arg, ");
+    i += 1;
+  }
+  headerPart(ref cx, "ptr %");
+  headerPart(ref cx, CORO_RET_PARAM);
+  headerPart(ref cx, ")");
+  headerPart(ref cx, CORO_FN_ATTR);
+  headerPart(ref cx, " {");
+  headerEnd(ref cx);
+  headerPart(ref cx, "entry:");
+  headerEnd(ref cx);
+}
+
 // Closes it, assembling the pieces into the module: the hoisted allocas first,
 // then the instruction stream, then `}`.
 export function emitFunctionClose(ref cx: Cx): void {

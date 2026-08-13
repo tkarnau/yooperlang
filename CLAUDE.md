@@ -108,7 +108,7 @@ check on a change, and say so when you do.
 
 ## Run / test
 
-- `npm test` - all tests (unit + e2e). Currently 1232 tests, ~70s.
+- `npm test` - all tests (unit + e2e). Currently 1241 tests, ~47s.
 - `npm run test:unit` - fast, no clang.
 - `npm run test:e2e` - full pipeline, requires `clang` on PATH.
 - Compile one file: `node src/yoopiler.js path/to/file.yoop -o out`.
@@ -121,13 +121,21 @@ check on a change, and say so when you do.
   (silent otherwise; the LSP shows it either way). It finds real leaks but has
   two known false positives - see
   [docs/writing_yoop.md](docs/writing_yoop.md) section 4.
-- Bootstrap: `npm run test:slice` (end-to-end executables),
-  `npm run test:parity` (layer dumps vs the JS reference),
-  `npm run test:selfhost` (the three-stage build and its fixpoint), and
-  `node src/yoopiler.js --test bootstrap/src/<module>` per module.
+- Bootstrap: `npm run test:slice` (end-to-end executables, ~18s),
+  `npm run test:parity` (layer dumps vs the JS reference, ~3s),
+  `npm run test:selfhost` (the three-stage build and its fixpoint, ~18s), and
+  `node src/yoopiler.js --test bootstrap/src` for every Yoop unit test at once
+  (857 of them, ~8s, ONE build of the graph - the five per-module
+  `--test bootstrap/src/<module>` commands rebuild it five times and take ~15s
+  between them; reach for one while iterating on that module).
   **The bootstrap compiles itself as of 2026-08-13**; `YOOP_BOOT_COMPILER=<path>
   npm run test:slice` runs the slice suite through an already-built stage
   instead of building one with the JS reference.
+- The bootstrap driver is `yoopiler_boot <entry.yoop> [-o <out>] [--emit-ir]`.
+  `--emit-ir` stops after writing `<out>.ll`, which is what
+  `scripts/probe_surface.sh` uses - a link nobody reads was a quarter of the
+  probe's wall clock. `YOOP_SLICE_CONCURRENCY` and `YOOP_E2E_CONCURRENCY`
+  override how many fixtures those two suites run at once.
 - `yoopiler --lsp` runs the language server over stdio instead of compiling. The
   import of [src/lsp/server.js](src/lsp/server.js) is **dynamic on purpose** -
   that module attaches `process.stdin` handlers at module scope, so a static

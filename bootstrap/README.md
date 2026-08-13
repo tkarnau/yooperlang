@@ -34,7 +34,9 @@ a shared header file.
       source_graph/    layer 0: Module / SourceFile / ModuleGraph, reading a
                        module's files, the import walk, path resolution,
                        module ids, finding the std root
-      typecheck/       layer 3: ids, Type, Symbol, Program, the passes
+      typecheck/       layer 3: ids, Type, Symbol, Program, the passes;
+                       async.yoop is `await` coloring, task.yoop the spawn's
+                       half - `Task<T>`, the binding forms, `wait`
       codegen/         layer 5: typed AST -> LLVM IR text (see the rules below)
       link/            layer 6: IR -> executable, by shelling out to clang;
                      also where the runtime's C sources are found
@@ -76,6 +78,36 @@ It is a real compiler now, so build it and point it at a file:
     /tmp/yoopiler_boot tests/slice/hello.yoop -o /tmp/hello
     /tmp/hello
 
+The whole command line:
+
+    yoopiler_boot <entry.yoop> [-o <out>] [--emit-ir]
+
+    -o <out>    where the executable goes. The IR is always written beside it,
+                as <out>.ll. Defaults to a.out.
+    --emit-ir   stop after writing <out>.ll. No clang, no executable.
+
+Flags may stand anywhere in the line, `<entry> -o <out>` means exactly what it
+always did, and an unrecognized option is refused BY NAME rather than taken for
+an input file. `--emit-ir` is the bootstrap's own spelling, not the reference's:
+the reference has `--keep-ir`, which keeps a temp copy of the IR and still
+links, and there is no reference flag that stops before clang. It exists
+because most of what compiles a corpus file only wants to know whether codegen
+succeeded, and the link is the expensive half - see the probe note below.
+
+### Running the tests
+
+    node ../src/yoopiler.js --test bootstrap/src            # all 857, one build
+    node ../src/yoopiler.js --test bootstrap/src/typecheck  # one module
+    npm run test:slice                                      # executables
+    npm run test:parity                                     # layer dumps vs JS
+    npm run test:selfhost                                   # the three stages
+
+**Prefer the whole-tree form.** `--test bootstrap/src` builds the module graph
+ONCE and runs every module's suite out of one binary; the five per-module
+commands build it five times, and measured on a 14-core M-series machine that is
+8.2 seconds against 14.9. Reach for the per-module form when you are iterating
+on one module and want the shorter feedback loop, not as the default.
+
 ## IT COMPILES ITSELF - 2026-08-13
 
 Point it at its own source and it builds a compiler, and that compiler builds an
@@ -99,9 +131,12 @@ the compiler.
 
 Confirmed working rather than merely byte-stable: the whole slice suite runs
 through stage3 (`YOOP_BOOT_COMPILER=<path> npm run test:slice`), and the surface
-probe over all 425 corpus files produces a byte-identical report from stage1 and
-stage3 - same 161 executables, same 82 refusal sites, same messages in the same
-order.
+probe over all 435 corpus files produces a byte-identical report from stage1 and
+stage3 - same 163 files with a `main`, same 169 no-main libraries, same 68
+refusal sites, same messages in the same order. Re-confirmed after `async` landed, which
+is the first feature that changed how a whole FUNCTION is emitted rather than
+how an expression is, and again after the TASK half, which is the first that
+emits a whole function nothing in the source asked for (the per-task thunk).
 
 The fixpoint check paid for itself immediately: stage2 built on the first try
 and stage3 did not. See the two invariants at the end of the list below - a
@@ -150,8 +185,108 @@ rather than mis-compiled.
     kind on a TYPE goes after the name instead. Kinds are reached by NAME from
     a graph-wide registry rather than through imports, and an undeclared one is
     refused. Nothing enforces kinds, so clauses are recorded by their leading
-    word - except `pausable`, which makes the function a coroutine that codegen
-    refuses to emit.
+    word - except four. `pausable` makes the function a COROUTINE (see `async`
+    below); `provides Task` on top of it makes it a `task`, whose call site is a
+    SPAWN; and on a BINDING, `refcounted` and `mustCall` are what pick where a
+    task handle lives and how it is released (see `task` below).
+  * `async` and `await` - REAL LLVM COROUTINES:
+
+        async double(x: int32): int32 { return x * 2; }
+        async outer(n: int32): int32 { return await double(n); }
+
+    An `async` function lowers to a switched-resume coroutine:
+    `define ptr @m__double(i32 %x.arg, ptr %__ret) presplitcoroutine`. It hands
+    back its HANDLE rather than its result; the result goes through `%__ret`, a
+    slot the CALLER owns, which is what keeps it alive across the caller's own
+    suspends. A `void` async function takes the slot too and never writes it, so
+    there is one ABI rather than two. There is NO INITIAL SUSPEND - calling one
+    runs it eagerly to its first real suspend point, so a call that never blocks
+    costs one frame allocation and no resume at all.
+
+    `await g(args)` allocates the result slot in the CALLER's frame, calls the
+    callee, and then drives it: test `coro.done`, and if it is not finished
+    suspend THIS frame too, resuming the callee each time the scheduler resumes
+    us. That loop is the whole feature - it is what carries a suspend four
+    frames down back up to the task body, and it is why the runtime only ever
+    holds one handle per task rather than tracking the interior of a call chain.
+
+    Three COLORING rules, the reference's unchanged, and between them they are
+    what makes a suspend safe: `await` only inside a function carrying a
+    pausable kind; its operand must be a CALL to one; and such a function must
+    be called through `await`. So there is no way to reach an async function
+    except from inside another one. A `task` CALL is carved out of the third
+    rule, because a task's call site is a spawn rather than a drive - the
+    reference makes the same carve-out.
+
+    Asyncness rides on the FUNC TYPE rather than in a side table, which is what
+    makes it work cross-module and through a method table, and being part of
+    interning is what makes a sync impl of an async trait method a type
+    mismatch. `async` methods, imported async functions and `ns.f(...)` all
+    work. `await intr.suspendNow()` is the suspend PRIMITIVE - a bare
+    `coro.suspend` with no callee to drive, and the one line everything in std
+    that parks a task is built on.
+
+    What is NOT built, and refused BY NAME: an INDIRECT async call through a
+    function value or a vtable slot.
+  * `task`, `wait`, and the SPAWN - the other half of concurrency, and the one
+    that makes async runnable at all:
+
+        task compute(x: int32): int32 { return x * x; }
+
+        const a: int32 = compute(3);   // spawn, join here, bind the result
+        joined d = compute(4);         // stack handle, joined at scope end
+        pooled h = compute(5);         // heap handle, refcounted
+        const v: int32 = wait h;       // join, and read the result slot
+
+    A task call is NOT a call. It fills in a HANDLE, hands it to the scheduler
+    in runtime/yoop_runtime.c, and evaluates to `Task<T>` while the body still
+    returns T. `wait h` blocks until the handle's state byte flips and reads
+    the result. Between them they are the only bridge from ordinary code into
+    async: `main` cannot be async and a coroutine is reachable only through
+    `await`, so before this landed there was no runnable async program in the
+    corpus at all.
+
+    The HANDLE's layout is a contract in BYTE OFFSETS, because the C runtime
+    reaches its prefix through `(char*)h + 16` and friends - a field in the
+    wrong place is a corrupted mutex rather than a link error:
+
+        %Task_m__compute = type { ptr, i8, [3 x i8], i32, ptr, ptr, ptr, ptr, i32, i32 }
+        ;   0 thunk   8 state   9 pad(cancel,park)   12 refcount   16 mutex
+        ;  24 cond   32 coro handle   40 allocator ctx   48 result   56+ args
+
+    One struct per task FUNCTION rather than per result type, matching the
+    reference: the arguments ride in the handle, so two tasks returning `int32`
+    with different parameters are two layouts.
+
+    Each task also gets a THUNK - what a worker thread actually calls, since
+    the body is a coroutine whose arguments live in the handle. It hands the
+    body the handle's OWN result slot as its `__ret`, so a finished coroutine
+    has already written the result where `wait` looks, with no copy. It STARTS
+    the coroutine and returns; `yoop_task_settle` decides whether that step
+    finished or merely parked, which is what lets a task blocked on I/O give
+    its worker thread back.
+
+    `main` opens with `yoop_runtime_init` plus `yoop_runtime_set_coro_ops`
+    (handing the scheduler three emitted trampolines around `llvm.coro.*`,
+    which C cannot call) and closes with `yoop_runtime_shutdown` before every
+    `ret`. Which of the three BINDING forms applies is read off the kind's
+    CLAUSES rather than its name - `refcounted` means pooled, `mustCall` means
+    joined - because a `Task<T>` has no methods for either clause to name, so
+    the compiler is the only thing that can honor one.
+
+    `Task<T>` is spellable in an ANNOTATION too, as a builtin generic name the
+    way `unsafe_ptr<T>` is: nothing declares it, so the spelling IS the type.
+
+    Refused BY NAME, each because emitting it would compile and then be wrong: a
+    CROSS-MODULE spawn (the handle layout and the thunk belong to the module
+    that declared the task, and the reference refuses it in the same place), a
+    task call outside a handle binding (`worker(1);` on its own would run the
+    body on this thread), copying a handle into a second binding
+    (`pooled b = a;` needs a refcount retain, and one without it is a
+    use-after-free), `wait` inside a TASK body (it would block a worker, which
+    is the thing coroutines exist to avoid - `await` is the in-task form, and a
+    plain `async` function may still `wait`), a `task` METHOD, `task main`, and
+    a task returning void.
   * `propagates<disposable>` clauses, on a function (after the return type), a
     `type`, or a `variant` (after `implements`). Not optional for self-hosting -
     the bootstrap's own source carries 48 of these across 25 files.
@@ -526,7 +661,14 @@ rather than mis-compiled.
     std must come through a namespace (`import * as log from "std/log.yoop"`);
     types may be imported by name.
 
-Not yet: the `modules/` import
+Not yet: an INDIRECT async call (through a function-typed field or a
+vtable slot - the erasure work of 3.4), and `waitUntil` / `cancel` /
+`armComplete` / `isDone`, which are `Task<T>` intrinsics the bootstrap has no
+lowering for. Also a `pooled` PARAMETER or FIELD and `propagates<pooled>`, and
+copying a handle into a second binding (`pooled b = a;`) - a copy needs a
+refcount retain, and one without it is a use-after-free rather than a leak, so
+it is refused BY NAME.
+Also the `modules/` import
 root, std AUTOLOADS - the reference pulls std/core/types.yoop and
 std/core/traits.yoop into every module and nothing here does, so a file naming
 `Result` or `Into` has to import it (or, for `Into`, be matched by name; see the
@@ -559,19 +701,25 @@ is refused rather than desugared because the desugaring would evaluate the
 subscript twice.
 
 
-**Most of std compiles.** Of the 425-file probe corpus (every non-test `.yoop`
-under `std/`, `examples/pass/` and `bootstrap/src/`), 161 compile all the way to
-an executable and 159 more reach clang and stop only for having no `main`, which
-a library compiled standalone always will - 320 files fully handled. That
+**Most of std compiles.** Of the 435-file probe corpus (every non-test `.yoop`
+under `std/`, `examples/pass/` and `bootstrap/src/`), 163 compile all the way to
+an executable and 169 more reach clang and stop only for having no `main`, which
+a library compiled standalone always will - 332 files fully handled. That
 includes every module the compiler itself imports: `std/core/types.yoop`,
 `std/core/vec.yoop`, `std/collections/map.yoop`, `std/core/strings.yoop`,
 `std/core/text.yoop`, `std/fs.yoop`, `std/log.yoop`, `std/env.yoop`,
 `std/core/alloc.yoop` and the rest of `bootstrap/src/`.
 
-The 104 that stop earlier are, as DISTINCT SITES: 24 `await` / `wait` (async,
-the one big feature left), 11 vtable erasure, 10 `@precompile` (out of scope), 7
-`@derive(display)`, and a long tail of named refusals. Full breakdown in
-plans/bootstrap-completion.md.
+The 103 that stop earlier are, as DISTINCT SITES: 13 vtable erasure, 11
+`@precompile` (out of scope), 7 `@derive(display)`, 5 `unknown kind` (a missing
+std AUTOLOAD rather than a missing feature), 4 `expr? "context"`, and a long
+tail of named refusals. NONE of them is an `await` or a `wait` any more. Full
+breakdown in plans/bootstrap-completion.md.
+
+The CRITICAL PATH is `std/core/concurrency.yoop:32`, at 21 files: the
+`waitUntil` / `cancel` / `armComplete` / `isDone` intrinsics, which take a
+`Task<T>` and have no lowering here. One line, and the whole net / tls / http
+stack imports the file it is in.
 
 Integer widths do NOT mix, matching the JS reference: `xs[0] + xs.len` is
 `int32 + usize` and is an error. Write the cast. Neither do FLOAT widths, and
@@ -585,6 +733,61 @@ Two invariants control flow introduced, both easy to break:
   dominate every load, and one emitted inside an `if` arm does not dominate a
   use after the join. Slot names carry a uniquing number for the same reason -
   sibling branches may each declare `a`.
+- **In a COROUTINE the allocas must land AFTER `coro.begin`**, and that is the
+  one ordering the emitter needed a third buffer for. The coro passes move
+  frame-resident allocas into the coroutine frame; one emitted before `begin` is
+  not one of them, so a local that has to survive a suspend is left on a stack
+  that no longer exists. `flushFunction` lays a function out as header, then
+  hoisted allocas, then instructions - so the four prologue instructions go into
+  the HEADER buffer, which is the only place above the hoisted allocas.
+- **A `return` inside a coroutine is not a `ret`.** It stores to `%__ret` and
+  branches to the shared final-suspend trailer, which is the block that hands
+  the handle back. Every exit goes through the same three trailer blocks, which
+  is also what lets an `await` route its two unwind edges (stay suspended,
+  destroyed) somewhere that already exists.
+- **`llvm.coro.end`'s result is deliberately DISCARDED.** It changed from
+  `i1 (ptr, i1)` to `void (ptr, i1, token)` in LLVM 19/20 and newer LLVM
+  auto-upgrades the old spelling on read - but only cleanly when nothing names
+  the result. With a `%tN =` in front, the upgrade rewrites the call to void and
+  leaves the assignment dangling, and the module fails verification with "Broken
+  module found". Discarding is legal in both worlds. Same line, same reason, as
+  the reference.
+- **The task handle's BYTE OFFSETS are a contract with C, and nothing else in
+  the tree would notice them being wrong.** `runtime/yoop_runtime.c` reaches the
+  prefix through `(char*)h + 16` and friends, so an inserted or reordered field
+  is a corrupted mutex pointer at run time rather than a link error. The
+  emitted type definition is pinned in `codegen.test.yoop` for exactly that
+  reason. Everything from byte 48 on - the result slot and the arguments - is
+  the COMPILER's, and the runtime never looks at it; that split is why the
+  result slot could move from 32 to 48 when the coroutine handle and the
+  allocator context were added without touching the C side.
+- **`wait` reads the result at byte 48 ALWAYS, never through a typed gep.** The
+  prefix layout is universal, and a `wait` may be handed a `Task<T>` whose
+  originating task function the site cannot name (a parameter, a handle passed
+  along), so one path that is right everywhere beats two that agree. The
+  reference has both and falls back to this one.
+- **A live RUNTIME RACE, not a codegen one, and both compilers have it.**
+  `yoop_task_settle` flips a handle's state byte and broadcasts before
+  `run_task_step` is done with the handle - it still reads the allocator-context
+  slot at byte 40 afterwards. A waiter that reuses the handle (a `joined`
+  binding is one hoisted alloca, so a loop reuses it every iteration) or drops
+  its last reference in that window makes the worker read a slot that is no
+  longer the task's, and libmalloc aborts in `yoop_arena_destroy`. It needs
+  roughly eight workers or more to show up at all. Written up with its
+  backtrace in plans/bootstrap-completion.md; neither slice fixture reaches it.
+- **The scheduler prologue in `main` is emitted only for a program that HAS a
+  task**, which is a deliberate divergence: the reference emits init, the
+  coroutine trampolines and shutdown unconditionally. The bootstrap already
+  links the runtime's C sources on demand, and making every hello-world compile
+  fourteen C files to install a worker pool it never uses is a real cost for no
+  observable difference. The trampolines keep EXTERNAL linkage for the
+  reference's reason - nothing inside the IR calls them, so a discardable
+  linkage gets all three deleted by globaldce and the link fails.
+- **A `wait` folds into a binary expression here and returns immediately in the
+  reference**, so `wait a + wait b` compiles here and is a parse error there.
+  The bootstrap's `ref x` has had the same shape for as long as it has existed;
+  it is a superset either way. It does mean a slice fixture has to spell the
+  joins one per statement - `task_spawn.yoop` says so where it does.
 - **One terminator per block.** `emitBlock` / `emitStatement` report whether the
   path definitely `terminated` - a `ret`, but also a `break` or `continue` -
   so no `br` follows one. An `if` whose both arms return emits no join block at
@@ -1425,10 +1628,12 @@ Two invariants control flow introduced, both easy to break:
   and a file may declare one below the function carrying it. Resolving in the
   walk that registers would make declaration order matter, which it does
   nowhere else in the language.
-- **A function carrying a PAUSABLE kind is refused by codegen.** It is a
-  coroutine, and emitting it as an ordinary function compiles, links, and then
-  never suspends - a silent miscompile rather than a missing feature. This is
-  the one kind clause anything reads.
+- **A function carrying a PAUSABLE kind is a COROUTINE**, and emitting it as an
+  ordinary function would compile, link and then never suspend - a silent
+  miscompile rather than a missing feature. `provides Task` on the same kind
+  additionally makes the CALL site a spawn, and on a binding `refcounted` and
+  `mustCall` pick a task handle's storage. Those are the only kind clauses
+  anything reads; every other one is recorded and understood by nobody.
 - **A kind clause ends at the `;` at DEPTH ZERO.** `layout { abi "C"; };` has a
   braced body, and stopping at the first `;` leaves a stray `}` that surfaces
   much later as "unexpected token at top level".
@@ -1648,6 +1853,14 @@ exactly one:
                             things that declare one
     try_op.yoop             `expr?`: a tag test, an early return, an unwrap
     instr_str.yoop          the libc calls a built string is made of
+    coro.yoop               the coroutine FRAME an `async` function opens
+    instr_coro.yoop         the same, one function per `llvm.coro.*`
+    await_op.yoop           `await`: the drive loop and the suspend primitive
+    task.yoop               the task handle STRUCT, and what a spawn reads
+    task_spawn.yoop         a `task` call site: fill a handle, submit it
+    task_thunk.yoop         the per-task thunk, and the coro trampolines
+    task_wait.yoop          `wait`, and what a handle binding owes its scope
+    instr_task.yoop         the same, one function per runtime call
 
 There is no traits.yoop here, and that is the point: a method is an ordinary
 function by the time codegen sees it, so it emits through the same path. All

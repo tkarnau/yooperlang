@@ -25,6 +25,20 @@ extern "C" from "stdlib.h" {
   function system(cmd: string): c_int;
 }
 
+// Writes `ir` to `irPath`. Returns "" on success or a human-readable error.
+//
+// Split out of `linkExecutable` for `--emit-ir`, which wants the first half of
+// the layer and none of the second. One writer rather than two, so the file a
+// linking run leaves behind and the file `--emit-ir` produces are the same
+// bytes at the same path by construction.
+export function writeIrFile(ref ir: Text, irPath: string): string {
+  const writeErr = fs.writeFile(irPath, text.bytes(ref ir));
+  if (writeErr.len > 0) {
+    return `writing ${irPath}: ${writeErr}`;
+  }
+  return "";
+}
+
 // Writes `ir` to `irPath`, then links it to `exePath`. Returns "" on success or
 // a human-readable error.
 //
@@ -39,9 +53,9 @@ export function linkExecutable(
   ref linkLibraries: Vec<string>,
   exeSelfPath: string
 ): string {
-  const writeErr = fs.writeFile(irPath, text.bytes(ref ir));
+  const writeErr = writeIrFile(ref ir, irPath);
   if (writeErr.len > 0) {
-    return `writing ${irPath}: ${writeErr}`;
+    return writeErr;
   }
 
   disposable cmd: Text = text.make(256);

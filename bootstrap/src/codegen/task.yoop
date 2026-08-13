@@ -1,0 +1,218 @@
+module codegen;
+
+/*
+  The TASK HANDLE STRUCT - one LLVM type per `task` function - and the metadata
+  every other half of the spawn reads off it.
+
+  This is the contract with runtime/yoop_runtime.c, and it is a contract in
+  BYTE OFFSETS rather than in field names: the C side reaches the prefix through
+  `(char*)h + 16` and friends, so a field inserted in the wrong place is a
+  corrupted mutex pointer at run time, not a link error. The offsets, straight
+  out of the comment at the top of yoop_runtime.c:
+
+     0   ptr        thunk        void (*)(void* handle)
+     8   i8         state        0 unstarted, 1 done. Atomic.
+     9   [3 x i8]   pad          byte 9 is the cancel flag, 10 the park flag
+    12   i32        refcount     >= 1 for a pooled handle, 0 for a stack one
+    16   ptr        mutex        allocated by yoop_task_submit
+    24   ptr        cond         likewise
+    32   ptr        coro handle  the task body is a coroutine; the thunk stores it
+    40   ptr        allocator context (runtime-owned, may be NULL)
+    48   <T>        result slot
+    56+  args...    one field per parameter, in declaration order
+
+  Everything from 48 on is the COMPILER's, and the runtime never looks at it.
+  That split is why the result slot could move from 32 to 48 when the coroutine
+  handle and the allocator context were added without touching the C side.
+
+  A struct per task FUNCTION rather than per result type, matching the
+  reference: the args ride in the handle, so two tasks returning `int32` with
+  different parameters are two layouts.
+*/
+
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { Map }, * as map from "std/collections/map.yoop";
+import { Text }, * as text from "std/core/text.yoop";
+import { Option } from "std/core/types.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import { AST, ASTNode, ASTNodeKind, NodeId, childAt, declOf, nodeAt } from "../ast";
+import { Module, ModuleGraph } from "../source_graph";
+import { Program, TypedModule, Type, TypeId, Symbol, SymbolId, symbolAt, typeAt,
+  TYPE_ERROR_ID } from "../typecheck";
+
+// The field INDICES that go with the offsets above. Named rather than spelled
+// at each gep, because "field 6" reads as nothing and getting one wrong is a
+// silent miscompile.
+export const TASK_FIELD_THUNK: usize = 0;
+export const TASK_FIELD_STATE: usize = 1;
+export const TASK_FIELD_REFCOUNT: usize = 3;
+export const TASK_FIELD_MUTEX: usize = 4;
+export const TASK_FIELD_COND: usize = 5;
+export const TASK_FIELD_CORO: usize = 6;
+export const TASK_FIELD_CTX: usize = 7;
+export const TASK_FIELD_RESULT: usize = 8;
+// The first ARG field. Parameter i lives at TASK_FIELD_ARG0 + i.
+export const TASK_FIELD_ARG0: usize = 9;
+
+// The byte offset of the result slot, for the one place that cannot use the
+// typed gep: a `wait` on a handle whose originating task function is not known
+// at the site (a `Task<T>` PARAMETER). The prefix is universal, so the offset
+// is right for every task struct in the program.
+export const TASK_RESULT_BYTE_OFFSET: usize = 48;
+
+// What the spawn and the thunk need to know about one task function. Read off
+// the signature rather than carried in a side table - the Func type already
+// holds the parameter and return types, and the struct name falls out of the
+// module id and the function name.
+export type TaskMeta propagates<disposable> {
+  found: bool,
+  structName: string,
+  resultTy: string,      // the LLVM spelling of the declared return
+  argTys: Vec<string>,   // one per parameter, in declaration order
+}
+
+export function noTaskMeta(): TaskMeta propagates<disposable> {
+  return { found: false, structName: "", resultTy: "", argTys: vec.vecNew(0) };
+}
+
+// `%Task_main_1__compute`. The module id is part of it for the same reason it
+// is part of a struct's name: two modules may each declare a `compute`.
+//
+// Builds a string per call, which the emit-path rule normally forbids - the
+// same contained wart `structLlvmName` carries, and for the same reason: the
+// name is a `string` every caller pushes, so making it append-only means
+// changing the signature and every use of it.
+export function taskStructLlvmName(moduleId: string, fnName: string): string {
+  return `%Task_${moduleId}${SYMBOL_MODULE_SEPARATOR}${fnName}`;
+}
+
+// The thunk's symbol: the task body's own mangled name with `__thunk` on the
+// end. Nothing in yoop can spell that name, which is what makes the suffix safe.
+export function taskThunkSymbolName(fnName: string): string {
+  return `${fnName}${SYMBOL_MODULE_SEPARATOR}thunk`;
+}
+
+// What one task function's layout is, looked up by NAME in the module being
+// emitted. `found: false` means the name is not a task function of this module,
+// which is how a cross-module spawn is caught - see emitTaskSpawn.
+export function taskMetaOf(ref cx: Cx, fnName: string): TaskMeta propagates<disposable> {
+  return taskMetaOfName(cx.prog, cx.tm, fnName);
+}
+
+// The same, without a Cx: the struct-definition pre-pass runs before any
+// function is walked, so there is none to hand it.
+function taskMetaOfName(
+  ref prog: Program,
+  ref tm: TypedModule,
+  fnName: string
+): TaskMeta propagates<disposable> {
+  if (!map.mapContainsKey(ref tm.taskNames, fnName)) {
+    return noTaskMeta();
+  }
+  switch (map.mapGet(ref tm.names, fnName)) {
+    case Option.Some { value: symId }: {
+      return taskMetaOfSymbol(ref prog, tm.moduleId, fnName, symId);
+    }
+    case Option.None: { return noTaskMeta(); }
+  }
+}
+
+function taskMetaOfSymbol(
+  ref prog: Program,
+  moduleId: string,
+  fnName: string,
+  symId: SymbolId
+): TaskMeta propagates<disposable> {
+  let funcType: TypeId = TYPE_ERROR_ID;
+  switch (symbolAt(ref prog, symId)) {
+    case Symbol.Func { typeId: t }: { funcType = t; }
+    default: { return noTaskMeta(); }
+  }
+  switch (typeAt(ref prog, funcType)) {
+    case Type.Func { params: p, ret: r, variadic: v, isAsync: a }: {
+      let argTys: Vec<string> = vec.vecNew(p.len);
+      let i: usize = 0;
+      while (i < p.len) {
+        vec.vecPush(ref argTys, llvmType(ref prog, vec.vecGet(ref p, i)));
+        i += 1;
+      }
+      return {
+        found: true,
+        structName: taskStructLlvmName(moduleId, fnName),
+        resultTy: llvmType(ref prog, r),
+        argTys: argTys,
+      };
+    }
+    default: { return noTaskMeta(); }
+  }
+}
+
+// One `%Task_... = type { ... }` per task function in the whole graph, plus the
+// answer to "does this program have anything to schedule".
+//
+// A PRE-PASS over the graph rather than something the function walk emits,
+// for two reasons. `main` needs the answer before it is emitted and may sit in
+// any module; and the definitions belong above the function bodies, which is
+// what the globals buffer is for.
+export function emitTaskStructDefs(ref e: Emitter, ref prog: Program, ref graph: ModuleGraph): void {
+  let i: usize = 0;
+  while (i < graph.modules.len) {
+    const m = vec.vecGet(ref graph.modules, i);
+    let tm = vec.vecGet(ref prog.modules, i);
+    emitModuleTaskStructDefs(ref e, ref prog, ref tm, m);
+    i += 1;
+  }
+}
+
+// In SOURCE order rather than in symbol order, so the emitted module reads the
+// way the program does and two runs of the same program produce the same bytes.
+function emitModuleTaskStructDefs(
+  ref e: Emitter,
+  ref prog: Program,
+  ref tm: TypedModule,
+  m: Module
+): void {
+  let f: usize = 0;
+  while (f < m.files.len) {
+    const root = nodeAt(ref m.ast, vec.vecGet(ref m.files, f).root);
+    let d: usize = 0;
+    while (d < root.childCount) {
+      const declId = declOf(ref m.ast, childAt(ref m.ast, root, d));
+      const declNode = nodeAt(ref m.ast, declId);
+      if (declNode.kind == ASTNodeKind.FUNCTION_DECL &&
+          map.mapContainsKey(ref tm.taskNames, declNode.name)) {
+        emitOneTaskStructDef(ref e, ref prog, ref tm, declNode.name);
+      }
+      d += 1;
+    }
+    f += 1;
+  }
+}
+
+//   %Task_main_1__compute = type { ptr, i8, [3 x i8], i32, ptr, ptr, ptr, ptr, i32, i32 }
+//
+// The prefix is fixed; the tail is the result slot and one field per parameter.
+// LLVM lays the whole thing out with natural alignment, which is what puts the
+// prefix fields on the byte offsets the C runtime hard-codes.
+function emitOneTaskStructDef(
+  ref e: Emitter,
+  ref prog: Program,
+  ref tm: TypedModule,
+  fnName: string
+): void {
+  disposable meta: TaskMeta = taskMetaOfName(ref prog, ref tm, fnName);
+  if (!meta.found) {
+    return;
+  }
+  e.hasTasks = true;
+  text.push(ref e.globals, meta.structName);
+  text.push(ref e.globals, " = type { ptr, i8, [3 x i8], i32, ptr, ptr, ptr, ptr, ");
+  text.push(ref e.globals, meta.resultTy);
+  let i: usize = 0;
+  while (i < meta.argTys.len) {
+    text.push(ref e.globals, ", ");
+    text.push(ref e.globals, vec.vecGet(ref meta.argTys, i));
+    i += 1;
+  }
+  text.push(ref e.globals, " }\n");
+}

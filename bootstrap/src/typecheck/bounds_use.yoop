@@ -83,7 +83,7 @@ export function typeParamNameOf(ref prog: Program, id: TypeId): string {
 // bound was applied.
 function withSelfAs(ref prog: Program, funcType: TypeId, receiver: TypeId): TypeId {
   switch (typeAt(ref prog, funcType)) {
-    case Type.Func { params: p, ret: r, variadic: v }: {
+    case Type.Func { params: p, ret: r, variadic: v, isAsync: fnAsync }: {
       if (p.len == 0) {
         return funcType;
       }
@@ -94,7 +94,7 @@ function withSelfAs(ref prog: Program, funcType: TypeId, receiver: TypeId): Type
         vec.vecPush(ref params, vec.vecGet(ref p, i));
         i += 1;
       }
-      return internFunc(ref prog, ref params, r, v);
+      return internFunc(ref prog, ref params, r, v, fnAsync);
     }
     default: { return funcType; }
   }

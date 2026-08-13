@@ -69,6 +69,7 @@ export function recordDisposal(
       viaField: false,
       fieldIndex: 0,
       slotType: "",
+      taskAction: TASK_ACTION_NONE,
     });
     return "";
   }
@@ -96,6 +97,7 @@ export function recordDisposal(
       viaField: true,
       fieldIndex: field.index,
       slotType: slotType,
+      taskAction: TASK_ACTION_NONE,
     });
     i += 1;
   }
@@ -177,6 +179,12 @@ export function emitUnwindTo(ref cx: Cx, target: usize): string {
 //   %t1 = getelementptr inbounds %struct.c__Emitter, ptr %e.1.addr, i32 0, i32 0
 //   call void @text__Text__dispose(ptr %t1)
 function emitOneDisposal(ref cx: Cx, entry: PendingDispose): string {
+  // A task handle owes the scheduler a join or a release rather than a method
+  // call - there is no method to call, since `Task<T>` is a compiler type.
+  if (entry.taskAction != TASK_ACTION_NONE) {
+    emitTaskCleanup(ref cx, entry);
+    return "";
+  }
   disposable args: Vec<CallArg> = vec.vecNew(1);
   vec.vecPush(ref args, {
     ty: "ptr",

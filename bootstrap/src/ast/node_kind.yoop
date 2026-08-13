@@ -119,6 +119,12 @@ export enum ASTNodeKind implements Display {
   TASK_RELEASE,
   TASK_RETAIN,
 
+  // `await <call>` - drive an async callee from inside a coroutine,
+  // propagating its suspension into this frame. childA is the operand, which
+  // the typechecker requires to be a CALL to an `async` function. A DIFFERENT
+  // thing from WAIT_EXPRESSION, which joins a task HANDLE from ordinary code.
+  AWAIT_EXPRESSION,
+
   // phase 7.1 generics
   TYPE_PARAM,
 
@@ -254,6 +260,7 @@ const AST_NODE_KIND_NAMES: string[] = [
   "TASK_AUTO_WAIT",
   "TASK_RELEASE",
   "TASK_RETAIN",
+  "AWAIT_EXPRESSION",
   "TYPE_PARAM",
   "SWITCH_STATEMENT",
   "SWITCH_ARM",

@@ -1,0 +1,114 @@
+// The TASK half of concurrency: a spawn, a scheduler, and a join.
+//
+// WHAT THIS FIXTURE ASSERTS, and it is the thing async_coroutine.yoop said it
+// could not: that a coroutine actually RUNS, SUSPENDS, is RESUMED by the
+// runtime, and hands back the right answer. `wait` is the bridge that makes it
+// checkable - `main` cannot be async and an async function is reachable only
+// from another one, so a spawn joined by a `wait` is the only way ordinary code
+// gets any of this to happen.
+//
+// Every number below would be WRONG if a piece were missing rather than merely
+// slower. A task that never ran leaves its result slot zero. A `wait` that
+// returned before the worker finished reads the slot early. A handle laid out
+// on the wrong byte offsets corrupts the mutex the runtime blocks on. And
+// `twoSteps` would come back as 40 rather than 42 if the scheduler could not
+// resume a suspended coroutine, because the two `+ 1`s happen after the parks.
+//
+// The output is ORDER-INDEPENDENT on purpose. Six tasks are in flight at once
+// across however many worker threads the machine has, so anything printed from
+// inside one would interleave differently run to run. Nothing prints from a
+// task body; `main` prints joined RESULTS, and a sum of them, which is the same
+// on one core and on thirty-two.
+
+import.unsafe;
+
+import { task, pooled, joined, async } from "std/core/kinds.yoop";
+
+extern "C" from "stdio.h" {
+  function printf(fmt: string, ...): int32;
+}
+
+// The suspend PRIMITIVE. It parks the enclosing coroutine right there and hands
+// the worker thread back; something must already have arranged a wakeup before
+// it is reached, which is what the two calls above it do.
+extern "intrinsic" from "compiler" {
+  async function suspendNow(): void;
+}
+
+extern "C" from "yoop_runtime" {
+  function yoop_current_task(): unsafe_ptr;
+  function yoop_task_make_runnable(h: unsafe_ptr): void;
+}
+
+// A leaf task: pure computation, no suspend, runs straight through on whichever
+// worker picks it up.
+task square(x: int32): int32 {
+  return x * x;
+}
+
+// A task carrying an argument of a different width, so the handle's arg fields
+// are not all one type. Getting the layout wrong here is a wrong number rather
+// than a crash, which is exactly why it is worth asserting.
+task combine(a: int32, b: int64): int64 {
+  return int64(a) + b;
+}
+
+// A coroutine that genuinely PARKS. It re-queues itself first - nothing else
+// would ever wake it - then suspends, and the `+ 1` runs only after the
+// scheduler has resumed it.
+async parkOnce(n: int32): int32 {
+  yoop_task_make_runnable(yoop_current_task());
+  await suspendNow();
+  return n + 1;
+}
+
+// Two parks in one task, through an await each time. The suspends PROPAGATE:
+// `parkOnce` suspends, `twoSteps` sees it is not done and suspends with it, and
+// the runtime resumes the whole chain from the one handle it holds.
+task twoSteps(n: int32): int32 {
+  let v: int32 = await parkOnce(n);
+  v = await parkOnce(v);
+  return v;
+}
+
+function main(): int32 {
+  // The IMMEDIATE form: spawn and join in one statement, binding the result.
+  const a: int32 = square(7);
+
+  // The JOINED form: a stack handle, joined explicitly here and again at the
+  // end of the scope, which has to be harmless.
+  joined d = square(8);
+  const dv: int32 = wait d;
+
+  // The POOLED form: heap handles, three of them in flight at once. The sum is
+  // what makes the assertion order-independent.
+  //
+  // Joined one per statement rather than as `wait p1 + wait p2 + wait p3`.
+  // The bootstrap folds a `wait` into a binary expression the way it folds a
+  // `ref`; the reference returns from both immediately, so a `wait` cannot be
+  // the LEFT operand of an operator there. A fixture asserted against both has
+  // to stay inside what they share.
+  pooled p1 = square(2);
+  pooled p2 = square(3);
+  pooled p3 = square(4);
+  const t1: int32 = wait p1;
+  const t2: int32 = wait p2;
+  const t3: int32 = wait p3;
+  const total: int32 = t1 + t2 + t3;
+
+  // A wider result, and a two-argument handle.
+  pooled c = combine(1000, 234);
+  const cv: int64 = wait c;
+
+  // The one that proves suspension.
+  pooled s = twoSteps(40);
+  const sv: int32 = wait s;
+
+  printf("a=%d\n", a);
+  printf("d=%d\n", dv);
+  printf("total=%d\n", total);
+  printf("c=%lld\n", cv);
+  printf("s=%d\n", sv);
+  printf("sum=%d\n", a + dv + total + sv);
+  return 0;
+}

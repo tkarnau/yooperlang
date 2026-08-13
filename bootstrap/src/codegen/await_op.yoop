@@ -1,0 +1,237 @@
+module codegen;
+
+// `await g(args)` - run an async callee and let ITS suspension propagate into
+// this frame.
+//
+// The whole point of the language having `async` at all is here.
+// `llvm.coro.suspend` suspends the CURRENT function's frame only, so for a task
+// blocked four calls deep to give its worker thread back, every frame in the
+// chain has to be a coroutine that propagates the suspend upward. That is what
+// this lowering does, and it is the reference's, validated as hand-written IR
+// before either compiler had any of it (plans/async-coroutines.md):
+//
+//     %sc.1.addr = alloca i32              ; the result slot, in OUR frame
+//     %t5 = call ptr @m__inner(i32 %t4, ptr %sc.1.addr)
+//     br label %L5
+//   L5:                                    ; drive
+//     %t6 = call i1 @llvm.coro.done(ptr %t5)
+//     br i1 %t6, label %L8, label %L6
+//   L6:                                    ; not finished - suspend OURSELVES
+//     %t7 = call i8 @llvm.coro.suspend(token none, i1 false)
+//     switch i8 %t7, label %L3 [
+//       i8 0, label %L7
+//       i8 1, label %L4
+//     ]
+//   L7:                                    ; resumed by the scheduler
+//     call void @llvm.coro.resume(ptr %t5)
+//     br label %L5
+//   L8:                                    ; finished
+//     %t8 = load i32, ptr %sc.1.addr
+//     call void @llvm.coro.destroy(ptr %t5)
+//
+// Three things this shape buys, and each is the reason for one of its parts:
+//
+//   * the callee runs EAGERLY. There is no initial suspend, so an async call
+//     that never blocks reaches the done test on the first iteration and costs
+//     one frame allocation and no resume at all.
+//   * the result slot is OURS. It lives in this frame, so it survives our own
+//     suspends - which is exactly what a caller-owned slot is for.
+//   * the loop RE-DRIVES. When the scheduler resumes only the outermost handle,
+//     each frame in the chain calls `resume` on the one below it and the whole
+//     chain walks itself back to where it parked. The runtime never has to
+//     track the interior of a call chain; it holds one handle per task.
+//
+// The two unwind edges (`stay suspended`, `destroyed`) route to the enclosing
+// function's own trailer blocks, which is why CoroFrame carries labels rather
+// than each await inventing its own.
+
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { Map }, * as map from "std/collections/map.yoop";
+import { Text }, * as text from "std/core/text.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import { ASTNode, ASTNodeKind, NodeId, nodeAt, childAt, kindName } from "../ast";
+import * as str from "std/core/strings.yoop";
+
+export function emitAwait(ref cx: Cx, expr: ASTNode, exprId: NodeId, ref out: Operand): string {
+  // Pass D proved both of these, so reaching either means a coloring rule was
+  // let through rather than that a program is wrong.
+  if (!cx.coro.active) {
+    return internalError("await reached codegen outside a coroutine", "await");
+  }
+  const call = nodeAt(cx.ast, expr.childA);
+  if (call.kind != ASTNodeKind.CALL_EXPRESSION) {
+    return internalError("await operand is not a call", kindName(call.kind));
+  }
+
+  // `await suspendNow()` is the PRIMITIVE, not a call: park THIS coroutine
+  // right here. There is no callee to drive, so it lowers to a lone
+  // `coro.suspend` whose resume edge falls through to the next statement.
+  //
+  // Whoever is about to reach this has already armed a wakeup - an I/O
+  // interest, a timer, a completion registration. Without one the task simply
+  // never runs again, which is a property of the primitive rather than
+  // something the compiler can check.
+  if (isSuspendNowCall(ref cx, call)) {
+    emitBareSuspend(ref cx);
+    out = Operand.None;
+    return "";
+  }
+
+  const resultTy = typeOf(ref cx, exprId);
+  const isVoid = text.equals(resultTy, "void");
+
+  let hdl: usize = 0;
+  let slotId: usize = 0;
+  const err = emitAsyncCall(ref cx, call, expr.childA, resultTy, isVoid, ref hdl, ref slotId);
+  if (err.len > 0) {
+    return err;
+  }
+  emitDriveLoop(ref cx, hdl);
+
+  if (isVoid) {
+    out = Operand.None;
+    return "";
+  }
+  const loaded = freshTemp(cx.e);
+  emitLoad(ref cx, loaded, resultTy, TEMP_SLOT_NAME, slotId);
+  // Read BEFORE destroying. The slot is ours, but nothing says the callee did
+  // not hand back something pointing into its own frame, and the reference
+  // orders it the same way.
+  emitCoroDestroy(ref cx, Operand.Temp { id: hdl });
+  out = Operand.Temp { id: loaded };
+  return "";
+}
+
+// The call half: the same argument lowering an ordinary call gets, plus the
+// result slot appended and `ptr` - the coroutine handle - as the return type.
+//
+//   %sc.1.addr = alloca i32
+//   %t5 = call ptr @m__inner(i32 %t4, ptr %sc.1.addr)
+//
+// A VOID callee still gets a slot, sized i8 so the alloca is well formed. One
+// ABI rather than two is worth one dead byte of stack.
+function emitAsyncCall(
+  ref cx: Cx,
+  call: ASTNode,
+  callId: NodeId,
+  resultTy: string,
+  isVoid: bool,
+  ref hdl: usize,
+  ref slotId: usize
+): string {
+  // An INDIRECT async call - a coroutine reached through a function-typed field
+  // or a vtable slot - is refused BY NAME rather than emitted. Asked FIRST, so
+  // the refusal does not arrive after half a call has been written into the
+  // instruction stream. Nothing in the corpus writes one; the vtable half of it
+  // is item 3.4.
+  if (map.mapContainsKey(ref cx.tm.indirectCalls, uint64(callId))) {
+    return unsupportedHere("an INDIRECT call to an async function", call.name);
+  }
+
+  disposable args: Vec<CallArg> = vec.vecNew(4);
+  if (call.childA != 0) {
+    const list = nodeAt(cx.ast, call.childA);
+    let i: usize = 0;
+    while (i < list.childCount) {
+      const argId = childAt(cx.ast, list, i);
+      let value: Operand = Operand.None;
+      const err = emitExpr(ref cx, argId, ref value);
+      if (err.len > 0) {
+        return err;
+      }
+      vec.vecPush(ref args, { ty: typeOf(ref cx, argId), value: value });
+      i += 1;
+    }
+  }
+
+  let slotTy = resultTy;
+  if (isVoid) {
+    slotTy = "i8";
+  }
+  const slot = declareAnonSlot(ref cx, slotTy);
+  slotId = slot.id;
+  vec.vecPush(ref args, {
+    ty: "ptr",
+    value: Operand.SlotAddr { name: TEMP_SLOT_NAME, id: slot.id },
+  });
+
+  // `callId` is the CALL node's own id, not the `await`'s: a trait-method
+  // receiver and a generic instantiation are both recorded against the call,
+  // which is where pass D put them.
+  const callee = calleeSymbol(ref cx, call, callId);
+  hdl = freshTemp(cx.e);
+  emitCall(ref cx, hdl, "ptr", callee.home, callee.name, ref args);
+  return "";
+}
+
+// The drive loop and the suspend that makes this frame a coroutine too.
+//
+//     br label %L5
+//   L5:
+//     %t6 = call i1 @llvm.coro.done(ptr %t5)
+//     br i1 %t6, label %L8, label %L6
+//   L6:
+//     %t7 = call i8 @llvm.coro.suspend(token none, i1 false)
+//     switch i8 %t7, label %L3 [ i8 0, label %L7   i8 1, label %L4 ]
+//   L7:
+//     call void @llvm.coro.resume(ptr %t5)
+//     br label %L5
+//   L8:
+//
+// Leaves L8 open: the caller reads the result there and carries on.
+function emitDriveLoop(ref cx: Cx, hdl: usize): void {
+  const loopLabel = freshLabel(cx.e);
+  const blockLabel = freshLabel(cx.e);
+  const resumeLabel = freshLabel(cx.e);
+  const doneLabel = freshLabel(cx.e);
+
+  emitBr(ref cx, loopLabel);
+  emitLabel(ref cx, loopLabel);
+  const doneFlag = freshTemp(cx.e);
+  emitCoroDone(ref cx, doneFlag, Operand.Temp { id: hdl });
+  emitCondBr(ref cx, Operand.Temp { id: doneFlag }, doneLabel, blockLabel);
+
+  emitLabel(ref cx, blockLabel);
+  const suspTemp = freshTemp(cx.e);
+  emitCoroSuspend(ref cx, suspTemp, false);
+  emitCoroSuspendSwitch(
+    ref cx, suspTemp, cx.coro.suspendLabel, resumeLabel, cx.coro.cleanupLabel
+  );
+
+  emitLabel(ref cx, resumeLabel);
+  emitCoroResume(ref cx, Operand.Temp { id: hdl });
+  emitBr(ref cx, loopLabel);
+
+  emitLabel(ref cx, doneLabel);
+}
+
+// `await suspendNow()` / `await intr.suspendNow()` - the one intrinsic that is
+// a suspend rather than a computation. Matched by NAME, which is what every
+// intrinsic is matched by: the name IS the lowering.
+function isSuspendNowCall(ref cx: Cx, call: ASTNode): bool {
+  return isIntrinsicCall(ref cx, call) && str.stringEq(call.name, SUSPEND_NOW_INTRINSIC);
+}
+
+export const SUSPEND_NOW_INTRINSIC: string = "suspendNow";
+
+// The bare suspend the primitive lowers to:
+//
+//   %t5 = call i8 @llvm.coro.suspend(token none, i1 false)
+//   switch i8 %t5, label %L3 [
+//     i8 0, label %L9
+//     i8 1, label %L4
+//   ]
+// L9:
+//
+// Not a FINAL suspend: the coroutine has more to run, so `coro.done` stays
+// false and whoever is driving it keeps driving. That single `false` is the
+// whole difference between parking and finishing.
+function emitBareSuspend(ref cx: Cx): void {
+  const resumeLabel = freshLabel(cx.e);
+  const suspTemp = freshTemp(cx.e);
+  emitCoroSuspend(ref cx, suspTemp, false);
+  emitCoroSuspendSwitch(
+    ref cx, suspTemp, cx.coro.suspendLabel, resumeLabel, cx.coro.cleanupLabel
+  );
+  emitLabel(ref cx, resumeLabel);
+}

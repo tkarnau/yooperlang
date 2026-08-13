@@ -1,0 +1,236 @@
+module typecheck;
+
+// `task`, `Task<T>` and `wait` - the SPAWN half of concurrency. The `async`
+// half is async.yoop; codegen's halves are codegen/task*.yoop.
+//
+// The two are different mechanisms wearing one word. `await` DRIVES a coroutine
+// inline from inside another coroutine, so its whole cost is codegen. `wait`
+// JOINS a handle the scheduler is running, from ORDINARY code - so a task's
+// call site is a SPAWN and there is a runtime on the other side of it.
+//
+//     kind task { appliesTo function; pausable; provides Task; }
+//
+//     task compute(x: int32): int32 { return x * x; }   // body returns int32
+//     pooled h = compute(5);                            // the CALL is Task<int32>
+//     const v: int32 = wait h;                          // the join gives int32
+//
+// The `provides Task` clause is what rewrites the call site. The BODY keeps its
+// declared return - it is the thing that produces the T - and only the call
+// evaluates to `Task<T>`. The reference keeps the two apart by storing an
+// external return type beside the declared one; the bootstrap wraps at the CALL
+// instead, which is the same fact recorded one step later and costs no second
+// field on every function in the program. `prog.taskSymbols` is what says which
+// symbols those are, and pass D already looks it up there for the spawn
+// carve-out in the coloring rules.
+//
+// THE BINDING FORMS are decided by the kind's CLAUSES, never by its name, which
+// is the rule everything else about kinds follows. A `Task<T>` is a compiler
+// type with no methods on it at all, so a kind clause naming one can only be
+// honored by the compiler - and that is exactly what makes the mapping
+// unambiguous:
+//
+//     refcounted retain release      -> POOLED: heap handle, released at scope end
+//     mustCall join beforeScopeEnd   -> JOINED: stack handle, joined at scope end
+//     no prefix, annotated `T`       -> IMMEDIATE: spawn and join in one statement
+
+import { Map }, * as map from "std/collections/map.yoop";
+import { Option } from "std/core/types.yoop";
+import * as str from "std/core/strings.yoop";
+import { AST, ASTNode, ASTNodeKind, NodeId, nodeAt, childAt } from "../ast";
+
+// The BUILTIN generic type name. `Task<T>` is not declared anywhere - it is the
+// compiler's own type, the way `unsafe_ptr<T>` is - so an annotation naming it
+// is resolved by spelling rather than through the symbol table.
+export const TASK_TYPE_NAME: string = "Task";
+
+// One TypeId per distinct result type, so `Task<int32> == Task<int32>`. Same
+// scan-before-insert as internArray and internRef, and for the same reason:
+// type equality is `id == id`.
+export function internTask(ref prog: Program, result: TypeId): TypeId {
+  let i: usize = 0;
+  while (i < prog.types.len) {
+    switch (typeAt(ref prog, i)) {
+      case Type.Task { result: existing }: {
+        if (existing == result) {
+          return i;
+        }
+      }
+      default: { }
+    }
+    i += 1;
+  }
+  return internType(ref prog, Type.Task { result: result });
+}
+
+// What one joins out of this type, or TYPE_ERROR_ID when it is not a handle.
+// The `fallibleShapeOf` boundary: the answer is a property of the TYPE, so
+// codegen asking again is a lookup rather than a second typecheck.
+export function taskResultOf(ref prog: Program, id: TypeId): TypeId {
+  switch (typeAt(ref prog, id)) {
+    case Type.Task { result: r }: { return r; }
+    default: { return TYPE_ERROR_ID; }
+  }
+}
+
+export function isTaskType(ref prog: Program, id: TypeId): bool {
+  return taskResultOf(ref prog, id) != TYPE_ERROR_ID;
+}
+
+// How a binding holding a freshly spawned task stores and releases its handle.
+//
+// NONE covers two different things and deliberately does not tell them apart:
+// "the initializer is not a spawn at all" and "it is, and the binding simply
+// holds the handle" (`const h: Task<int32> = ...`, which owes nothing at scope
+// end because nothing said it should).
+export enum TaskBind<uint8> {
+  NONE,
+  IMMEDIATE,
+  JOINED,
+  POOLED,
+}
+
+// The classifier BOTH pass D and codegen ask. `declaredType` is the binding's
+// final type - the annotation when there is one, the initializer's otherwise -
+// which is what tells `const v: int32 = compute(3)` (a spawn joined on the
+// spot) from `const h: Task<int32> = someHandle` (a handle held as a value).
+export function taskBindOf(
+  ref prog: Program,
+  ref ast: AST,
+  declNode: ASTNode,
+  declaredType: TypeId,
+  rhsType: TypeId
+): TaskBind {
+  const result = taskResultOf(ref prog, rhsType);
+  if (result == TYPE_ERROR_ID) {
+    return TaskBind.NONE;
+  }
+  if (declNode.childC != 0) {
+    return taskBindOfPrefixes(ref prog, ref ast, declNode.childC);
+  }
+  if (declaredType == result) {
+    return TaskBind.IMMEDIATE;
+  }
+  return TaskBind.NONE;
+}
+
+// The FIRST prefix that asks for a storage discipline wins, which is the rule
+// the disposal side already has - two kinds each asking for a different one is
+// an order nothing specifies, so it is not silently merged.
+function taskBindOfPrefixes(ref prog: Program, ref ast: AST, listId: NodeId): TaskBind {
+  const list = nodeAt(ref ast, listId);
+  let i: usize = 0;
+  while (i < list.childCount) {
+    const prefix = nodeAt(ref ast, childAt(ref ast, list, i));
+    switch (lookupKind(ref prog, prefix.name)) {
+      case Option.Some { value: info }: {
+        if (info.refcounted) {
+          return TaskBind.POOLED;
+        }
+        if (info.disposeMethod.len > 0) {
+          return TaskBind.JOINED;
+        }
+      }
+      case Option.None: { }
+    }
+    i += 1;
+  }
+  return TaskBind.NONE;
+}
+
+// The two things a `task` declaration may not be, both refused where the kind
+// is already in hand. Both are the reference's rules.
+//
+// `main` is the C entry point and there is nobody to hand its handle to. A
+// VOID task is worse than useless: the handle's result slot is sized by the
+// declared return, and `void` has no LLVM spelling a struct field could take -
+// so the refusal here is what keeps a broken type definition out of the module.
+export function checkTaskDecl(ref prog: Program, ref tm: TypedModule, declNode: ASTNode): void {
+  if (str.stringEq(declNode.name, TASK_MAIN_NAME)) {
+    reportError(
+      ref prog,
+      `"main" cannot be a task - it is the program's entry point, so there is nothing to hand its handle to`,
+      declNode.sourceLoc
+    );
+    return;
+  }
+  if (taskDeclReturn(ref prog, ref tm, declNode) == TYPE_VOID_ID) {
+    reportError(
+      ref prog,
+      `task "${declNode.name}" cannot return void - a task's handle carries a result slot, and there is nothing to put in one`,
+      declNode.sourceLoc
+    );
+  }
+}
+
+const TASK_MAIN_NAME: string = "main";
+
+// The declared return of a task body, read off the signature pass C just
+// filled. TYPE_ERROR_ID when the name did not resolve, which pass A already
+// reported.
+function taskDeclReturn(ref prog: Program, ref tm: TypedModule, declNode: ASTNode): TypeId {
+  const symId = lookupOwnName(ref tm, declNode.name);
+  if (symId == SYMBOL_NONE_ID) {
+    return TYPE_ERROR_ID;
+  }
+  switch (symbolAt(ref prog, symId)) {
+    case Symbol.Func { typeId: t }: {
+      switch (typeAt(ref prog, t)) {
+        case Type.Func { params: p, ret: r, variadic: v, isAsync: a }: { return r; }
+        default: { return TYPE_ERROR_ID; }
+      }
+    }
+    default: { return TYPE_ERROR_ID; }
+  }
+}
+
+// Whether the body about to be walked is a `task` body. Gated on the node KIND
+// as well as the name, because `taskNames` is a MODULE-level table and a method
+// may legitimately share its name with a top-level function. A task METHOD is
+// refused in codegen, so answering false for one here costs nothing.
+export function declIsTaskBody(ref tm: TypedModule, declNode: ASTNode): bool {
+  if (declNode.kind != ASTNodeKind.FUNCTION_DECL) {
+    return false;
+  }
+  return map.mapContainsKey(ref tm.taskNames, declNode.name);
+}
+
+// `wait h` - join a handle and yield what it produced.
+//
+// Two rules. The operand has to BE a handle, and this may not appear inside a
+// `task` body: `wait` blocks its worker thread until the handle completes,
+// which is the one thing a task body must not do - it is what the whole
+// coroutine machinery exists to avoid. `await conc.awaitTask(h)` is the in-task
+// form, and it suspends instead. Same rule, and roughly the same words, as the
+// reference.
+//
+// An `async` function that is not a task may write `wait` freely: std's
+// `awaitTask` ends in one, as the fallback for being called off a worker.
+export function checkWait(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  expr: ASTNode,
+  ref scope: LocalScope
+): TypeId {
+  const operandType = checkExpr(ref prog, ref tm, ref ast, expr.childA, TYPE_ERROR_ID, ref scope);
+  if (operandType == TYPE_ERROR_ID) {
+    return TYPE_ERROR_ID;
+  }
+  const result = taskResultOf(ref prog, operandType);
+  if (result == TYPE_ERROR_ID) {
+    reportError(
+      ref prog,
+      `"wait" joins a Task<T> handle, and this operand is ${formatType(ref prog, operandType)}`,
+      expr.sourceLoc
+    );
+    return TYPE_ERROR_ID;
+  }
+  if (prog.currentIsTask) {
+    reportError(
+      ref prog,
+      `"wait" is not allowed inside a task body - it would block this task's worker thread. Use "await" on an async call instead, which suspends the task and hands the worker back`,
+      expr.sourceLoc
+    );
+  }
+  return result;
+}

@@ -94,7 +94,7 @@ export function iterableWalkOf(ref prog: Program, iterType: TypeId): IterableWal
   }
   let stepType: TypeId = TYPE_ERROR_ID;
   switch (typeAt(ref prog, nextSig)) {
-    case Type.Func { params: p, ret: r, variadic: v }: { stepType = r; }
+    case Type.Func { params: p, ret: r, variadic: v, isAsync: fnAsync }: { stepType = r; }
     default: { return out; }
   }
 

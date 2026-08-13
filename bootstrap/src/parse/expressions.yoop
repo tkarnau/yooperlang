@@ -105,6 +105,47 @@ export function parseExpression(ref ps: ParserState, minPrecedence: int): Parsin
       SelfLexing.advance(ref ps)?;
       node.childA = parseExpression(ref ps, 70)?;
     }
+    // `await g(args)` - run an async callee and let its suspension propagate
+    // into this frame. A PREFIX operator at 70, the same tight precedence
+    // `-`, `!` and `~` take, so `await f(x) + 1` is `(await f(x)) + 1`.
+    //
+    // The operand is parsed at 70 rather than at 0 so a binary operator after
+    // it belongs to the enclosing expression.
+    //
+    // `await f(x)?` needs a SWAP, and the reference does the same thing for the
+    // same reason: the postfix `?` binds inside the operand parse, so what
+    // comes back is `await (f(x)?)` - propagate first, then await the value
+    // that is left - which is backwards. `f(x)` is the thing to await and the
+    // `?` applies to its RESULT. 15 sites in std spell it this way.
+    case TokenTags.AWAIT: {
+      node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.AWAIT_EXPRESSION);
+      SelfLexing.advance(ref ps)?;
+      const operandId = parseExpression(ref ps, 70)?;
+      const operand = nodeAt(ref ps.ast, operandId);
+      if (operand.kind == ASTNodeKind.TRY_OP) {
+        node.childA = operand.childA;
+        let tryNode = operand;
+        tryNode.childA = SelfLexing.pushNode(ref ps, node);
+        node = tryNode;
+      } else {
+        node.childA = operandId;
+      }
+    }
+    // `wait h` - JOIN a task handle. A different mechanism from `await`, not a
+    // variant of it: `await` drives a coroutine inline from inside another one,
+    // `wait` blocks an ORDINARY function until a task the scheduler is running
+    // finishes. Same PREFIX shape and the same precedence as `await`, so
+    // `wait h + 1` is `(wait h) + 1`.
+    //
+    // No `?` swap here, unlike `await`. `wait h?` would mean "join, then
+    // propagate the Err out of the joined value", and that reading is already
+    // the right one - the operand is a handle, not a call whose result the `?`
+    // belongs to.
+    case TokenTags.WAIT: {
+      node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.WAIT_EXPRESSION);
+      SelfLexing.advance(ref ps)?;
+      node.childA = parseExpression(ref ps, 70)?;
+    }
     case TokenTags.REF: {
       // `ref x` at a call site: a BORROW, which is a distinct type from `x`.
       // Writing it is required rather than inferred - the whole point is that
