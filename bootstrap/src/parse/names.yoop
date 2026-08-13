@@ -33,6 +33,29 @@ export function peekText(ref ps: ParserState): string {
 }
 
 // True when the current token is the contextual keyword `word`.
+// The source text of the token `n` ahead, or "" when it cannot be read. The
+// lookahead twin of peekText, for the places that have to tell a contextual
+// keyword from an ordinary identifier BEFORE committing to a parse.
+export function peekAheadText(ref ps: ParserState, n: usize): string {
+  switch (SelfLexing.peekAhead(ref ps, n)) {
+    case Result.Err { error: e }: { return ""; }
+    case Result.Ok { value: tok }: {
+      if (tok.length <= 0) {
+        return "";
+      }
+      const src = ps.src;
+      switch (str.stringFromBytes(bytes.bytesSlice(src, tok.start, tok.start + usize(tok.length)))) {
+        case Result.Err { error: e2 }: { return ""; }
+        case Result.Ok { value: text }: { return text; }
+      }
+    }
+  }
+}
+
+export function peekAheadIsWord(ref ps: ParserState, n: usize, word: string): bool {
+  return str.stringEq(peekAheadText(ref ps, n), word);
+}
+
 export function peekIsWord(ref ps: ParserState, word: string): bool {
   if (SelfLexing.peek(ref ps).tag != TokenTags.IDENT) {
     return false;

@@ -9,6 +9,11 @@ module typecheck;
 //
 // Shadowing an OUTER name is rejected rather than allowed. Yoop has no
 // shadowing story yet, and refusing is the reversible choice.
+//
+// A binding carries MUTABILITY as well as a type, because `const a = 1; a = 2;`
+// has to be refused and the type alone cannot say so. It rides here rather than
+// in a second table so there is one source of truth per name - a separate
+// mutability map would be a thing to forget to update at a new declare site.
 
 import { Vec }, * as vec from "std/core/vec.yoop";
 import { Map }, * as map from "std/collections/map.yoop";
@@ -16,8 +21,17 @@ import { disposable, Disposable } from "std/core/kinds.yoop";
 import { Option } from "std/core/types.yoop";
 
 
+// What a name in scope resolves to.
+export type Binding {
+  typeId: TypeId,
+  // False for `const`, a for-in loop variable, and a pattern binding. True for
+  // `let` and for parameters - a parameter is a local copy, so writing to it is
+  // ordinary, and the reference agrees.
+  mutable: bool,
+}
+
 export type LocalScope propagates<disposable> {
-  blocks: Vec<Map<string, TypeId>>,
+  blocks: Vec<Map<string, Binding>>,
   // How many loops enclose the statement being checked. `break` and `continue`
   // are only legal when this is non-zero, and it rides here because it answers
   // the same question the block stack does: where am I in this body.
@@ -26,13 +40,13 @@ export type LocalScope propagates<disposable> {
 
 // Annotated rather than inline: `V` is not inferable from `stringKeyOps()`
 // alone and there is no turbofish.
-function newBlock(): Map<string, TypeId> propagates<disposable> {
-  let b: Map<string, TypeId> = map.mapNew(0, map.stringKeyOps());
+function newBlock(): Map<string, Binding> propagates<disposable> {
+  let b: Map<string, Binding> = map.mapNew(0, map.stringKeyOps());
   return b;
 }
 
 export function scopeNew(): LocalScope propagates<disposable> {
-  let blocks: Vec<Map<string, TypeId>> = vec.vecNew(4);
+  let blocks: Vec<Map<string, Binding>> = vec.vecNew(4);
   vec.vecPush(ref blocks, newBlock());
   return { blocks: blocks, loopDepth: 0 };
 }
@@ -55,28 +69,43 @@ export function scopePop(ref s: LocalScope): void {
 
 // False when the name is already visible - in THIS block or any enclosing one.
 // The caller turns that into the diagnostic, since only it has the location.
-export function scopeDeclare(ref s: LocalScope, name: string, typeId: TypeId): bool {
+export function scopeDeclare(
+  ref s: LocalScope,
+  name: string,
+  typeId: TypeId,
+  mutable: bool
+): bool {
   switch (scopeLookup(ref s, name)) {
     case Option.Some { value: existing }: { return false; }
     case Option.None: {
       let top = vec.vecGet(ref s.blocks, s.blocks.len - 1);
-      map.mapInsert(ref top, name, typeId);
+      map.mapInsert(ref top, name, { typeId: typeId, mutable: mutable });
       vec.vecSet(ref s.blocks, s.blocks.len - 1, top);
       return true;
     }
   }
 }
 
-// Innermost block first.
-export function scopeLookup(ref s: LocalScope, name: string): Option<TypeId> {
+// The whole binding. Only the assignment check wants this; everything else
+// wants the type, and scopeLookup below keeps giving it that.
+export function scopeBinding(ref s: LocalScope, name: string): Option<Binding> {
   let i = s.blocks.len;
   while (i > 0) {
     i -= 1;
     let b = vec.vecGet(ref s.blocks, i);
     switch (map.mapGet(ref b, name)) {
-      case Option.Some { value: t }: { return Option.Some { value: t }; }
+      case Option.Some { value: bound }: { return Option.Some { value: bound }; }
       case Option.None: { }
     }
+  }
+  return Option.None;
+}
+
+// Innermost block first.
+export function scopeLookup(ref s: LocalScope, name: string): Option<TypeId> {
+  switch (scopeBinding(ref s, name)) {
+    case Option.Some { value: bound }: { return Option.Some { value: bound.typeId }; }
+    case Option.None: { }
   }
   return Option.None;
 }

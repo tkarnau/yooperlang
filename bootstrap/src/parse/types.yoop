@@ -87,11 +87,20 @@ function parseKindPrefixes(ref ps: ParserState): Result<NodeId, ParsingError> {
     return Result.Ok { value: 0 };
   }
 
+  // `Buf propagates<tracked>` is a TYPE followed by a clause, not a kind prefix
+  // followed by a type - and both are two identifiers in a row. The clause
+  // keywords are contextual, so telling them apart means reading the second
+  // identifier's TEXT rather than its tag.
+  if (peekAheadIsWord(ref ps, 1, PROPAGATES_KEYWORD)) {
+    return Result.Ok { value: 0 };
+  }
+
   const loc = posToSourceLocation(ps.src, ps.pos, 1);
   disposable ids: Vec<NodeId> = vec.vecNew(2);
   while (
     SelfLexing.peek(ref ps).tag == TokenTags.IDENT &&
-    SelfLexing.peekAhead(ref ps, 1)?.tag == TokenTags.IDENT
+    SelfLexing.peekAhead(ref ps, 1)?.tag == TokenTags.IDENT &&
+    !peekAheadIsWord(ref ps, 1, PROPAGATES_KEYWORD)
   ) {
     let node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.KIND_PREFIX);
     node.name = parseIdentAsName(ref ps)?;
@@ -173,7 +182,10 @@ export function parseTypeDecl(ref ps: ParserState): Result<NodeId, ParsingError>
   // `propagates` / `contains` are still refused BY NAME rather than allowed to
   // fall through to the body parse and produce a confusing "expected {".
   node.childD = parseImplementsClause(ref ps)?;
-  if (peekIsWord(ref ps, "propagates") || peekIsWord(ref ps, "contains")) {
+  node.childF = parsePropagatesClause(ref ps)?;
+  // `contains` is the sibling clause and appears nowhere in the tree, so it
+  // stays refused BY NAME rather than parsed on speculation.
+  if (peekIsWord(ref ps, "contains")) {
     return Result.Err { error: SelfLexing.createParsingError(
       ref ps,
       `"${peekText(ref ps)}" clauses on a type decl are not supported by the bootstrap parser yet`,
@@ -202,7 +214,7 @@ export function parseTypeDecl(ref ps: ParserState): Result<NodeId, ParsingError>
     // lists on a node that has one, and every later pass already switches on
     // the member's kind anyway.
     if (SelfLexing.peek(ref ps).tag == TokenTags.FUNCTION) {
-      vec.vecPush(ref fieldIds, parseMethodDecl(ref ps, node.name)?);
+      vec.vecPush(ref fieldIds, parseMethodDecl(ref ps, node.name, node.childA)?);
     } else {
       vec.vecPush(ref fieldIds, parseFieldDecl(ref ps)?);
     }
@@ -246,6 +258,29 @@ export function parseTypeAnnotation(ref ps: ParserState): Result<NodeId, Parsing
     refNode.childA = parseTypeAnnotation(ref ps)?;
     return Result.Ok { value: SelfLexing.pushNode(ref ps, refNode) };
   }
+  // A `(` opens one of two things, and the token after it decides which:
+  //
+  //   ( )         ( ref x: T ...      ( name : T ...      a FUNCTION TYPE
+  //   anything else                                       a parenthesized GROUP
+  //
+  // Parameters are REQUIRED to be named, which is what makes the fork decidable
+  // at one token of lookahead - the unnamed form `(T) => R` would be
+  // indistinguishable from a `(T)` group. The names are discarded; a parameter
+  // list at the type level is purely positional.
+  //
+  // A group exists only to attach an array suffix. `(p: T) => R[]` binds the
+  // `[]` to the RETURN type, because the return is parsed greedily, so
+  // `((p: T) => R)[]` is the only way to spell an array of function pointers.
+  if (peekTag == TokenTags.LPAREN) {
+    if (atFunctionTypeParams(ref ps)) {
+      return parseFunctionTypeAnnotation(ref ps);
+    }
+    SelfLexing.advance(ref ps)?;
+    let grouped = parseTypeAnnotation(ref ps)?;
+    SelfLexing.expect(ref ps, TokenTags.RPAREN)?;
+    return parseArraySuffixes(ref ps, grouped);
+  }
+
   // A KIND PREFIX: `owned string`, `cleared validated Foo`. Kinds are
   // contextual and lex as IDENT, so two IDENTs in a row is what identifies one
   // - the last is the type, everything before it is prefix.
@@ -265,15 +300,71 @@ export function parseTypeAnnotation(ref ps: ParserState): Result<NodeId, Parsing
   typeNameNode.childA = parseTypeArgList(ref ps)?;
   let inner = SelfLexing.pushNode(ref ps, typeNameNode);
 
-  // Trailing `[]`, repeatable: `int[][]` is an array of arrays. Left to right,
-  // so each `[]` wraps what came before.
+  return parseArraySuffixes(ref ps, inner);
+}
+
+// Trailing `[]`, repeatable: `int[][]` is an array of arrays. Left to right, so
+// each `[]` wraps what came before. Shared by the plain form and by a
+// parenthesized group, which exists precisely to reach this.
+function parseArraySuffixes(ref ps: ParserState, inner: NodeId): Result<NodeId, ParsingError> {
+  let node = inner;
   while (SelfLexing.peek(ref ps).tag == TokenTags.LBRACKET) {
     SelfLexing.advance(ref ps)?;
     SelfLexing.expect(ref ps, TokenTags.RBRACKET)?;
     let arrayNode = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.TYPE_ANNOTATION_ARRAY_TYPE);
-    arrayNode.childA = inner;
-    inner = SelfLexing.pushNode(ref ps, arrayNode);
+    arrayNode.childA = node;
+    node = SelfLexing.pushNode(ref ps, arrayNode);
   }
+  return Result.Ok { value: node };
+}
 
-  return Result.Ok { value: inner };
+// True when the `(` under the cursor opens a function type's parameter list
+// rather than a parenthesized type group. See parseTypeAnnotation for the rule.
+function atFunctionTypeParams(ref ps: ParserState): bool {
+  switch (SelfLexing.peekAhead(ref ps, 1)) {
+    case Result.Err { error: e }: { return false; }
+    case Result.Ok { value: after }: {
+      if (after.tag == TokenTags.RPAREN || after.tag == TokenTags.REF) {
+        return true;
+      }
+      if (after.tag != TokenTags.IDENT) {
+        return false;
+      }
+      switch (SelfLexing.peekAhead(ref ps, 2)) {
+        case Result.Err { error: e2 }: { return false; }
+        case Result.Ok { value: colon }: { return colon.tag == TokenTags.COLON; }
+      }
+    }
+  }
+}
+
+// `(k: K) => uint64` - a function VALUE's type.
+//
+//   childA   the parameter list-node, of PARAM nodes
+//   childB   the return annotation
+//
+// The same PARAM nodes a function declaration uses, so pass C resolves them
+// with the same code. Their NAMES are parsed and then ignored by everything
+// downstream: two function types match on parameter types and return type.
+function parseFunctionTypeAnnotation(ref ps: ParserState): Result<NodeId, ParsingError> {
+  let node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.TYPE_ANNOTATION_FUNC_TYPE);
+  SelfLexing.expect(ref ps, TokenTags.LPAREN)?;
+  const loc = posToSourceLocation(ps.src, ps.pos, 1);
+
+  disposable ids: Vec<NodeId> = vec.vecNew(2);
+  while (
+    SelfLexing.peek(ref ps).tag != TokenTags.RPAREN &&
+    SelfLexing.peek(ref ps).tag != TokenTags.EOF
+  ) {
+    vec.vecPush(ref ids, parseFunctionParam(ref ps)?);
+    if (SelfLexing.peek(ref ps).tag == TokenTags.COMMA) {
+      SelfLexing.advance(ref ps)?;
+    }
+  }
+  SelfLexing.expect(ref ps, TokenTags.RPAREN)?;
+  node.childA = SelfLexing.buildListNode(ref ps, ref ids, loc);
+
+  SelfLexing.expect(ref ps, TokenTags.FATARROW)?;
+  node.childB = parseTypeAnnotation(ref ps)?;
+  return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
 }

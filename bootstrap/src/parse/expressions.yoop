@@ -31,7 +31,11 @@ export function parseExpression(ref ps: ParserState, minPrecedence: int): Parsin
       node.operator = peekTag;
       node.childA = parseExpression(ref ps, 70)?;
     }
-    case TokenTags.INTLITERAL: {
+    // A char literal IS an int literal - the lexer already decoded `'a'` to its
+    // codepoint - so it becomes the same node and pins to context the same way.
+    // That is what lets `src[i] == '\\'` compare against a uint8 and
+    // `text.pushByte(ref t, '0')` pass one, with no conversion at either site.
+    case TokenTags.INTLITERAL, TokenTags.CHARLITERAL: {
       node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.INT_LITERAL);
       node.intVal = SelfLexing.advance(ref ps)?.intVal;
     }
@@ -55,6 +59,12 @@ export function parseExpression(ref ps: ParserState, minPrecedence: int): Parsin
       SelfLexing.expect(ref ps, TokenTags.RPAREN)?;
       node = nodeAt(ref ps.ast, innerId);
     }
+    // `null` - a raw null pointer. It carries no value: the TYPE is the whole
+    // content, and it pins to whatever `unsafe_ptr` the context wants.
+    case TokenTags.NULL: {
+      node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.NULL_LITERAL);
+      SelfLexing.advance(ref ps)?;
+    }
     case TokenTags.TRUE, TokenTags.FALSE: {
       node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.BOOL_LITERAL);
       SelfLexing.advance(ref ps)?;
@@ -63,6 +73,25 @@ export function parseExpression(ref ps: ParserState, minPrecedence: int): Parsin
       } else {
         node.intVal = 0;
       }
+    }
+    // `&x` - the ADDRESS of a binding, as a raw pointer. Distinct from `ref x`,
+    // which is a checked borrow: `&` exists for handing a local to C, and its
+    // result is an `unsafe_ptr` with none of a borrow's guarantees.
+    //
+    // `&` is also the binary bitwise-and operator. There is no ambiguity: this
+    // is the PREFIX position, where a binary operator cannot appear.
+    // `*p` - read THROUGH a pointer, the inverse of `&`. Also the binary
+    // multiply operator, and told apart the same way `&` is: this is the prefix
+    // position, where a binary operator cannot appear.
+    case TokenTags.MULT: {
+      node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.DEREF_EXPRESSION);
+      SelfLexing.advance(ref ps)?;
+      node.childA = parseExpression(ref ps, 70)?;
+    }
+    case TokenTags.AMP: {
+      node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.ADDRESS_OF_EXPRESSION);
+      SelfLexing.advance(ref ps)?;
+      node.childA = parseExpression(ref ps, 70)?;
     }
     case TokenTags.REF: {
       // `ref x` at a call site: a BORROW, which is a distinct type from `x`.
@@ -118,12 +147,46 @@ export function parseExpression(ref ps: ParserState, minPrecedence: int): Parsin
     const postfixTag = SelfLexing.peek(ref ps).tag;
     if (postfixTag == TokenTags.LBRACKET) {
       SelfLexing.advance(ref ps)?;
+      const baseId = SelfLexing.pushNode(ref ps, node);
+
+      // `xs[..2]` - a slice with no start. The `[` is followed straight by the
+      // `..`, so there is no expression to parse first.
+      if (SelfLexing.peek(ref ps).tag == TokenTags.DOTDOT) {
+        node = parseSliceRest(ref ps, baseId, 0)?;
+        continue;
+      }
+
+      const firstId = parseExpression(ref ps, 0)?;
+      // `xs[a..b]` / `xs[a..]` - a SLICE, not an index. Told apart by the `..`
+      // after the first expression, which is why the index is parsed first and
+      // reinterpreted rather than looked ahead for.
+      if (SelfLexing.peek(ref ps).tag == TokenTags.DOTDOT) {
+        node = parseSliceRest(ref ps, baseId, firstId)?;
+        continue;
+      }
+
       let indexNode = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.INDEX_EXPRESSION);
-      indexNode.childA = SelfLexing.pushNode(ref ps, node);
-      indexNode.childB = parseExpression(ref ps, 0)?;
+      indexNode.childA = baseId;
+      indexNode.childB = firstId;
       SelfLexing.expect(ref ps, TokenTags.RBRACKET)?;
       node = indexNode;
       continue;
+    }
+    // A `(` HERE is a call through a value that is neither a bare name nor a
+    // field - `fns[0]("a")`, `f()()`. Both of those are handled earlier: a name
+    // in the prefix switch, a field in the DOT branch below. So reaching this
+    // means the callee is an arbitrary expression, which nothing lowers.
+    //
+    // Refused rather than left alone, because leaving it produced a SILENT
+    // miscompile: the arguments were dropped and the function pointer itself
+    // was the value. It only became reachable when function-type annotations
+    // landed and `((k: K) => V)[]` started parsing.
+    if (postfixTag == TokenTags.LPAREN) {
+      return Result.Err { error: SelfLexing.createParsingError(
+        ref ps,
+        "a function value can only be called through a name or a field so far - assign it to a local first",
+        peekLengthUsize(ref ps),
+      )};
     }
     if (postfixTag == TokenTags.DOT) {
       SelfLexing.advance(ref ps)?;
@@ -168,7 +231,12 @@ export function parseExpression(ref ps: ParserState, minPrecedence: int): Parsin
 
   // Assignment, before the binary loop so `=` is never folded in as an
   // operator. Right-associative, which is what `a = b = c` needs.
-  if (SelfLexing.peek(ref ps).tag == TokenTags.EQ) {
+  //
+  // Only at minPrecedence 0 - the TOP of an expression. Assignment binds
+  // loosest of anything, so a prefix operand must not swallow one: without this
+  // `*p = 9` parses as `*(p = 9)`, which then reports "cannot assign to const
+  // p" and points at the wrong thing entirely.
+  if (minPrecedence == 0 && SelfLexing.peek(ref ps).tag == TokenTags.EQ) {
     SelfLexing.advance(ref ps)?;
     let assign = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.ASSIGNMENT);
     assign.childA = SelfLexing.pushNode(ref ps, node);
@@ -315,4 +383,29 @@ function parseStructLiteralFields(ref ps: ParserState): Result<NodeId, ParsingEr
   SelfLexing.expect(ref ps, TokenTags.RCURLY)?;
 
   return Result.Ok { value: SelfLexing.buildListNode(ref ps, ref ids, loc) };
+}
+
+// The `..end]` half of a slice, with the base and start already parsed.
+//
+//   childA   the array being sliced
+//   childB   the start, or 0 for "from the beginning"
+//   childC   the end, or 0 for "to the end"
+//
+// Half-open: `xs[1..3]` is elements 1 and 2. An omitted bound is 0 rather than
+// a synthesized literal, because "to the end" is `xs.len` and codegen is the
+// only layer that has it.
+function parseSliceRest(
+  ref ps: ParserState,
+  baseId: NodeId,
+  startId: NodeId
+): Result<ASTNode, ParsingError> {
+  let node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.SLICE_EXPRESSION);
+  SelfLexing.expect(ref ps, TokenTags.DOTDOT)?;
+  node.childA = baseId;
+  node.childB = startId;
+  if (SelfLexing.peek(ref ps).tag != TokenTags.RBRACKET) {
+    node.childC = parseExpression(ref ps, 0)?;
+  }
+  SelfLexing.expect(ref ps, TokenTags.RBRACKET)?;
+  return Result.Ok { value: node };
 }

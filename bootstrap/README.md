@@ -79,6 +79,59 @@ rather than mis-compiled.
   * function PARAMETERS, readable in the body and passed at call sites
   * assignment to a local (`x = expr`)
   * `if` / `else if` / `else`, `while`, and `for (let i = 0; i < n; i = i + 1)`
+  * `for x in xs { ... }` over an ARRAY - the iterable is evaluated once, and
+    the loop variable is a copy of each element, bound to the element type and
+    scoped to the loop. A type implementing `Iterable<T>` is refused by name:
+    that form needs generic traits, since `Iterable<T>` has to be instantiated
+    before its `next` can be called.
+  * `kind` declarations and the declarations that carry one:
+
+        kind c_layout { appliesTo type; layout { abi "C"; }; }
+        type SockAddrIn c_layout { sin_family: uint16, }
+        async fetch(u: string): string { ... }
+
+    `async` and `task` are NOT keywords - they are kinds declared in
+    std/core/kinds.yoop like any other, so a kind prefix stands where the
+    `function` keyword would and the parser needs no list of blessed words. A
+    kind on a TYPE goes after the name instead. Kinds are reached by NAME from
+    a graph-wide registry rather than through imports, and an undeclared one is
+    refused. Nothing enforces kinds, so clauses are recorded by their leading
+    word - except `pausable`, which makes the function a coroutine that codegen
+    refuses to emit.
+  * `propagates<disposable>` clauses, on a function (after the return type), a
+    `type`, or a `variant` (after `implements`). Parsed and recorded; nothing
+    enforces them. Not optional for self-hosting - the bootstrap's own source
+    carries 48 of these across 25 files.
+  * char literals - `'a'`, `'\n'`, `'\''` - in expressions and switch patterns
+  * `extern "intrinsic" from "compiler" { ... }` - operations the COMPILER
+    implements. Six are lowered: `stringAsBytes`, `bytesAsStringUnchecked`,
+    `arraySlice`, `heapAlloc`, `heapFree`, `stringFromBytesUnchecked`. The
+    generic ones infer their type argument through the same path every generic
+    function uses. `ctxAlloc` / `ctxFree` are refused by name - they route
+    through the yoop runtime's allocator context, which the link step does not
+    pull in yet.
+  * generic TRAIT declarations (`trait Joinable<T> { function join(ref self): T; }`)
+    - the parameters are in scope while the signatures resolve. That makes one
+    DECLARE; instantiating `Iterable<T>` to dispatch through it is still open.
+  * function types - `(k: string) => uint64` - as struct fields, parameters and
+    locals. A named function is a value of its own signature, so
+    `{ hash: myHash }` needs no conversion, and a call through a field is an
+    indirect call. Parenthesized type GROUPS come with them, since
+    `((k: K) => V)[]` is the only way to spell an array of them.
+  * `unsafe_ptr` / `unsafe_ptr<T>` and `null`, gated on `import.unsafe;`. A
+    typed pointer widens to the opaque one and not back; `null` fits any raw
+    pointer and nothing else. The `c_*` names are LP64 aliases, not types.
+  * `vtable Name for Trait { m: (args) => R, }` - DECLARED, resolved, and laid
+    out as the struct of function pointers it is. Building one
+    (`Reader.from(ref s)`) is the erasure machinery and is not here.
+  * array slices - `xs[a..b]`, `xs[a..]`, `xs[..b]`, `xs[..]` - half-open, and
+    a borrowing VIEW rather than a copy
+  * bitwise `& | ^ << >>`, with the opcode chosen from the OPERAND's
+    signedness (`ashr` vs `lshr`, and `sdiv`/`udiv` alongside them)
+  * `&x` and `*p` - address-of and dereference, gated on `import.unsafe;`.
+    Not `ref x`: `&` yields an `unsafe_ptr` with none of a borrow's guarantees.
+    `*p = v` stores through the pointer.
+  * `s.len` on a string - the BYTE length, one `strlen`
   * `break` and `continue`, checked to be inside a loop
   * comparisons `== != < > <= >=`, and `&&` / `||` with real short-circuiting
   * `true` / `false`, unary `-` and `!`, parenthesized grouping
@@ -351,6 +404,142 @@ Two invariants control flow introduced, both easy to break:
 - **A variant's methods share the member run with its cases,** so the case
   ordinal counts off `cases.len` and not off the loop index. Counting off the
   index puts a hole in the tag numbering, and the tag numbering is ABI.
+- **`resolvedTypeAt` is the ONE place substitution happens, so nothing may read
+  `tm.resolvedTypes` directly.** Inside a monomorphization the recorded type is
+  still `T[]`; a raw read produces IR that operates on the template. Six query
+  helpers were doing it, and each was silently wrong inside a generic instance.
+- **A generic decl's METHODS and implemented TRAITS travel with the instance.**
+  Instantiation substitutes fields; dropping the rest leaves `Vec<string>` with
+  an empty method table, so it stops satisfying the traits `Vec<T>` declares -
+  which surfaces far away as "Vec_string does not implement Disposable.dispose".
+- **`substitute` covers `Type.Func` too.** A method's signature is one, and
+  without it the instance keeps a `(ref Vec_T) => void` that talks about the
+  template.
+- **Trait satisfaction is checked in its OWN sweep, after every fill.** The
+  generic sweep runs before traits are filled, so checking during the fill
+  reports "no implemented trait requires it" about a trait that was not
+  populated yet.
+- **A generic function's type parameters must be in scope for its BODY,** not
+  just its signature - `let xs: T[] = ...` is an annotation inside the body.
+- **A cast must NOT pin its operand.** It converts what it is given, so passing
+  the target down makes `uint8(48 + big)` pin the 48 to uint8 and then refuse to
+  add it to a uint64.
+- **A LEADING int literal is re-pinned from the other operand.** The right side
+  is checked with the left as its expectation and gets this free; the left has
+  already defaulted to int32 by the time the right is known.
+- **`&` and `*` are each BOTH a prefix and a binary operator,** told apart by
+  position alone - the prefix switch runs where a binary operator cannot appear.
+  No lookahead, and none is needed.
+- **Assignment is only parsed at minPrecedence 0.** It binds loosest of
+  anything, so a prefix operand must not swallow it: without the guard `*p = 9`
+  parses as `*(p = 9)` and reports "cannot assign to const p", pointing at the
+  wrong thing entirely.
+- **The integer opcode depends on the OPERAND's signedness**, not the result's.
+  Three operators care: `/` (sdiv/udiv), `%` (srem/urem) and `>>` (ashr/lshr).
+  `and`, `or` and `xor` are bit-for-bit and never do.
+- **A slice BORROWS; it does not copy.** `xs[a..b]` is a data pointer and a
+  length over the base's own storage, which is why writing through one is
+  visible in the base - and why nothing keeps the base alive. Same three
+  instructions the `arraySlice` intrinsic emits, because it is the same
+  operation with syntax on it.
+- **An omitted slice bound is 0, not a synthesized literal.** "To the end" is
+  the base's own length, and codegen is the only layer that has it.
+- **An index and a slice open the same way**, so the index expression is parsed
+  FIRST and reinterpreted when a `..` follows. Do not add lookahead for it.
+- **A typed `unsafe_ptr<T>` widens to the opaque `unsafe_ptr`, and not back.**
+  The opaque one means "some pointer"; narrowing it invents a promise about what
+  it points at. Opaque is `pointee == 0`, the reserved none-id.
+- **A vtable IS a struct** - of function pointers, one per trait method - so it
+  gets a struct TYPE and field access, layout and literals come free. The
+  SYMBOL is what records that it erases a trait.
+- **A function VALUE is its address, and its type is its signature.** There is
+  no separate "function pointer" type to convert to: an annotation
+  `(k: string) => uint64` and a declared function's signature intern to the same
+  `Type.Func`, which is exactly what makes `{ hash: myHash }` typecheck.
+- **Func types compare STRUCTURALLY, through `typeAccepts`.** Everything else in
+  the type system is `id == id`, and Funcs cannot be: a declared function's
+  signature lives in the SHELL pass A registered for it and filled in place, so
+  two identical signatures keep different TypeIds. `typeAccepts` is the one
+  place that knows; do not reach for `==` when a Func can be on either side.
+- **A `(` in a type annotation is a function type only when the next token is
+  `)`, `ref`, or `IDENT :`.** Otherwise it is a parenthesized GROUP, whose only
+  job is attaching `[]` - a return type is parsed greedily, so `(k: K) => V[]`
+  returns an array and `((k: K) => V)[]` is an array of functions. Parameters
+  must be NAMED, which is what makes the fork decidable at one token.
+- **A call through anything but a name or a field is REFUSED.** `fns[0](x)` and
+  `g()(x)` were silently miscompiled before - arguments dropped, the function
+  pointer itself becoming the value - and only became reachable when function
+  types landed.
+- **An intrinsic is not a call, so its name must NOT be in `externNames`.**
+  That table means "emit this call with its name unmangled"; an intrinsic has no
+  symbol at all, and codegen lowers it to instructions. `Program.intrinsics` is
+  the separate table, and it is PROGRAM-level for the same reason `kinds` is:
+  the module that calls `intr.stringAsBytes` is not the one that declared it.
+- **The intrinsic list and the codegen dispatch are two halves of one table.**
+  Pass A refuses a name codegen has no lowering for - user code cannot fabricate
+  an intrinsic, because the name IS the implementation. Adding to one side
+  without the other emits a call to a symbol nothing defines.
+- **An intrinsic extern is implicitly EXPORTED; a C extern is not.** There is
+  nowhere to write `export` - the block is the declaration - and every std
+  module reaches them through `import * as intr`. The reference does the same.
+- **A generic intrinsic registers as an ordinary generic decl.** Call sites then
+  infer `T` through the path every generic function already uses. What differs
+  is that there is no body to monomorphize, and codegen never looks for one
+  because the intrinsic dispatch runs before any symbol is resolved.
+- **A char literal IS an int literal.** The lexer decodes `'a'` to its codepoint
+  into the token, so the parser builds the same INT_LITERAL node a number would
+  and it pins to context the same way. There is no char TYPE and adding one to
+  carry the literal would be the wrong shape - these exist for byte comparisons
+  in a lexer, and a byte is what they are.
+- **A clause keyword is not a kind prefix, and both are two identifiers.**
+  `Buf propagates<tracked>` is a type followed by a clause; `disposable Buf` is
+  a kind followed by a type. `propagates` is CONTEXTUAL, so telling them apart
+  means reading the second identifier's TEXT rather than its tag - getting it
+  wrong makes `propagates` the type name and reports "unknown type propagates".
+- **`childF` is the propagates clause, on every kind that has one.** A
+  FUNCTION_DECL had all five earlier slots spoken for once kind prefixes landed
+  in childE. One slot, one meaning - do not overload it.
+- **`async` is a kind, not a keyword,** and so is `task`. Both are declared in
+  std/core/kinds.yoop as ordinary `kind { ... }` decls. Nothing in the parser
+  may special-case either word: a kind prefix is an identifier standing where a
+  keyword would, and the shape `IDENT IDENT (` is the whole tell. A user kind
+  gets the same treatment, which is the point.
+- **Kinds are AMBIENT, reached by name from `Program.kinds`.** A kind prefix is
+  not imported - `async fetch(...)` in std/http names a kind declared in
+  std/core/kinds.yoop with nothing linking the two files - so it resolves
+  against a graph-wide registry. The JS reference has the same registry for the
+  same reason.
+- **Kind prefixes resolve in pass C, not pass A.** Pass A REGISTERS the kinds,
+  and a file may declare one below the function carrying it. Resolving in the
+  walk that registers would make declaration order matter, which it does
+  nowhere else in the language.
+- **A function carrying a PAUSABLE kind is refused by codegen.** It is a
+  coroutine, and emitting it as an ordinary function compiles, links, and then
+  never suspends - a silent miscompile rather than a missing feature. This is
+  the one kind clause anything reads.
+- **A kind clause ends at the `;` at DEPTH ZERO.** `layout { abi "C"; };` has a
+  braced body, and stopping at the first `;` leaves a stray `}` that surfaces
+  much later as "unexpected token at top level".
+- **A scope binding carries MUTABILITY, not just a type.** `const a = 1; a = 2;`
+  has to be refused and the type alone cannot say so. It rides in the binding
+  rather than in a second table so there is one source of truth per name - a
+  parallel mutability map is a thing to forget at a new declare site. Immutable:
+  `const`, a for-in loop variable, a pattern binding. Mutable: `let`, a counted
+  loop's counter, and PARAMETERS including `ref` ones - a parameter is a local
+  copy and a borrow exists to be written through.
+- **Constness is about the BINDING, not the value behind it.** `p.x = 2` and
+  `xs[0] = 9` through a `const` are allowed, matching the reference. Deep
+  immutability would be a different feature, not a stricter version of this one.
+- **The compound forms desugar to a plain assignment in the PARSER,** so one
+  check covers `a = 2` and `a += 2` both. The JS reference checks somewhere that
+  the desugaring bypasses, so it refuses the first and allows the second on the
+  same binding; the bootstrap deliberately does not copy that.
+- **A `for ... in` iterable is evaluated ONCE**, before the loop, with its data
+  pointer and length cached. Re-evaluating per iteration calls
+  `headersView(ref h)` on every step, and an array that grows underneath the
+  walk changes length mid-loop. The condition is `uge` against that cached
+  length, not `eq` - an equality test on an empty array runs the body once and
+  then walks off the end.
 - **An interpolation ends where its EXPRESSION ends, not at a matching brace.**
   `parseTemplateLiteral` repositions into the same source buffer at the byte
   after `${` and parses an ordinary expression; wherever that stops IS the
@@ -450,7 +639,7 @@ exactly one:
 
     expr.yoop / stmt.yoop   walk the AST, decide what should happen
     flow.yoop               the same, for `if` (block discipline lives here)
-    loop.yoop               the same, for `while` / `for`
+    loop.yoop               the same, for `while` / `for` / `for ... in`
     loop_stack.yoop         where break/continue jump
     array.yoop              array literals, indexing, `.len`
     call.yoop               call expressions
@@ -466,6 +655,7 @@ exactly one:
     query.yoop              THE typecheck boundary - everything codegen asks
     mangle.yoop             what a symbol is CALLED in the emitted module
     template.yoop           template literals: parts -> one built string
+    intrinsic.yoop          the calls that are not calls
     instr_str.yoop          the libc calls a built string is made of
 
 There is no traits.yoop here, and that is the point: a method is an ordinary

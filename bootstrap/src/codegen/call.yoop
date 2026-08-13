@@ -8,6 +8,7 @@ module codegen;
 // values is what makes that possible without building any text early.
 
 import { Vec }, * as vec from "std/core/vec.yoop";
+import { Map }, * as map from "std/collections/map.yoop";
 import { Text }, * as text from "std/core/text.yoop";
 import { disposable } from "std/core/kinds.yoop";
 import { ASTNode, NodeId, childAt, nodeAt } from "../ast";
@@ -16,6 +17,12 @@ import { ASTNode, NodeId, childAt, nodeAt } from "../ast";
 // have to land before the call. Their operands are held as values, so nothing
 // is formatted until emitCall runs.
 function emitCallExpr(ref cx: Cx, expr: ASTNode, exprId: NodeId, ref out: Operand): string {
+  // An intrinsic is not a call: the compiler IS its implementation, so it
+  // lowers to instructions. Checked first, because everything below this point
+  // is about finding a SYMBOL to call and an intrinsic has none.
+  if (isIntrinsicCall(ref cx, expr)) {
+    return emitIntrinsicCall(ref cx, expr, exprId, ref out);
+  }
   // A cast is not a call - pass D typed it as the target primitive, and the
   // lowering is one conversion instruction (or none). Only an UNQUALIFIED name
   // can be one: `ns.usize(x)` reaches a member of `ns`, whatever it is named.
@@ -60,6 +67,30 @@ function emitCallExpr(ref cx: Cx, expr: ASTNode, exprId: NodeId, ref out: Operan
   if (!isVoid) {
     dest = freshTemp(cx.e);
   }
+  // An INDIRECT call - `m.ops.hash(key)` - reads the function out of a field
+  // and calls through it. Pass D recorded which calls those are, because the
+  // shape is identical to `ns.fn()` in the AST and only name resolution can
+  // tell them apart.
+  if (map.mapContainsKey(ref cx.tm.indirectCalls, uint64(exprId))) {
+    let base: Operand = Operand.None;
+    const berr = emitExpr(ref cx, expr.childB, ref base);
+    if (berr.len > 0) {
+      return berr;
+    }
+    const fnPtr = freshTemp(cx.e);
+    emitExtractValue(
+      ref cx, fnPtr, typeOf(ref cx, expr.childB), base,
+      fieldPositionOf(ref cx, expr.childB, expr.name)
+    );
+    emitCallIndirect(ref cx, dest, retTy, fnPtr, ref args);
+    if (isVoid) {
+      out = Operand.None;
+    } else {
+      out = Operand.Temp { id: dest };
+    }
+    return "";
+  }
+
   const callee = calleeSymbol(ref cx, expr, exprId);
   emitCall(ref cx, dest, retTy, callee.home, callee.name, isPrintf, ref args);
 

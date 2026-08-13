@@ -10,9 +10,24 @@ import { TokenTags, posToSourceLocation } from "../lex";
 import { ParsingError } from "../diagnostics";
 
 export function parseFunctionDecl(ref ps: ParserState): Result<NodeId, ParsingError> {
-  // todo task stuff???
   SelfLexing.expect(ref ps, TokenTags.FUNCTION)?;
+  return parseFunctionRest(ref ps, 0);
+}
+
+// A function declaration whose `function` keyword has already been consumed -
+// or was never there.
+//
+// `async fetch(u: string): string { ... }` is a function with the kind `async`
+// on it, and a kind prefix REPLACES the keyword rather than preceding it. So
+// the two spellings differ only in what the caller ate before getting here,
+// and everything from the name onward is shared. `prefixes` is the KIND_PREFIX
+// list node, or 0 for a plain `function`.
+export function parseFunctionRest(
+  ref ps: ParserState,
+  prefixes: NodeId
+): Result<NodeId, ParsingError> {
   let node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.FUNCTION_DECL);
+  node.childE = prefixes;
   node.name = parseIdentAsName(ref ps)?;
   // function {name}<{typeparams}>({args}){{body}}
 
@@ -41,7 +56,7 @@ export function parseFunctionDecl(ref ps: ParserState): Result<NodeId, ParsingEr
   SelfLexing.expect(ref ps, TokenTags.RPAREN)?;
   SelfLexing.expect(ref ps, TokenTags.COLON)?;
   node.childC = parseTypeAnnotation(ref ps)?;
-  // todo propagation clauses, etc... before function body
+  node.childF = parsePropagatesClause(ref ps)?;
 
   // parse function body as a block
   node.childD = parseBlock(ref ps)?;

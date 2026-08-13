@@ -123,9 +123,84 @@ function emitElementAddress(ref cx: Cx, expr: ASTNode, exprId: NodeId, ref addr:
 
 // The LLVM element type of an array-typed node.
 function elementLlvmType(ref cx: Cx, exprId: NodeId): string {
-  const arrayType = vec.vecGet(ref cx.tm.resolvedTypes, exprId);
+  // resolvedTypeAt, not the raw table: inside a monomorphization the recorded
+  // type is still `T[]`, and the element has to be substituted before it can be
+  // an LLVM type at all.
+  const arrayType = resolvedTypeAt(ref cx, exprId);
   switch (typeAt(cx.prog, arrayType)) {
     case Type.Array { elem: e }: { return llvmType(cx.prog, e); }
     default: { return "i8"; }
   }
+}
+
+// `xs[a..b]` - a borrowing view, no copy.
+//
+//   %data = extractvalue { ptr, i64 } %xs, 0
+//   %base = getelementptr i32, ptr %data, i64 %a
+//   %len  = sub i64 %b, %a
+//
+// The same three instructions the `arraySlice` intrinsic emits, because it is
+// the same operation - this is the syntax for it. An omitted start is 0 and an
+// omitted end is the base's own length, which is the one thing the syntax
+// cannot say and codegen already has.
+export function emitSlice(ref cx: Cx, expr: ASTNode, exprId: NodeId, ref out: Operand): string {
+  let base: Operand = Operand.None;
+  const berr = emitExpr(ref cx, expr.childA, ref base);
+  if (berr.len > 0) {
+    return berr;
+  }
+  const data = freshTemp(cx.e);
+  emitExtractValue(ref cx, data, ARRAY_DESCRIPTOR, base, 0);
+
+  let start: Operand = Operand.Imm { value: 0 };
+  if (expr.childB != 0) {
+    const serr = emitExpr(ref cx, expr.childB, ref start);
+    if (serr.len > 0) {
+      return serr;
+    }
+  }
+
+  let end: Operand = Operand.None;
+  if (expr.childC != 0) {
+    const eerr = emitExpr(ref cx, expr.childC, ref end);
+    if (eerr.len > 0) {
+      return eerr;
+    }
+  } else {
+    const len = freshTemp(cx.e);
+    emitExtractValue(ref cx, len, ARRAY_DESCRIPTOR, base, 1);
+    end = Operand.Temp { id: len };
+  }
+
+  const elemTy = elementLlvmType(ref cx, exprId);
+  const at = freshTemp(cx.e);
+  emitGepElem(ref cx, at, elemTy, Operand.Temp { id: data }, "i64", start);
+  const count = freshTemp(cx.e);
+  emitBinOp(ref cx, count, "sub", "i64", end, start);
+
+  const withData = freshTemp(cx.e);
+  emitInsertValue(ref cx, withData, "undef", "ptr", Operand.Temp { id: at }, 0);
+  const withLen = freshTemp(cx.e);
+  emitInsertValueTemp(ref cx, withLen, withData, "i64", Operand.Temp { id: count }, 1);
+  out = Operand.Temp { id: withLen };
+  return "";
+}
+
+// `s.len` on a STRING - one strlen.
+//
+//   %t1 = call i64 @strlen(ptr %t0)
+//
+// A string is a NUL-terminated pointer with no length beside it, so unlike an
+// array's `.len` there is no field to project - the length has to be measured.
+export function emitStringLen(ref cx: Cx, expr: ASTNode, ref out: Operand): string {
+  let base: Operand = Operand.None;
+  const err = emitExpr(ref cx, expr.childA, ref base);
+  if (err.len > 0) {
+    return err;
+  }
+  cx.e.usesStringBuilder = true;
+  const dest = freshTemp(cx.e);
+  emitStrlen(ref cx, dest, base);
+  out = Operand.Temp { id: dest };
+  return "";
 }

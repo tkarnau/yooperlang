@@ -152,3 +152,11 @@ export function operand(ref cx: Cx, op: Operand): void {
 export function internalError(what: string, detail: string): string {
   return `internal error: ${what} "${detail}"`;
 }
+
+// A construct codegen understands and cannot lower YET, as opposed to one it
+// should never have been handed. The two read differently on purpose: an
+// internal error means a pass above let something through, and this means the
+// feature is not built.
+export function unsupportedHere(what: string, detail: string): string {
+  return `${what} "${detail}" is not supported by the bootstrap codegen yet`;
+}

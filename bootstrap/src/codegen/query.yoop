@@ -12,6 +12,7 @@ import { Vec }, * as vec from "std/core/vec.yoop";
 import { Map }, * as map from "std/collections/map.yoop";
 import { Option } from "std/core/types.yoop";
 import { NodeId } from "../ast";
+import { PrimKind } from "../typecheck";
 import { Program, TypedModule, TypeId, Type, Symbol, symbolAt, typeAt, TYPE_VOID_ID,
   TYPE_ERROR_ID, primTypeIdOfName, primBitWidth, primIsSigned,
   lookupField, isStructType, isVariantType, lookupVariantCase, variantCaseFieldNamed,
@@ -84,8 +85,8 @@ export function isPrimTypeName(name: string): bool {
 // Which conversion opcode a cast from `argId` to `exprId` needs, or "" for a
 // pass-through.
 export function castOpFor(ref cx: Cx, argId: NodeId, exprId: NodeId): string {
-  const source = vec.vecGet(ref cx.tm.resolvedTypes, argId);
-  const target = vec.vecGet(ref cx.tm.resolvedTypes, exprId);
+  const source = resolvedTypeAt(ref cx, argId);
+  const target = resolvedTypeAt(ref cx, exprId);
   return llvmIntCastOp(
     primBitWidth(cx.prog, source),
     primBitWidth(cx.prog, target),
@@ -96,7 +97,7 @@ export function castOpFor(ref cx: Cx, argId: NodeId, exprId: NodeId): string {
 // The LLVM type a variadic call must pass this argument as, or "" when it is
 // not an integer or bool (a string is already `ptr` and needs nothing).
 export function promotedVarargTypeOf(ref cx: Cx, argId: NodeId): string {
-  const t = vec.vecGet(ref cx.tm.resolvedTypes, argId);
+  const t = resolvedTypeAt(ref cx, argId);
   const bits = primBitWidth(cx.prog, t);
   if (bits == 0) {
     return "";
@@ -107,7 +108,7 @@ export function promotedVarargTypeOf(ref cx: Cx, argId: NodeId): string {
 // zext for a bool or an unsigned source, sext for a signed one - the same rule
 // the ordinary cast uses, and for the same reason.
 export function varargWidenOp(ref cx: Cx, argId: NodeId): string {
-  const t = vec.vecGet(ref cx.tm.resolvedTypes, argId);
+  const t = resolvedTypeAt(ref cx, argId);
   if (primIsSigned(cx.prog, t)) {
     return "sext";
   }
@@ -118,14 +119,14 @@ export function varargWidenOp(ref cx: Cx, argId: NodeId): string {
 // gep and extractvalue both address a field by index, so this is the one thing
 // codegen needs that a field name alone does not give it.
 export function fieldPositionOf(ref cx: Cx, baseId: NodeId, fieldName: string): usize {
-  const structType = vec.vecGet(ref cx.tm.resolvedTypes, baseId);
+  const structType = resolvedTypeAt(ref cx, baseId);
   return lookupField(cx.prog, structType, fieldName).index;
 }
 
 // True when the node resolved to a struct, which is how the field-access and
 // assignment paths tell a struct from an array.
 export function isStructAt(ref cx: Cx, nodeId: NodeId): bool {
-  return isStructType(cx.prog, vec.vecGet(ref cx.tm.resolvedTypes, nodeId));
+  return isStructType(cx.prog, resolvedTypeAt(ref cx, nodeId));
 }
 
 // The generic-function DeclId a name binds to, or DECL_NONE_ID when the name is
@@ -210,7 +211,7 @@ export function methodOwnerOf(ref cx: Cx, declNode: ASTNode): TypeId {
 }
 
 export function isVariantAt(ref cx: Cx, nodeId: NodeId): bool {
-  return isVariantType(cx.prog, vec.vecGet(ref cx.tm.resolvedTypes, nodeId));
+  return isVariantType(cx.prog, resolvedTypeAt(ref cx, nodeId));
 }
 
 // ----- variants -------------------------------------------------------------
@@ -220,14 +221,14 @@ export function isVariantAt(ref cx: Cx, nodeId: NodeId): bool {
 
 // The tag to store, or to dispatch on. Declaration order, which pass C fixed.
 export function variantOrdinalOf(ref cx: Cx, nodeId: NodeId): uint64 {
-  const variantType = vec.vecGet(ref cx.tm.resolvedTypes, nodeId);
+  const variantType = resolvedTypeAt(ref cx, nodeId);
   return uint64(lookupVariantCase(cx.prog, variantType, nodeAt(cx.ast, nodeId).name).ordinal);
 }
 
 // The LLVM name of one case's payload struct, which is how the payload bytes
 // are addressed.
 export function variantCaseTypeOf(ref cx: Cx, nodeId: NodeId, caseName: string): string {
-  const variantType = vec.vecGet(ref cx.tm.resolvedTypes, nodeId);
+  const variantType = resolvedTypeAt(ref cx, nodeId);
   return variantCaseLlvmName(variantModuleIdOf(cx.prog, variantType),
     variantDeclNameOf(cx.prog, variantType), caseName);
 }
@@ -235,7 +236,30 @@ export function variantCaseTypeOf(ref cx: Cx, nodeId: NodeId, caseName: string):
 // Which POSITION a named field occupies in a case's payload. gep addresses a
 // field by index, so this is the one thing the field name alone does not give.
 export function variantFieldPositionOf(ref cx: Cx, nodeId: NodeId, caseName: string, fieldName: string): usize {
-  const variantType = vec.vecGet(ref cx.tm.resolvedTypes, nodeId);
+  const variantType = resolvedTypeAt(ref cx, nodeId);
   const found = lookupVariantCase(cx.prog, variantType, caseName);
   return variantCaseFieldNamed(cx.prog, variantType, usize(found.ordinal), fieldName).index;
+}
+
+// True when `name` is a module-level FUNCTION in scope here - what makes a bare
+// name in value position a function pointer rather than a missing local.
+export function isModuleFunction(ref cx: Cx, name: string): bool {
+  switch (map.mapGet(ref cx.tm.names, name)) {
+    case Option.None: { return false; }
+    case Option.Some { value: symId }: {
+      switch (symbolAt(cx.prog, symId)) {
+        case Symbol.Func { typeId: t }: { return true; }
+        default: { return false; }
+      }
+    }
+  }
+}
+
+// True when the node resolved to a string, which is how the field-access path
+// tells `s.len` from an array's `.len`.
+export function isStringAt(ref cx: Cx, nodeId: NodeId): bool {
+  switch (typeAt(cx.prog, resolvedTypeAt(ref cx, nodeId))) {
+    case Type.Prim { prim: p }: { return p == PrimKind.STRING; }
+    default: { return false; }
+  }
 }

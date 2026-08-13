@@ -11,11 +11,24 @@ module parse;
 // spelling exactly: `yoop_log_info` has to be the name the linker sees, so an
 // extern is never mangled (see mangle.yoop) and never has a body.
 //
-// The ABI string is required to be "C", the only one there is. The `from`
-// clause names the library the symbol comes from; nothing consumes it yet -
-// linking against anything but libc is a layer-6 feature the bootstrap does not
-// have - but it is recorded rather than dropped, because the moment linking
-// grows an option it is the thing that decides it.
+// Two ABIs. "C" means the symbol exists in a library and keeps its spelling.
+// "intrinsic" means the COMPILER is the implementation:
+//
+//   extern "intrinsic" from "compiler" {
+//     function heapAlloc<T>(n: usize): T[];
+//     function stringAsBytes(s: string): uint8[];
+//   }
+//
+// An intrinsic names an operation codegen lowers directly to IR - a malloc plus
+// a fat pointer, a field projection - rather than a call to anything. There is
+// no symbol, so the `from` library is documentation, and the signature exists
+// so the TYPECHECKER has something to check calls against. Several are generic,
+// which an ordinary extern never is.
+//
+// The `from` clause names the library the symbol comes from; nothing consumes
+// it yet - linking against anything but libc is a layer-6 feature the bootstrap
+// does not have - but it is recorded rather than dropped, because the moment
+// linking grows an option it is the thing that decides it.
 
 import { Result } from "std/core/types.yoop";
 import { Vec }, * as vec from "std/core/vec.yoop";
@@ -35,13 +48,16 @@ export function parseExternBlock(ref ps: ParserState): Result<NodeId, ParsingErr
 
   const abiTok = SelfLexing.expect(ref ps, TokenTags.STRLITERAL)?;
   const abi = decodeStringLiteral(ref ps, abiTok)?;
-  if (!str.stringEq(abi, "C")) {
+  if (!str.stringEq(abi, ABI_C) && !str.stringEq(abi, ABI_INTRINSIC)) {
     return Result.Err { error: SelfLexing.createParsingError(
       ref ps,
-      `unsupported extern ABI "${abi}" - only "C" is supported`,
+      `unsupported extern ABI "${abi}" - the ones that exist are "C" and "intrinsic"`,
       peekLengthUsize(ref ps),
     )};
   }
+  // The ABI decides whether a call becomes a CALL or becomes instructions, so
+  // it rides on the block for pass A to read.
+  node.flagA = str.stringEq(abi, ABI_INTRINSIC);
 
   // `from "lib"` is REQUIRED, matching the JS reference. Making it optional was
   // the first attempt and it was a divergence for nothing: a program written
@@ -70,13 +86,17 @@ export function parseExternBlock(ref ps: ParserState): Result<NodeId, ParsingErr
   return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
 }
 
-// `function name(a: T, b: U): R;` - a signature and nothing else. The same
-// slots a FUNCTION_DECL uses for its params and return, so pass C fills it with
-// the same code; what it does NOT have is childD, the body.
+// `function name<T>(a: T, b: U): R;` - a signature and nothing else. The same
+// slots a FUNCTION_DECL uses for its type params, params and return, so pass C
+// fills it with the same code; what it does NOT have is childD, the body.
+//
+// Type parameters are here for the intrinsics: `heapAlloc<T>(n: usize): T[]` is
+// generic over what it allocates, and a C extern never is.
 function parseExternFunction(ref ps: ParserState): Result<NodeId, ParsingError> {
   SelfLexing.expect(ref ps, TokenTags.FUNCTION)?;
   let node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.EXTERN_FUNCTION_DECL);
   node.name = parseIdentAsName(ref ps)?;
+  node.childA = parseTypeParamList(ref ps)?;
 
   SelfLexing.expect(ref ps, TokenTags.LPAREN)?;
   const loc = posToSourceLocation(ps.src, ps.pos, 1);
@@ -121,3 +141,6 @@ export function parseImportDirective(ref ps: ParserState): Result<string, Parsin
   }
   return Result.Ok { value: name };
 }
+
+export const ABI_C: string = "C";
+export const ABI_INTRINSIC: string = "intrinsic";

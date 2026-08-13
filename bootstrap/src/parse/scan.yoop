@@ -9,7 +9,11 @@ export function findMatchingRParen(ref ps: ParserState, lParentIdx: usize): Opti
   let depth = 1;
   let i = lParentIdx + 1;
   while (depth > 0) {
-    const peekAheadResult = SelfLexing.peekAhead(ref ps, 1);
+    // `i`, not a constant: peeking at a fixed offset re-reads the SAME token
+    // every iteration, so an unbalanced count never converges and the parser
+    // hangs rather than failing. `aligned(16)` on a type decl was the first
+    // thing to reach this.
+    const peekAheadResult = SelfLexing.peekAhead(ref ps, i);
     switch (peekAheadResult) {
       case Result.Err { error: e }: {
         return Option.None {}; // ignore this error, as we may peek too far and that's ok

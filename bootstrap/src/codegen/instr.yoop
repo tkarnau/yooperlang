@@ -314,3 +314,41 @@ export function emitCall(
   part(ref cx, ")");
   endInstr(ref cx);
 }
+
+//   %t7 = call i64 %t5(ptr %t6)
+//
+// A call through a function POINTER rather than a symbol. LLVM's opaque
+// pointers put the signature at the call site, so the return type here is all
+// the callee's type contributes.
+export function emitCallIndirect(
+  ref cx: Cx,
+  dest: usize,
+  retTy: string,
+  callee: usize,
+  ref args: Vec<CallArg>
+): void {
+  startInstr(ref cx);
+  const isVoid = text.equals(retTy, "void");
+  if (!isVoid) {
+    temp(ref cx, dest);
+    part(ref cx, " = ");
+  }
+  part(ref cx, "call ");
+  part(ref cx, retTy);
+  part(ref cx, " ");
+  temp(ref cx, callee);
+  part(ref cx, "(");
+  let i: usize = 0;
+  while (i < args.len) {
+    const a = vec.vecGet(ref args, i);
+    if (i > 0) {
+      part(ref cx, ", ");
+    }
+    part(ref cx, a.ty);
+    part(ref cx, " ");
+    operand(ref cx, a.value);
+    i += 1;
+  }
+  part(ref cx, ")");
+  endInstr(ref cx);
+}

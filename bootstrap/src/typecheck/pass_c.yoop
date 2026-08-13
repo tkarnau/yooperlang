@@ -32,6 +32,15 @@ export function passCFillShells(
   fillEachFile(ref prog, ref tm, m, moduleId, true);
   fillEachFile(ref prog, ref tm, m, moduleId, false);
 
+  // Trait satisfaction is checked in its OWN sweep, after every fill.
+  //
+  // The generic sweep runs first, so a generic type's methods are collected
+  // before any trait in the same module has its signatures - and checking then
+  // reports "no implemented trait requires it" about a trait that simply was
+  // not filled yet. The promise is about the finished type AND the finished
+  // trait, so it can only be checked once both are.
+  checkEachFileTraits(ref prog, ref tm, m);
+
   // Then fill the instances all of that registered. Late enough that every
   // template they can reach is populated - this module's just were, and
   // earlier modules' were before this module was reached at all.
@@ -81,6 +90,7 @@ function fillFileShells(
     switch (declNode.kind) {
       case ASTNodeKind.FUNCTION_DECL: {
         fillFunctionSignature(ref prog, ref tm, ref m.ast, declNode);
+        checkFunctionKinds(ref prog, ref tm, ref m.ast, declNode);
       }
       case ASTNodeKind.TYPE_DECL: {
         fillStructFields(ref prog, ref tm, ref m.ast, declNode, moduleId);
@@ -94,12 +104,15 @@ function fillFileShells(
       case ASTNodeKind.CONST_DECL: {
         fillModuleConst(ref prog, ref tm, ref m.ast, declNode);
       }
+      case ASTNodeKind.VTABLE_DECL: {
+        fillVtable(ref prog, ref tm, ref m.ast, declNode, moduleId);
+      }
       case ASTNodeKind.EXTERN_BLOCK: {
         // An extern's signature fills exactly like a function's - it has the
         // same childB/childC slots, and no body is the only difference.
         let x: usize = 0;
         while (x < declNode.childCount) {
-          fillFunctionSignature(
+          fillExternSignature(
             ref prog, ref tm, ref m.ast, nodeAt(ref m.ast, childAt(ref m.ast, declNode, x))
           );
           x += 1;
@@ -152,6 +165,39 @@ function beginFill(
 
 // The parameter NAMES, in declaration order, read back off the decl's
 // `<T, U>` list. Their TypeIds were interned in pass A; this pairs them up.
+// One extern signature, with its type parameters in scope while it resolves.
+//
+// `heapAlloc<T>(n: usize): T[]` needs `T` to mean something, and an intrinsic's
+// parameters exist ONLY for that - the intrinsic is lowered at each call site
+// rather than monomorphized into a symbol, so there is no template to build and
+// no instance to register. The parameters are interned as opaque TypeParams,
+// used to resolve the signature, and dropped.
+function fillExternSignature(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  declNode: ASTNode
+): void {
+  if (declNode.childA == 0) {
+    fillFunctionSignature(ref prog, ref tm, ref ast, declNode);
+    return;
+  }
+
+  disposable names: Vec<string> = typeParamNames(ref ast, declNode);
+  disposable params: Vec<TypeId> = vec.vecNew(names.len);
+  let i: usize = 0;
+  while (i < names.len) {
+    vec.vecPush(ref params, internType(ref prog, Type.TypeParam {
+      name: vec.vecGet(ref names, i), originDecl: 0, bounds: vec.vecNew(0),
+    }));
+    i += 1;
+  }
+
+  beginTypeParams(ref prog, ref params, ref names);
+  fillFunctionSignature(ref prog, ref tm, ref ast, declNode);
+  endTypeParams(ref prog);
+}
+
 function typeParamNames(ref ast: AST, declNode: ASTNode): Vec<string> propagates<disposable> {
   let names: Vec<string> = vec.vecNew(2);
   const list = nodeAt(ref ast, declNode.childA);
@@ -292,9 +338,6 @@ function fillStructFields(
     implementsTraits: traits,
     generic: genericInstOf(ref prog, typeId),
   });
-  // Checked AFTER the table is set: the promise is about the finished type.
-  checkMethodsRequired(ref prog, ref ast, declNode, ref traits);
-  checkTraitsSatisfied(ref prog, ref tm, declNode, typeId, ref traits);
 }
 
 // The `generic` record already on a shell, copied so re-setting the slot keeps
@@ -371,8 +414,6 @@ function fillVariantCases(
     implementsTraits: traits,
     generic: genericInstOf(ref prog, typeId),
   });
-  checkMethodsRequired(ref prog, ref ast, declNode, ref traits);
-  checkTraitsSatisfied(ref prog, ref tm, declNode, typeId, ref traits);
 }
 
 // `const SEEK_SET: c_int = 0;` - the annotation, and the value.
@@ -455,4 +496,150 @@ export function lookupOwnName(ref tm: TypedModule, name: string): SymbolId {
     case Option.Some { value: symId }: { return symId; }
     case Option.None: { return SYMBOL_NONE_ID; }
   }
+}
+
+// A function's kind prefixes, resolved against the graph's kind registry.
+//
+// Two things come out of this. An unknown kind is REFUSED - a prefix is not
+// decoration, and a typo in one would otherwise silently produce an ordinary
+// function. And a PAUSABLE kind marks the function a coroutine, which codegen
+// has to know about because it cannot lower one.
+//
+// Resolution is by NAME against the registry rather than through the symbol
+// table, because a kind prefix is not imported: `async fetch(...)` in std/http
+// names a kind declared in std/core/kinds.yoop with nothing linking the files.
+//
+// In pass C rather than pass A for the ordinary shell-then-fill reason: pass A
+// REGISTERS the kinds, and a file may declare one below the function that
+// carries it. Resolving in the same walk that registers would make declaration
+// order matter, which it does nowhere else in the language.
+export function checkFunctionKinds(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  declNode: ASTNode
+): void {
+  if (declNode.childE == 0) {
+    return;
+  }
+  const list = nodeAt(ref ast, declNode.childE);
+  let i: usize = 0;
+  while (i < list.childCount) {
+    const prefix = nodeAt(ref ast, childAt(ref ast, list, i));
+    switch (lookupKind(ref prog, prefix.name)) {
+      case Option.Some { value: info }: {
+        if (info.pausable) {
+          map.mapInsert(ref tm.pausableNames, declNode.name, true);
+        }
+      }
+      case Option.None: {
+        reportError(
+          ref prog,
+          `unknown kind "${prefix.name}" on function "${declNode.name}"`,
+          prefix.sourceLoc
+        );
+      }
+    }
+    i += 1;
+  }
+}
+
+// A vtable's fields, and the promise that it erases a real trait.
+//
+// The fields are ordinary struct fields whose types happen to be functions -
+// which is exactly what a vtable is - so this is the struct fill with one extra
+// check. Whether each field MATCHES the trait's corresponding method is not
+// checked yet: nothing can build a vtable value, so a mismatch has no way to be
+// observed, and inventing the rule before the erasure exists would be guessing.
+function fillVtable(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  declNode: ASTNode,
+  moduleId: ModuleId
+): void {
+  const symId = lookupOwnName(ref tm, declNode.name);
+  if (symId == SYMBOL_NONE_ID) {
+    return;
+  }
+  let typeId: TypeId = TYPE_ERROR_ID;
+  switch (symbolAt(ref prog, symId)) {
+    case Symbol.Vtable { typeId: t }: { typeId = t; }
+    default: { return; }
+  }
+
+  // `vtable Reader for Readable` - the thing after `for` has to be a TRAIT.
+  // Naming a struct there is the same class of mistake as `implements` on a
+  // non-trait, and reads the same way.
+  const traitAnnot = nodeAt(ref ast, declNode.childA);
+  if (traitTypeNamed(ref prog, ref tm, traitAnnot.name) == TYPE_ERROR_ID) {
+    reportError(
+      ref prog,
+      `"${traitAnnot.name}" is not a trait, so vtable "${declNode.name}" cannot erase it`,
+      traitAnnot.sourceLoc
+    );
+  }
+
+  let fields: Vec<Field> = vec.vecNew(declNode.childCount);
+  let i: usize = 0;
+  while (i < declNode.childCount) {
+    const fieldNode = nodeAt(ref ast, childAt(ref ast, declNode, i));
+    vec.vecPush(ref fields, {
+      name: fieldNode.name,
+      typeId: resolveTypeAnnotation(ref prog, ref tm, ref ast, fieldNode.childA),
+    });
+    i += 1;
+  }
+
+  setType(ref prog, typeId, Type.Struct {
+    decl: { name: declNode.name, module: moduleId, populated: true },
+    fields: fields,
+    methods: map.mapNew(0, map.stringKeyOps()),
+    implementsTraits: vec.vecNew(0),
+    generic: { origin: 0, args: vec.vecNew(0) },
+  });
+}
+
+// Every type and variant decl's `implements` promise, once all fills are done.
+function checkEachFileTraits(ref prog: Program, ref tm: TypedModule, m: Module): void {
+  let f: usize = 0;
+  while (f < m.files.len) {
+    const file = vec.vecGet(ref m.files, f);
+    beginFile(ref prog, file.absPath);
+    const programNode = nodeAt(ref m.ast, file.root);
+    let i: usize = 0;
+    while (i < programNode.childCount) {
+      const declNode = nodeAt(ref m.ast, declOf(ref m.ast, childAt(ref m.ast, programNode, i)));
+      if (declNode.kind == ASTNodeKind.TYPE_DECL || declNode.kind == ASTNodeKind.VARIANT_DECL) {
+        checkDeclTraits(ref prog, ref tm, ref m.ast, declNode);
+      }
+      i += 1;
+    }
+    f += 1;
+  }
+}
+
+function checkDeclTraits(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  declNode: ASTNode
+): void {
+  const symId = lookupOwnName(ref tm, declNode.name);
+  if (symId == SYMBOL_NONE_ID) {
+    return;
+  }
+  let typeId: TypeId = TYPE_ERROR_ID;
+  switch (symbolAt(ref prog, symId)) {
+    case Symbol.Struct { typeId: t }: { typeId = t; }
+    case Symbol.VariantT { typeId: t }: { typeId = t; }
+    // A generic decl's promise is about its TEMPLATE, which is what carries
+    // the methods and the implements list.
+    case Symbol.GenericDecl { decl: d, sort: srt }: { typeId = genericAt(ref prog, d).template; }
+    default: { return; }
+  }
+
+  disposable traits: Vec<TypeId> = collectImplementedTraits(ref prog, ref tm, ref ast, declNode);
+  checkMethodsRequired(ref prog, ref ast, declNode, ref traits);
+  checkTraitsSatisfied(ref prog, ref tm, declNode, typeId, ref traits);
 }

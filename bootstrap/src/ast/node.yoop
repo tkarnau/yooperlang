@@ -50,6 +50,11 @@ export type ASTNode {
   // annotation, its initializer, the condition, the step, and the body. Adding
   // a slot is what the fat-node design says to do when a kind needs one.
   childE: NodeId,
+  // childF is the `propagates<...>` clause, and it means that on every kind
+  // that has one - a FUNCTION_DECL had all five earlier slots spoken for once
+  // kind prefixes landed in childE, and giving the clause its own slot beats
+  // overloading one that already means something else.
+  childF: NodeId,
 
   // scalar payload reused per kind (e.g. IMPORT_DECL's source-path span)
   spanStart: usize,

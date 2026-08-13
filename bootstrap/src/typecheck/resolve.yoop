@@ -9,6 +9,7 @@ module typecheck;
 import * as str from "std/core/strings.yoop";
 import { Map }, * as map from "std/collections/map.yoop";
 import { Vec }, * as vec from "std/core/vec.yoop";
+import { Text }, * as text from "std/core/text.yoop";
 import { Option } from "std/core/types.yoop";
 import { disposable } from "std/core/kinds.yoop";
 import { AST, ASTNode, ASTNodeKind, NodeId, childAt, nodeAt, kindName } from "../ast";
@@ -35,6 +36,9 @@ export function resolveTypeAnnotation(
     case ASTNodeKind.TYPE_ANNOTATION_TYPE_NAME: {
       return resolveTypeName(ref prog, ref tm, ref ast, annot);
     }
+    case ASTNodeKind.TYPE_ANNOTATION_FUNC_TYPE: {
+      return resolveFuncTypeAnnotation(ref prog, ref tm, ref ast, annot);
+    }
     default: {
       reportError(ref prog, `not a type annotation: ${kindName(annot.kind)}`, annot.sourceLoc);
       return TYPE_ERROR_ID;
@@ -56,6 +60,35 @@ function resolveTypeName(ref prog: Program, ref tm: TypedModule, ref ast: AST, a
       reportError(ref prog, `type parameter "${annot.name}" is not generic`, annot.sourceLoc);
     }
     return asParam;
+  }
+
+  // `unsafe_ptr` / `unsafe_ptr<T>` - a raw pointer, gated on `import.unsafe;`.
+  //
+  // The bare form is OPAQUE (pointee 0), which is a different type from
+  // `unsafe_ptr<void>`: a typed pointer widens to the opaque one and not back,
+  // which is what lets an extern take any pointer while a typed one stays
+  // checked. Same rule as the reference.
+  if (str.stringEq(annot.name, UNSAFE_PTR_NAME)) {
+    if (!tm.unsafeAllowed) {
+      reportError(
+        ref prog,
+        `'unsafe_ptr<T>' requires 'import.unsafe;' at module top`,
+        annot.sourceLoc
+      );
+      return TYPE_ERROR_ID;
+    }
+    if (annot.childA == 0) {
+      return internUnsafePtr(ref prog, TYPE_ERROR_ID);
+    }
+    const args = nodeAt(ref ast, annot.childA);
+    if (args.childCount != 1) {
+      reportError(ref prog, `"unsafe_ptr" takes one type argument`, annot.sourceLoc);
+      return TYPE_ERROR_ID;
+    }
+    return internUnsafePtr(
+      ref prog,
+      resolveTypeAnnotation(ref prog, ref tm, ref ast, childAt(ref ast, args, 0))
+    );
   }
 
   switch (primKindOfName(annot.name)) {
@@ -160,20 +193,33 @@ function resolveGenericApplication(
 
 // The canonical spellings. `void` is absent on purpose: it is the ABSENCE of a
 // type annotation as far as the arena is concerned, handled by the caller.
+// The `c_*` names are LP64 ALIASES, not distinct types: the alias IS the target
+// for equality, assignability and codegen alike. Hardcoded to Linux and macOS,
+// as the reference is - Windows LLP64 waits on real target-triple awareness.
 function primKindOfName(name: string): Option<PrimKind> {
   if (str.stringEq(name, "int") || str.stringEq(name, "int32") || str.stringEq(name, "c_int")) {
     return Option.Some { value: PrimKind.INT32 };
   }
   if (str.stringEq(name, "int8")) { return Option.Some { value: PrimKind.INT8 }; }
-  if (str.stringEq(name, "int16")) { return Option.Some { value: PrimKind.INT16 }; }
+  if (str.stringEq(name, "int16") || str.stringEq(name, "c_short")) {
+    return Option.Some { value: PrimKind.INT16 };
+  }
   if (str.stringEq(name, "int64") || str.stringEq(name, "c_long")) {
     return Option.Some { value: PrimKind.INT64 };
   }
-  if (str.stringEq(name, "isize")) { return Option.Some { value: PrimKind.ISIZE }; }
+  if (str.stringEq(name, "isize") || str.stringEq(name, "c_ssize_t")) {
+    return Option.Some { value: PrimKind.ISIZE };
+  }
   if (str.stringEq(name, "uint8")) { return Option.Some { value: PrimKind.UINT8 }; }
-  if (str.stringEq(name, "uint16")) { return Option.Some { value: PrimKind.UINT16 }; }
-  if (str.stringEq(name, "uint32")) { return Option.Some { value: PrimKind.UINT32 }; }
-  if (str.stringEq(name, "uint64")) { return Option.Some { value: PrimKind.UINT64 }; }
+  if (str.stringEq(name, "uint16") || str.stringEq(name, "c_ushort")) {
+    return Option.Some { value: PrimKind.UINT16 };
+  }
+  if (str.stringEq(name, "uint32") || str.stringEq(name, "c_uint")) {
+    return Option.Some { value: PrimKind.UINT32 };
+  }
+  if (str.stringEq(name, "uint64") || str.stringEq(name, "c_ulong")) {
+    return Option.Some { value: PrimKind.UINT64 };
+  }
   if (str.stringEq(name, "usize") || str.stringEq(name, "c_size_t")) {
     return Option.Some { value: PrimKind.USIZE };
   }
@@ -209,6 +255,15 @@ export function isIntPrimType(ref prog: Program, id: TypeId): bool {
   }
 }
 
+export const UNSAFE_PTR_NAME: string = "unsafe_ptr";
+
+export function isUnsafePtrType(ref prog: Program, id: TypeId): bool {
+  switch (typeAt(ref prog, id)) {
+    case Type.UnsafePtr { pointee: p }: { return true; }
+    default: { return false; }
+  }
+}
+
 // How a type reads in a diagnostic.
 export function formatType(ref prog: Program, id: TypeId): string {
   switch (typeAt(ref prog, id)) {
@@ -223,8 +278,24 @@ export function formatType(ref prog: Program, id: TypeId): string {
       return d.name;
     }
     case Type.ErrorT: { return "<error>"; }
+    case Type.Func { params: p, ret: r, variadic: v }: {
+      return `(${formatTypeList(ref prog, ref p)}) => ${formatType(ref prog, r)}`;
+    }
     default: { return "<type>"; }
   }
+}
+
+function formatTypeList(ref prog: Program, ref types: Vec<TypeId>): string propagates<disposable> {
+  disposable out: Text = text.make(32);
+  let i: usize = 0;
+  while (i < types.len) {
+    if (i > 0) {
+      text.push(ref out, ", ");
+    }
+    text.push(ref out, formatType(ref prog, vec.vecGet(ref types, i)));
+    i += 1;
+  }
+  return text.view(ref out);
 }
 
 function primName(p: PrimKind): string {
@@ -477,6 +548,89 @@ export function isStructType(ref prog: Program, id: TypeId): bool {
   switch (typeAt(ref prog, id)) {
     case Type.Struct { decl: d, fields: f, methods: mm, implementsTraits: it, generic: g }: {
       return true;
+    }
+    default: { return false; }
+  }
+}
+
+// `(k: K) => uint64` - the SAME `Type.Func` a declared function gets.
+//
+// That sameness is the feature: `{ hash: stringHash }` puts a named function
+// into a function-typed field, and it typechecks because both sides intern to
+// one TypeId. A separate "function pointer" type would have to be converted to
+// and from, and nothing would be gained - a yoop function value IS its address.
+//
+// Parameter NAMES are ignored here. Two function types match on parameter types
+// and return type, which is what lets a field declared `(a: K, b: K) => bool`
+// accept a function whose parameters are called something else.
+function resolveFuncTypeAnnotation(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  annot: ASTNode
+): TypeId {
+  let params: Vec<TypeId> = vec.vecNew(2);
+  if (annot.childA != 0) {
+    const list = nodeAt(ref ast, annot.childA);
+    let i: usize = 0;
+    while (i < list.childCount) {
+      const paramNode = nodeAt(ref ast, childAt(ref ast, list, i));
+      const declared = resolveTypeAnnotation(ref prog, ref tm, ref ast, paramNode.childA);
+      // `ref` is part of the signature here exactly as on a declaration.
+      if (paramNode.flagA) {
+        vec.vecPush(ref params, internRef(ref prog, declared));
+      } else {
+        vec.vecPush(ref params, declared);
+      }
+      i += 1;
+    }
+  }
+  return internType(ref prog, Type.Func {
+    params: params,
+    ret: resolveTypeAnnotation(ref prog, ref tm, ref ast, annot.childB),
+    variadic: false,
+  });
+}
+
+// Whether a value of type `actual` may be used where `expected` is wanted.
+//
+// `id == id` for everything except FUNCTION types, which compare structurally.
+// They have to: a declared function's signature lives in the SHELL pass A
+// registered for it, filled in place by pass C, so two functions with identical
+// signatures keep different TypeIds - and an annotation like
+// `(k: string) => uint64` interns a third. Comparing those by id would make
+// `{ hash: stringHash }` a type error for no reason a reader could see.
+//
+// Deliberately not a general subtyping rule. It answers one question, the same
+// way `==` did before, and everything else in the type system stays `id == id`.
+export function typeAccepts(ref prog: Program, expected: TypeId, actual: TypeId): bool {
+  if (expected == actual) {
+    return true;
+  }
+  // `null` fits any raw pointer and nothing else - the pointer twin of an
+  // untyped int literal pinning to an integer.
+  if (actual == TYPE_UNTYPED_NULL_ID) {
+    return isUnsafePtrType(ref prog, expected);
+  }
+  switch (typeAt(ref prog, expected)) {
+    case Type.Func { params: wantParams, ret: wantRet, variadic: wantVariadic }: {
+      switch (typeAt(ref prog, actual)) {
+        case Type.Func { params: gotParams, ret: gotRet, variadic: gotVariadic }: {
+          return wantRet == gotRet &&
+            wantVariadic == gotVariadic &&
+            sameTypeList(ref wantParams, ref gotParams);
+        }
+        default: { return false; }
+      }
+    }
+    // A TYPED pointer widens to the OPAQUE one, and not back. `unsafe_ptr` is
+    // "some pointer" and `unsafe_ptr<uint8>` is a promise about what it points
+    // at, so forgetting the promise is safe and inventing one is not.
+    case Type.UnsafePtr { pointee: wantPointee }: {
+      if (wantPointee != TYPE_ERROR_ID) {
+        return false;
+      }
+      return isUnsafePtrType(ref prog, actual);
     }
     default: { return false; }
   }

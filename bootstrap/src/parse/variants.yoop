@@ -31,6 +31,7 @@ import { ParsingError } from "../diagnostics";
 //   name                    the variant's name
 //   childA                  typeParams list-node (0 = none)
 //   childD                  implements list-node (0 = none)
+//   childF                  propagates list-node (0 = none)
 //   own childIds run        the VARIANT_CASE nodes, in DECLARATION ORDER, which
 //                           is the tag order and therefore ABI, then any
 //                           METHOD_DECLs
@@ -41,6 +42,7 @@ export function parseVariantDecl(ref ps: ParserState): Result<NodeId, ParsingErr
   node.childA = parseTypeParamList(ref ps)?;
   // Same slot a TYPE_DECL uses, so pass C reads the clause the one way.
   node.childD = parseImplementsClause(ref ps)?;
+  node.childF = parsePropagatesClause(ref ps)?;
 
   SelfLexing.expect(ref ps, TokenTags.LCURLY)?;
   disposable caseIds: Vec<NodeId> = vec.vecNew(4);
@@ -51,7 +53,7 @@ export function parseVariantDecl(ref ps: ParserState): Result<NodeId, ParsingErr
     // A method, not a case. `function` cannot start a case name, so the two
     // members never have to be told apart by anything but the keyword.
     if (SelfLexing.peek(ref ps).tag == TokenTags.FUNCTION) {
-      vec.vecPush(ref caseIds, parseMethodDecl(ref ps, node.name)?);
+      vec.vecPush(ref caseIds, parseMethodDecl(ref ps, node.name, node.childA)?);
       continue;
     }
     vec.vecPush(ref caseIds, parseVariantCase(ref ps)?);

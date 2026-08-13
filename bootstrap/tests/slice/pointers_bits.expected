@@ -1,0 +1,9 @@
+and=8 or=14 xor=6
+shl=48 shr=3
+bucket=2
+ashr=-4
+read=42
+after store n=9 via=9
+through=15
+opaque null=0
+exit=0

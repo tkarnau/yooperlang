@@ -12,6 +12,7 @@ module codegen;
 // something wrong.
 
 import { Vec }, * as vec from "std/core/vec.yoop";
+import { primIsSigned } from "../typecheck";
 import { Text }, * as text from "std/core/text.yoop";
 import { disposable } from "std/core/kinds.yoop";
 import { Option } from "std/core/types.yoop";
@@ -36,6 +37,13 @@ export function emitExpr(ref cx: Cx, exprId: NodeId, ref out: Operand): string {
     case ASTNodeKind.TEMPLATE_LITERAL: {
       return emitTemplateLiteral(ref cx, expr, exprId, ref out);
     }
+    case ASTNodeKind.SLICE_EXPRESSION: {
+      return emitSlice(ref cx, expr, exprId, ref out);
+    }
+    case ASTNodeKind.NULL_LITERAL: {
+      out = Operand.Null;
+      return "";
+    }
     case ASTNodeKind.BOOL_LITERAL: {
       // i1 immediates are spelled `true` / `false`, which Operand.Bool writes.
       out = Operand.Bool { value: expr.intVal != 0 };
@@ -57,21 +65,30 @@ export function emitExpr(ref cx: Cx, exprId: NodeId, ref out: Operand): string {
       return emitVariantConstructor(ref cx, expr, exprId, ref out);
     }
     case ASTNodeKind.FIELD_ACCESS: {
-      // Three things wear this shape, and pass D already decided which: a
+      // Four things wear this shape, and pass D already decided which: a
       // payload-less variant constructor (`Shape.Empty`, typed as the VARIANT),
-      // a struct field, or an array's `.len`.
+      // a struct field, a STRING's `.len`, or an array's `.len`.
       if (isVariantAt(ref cx, exprId)) {
         return emitVariantConstructor(ref cx, expr, exprId, ref out);
       }
       if (isStructAt(ref cx, expr.childA)) {
         return emitStructFieldRead(ref cx, expr, ref out);
       }
+      if (isStringAt(ref cx, expr.childA)) {
+        return emitStringLen(ref cx, expr, ref out);
+      }
       return emitArrayLen(ref cx, expr, ref out);
     }
     case ASTNodeKind.IDENT: {
       return emitLocalRead(ref cx, expr, ref out);
     }
-    case ASTNodeKind.REF_EXPRESSION: {
+    // `&x` and `ref x` lower identically - both are the address of x's slot.
+    // What differs is the TYPE, which pass D decided, and therefore what the
+    // language lets you do with the result.
+    case ASTNodeKind.DEREF_EXPRESSION: {
+      return emitDeref(ref cx, expr, exprId, ref out);
+    }
+    case ASTNodeKind.REF_EXPRESSION, ASTNodeKind.ADDRESS_OF_EXPRESSION: {
       return emitRefExpr(ref cx, expr, ref out);
     }
     case ASTNodeKind.ASSIGNMENT: {
@@ -102,6 +119,16 @@ function emitLocalRead(ref cx: Cx, expr: ASTNode, ref out: Operand): string {
           return "";
         }
         case Option.None: { }
+      }
+      // Or a FUNCTION named without being called - `{ hash: stringHash }`.
+      // Its value is its symbol, resolved through the same table a call goes
+      // through so an imported one lands on the defining module's name.
+      if (isModuleFunction(ref cx, expr.name)) {
+        // NodeId 0 is safe here: calleeSymbol only reads it to look for a
+        // generic instance or a trait receiver, and a bare name is neither.
+        const sym = calleeSymbol(ref cx, expr, 0);
+        out = Operand.FuncRef { home: sym.home, name: sym.name };
+        return "";
       }
       return internalError("no stack slot for", expr.name);
     }
@@ -149,6 +176,18 @@ function emitAssignment(ref cx: Cx, expr: ASTNode, ref out: Operand): string {
   if (target.kind == ASTNodeKind.INDEX_EXPRESSION) {
     out = Operand.None;
     return emitIndexWrite(ref cx, target, expr.childA, value);
+  }
+  // `*p = v` - store THROUGH the pointer. The address is the pointer's own
+  // value, so there is nothing to compute but the pointer itself.
+  if (target.kind == ASTNodeKind.DEREF_EXPRESSION) {
+    let ptr: Operand = Operand.None;
+    const perr = emitExpr(ref cx, target.childA, ref ptr);
+    if (perr.len > 0) {
+      return perr;
+    }
+    emitStoreToAddr(ref cx, typeOf(ref cx, expr.childA), value, ptr);
+    out = Operand.None;
+    return "";
   }
   switch (lookupLocal(cx.locals, target.name)) {
     case Option.None: {
@@ -206,11 +245,33 @@ function emitBinaryExpr(ref cx: Cx, expr: ASTNode, exprId: NodeId, ref out: Oper
     return "";
   }
 
-  const op = llvmIntOp(expr.operator);
+  // Signedness comes from the OPERANDS, not the result: a comparison already
+  // returned above, so the result type here is the operand type anyway - but
+  // reading the left side is what stays correct if that ever changes.
+  const op = llvmIntOp(expr.operator, primIsSigned(cx.prog, resolvedTypeAt(ref cx, expr.childA)));
   if (op.len == 0) {
     return internalError("codegen cannot emit operator", tagName(expr.operator));
   }
   emitBinOp(ref cx, dest, op, typeOf(ref cx, exprId), lhs, rhs);
+  out = Operand.Temp { id: dest };
+  return "";
+}
+
+// `*p` - one load from the address the pointer holds.
+//
+//   %t2 = load i32, ptr %t1
+//
+// The pointer is already a value, so there is nothing to compute first: an
+// opaque `ptr` in LLVM plus the pointee type pass D resolved is the whole
+// instruction.
+function emitDeref(ref cx: Cx, expr: ASTNode, exprId: NodeId, ref out: Operand): string {
+  let ptr: Operand = Operand.None;
+  const err = emitExpr(ref cx, expr.childA, ref ptr);
+  if (err.len > 0) {
+    return err;
+  }
+  const dest = freshTemp(cx.e);
+  emitLoadFromAddr(ref cx, dest, typeOf(ref cx, exprId), ptr);
   out = Operand.Temp { id: dest };
   return "";
 }

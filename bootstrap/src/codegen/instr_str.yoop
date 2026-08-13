@@ -25,6 +25,15 @@ export function emitStrlen(ref cx: Cx, dest: usize, str: Operand): void {
   endInstr(ref cx);
 }
 
+//   call void @free(ptr %t2)
+export function emitFree(ref cx: Cx, ptr: usize): void {
+  startInstr(ref cx);
+  part(ref cx, "call void @free(ptr ");
+  temp(ref cx, ptr);
+  part(ref cx, ")");
+  endInstr(ref cx);
+}
+
 //   %t2 = call ptr @malloc(i64 %t1)
 export function emitMalloc(ref cx: Cx, dest: usize, size: Operand): void {
   startInstr(ref cx);
@@ -112,11 +121,13 @@ export function emitSelectPtr(
 //
 //   declare i64 @strlen(ptr)
 //   declare ptr @malloc(i64)
+//   declare void @free(ptr)
 //   declare ptr @memcpy(ptr, ptr, i64)
 //   declare i32 @sprintf(ptr, ptr, ...)
 export function emitStringBuilderDeclarations(ref e: Emitter): void {
   emitGlobal(ref e, "declare i64 @strlen(ptr)");
   emitGlobal(ref e, "declare ptr @malloc(i64)");
+  emitGlobal(ref e, "declare void @free(ptr)");
   emitGlobal(ref e, "declare ptr @memcpy(ptr, ptr, i64)");
   emitGlobal(ref e, "declare i32 @sprintf(ptr, ptr, ...)");
 }

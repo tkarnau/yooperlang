@@ -22,6 +22,25 @@ function parseReturnStatement(ref ps: ParserState): ParsingResult {
 
 export function parseStatement(ref ps: ParserState): ParsingResult {
   const peekTag = SelfLexing.peek(ref ps).tag;
+
+  // `ephemeral arenaScope(N) { ... }` - a kind-prefixed BLOCK, from a kind
+  // carrying `ownsBlock`. Two identifiers then a `(` is the shape; a
+  // kind-prefixed BINDING (`disposable buf: T = ...`) has a `:` instead and is
+  // the var-decl parser's.
+  //
+  // Refused rather than parsed-and-ignored. The block's whole meaning is that
+  // an allocator is installed for its duration and torn down at the end, and
+  // that is the yoop runtime's allocator context - the same thing `ctxAlloc`
+  // needs. Parsing it and running the body without the arena would be a silent
+  // behavior change, which is worse than not compiling.
+  if (atKindPrefixedBlock(ref ps)) {
+    return Result.Err { error: SelfLexing.createParsingError(
+      ref ps,
+      `a kind-prefixed block ("${peekText(ref ps)} ... { }") installs an allocator for its body, which needs the yoop runtime linked`,
+      peekLengthUsize(ref ps),
+    )};
+  }
+
   switch (peekTag) {
     case TokenTags.LET, TokenTags.CONST: {
       return Result.Ok { value: parseVarDecl(ref ps)? };
@@ -135,6 +154,15 @@ export function parseBlock(ref ps: ParserState): ParsingResult {
 //   childE = the body block
 function parseForStatement(ref ps: ParserState): ParsingResult {
   SelfLexing.expect(ref ps, TokenTags.FOR)?;
+
+  // Two loops share the keyword, and the token right after it is what tells
+  // them apart: `for (` is the counted form, anything else is `for x in xs`.
+  // Cheaper and clearer than a lookahead for `in`, since the counted form
+  // ALWAYS parenthesizes.
+  if (SelfLexing.peek(ref ps).tag != TokenTags.LPAREN) {
+    return parseForInLoop(ref ps);
+  }
+
   let node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.FOR_LOOP);
   SelfLexing.expect(ref ps, TokenTags.LPAREN)?;
 
@@ -196,6 +224,25 @@ function parseForStatement(ref ps: ParserState): ParsingResult {
   SelfLexing.expect(ref ps, TokenTags.RPAREN)?;
   node.childE = parseBlock(ref ps)?;
 
+  return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
+}
+
+// `for name in <expr> { ... }` - walk an array, element by element.
+//
+//   name      the loop variable
+//   childA    the iterable expression
+//   childB    the body block
+//
+// The loop variable takes no annotation: its type is the element type of
+// whatever is being walked, so there is nothing for the writer to say and
+// nothing for a mismatch to mean. It is also always a fresh binding, so there
+// is no `let` to write either.
+function parseForInLoop(ref ps: ParserState): ParsingResult {
+  let node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.FOR_IN_LOOP);
+  node.name = parseIdentAsName(ref ps)?;
+  SelfLexing.expect(ref ps, TokenTags.IN)?;
+  node.childA = parseExpression(ref ps, 0)?;
+  node.childB = parseBlock(ref ps)?;
   return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
 }
 
@@ -278,8 +325,9 @@ function parseSwitchArm(ref ps: ParserState): ParsingResult {
   return Result.Ok { value: SelfLexing.pushNode(ref ps, arm) };
 }
 
-// Only integer literals so far. Variant and enum-case patterns arrive with the
-// types that have cases.
+// Integer literals, and char literals - which ARE integer literals, already
+// decoded to their codepoint by the lexer. `case '0', '1':` is the readable
+// spelling of a digit test and appears throughout std.
 function parseLiteralPattern(ref ps: ParserState): ParsingResult {
   let node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.LITERAL_PATTERN);
   let negate = false;
@@ -287,8 +335,32 @@ function parseLiteralPattern(ref ps: ParserState): ParsingResult {
     SelfLexing.advance(ref ps)?;
     negate = true;
   }
+  if (SelfLexing.peek(ref ps).tag == TokenTags.CHARLITERAL) {
+    node.intVal = SelfLexing.advance(ref ps)?.intVal;
+    node.flagA = negate;
+    return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
+  }
   const tok = SelfLexing.expect(ref ps, TokenTags.INTLITERAL)?;
   node.intVal = tok.intVal;
   node.flagA = negate;
   return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
+}
+
+// Two identifiers then a `(` in STATEMENT position: a kind-prefixed block.
+function atKindPrefixedBlock(ref ps: ParserState): bool {
+  if (SelfLexing.peek(ref ps).tag != TokenTags.IDENT) {
+    return false;
+  }
+  switch (SelfLexing.peekAhead(ref ps, 1)) {
+    case Result.Err { error: e }: { return false; }
+    case Result.Ok { value: second }: {
+      if (second.tag != TokenTags.IDENT) {
+        return false;
+      }
+      switch (SelfLexing.peekAhead(ref ps, 2)) {
+        case Result.Err { error: e2 }: { return false; }
+        case Result.Ok { value: third }: { return third.tag == TokenTags.LPAREN; }
+      }
+    }
+  }
 }

@@ -688,6 +688,513 @@ suite function templateEscapesAreDecodedNotInterpreted(): void {
   }
 }
 
+suite function forInLoopsAreTheirOwnStatement(): void {
+  let ast = parseOk("function f(): int { for x in xs { return x; } return 0; }");
+  const loop = firstStatement(ref ast);
+
+  let test theory: Case = t.asserts("`for x in xs` is a FOR_IN_LOOP, not a FOR_LOOP") {
+    theory.isSuccessful = loop.kind == ASTNodeKind.FOR_IN_LOOP;
+    theory.detail = `the statement is ${loop.kind}, wanted FOR_IN_LOOP`;
+  }
+
+  let test theory: Case = t.asserts("the loop variable lands on the node's name") {
+    theory.isSuccessful = str.stringEq(loop.name, "x");
+    theory.detail = `the loop variable is "${loop.name}", wanted "x"`;
+  }
+
+  let test theory: Case = t.asserts("the iterable is a real expression, not just a name") {
+    let call = parseOk("function f(): int { for e in view(ref h) { return 1; } return 0; }");
+    const iterable = nodeAt(ref call, firstStatement(ref call).childA);
+    theory.isSuccessful = iterable.kind == ASTNodeKind.CALL_EXPRESSION;
+    theory.detail = `the iterable is ${iterable.kind}, wanted CALL_EXPRESSION`;
+  }
+
+  // The keyword is shared, and the token right after it is the whole fork. A
+  // counted loop must still reach the counted parser.
+  let counted = parseOk("function f(): int { for (let i = 0; i < 3; i = i + 1) { return i; } return 0; }");
+  let test theory: Case = t.asserts("the counted form still parses as a FOR_LOOP") {
+    theory.isSuccessful = firstStatement(ref counted).kind == ASTNodeKind.FOR_LOOP;
+    theory.detail = `the counted form parsed as ${firstStatement(ref counted).kind}, wanted FOR_LOOP`;
+  }
+
+  // A loop variable takes no annotation - its type is the element type, so
+  // there is nothing to say and a mismatch could not mean anything.
+  let test theory: Case = t.asserts("an annotated loop variable is refused") {
+    theory.isSuccessful = parseError("function f(): int { for x: int in xs { return x; } return 0; }").len > 0;
+    theory.detail = "`for x: int in xs` parsed without a diagnostic";
+  }
+}
+
+suite function kindDeclarationsRecordTheirClauses(): void {
+  let ast = parseOk("kind disposable { appliesTo binding; requires Disposable; mustCall dispose beforeScopeEnd; ownsBlock; }");
+  const decl = topLevel(ref ast, 0);
+
+  let test theory: Case = t.asserts("`kind NAME { ... }` is a KIND_DECL") {
+    theory.isSuccessful = decl.kind == ASTNodeKind.KIND_DECL && str.stringEq(decl.name, "disposable");
+    theory.detail = `the first top-level node is ${decl.kind} named "${decl.name}", wanted KIND_DECL "disposable"`;
+  }
+
+  let test theory: Case = t.asserts("each clause is one node in the decl's own child run") {
+    theory.isSuccessful = decl.childCount == 4;
+    theory.detail = `the kind has ${decl.childCount} clause(s), wanted 4`;
+  }
+
+  // A clause is a run of tokens ending in `;`, recorded by its LEADING WORD.
+  // Some of these words are keywords in this lexer and some are not, so the
+  // name comes from the source text rather than the tag - otherwise the two
+  // spellings would record differently.
+  let test theory: Case = t.asserts("a clause is named for its leading word, keyword or not") {
+    const first = nodeAt(ref ast, childAt(ref ast, decl, 0));
+    const last = nodeAt(ref ast, childAt(ref ast, decl, 3));
+    theory.isSuccessful = str.stringEq(first.name, "appliesTo") && str.stringEq(last.name, "ownsBlock");
+    theory.detail = `clauses recorded as "${first.name}" ... "${last.name}", wanted "appliesTo" ... "ownsBlock"`;
+  }
+
+  let test theory: Case = t.asserts("a multi-word clause is still one clause") {
+    const third = nodeAt(ref ast, childAt(ref ast, decl, 2));
+    theory.isSuccessful = str.stringEq(third.name, "mustCall");
+    theory.detail = `the third clause is "${third.name}", wanted "mustCall"`;
+  }
+
+  let params = parseOk("kind aligned(n: usize) { appliesTo binding; }");
+  let test theory: Case = t.asserts("a parameterized kind keeps its parameter list") {
+    theory.isSuccessful = topLevel(ref params, 0).childA != 0;
+    theory.detail = "`kind aligned(n: usize)` recorded no parameter list";
+  }
+
+  // A clause body can be a braced block, so a clause ends at the `;` at DEPTH
+  // ZERO. Stopping at the first `;` leaves a stray `}` that surfaces much later
+  // as "unexpected token at top level".
+  let braced = parseOk("kind c_layout { appliesTo type; layout { abi \"C\"; }; }\nfunction f(): int { return 1; }");
+  let test theory: Case = t.asserts("a braced clause body does not end the clause early") {
+    theory.isSuccessful = topLevel(ref braced, 0).childCount == 2 &&
+      topLevel(ref braced, 1).kind == ASTNodeKind.FUNCTION_DECL;
+    theory.detail = `recorded ${topLevel(ref braced, 0).childCount} clause(s), and the next decl is ${topLevel(ref braced, 1).kind}`;
+  }
+
+  // A kind on a TYPE is written AFTER the name, unlike the one on a function.
+  let onType = parseOk("type SockAddrIn c_layout { x: int, }");
+  let test theory: Case = t.asserts("a type takes its kind after the name") {
+    const decl = topLevel(ref onType, 0);
+    theory.isSuccessful = decl.kind == ASTNodeKind.TYPE_DECL && decl.childB != 0 && decl.childCount == 1;
+    theory.detail = `the decl is ${decl.kind} with kind slot ${decl.childB} and ${decl.childCount} field(s)`;
+  }
+
+  let withArgs = parseOk("type Buf aligned(16) { x: int, }");
+  let test theory: Case = t.asserts("a kind's arguments are consumed, not left to confuse the body") {
+    theory.isSuccessful = topLevel(ref withArgs, 0).childCount == 1;
+    theory.detail = `the decl recorded ${topLevel(ref withArgs, 0).childCount} field(s), wanted 1`;
+  }
+
+  let composed = parseOk("kind scoped = disposable_base & noescape;\nfunction f(): int { return 1; }");
+  let test theory: Case = t.asserts("a composition parses and does not swallow what follows") {
+    theory.isSuccessful = topLevel(ref composed, 0).kind == ASTNodeKind.KIND_DECL &&
+      topLevel(ref composed, 1).kind == ASTNodeKind.FUNCTION_DECL;
+    theory.detail = `after a composition the next decl is ${topLevel(ref composed, 1).kind}, wanted FUNCTION_DECL`;
+  }
+}
+
+// `async` is a kind, not a keyword - so a kind prefix stands where `function`
+// would rather than in front of it, and the parser needs no list of blessed
+// words to recognize one.
+suite function kindPrefixesReplaceTheFunctionKeyword(): void {
+  let ast = parseOk("async fetch(u: string): string { return u; }");
+  const decl = topLevel(ref ast, 0);
+
+  let test theory: Case = t.asserts("a kind-prefixed declaration is an ordinary FUNCTION_DECL") {
+    theory.isSuccessful = decl.kind == ASTNodeKind.FUNCTION_DECL && str.stringEq(decl.name, "fetch");
+    theory.detail = `the node is ${decl.kind} named "${decl.name}", wanted FUNCTION_DECL "fetch"`;
+  }
+
+  let test theory: Case = t.asserts("the prefix is recorded rather than dropped") {
+    const prefixes = nodeAt(ref ast, decl.childE);
+    const first = nodeAt(ref ast, childAt(ref ast, prefixes, 0));
+    theory.isSuccessful = prefixes.childCount == 1 && str.stringEq(first.name, "async");
+    theory.detail = `recorded ${prefixes.childCount} prefix(es), first "${first.name}", wanted 1 and "async"`;
+  }
+
+  let test theory: Case = t.asserts("the parameters and return type survive the shared path") {
+    const params = nodeAt(ref ast, decl.childB);
+    theory.isSuccessful = params.childCount == 1 && decl.childC != 0 && decl.childD != 0;
+    theory.detail = `${params.childCount} param(s), return slot ${decl.childC}, body slot ${decl.childD}`;
+  }
+
+  let several = parseOk("pooled tainted buf(): int { return 1; }");
+  let test theory: Case = t.asserts("several prefixes all land in the list") {
+    theory.isSuccessful = nodeAt(ref several, topLevel(ref several, 0).childE).childCount == 2;
+    theory.detail = `recorded ${nodeAt(ref several, topLevel(ref several, 0).childE).childCount} prefix(es), wanted 2`;
+  }
+
+  // The plain form has to keep working: the two spellings share everything from
+  // the name onward, so a change to one is a change to both.
+  let plain = parseOk("function fetch(u: string): string { return u; }");
+  let test theory: Case = t.asserts("a plain `function` still parses, with no prefixes") {
+    theory.isSuccessful = topLevel(ref plain, 0).kind == ASTNodeKind.FUNCTION_DECL &&
+      topLevel(ref plain, 0).childE == 0;
+    theory.detail = `plain function recorded prefix slot ${topLevel(ref plain, 0).childE}, wanted 0`;
+  }
+
+  let exported = parseOk("export async fetch(): int { return 1; }");
+  let test theory: Case = t.asserts("`export async` reaches the same parser") {
+    const inner = nodeAt(ref exported, topLevel(ref exported, 0).childA);
+    theory.isSuccessful = inner.kind == ASTNodeKind.FUNCTION_DECL && inner.childE != 0;
+    theory.detail = `the exported decl is ${inner.kind} with prefix slot ${inner.childE}`;
+  }
+
+  let exportedKind = parseOk("export kind async { appliesTo function; pausable; }");
+  let test theory: Case = t.asserts("`export kind` reaches the kind parser") {
+    const inner = nodeAt(ref exportedKind, topLevel(ref exportedKind, 0).childA);
+    theory.isSuccessful = inner.kind == ASTNodeKind.KIND_DECL;
+    theory.detail = `the exported decl is ${inner.kind}, wanted KIND_DECL`;
+  }
+
+  // The one async form the bootstrap's own std closure needs, and the one that
+  // needs no codegen at all - a signature has no body to emit.
+  let sig = parseOk("trait Readable { async read(ref self, ref buf: uint8[]): int; }");
+  let test theory: Case = t.asserts("a trait method signature takes a kind prefix too") {
+    const method = nodeAt(ref sig, childAt(ref sig, topLevel(ref sig, 0), 0));
+    theory.isSuccessful = method.kind == ASTNodeKind.METHOD_SIG && method.childE != 0 && method.childD == 0;
+    theory.detail = `the member is ${method.kind}, prefix slot ${method.childE}, body slot ${method.childD}`;
+  }
+}
+
+suite function propagatesClausesAreRecorded(): void {
+  let fn = parseOk("function vecNew(n: usize): int propagates<disposable> { return 1; }");
+  const decl = topLevel(ref fn, 0);
+
+  let test theory: Case = t.asserts("a function's clause lands in its own slot") {
+    theory.isSuccessful = decl.childF != 0;
+    theory.detail = `the function's propagates slot is ${decl.childF}, wanted non-zero`;
+  }
+
+  let test theory: Case = t.asserts("the clause is a list of the kinds it names") {
+    const list = nodeAt(ref fn, decl.childF);
+    const first = nodeAt(ref fn, childAt(ref fn, list, 0));
+    theory.isSuccessful = list.childCount == 1 && str.stringEq(first.name, "disposable");
+    theory.detail = `recorded ${list.childCount} kind(s), first "${first.name}", wanted 1 and "disposable"`;
+  }
+
+  let test theory: Case = t.asserts("the body still parses after the clause") {
+    theory.isSuccessful = decl.childD != 0;
+    theory.detail = `the body slot is ${decl.childD}, wanted non-zero`;
+  }
+
+  let several = parseOk("function f(): int propagates<disposable, tainted> { return 1; }");
+  let test theory: Case = t.asserts("several kinds all land in the list") {
+    theory.isSuccessful = nodeAt(ref several, topLevel(ref several, 0).childF).childCount == 2;
+    theory.detail = `recorded ${nodeAt(ref several, topLevel(ref several, 0).childF).childCount} kind(s), wanted 2`;
+  }
+
+  let none = parseOk("function f(): int { return 1; }");
+  let test theory: Case = t.asserts("no clause is 0, not an empty list") {
+    theory.isSuccessful = topLevel(ref none, 0).childF == 0;
+    theory.detail = `a function with no clause has childF ${topLevel(ref none, 0).childF}, wanted 0`;
+  }
+
+  let onType = parseOk("type Buf propagates<disposable> { n: int, }");
+  let test theory: Case = t.asserts("a type takes the clause after its name") {
+    const t2 = topLevel(ref onType, 0);
+    theory.isSuccessful = t2.kind == ASTNodeKind.TYPE_DECL && t2.childF != 0 && t2.childCount == 1;
+    theory.detail = `the decl is ${t2.kind} with clause slot ${t2.childF} and ${t2.childCount} field(s)`;
+  }
+
+  // The clauses have a fixed order, and a parser that took them in the wrong
+  // one would read `propagates` as a trait name.
+  let both = parseOk("variant R implements Disposable propagates<disposable> { A, B }");
+  let test theory: Case = t.asserts("a variant takes implements and propagates, in that order") {
+    const v = topLevel(ref both, 0);
+    theory.isSuccessful = v.childD != 0 && v.childF != 0 && v.childCount == 2;
+    theory.detail = `implements slot ${v.childD}, propagates slot ${v.childF}, ${v.childCount} case(s)`;
+  }
+}
+
+// `Buf propagates<tracked>` and `disposable Buf` are both two identifiers in a
+// row: one is a type followed by a clause, the other a kind prefix followed by
+// a type. `propagates` is contextual, so telling them apart means reading the
+// second identifier's TEXT rather than its tag - and getting it wrong makes
+// `propagates` itself the type name, which reads as "unknown type propagates".
+suite function aClauseKeywordIsNotAKindPrefix(): void {
+  let ast = parseOk("function make(): Buf propagates<tracked> { return 1; }");
+  const decl = topLevel(ref ast, 0);
+  const ret = nodeAt(ref ast, decl.childC);
+
+  let test theory: Case = t.asserts("the return type is the type, not the clause keyword") {
+    theory.isSuccessful = str.stringEq(ret.name, "Buf");
+    theory.detail = `the return type parsed as "${ret.name}", wanted "Buf"`;
+  }
+
+  let test theory: Case = t.asserts("and the clause is still recorded") {
+    theory.isSuccessful = decl.childF != 0;
+    theory.detail = `the clause slot is ${decl.childF}, wanted non-zero`;
+  }
+
+  // The real kind-prefix form has to keep working, or the guard above is just
+  // breaking prefixes to fix clauses.
+  let prefixed = parseOk("type Handle disposable { n: int, }");
+  let test theory: Case = t.asserts("a genuine kind on a type still parses") {
+    theory.isSuccessful = topLevel(ref prefixed, 0).childB != 0;
+    theory.detail = `the kind slot is ${topLevel(ref prefixed, 0).childB}, wanted non-zero`;
+  }
+}
+
+suite function charLiteralsAreIntegerLiterals(): void {
+  let ast = parseOk("function f(): int { return 'a'; }");
+  const node = returnedExpression(ref ast);
+
+  // The lexer already decoded the codepoint, so there is nothing for a separate
+  // node kind to carry - and making one would give the typechecker a second
+  // literal to pin, for no gain.
+  let test theory: Case = t.asserts("a char literal builds an INT_LITERAL") {
+    theory.isSuccessful = node.kind == ASTNodeKind.INT_LITERAL;
+    theory.detail = `'a' parsed as ${node.kind}, wanted INT_LITERAL`;
+  }
+
+  let test theory: Case = t.asserts("carrying the codepoint as its value") {
+    theory.isSuccessful = node.intVal == 97;
+    theory.detail = `'a' has value ${node.intVal}, wanted 97`;
+  }
+
+  let escaped = parseOk("function f(): int { return '\\n'; }");
+  let test theory: Case = t.asserts("an escape decodes to its byte") {
+    theory.isSuccessful = returnedExpression(ref escaped).intVal == 10;
+    theory.detail = `'\\n' has value ${returnedExpression(ref escaped).intVal}, wanted 10`;
+  }
+
+  let quote = parseOk("function f(): int { return '\\''; }");
+  let test theory: Case = t.asserts("a char literal can escape its own delimiter") {
+    theory.isSuccessful = returnedExpression(ref quote).intVal == 39;
+    theory.detail = `'\\'' has value ${returnedExpression(ref quote).intVal}, wanted 39`;
+  }
+
+  // In a PATTERN too. `case '0', '1':` is how std spells a digit test, and the
+  // pattern parser has its own literal path that would otherwise reject it.
+  let pattern = parseOk("function f(b: uint8): int { switch (b) { case '0': { return 1; } default: { return 0; } } }");
+  let test theory: Case = t.asserts("a char literal works as a switch pattern") {
+    theory.isSuccessful = firstSwitchPattern(ref pattern).intVal == 48;
+    theory.detail = `case '0' has value ${firstSwitchPattern(ref pattern).intVal}, wanted 48`;
+  }
+}
+
+suite function functionTypeAnnotationsParse(): void {
+  let ast = parseOk("type Ops { hash: (k: string, n: usize) => uint64, }");
+  const field = nodeAt(ref ast, childAt(ref ast, topLevel(ref ast, 0), 0));
+  const annot = nodeAt(ref ast, field.childA);
+
+  let test theory: Case = t.asserts("a `=>` annotation is a FUNC_TYPE") {
+    theory.isSuccessful = annot.kind == ASTNodeKind.TYPE_ANNOTATION_FUNC_TYPE;
+    theory.detail = `the field's annotation is ${annot.kind}, wanted TYPE_ANNOTATION_FUNC_TYPE`;
+  }
+
+  let test theory: Case = t.asserts("its parameters land in a list, its return in childB") {
+    const params = nodeAt(ref ast, annot.childA);
+    theory.isSuccessful = params.childCount == 2 && annot.childB != 0;
+    theory.detail = `${params.childCount} param(s), return slot ${annot.childB}`;
+  }
+
+  let none = parseOk("type Ops { run: () => void, }");
+  let test theory: Case = t.asserts("an empty parameter list is legal") {
+    const a2 = nodeAt(ref none, nodeAt(ref none, childAt(ref none, topLevel(ref none, 0), 0)).childA);
+    theory.isSuccessful = a2.kind == ASTNodeKind.TYPE_ANNOTATION_FUNC_TYPE &&
+      nodeAt(ref none, a2.childA).childCount == 0;
+    theory.detail = `an empty parameter list parsed as ${a2.kind}`;
+  }
+
+  let refParam = parseOk("type Ops { fill: (ref buf: uint8[]) => void, }");
+  let test theory: Case = t.asserts("a ref parameter is part of the signature") {
+    const a3 = nodeAt(ref refParam, nodeAt(ref refParam, childAt(ref refParam, topLevel(ref refParam, 0), 0)).childA);
+    const p0 = nodeAt(ref refParam, childAt(ref refParam, nodeAt(ref refParam, a3.childA), 0));
+    theory.isSuccessful = p0.flagA;
+    theory.detail = `the parameter's isRef is ${p0.flagA}, wanted true`;
+  }
+}
+
+// A return type is parsed GREEDILY, so `(k: K) => V[]` is a function returning
+// an array. A parenthesized group is the only way to lift the array out, and it
+// exists for exactly that.
+suite function parenthesizedTypeGroupsAttachArraySuffixes(): void {
+  let grouped = parseOk("type T { fns: ((k: string) => uint64)[], }");
+  const outer = nodeAt(ref grouped, nodeAt(ref grouped, childAt(ref grouped, topLevel(ref grouped, 0), 0)).childA);
+
+  let test theory: Case = t.asserts("a group lifts the array out to the whole function type") {
+    theory.isSuccessful = outer.kind == ASTNodeKind.TYPE_ANNOTATION_ARRAY_TYPE &&
+      nodeAt(ref grouped, outer.childA).kind == ASTNodeKind.TYPE_ANNOTATION_FUNC_TYPE;
+    theory.detail = `outer is ${outer.kind}, inner is ${nodeAt(ref grouped, outer.childA).kind}`;
+  }
+
+  let greedy = parseOk("type T { f: (k: string) => uint64[], }");
+  let test theory: Case = t.asserts("without a group the array binds to the RETURN type") {
+    const a = nodeAt(ref greedy, nodeAt(ref greedy, childAt(ref greedy, topLevel(ref greedy, 0), 0)).childA);
+    theory.isSuccessful = a.kind == ASTNodeKind.TYPE_ANNOTATION_FUNC_TYPE &&
+      nodeAt(ref greedy, a.childB).kind == ASTNodeKind.TYPE_ANNOTATION_ARRAY_TYPE;
+    theory.detail = `annotation is ${a.kind}, its return is ${nodeAt(ref greedy, a.childB).kind}`;
+  }
+
+  // The fork is decided at one token of lookahead, which is why parameters must
+  // be named: `(T)` and `(T) => R` would otherwise be indistinguishable.
+  let plainGroup = parseOk("type T { xs: (uint8)[], }");
+  let test theory: Case = t.asserts("a group with no `=>` is just a parenthesized type") {
+    const a = nodeAt(ref plainGroup, nodeAt(ref plainGroup, childAt(ref plainGroup, topLevel(ref plainGroup, 0), 0)).childA);
+    theory.isSuccessful = a.kind == ASTNodeKind.TYPE_ANNOTATION_ARRAY_TYPE;
+    theory.detail = `(uint8)[] parsed as ${a.kind}, wanted an array`;
+  }
+}
+
+// A call through anything but a name or a field used to be accepted and then
+// SILENTLY miscompiled - the arguments were dropped and the function pointer
+// itself became the value. It only became reachable when `((k: K) => V)[]`
+// started parsing.
+suite function callingAValueThatIsNotANameOrFieldIsRefused(): void {
+  let test theory: Case = t.asserts("calling an indexed element is refused") {
+    theory.isSuccessful = refusalMentions(
+      "function f(): int { return fns[0](1); }",
+      "can only be called through a name or a field"
+    );
+    theory.detail = "`fns[0](1)` parsed without a diagnostic";
+  }
+
+  let test theory: Case = t.asserts("so is calling a call's result") {
+    theory.isSuccessful = refusalMentions(
+      "function f(): int { return g()(1); }",
+      "can only be called through a name or a field"
+    );
+    theory.detail = "`g()(1)` parsed without a diagnostic";
+  }
+
+  // The two supported spellings must still work, or the refusal above is just
+  // breaking calls.
+  let test theory: Case = t.asserts("a plain call and a field call still parse") {
+    theory.isSuccessful = parseError("function f(): int { return g(1); }").len == 0 &&
+      parseError("function f(): int { return ops.hash(1); }").len == 0;
+    theory.detail = "a supported call form was refused";
+  }
+}
+
+suite function sliceExpressionsAreNotIndexes(): void {
+  let both = parseOk("function f(): int { return xs[1..3]; }");
+  const sliced = returnedExpression(ref both);
+
+  // An index and a slice open the same way, so the index expression is parsed
+  // FIRST and reinterpreted when a `..` follows - not looked ahead for.
+  let test theory: Case = t.asserts("`xs[a..b]` is a SLICE_EXPRESSION") {
+    theory.isSuccessful = sliced.kind == ASTNodeKind.SLICE_EXPRESSION &&
+      sliced.childB != 0 && sliced.childC != 0;
+    theory.detail = `parsed as ${sliced.kind}, start ${sliced.childB}, end ${sliced.childC}`;
+  }
+
+  let indexed = parseOk("function f(): int { return xs[1]; }");
+  let test theory: Case = t.asserts("`xs[a]` is still an INDEX_EXPRESSION") {
+    theory.isSuccessful = returnedExpression(ref indexed).kind == ASTNodeKind.INDEX_EXPRESSION;
+    theory.detail = `parsed as ${returnedExpression(ref indexed).kind}, wanted INDEX_EXPRESSION`;
+  }
+
+  // An omitted bound is 0 rather than a synthesized literal: "to the end" is
+  // the base's length, and codegen is the only layer that has it.
+  let openEnd = parseOk("function f(): int { return xs[1..]; }");
+  let test theory: Case = t.asserts("an omitted END is 0, not a synthesized bound") {
+    const n = returnedExpression(ref openEnd);
+    theory.isSuccessful = n.kind == ASTNodeKind.SLICE_EXPRESSION && n.childB != 0 && n.childC == 0;
+    theory.detail = `start ${n.childB}, end ${n.childC}, wanted a start and 0`;
+  }
+
+  let openStart = parseOk("function f(): int { return xs[..2]; }");
+  let test theory: Case = t.asserts("an omitted START is 0 too") {
+    const n = returnedExpression(ref openStart);
+    theory.isSuccessful = n.kind == ASTNodeKind.SLICE_EXPRESSION && n.childB == 0 && n.childC != 0;
+    theory.detail = `start ${n.childB}, end ${n.childC}, wanted 0 and an end`;
+  }
+
+  let openBoth = parseOk("function f(): int { return xs[..]; }");
+  let test theory: Case = t.asserts("both bounds may be omitted") {
+    const n = returnedExpression(ref openBoth);
+    theory.isSuccessful = n.kind == ASTNodeKind.SLICE_EXPRESSION && n.childB == 0 && n.childC == 0;
+    theory.detail = `start ${n.childB}, end ${n.childC}, wanted 0 and 0`;
+  }
+
+  // A slice is a postfix like any other, so it chains.
+  let chained = parseOk("function f(): int { return xs[1..3][0]; }");
+  let test theory: Case = t.asserts("a slice chains with an index") {
+    const n = returnedExpression(ref chained);
+    theory.isSuccessful = n.kind == ASTNodeKind.INDEX_EXPRESSION &&
+      nodeAt(ref chained, n.childA).kind == ASTNodeKind.SLICE_EXPRESSION;
+    theory.detail = `outer ${n.kind}, inner ${nodeAt(ref chained, n.childA).kind}`;
+  }
+}
+
+suite function vtablesAndNullParse(): void {
+  let ast = parseOk("vtable Reader for Readable { read: () => int, }");
+  const decl = topLevel(ref ast, 0);
+
+  let test theory: Case = t.asserts("`vtable N for T { ... }` is a VTABLE_DECL") {
+    theory.isSuccessful = decl.kind == ASTNodeKind.VTABLE_DECL && str.stringEq(decl.name, "Reader");
+    theory.detail = `parsed as ${decl.kind} named "${decl.name}"`;
+  }
+
+  let test theory: Case = t.asserts("the erased trait and the fields both land") {
+    theory.isSuccessful = decl.childA != 0 && decl.childCount == 1;
+    theory.detail = `trait slot ${decl.childA}, ${decl.childCount} field(s)`;
+  }
+
+  let exported = parseOk("export vtable Reader for Readable { read: () => int, }");
+  let test theory: Case = t.asserts("`export vtable` reaches the same parser") {
+    theory.isSuccessful = nodeAt(ref exported, topLevel(ref exported, 0).childA).kind == ASTNodeKind.VTABLE_DECL;
+    theory.detail = `the exported decl is ${nodeAt(ref exported, topLevel(ref exported, 0).childA).kind}`;
+  }
+
+  let nul = parseOk("function f(): int { return null; }");
+  let test theory: Case = t.asserts("`null` is its own literal, carrying no value") {
+    theory.isSuccessful = returnedExpression(ref nul).kind == ASTNodeKind.NULL_LITERAL;
+    theory.detail = `null parsed as ${returnedExpression(ref nul).kind}`;
+  }
+}
+
+// `&` and `*` are each both a prefix and a binary operator. The prefix position
+// is where a binary operator cannot appear, so there is no ambiguity and no
+// lookahead - but the two readings have to actually come out different.
+suite function prefixAmpAndStarAreNotTheBinaryOnes(): void {
+  let addr = parseOk("function f(): int { return &n; }");
+  let test theory: Case = t.asserts("a leading `&` is ADDRESS_OF") {
+    theory.isSuccessful = returnedExpression(ref addr).kind == ASTNodeKind.ADDRESS_OF_EXPRESSION;
+    theory.detail = `&n parsed as ${returnedExpression(ref addr).kind}`;
+  }
+
+  let deref = parseOk("function f(): int { return *p; }");
+  let test theory: Case = t.asserts("a leading `*` is DEREF") {
+    theory.isSuccessful = returnedExpression(ref deref).kind == ASTNodeKind.DEREF_EXPRESSION;
+    theory.detail = `*p parsed as ${returnedExpression(ref deref).kind}`;
+  }
+
+  let band = parseOk("function f(): int { return a & b; }");
+  let test theory: Case = t.asserts("an infix `&` is still a binary expression") {
+    theory.isSuccessful = returnedExpression(ref band).kind == ASTNodeKind.BINARY_EXPRESSION;
+    theory.detail = `a & b parsed as ${returnedExpression(ref band).kind}`;
+  }
+
+  let mul = parseOk("function f(): int { return a * b; }");
+  let test theory: Case = t.asserts("an infix `*` is still a binary expression") {
+    theory.isSuccessful = returnedExpression(ref mul).kind == ASTNodeKind.BINARY_EXPRESSION;
+    theory.detail = `a * b parsed as ${returnedExpression(ref mul).kind}`;
+  }
+
+  // The one that actually bit: assignment binds LOOSEST, so a prefix operand
+  // must not swallow it. Without the guard `*p = 9` becomes `*(p = 9)`, which
+  // reports "cannot assign to const p" and points at the wrong thing.
+  let store = parseOk("function f(): void { *p = 9; }");
+  let test theory: Case = t.asserts("`*p = 9` assigns THROUGH the pointer") {
+    const stmt = nodeAt(ref store, firstStatement(ref store).childA);
+    theory.isSuccessful = stmt.kind == ASTNodeKind.ASSIGNMENT &&
+      nodeAt(ref store, stmt.childA).kind == ASTNodeKind.DEREF_EXPRESSION;
+    theory.detail = `the statement is ${stmt.kind} with target ${nodeAt(ref store, stmt.childA).kind}`;
+  }
+
+  let compound = parseOk("function f(): void { *p = *p * 3; }");
+  let test theory: Case = t.asserts("and the right-hand side may deref too") {
+    const stmt = nodeAt(ref compound, firstStatement(ref compound).childA);
+    theory.isSuccessful = stmt.kind == ASTNodeKind.ASSIGNMENT &&
+      nodeAt(ref compound, stmt.childB).kind == ASTNodeKind.BINARY_EXPRESSION;
+    theory.detail = `the value is ${nodeAt(ref compound, stmt.childB).kind}`;
+  }
+}
+
 // ----- helpers ---------------------------------------------------------------
 
 // Parses, or hands back an empty arena so the assertion that asked fails rather

@@ -1,0 +1,7 @@
+sum=14
+seen=3
+touched=0
+a=10 b=20 | weight=30
+pairs=25
+xyz
+exit=0

@@ -138,6 +138,17 @@ export function fillTraitMethods(
     default: { return; }
   }
 
+  // `trait Joinable<T> { function join(ref self): T; }` - the parameters are in
+  // scope while the SIGNATURES resolve, so `T` means something.
+  //
+  // This is what makes a generic trait DECLARE. It is not what makes one
+  // dispatch: `Iterable<MapEntry<K, V>>` still has to be instantiated before
+  // its `next` can be called, and nothing here does that. The parameters are
+  // recorded on the trait so the day it does, they are already there.
+  disposable typeParams: Vec<TypeId> = traitTypeParams(ref prog, ref ast, declNode);
+  disposable paramNames: Vec<string> = traitTypeParamNames(ref ast, declNode);
+  beginTypeParams(ref prog, ref typeParams, ref paramNames);
+
   let methods: Map<string, TypeId> = map.mapNew(0, map.stringKeyOps());
   let i: usize = 0;
   while (i < declNode.childCount) {
@@ -146,13 +157,47 @@ export function fillTraitMethods(
       funcTypeOfSignature(ref prog, ref tm, ref ast, sigNode));
     i += 1;
   }
+  endTypeParams(ref prog);
 
   setType(ref prog, typeId, Type.Trait {
     decl: { name: declNode.name, module: moduleId, populated: true },
     methods: methods,
-    typeParams: vec.vecNew(0),
+    typeParams: typeParams,
     extendsTraits: vec.vecNew(0),
   });
+}
+
+// A trait's type parameters, as opaque TypeParams.
+function traitTypeParams(ref prog: Program, ref ast: AST, declNode: ASTNode): Vec<TypeId> propagates<disposable> {
+  let params: Vec<TypeId> = vec.vecNew(2);
+  if (declNode.childA == 0) {
+    return params;
+  }
+  const list = nodeAt(ref ast, declNode.childA);
+  let i: usize = 0;
+  while (i < list.childCount) {
+    vec.vecPush(ref params, internType(ref prog, Type.TypeParam {
+      name: nodeAt(ref ast, childAt(ref ast, list, i)).name,
+      originDecl: 0,
+      bounds: vec.vecNew(0),
+    }));
+    i += 1;
+  }
+  return params;
+}
+
+function traitTypeParamNames(ref ast: AST, declNode: ASTNode): Vec<string> propagates<disposable> {
+  let names: Vec<string> = vec.vecNew(2);
+  if (declNode.childA == 0) {
+    return names;
+  }
+  const list = nodeAt(ref ast, declNode.childA);
+  let i: usize = 0;
+  while (i < list.childCount) {
+    vec.vecPush(ref names, nodeAt(ref ast, childAt(ref ast, list, i)).name);
+    i += 1;
+  }
+  return names;
 }
 
 // The METHOD members of a type decl, as a name -> Func map. Fields are the

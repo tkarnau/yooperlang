@@ -35,6 +35,7 @@ module codegen;
 // well-formed input. An internal-error return here is a typecheck bug.
 
 import { Vec }, * as vec from "std/core/vec.yoop";
+import { Map }, * as map from "std/collections/map.yoop";
 import { Text }, * as text from "std/core/text.yoop";
 import { disposable } from "std/core/kinds.yoop";
 import { Result } from "std/core/types.yoop";
@@ -151,6 +152,23 @@ function emitMethods(
   m: Module,
   declNode: ASTNode
 ): string {
+  // A GENERIC type's methods are templates: their `ref self` is `Box<T>`, whose
+  // layout is unknown until T is. Emitting one produces IR that operates on the
+  // template type and does not verify.
+  //
+  // The right answer is to emit one copy per instantiation, the way generic
+  // FUNCTIONS already are - but that needs a "current type instance" on the Cx
+  // for `resolvedTypeAt` to substitute against, which generic functions get
+  // from `cx.instance` and type methods have no equivalent of. Refused by name
+  // until that exists; typechecking them already works, which is what std
+  // needed.
+  if (declNode.childA != 0 && declNodeHasMethods(ref m.ast, declNode)) {
+    return unsupportedHere(
+      "a method on a generic type, which needs one copy emitted per instantiation",
+      declNode.name
+    );
+  }
+
   let i: usize = 0;
   while (i < declNode.childCount) {
     const member = nodeAt(ref m.ast, childAt(ref m.ast, declNode, i));
@@ -199,6 +217,17 @@ function emitFunction(
   declNode: ASTNode,
   instance: usize
 ): string {
+  // A coroutine, and there is no coroutine lowering. Refused HERE rather than
+  // waved through, because an `async` function emitted as an ordinary one
+  // compiles and links and then simply never suspends - a silent miscompile
+  // instead of a missing feature.
+  if (map.mapContainsKey(ref tm.pausableNames, declNode.name)) {
+    return unsupportedHere(
+      "a coroutine - a function carrying a pausable kind such as `async` or `task`",
+      declNode.name
+    );
+  }
+
   // One locals map per function; the Cx bundles it with everything else so the
   // walk below is not threading five arguments through every call.
   disposable locals: FnLocals = localsNew();
@@ -298,4 +327,16 @@ function emitParamPrologue(ref cx: Cx, ref params: Vec<ParamInfo>): void {
     emitStoreArg(ref cx, p.ty, p.name, slotInfo.id);
     i += 1;
   }
+}
+
+// Whether a decl's member run holds any METHOD_DECL.
+function declNodeHasMethods(ref ast: AST, declNode: ASTNode): bool {
+  let i: usize = 0;
+  while (i < declNode.childCount) {
+    if (nodeAt(ref ast, childAt(ref ast, declNode, i)).kind == ASTNodeKind.METHOD_DECL) {
+      return true;
+    }
+    i += 1;
+  }
+  return false;
 }

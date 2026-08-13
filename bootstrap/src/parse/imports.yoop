@@ -133,10 +133,23 @@ export function parseExportDecl(ref ps: ParserState): Result<NodeId, ParsingErro
     case TokenTags.TRAIT: {
       node.childA = parseTraitDecl(ref ps)?;
     }
+    case TokenTags.VTABLE: {
+      node.childA = parseVtableDecl(ref ps)?;
+    }
     default: {
+      // `export kind async { ... }` and `export async fetch(...)`. Both open
+      // with an IDENT, so they are told apart the same way the top level does.
+      if (atKindDecl(ref ps)) {
+        node.childA = parseKindDecl(ref ps)?;
+        return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
+      }
+      if (atKindPrefixedDecl(ref ps)) {
+        node.childA = parseKindPrefixedDecl(ref ps)?;
+        return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
+      }
       return Result.Err { error: SelfLexing.createParsingError(
         ref ps,
-        `only \`export function\`, \`export type\`, \`export variant\` and \`export const\` are supported by the bootstrap parser yet, got ${tagName(declTag)}`,
+        `only \`export function\`, \`export type\`, \`export variant\`, \`export const\`, \`export trait\` and \`export kind\` are supported by the bootstrap parser yet, got ${tagName(declTag)}`,
         peekLengthUsize(ref ps),
       )};
     }

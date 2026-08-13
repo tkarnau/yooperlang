@@ -1,0 +1,68 @@
+// The pieces that got the std closure typechecking: generic methods, a generic
+// body's type parameters, string `.len`, and untyped literals in mixed
+// arithmetic.
+//
+// Each of these was invisible until real std code hit it, and each is the kind
+// of gap that produces a confusing message far from its cause:
+//
+//   `ref self` in `type Vec<T>` annotated as bare `Vec`, which reports
+//   "Vec is generic, so it needs type arguments" pointing at the method
+//
+//   a generic function's BODY had no type parameters in scope, so
+//   `let xs: T[] = ...` inside it reported "unknown type T"
+//
+//   instantiating `Vec<T>` dropped its METHODS, so `Vec<string>` stopped
+//   implementing the traits `Vec<T>` was declared to implement
+//
+//   trait satisfaction was checked during the fill, but the GENERIC sweep runs
+//   before traits are filled - so a generic type reported "no implemented
+//   trait requires it" about a trait that simply was not populated yet
+//
+//   a cast pinned its operand, so `uint8(48 + big)` refused to add an
+//   int to a uint64 - a difference the writer never wrote
+
+// A generic type. Its methods TYPECHECK - `ref self` is `Box<T>` and not bare
+// `Box`, which is what unblocked std - but emitting one needs a copy per
+// instantiation, so this one has none. See bootstrap/README.md.
+type Box<T> {
+  value: T,
+  count: usize,
+}
+
+// A generic FUNCTION whose body declares an annotated local using T. The
+// parameters have to be in scope for the body, not just the signature.
+function pairOf<T>(a: T, b: T): usize {
+  const both: T[] = [a, b];
+  return both.len;
+}
+
+function main(): int {
+  const bs: Box<string> = { value: "hi", count: 3 };
+  const bi: Box<int32> = { value: 7, count: 5 };
+  printf("counts %llu %llu\n", bs.count, bi.count);
+
+  // Typed rather than bare literals: the JS reference cannot infer a type
+  // parameter from an untyped int, and this fixture is asserted against both.
+  const one: int32 = 1;
+  const two: int32 = 2;
+  printf("pairs %llu %llu\n", pairOf("a", "b"), pairOf(one, two));
+
+  // A string's `.len` is its BYTE length - one strlen, since a string has no
+  // length beside it the way an array does.
+  const s: string = "hello";
+  const empty: string = "";
+  printf("len %llu %llu %llu\n", s.len, empty.len, bs.value.len);
+
+  // A cast converts what it is GIVEN, so it must not reach in and pin its
+  // operand: the 48 here takes uint64 from `rest`, not uint8 from the cast.
+  let rest: uint64 = 7;
+  const digit: uint8 = uint8(48 + (rest % 10));
+  printf("digit %d\n", digit);
+
+  // And a leading literal takes the other operand's type rather than
+  // defaulting to int32 before the right side is known.
+  const scaled: uint64 = 2 * rest;
+  printf("scaled %llu\n", scaled);
+
+  return 0;
+}

@@ -87,19 +87,39 @@ function parseAST(ref ps: ParserState): Result<NodeId, ParsingError> {
       case TokenTags.TRAIT: {
         vec.vecPush(ref body, parseTraitDecl(ref ps)?);
       }
+      case TokenTags.VTABLE: {
+        vec.vecPush(ref body, parseVtableDecl(ref ps)?);
+      }
       case TokenTags.FUNCTION /*, TokenTags.TASK */: {
         vec.vecPush(ref body, parseFunctionDecl(ref ps)?);
       }
       // TODO: rest of tags...
       default: {
-        // A header below the first declaration. It is contextual (it lexes as
-        // IDENT), so without this it reads as an unhelpful "unexpected IDENT".
+        // A header below the first declaration. Checked BEFORE the kind forms
+        // because `module lex;` is two identifiers in a row and would
+        // otherwise be read as a kind-prefixed declaration, which reports a
+        // missing `(` instead of the real mistake.
         if (peekIsWord(ref ps, "module")) {
           return Result.Err { error: SelfLexing.createParsingError(
             ref ps,
             "a `module <name>;` header must be the FIRST thing in the file, above the imports",
             peekLengthUsize(ref ps),
           )};
+        }
+        // `kind async { ... }` - a kind DECLARATION. Contextual, so it arrives
+        // as an IDENT like everything else here.
+        if (atKindDecl(ref ps)) {
+          vec.vecPush(ref body, parseKindDecl(ref ps)?);
+          peekTag = SelfLexing.peek(ref ps).tag;
+          continue;
+        }
+        // `async fetch(...)` - a declaration CARRYING a kind. A kind prefix
+        // stands where the `function` keyword would, so there is no keyword to
+        // dispatch on and the two-identifier shape is what says so.
+        if (atKindPrefixedDecl(ref ps)) {
+          vec.vecPush(ref body, parseKindPrefixedDecl(ref ps)?);
+          peekTag = SelfLexing.peek(ref ps).tag;
+          continue;
         }
         return Result.Err { error: SelfLexing.createParsingError(
           ref ps,

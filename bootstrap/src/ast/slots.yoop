@@ -85,6 +85,9 @@ export function astNodeChildAName(v: ASTNodeKind): string {
          ASTNodeKind.FOR_LOOP: {
       return "typeAnnotation";
     }
+    case ASTNodeKind.FOR_IN_LOOP: {
+      return "iterable";
+    }
     case ASTNodeKind.BLOCK: {
       return "statementsList";
     }
@@ -144,6 +147,9 @@ export function astNodeChildBName(v: ASTNodeKind): string {
     }
     case ASTNodeKind.FOR_LOOP: {
       return "initExpr";
+    }
+    case ASTNodeKind.FOR_IN_LOOP: {
+      return "bodyBlock";
     }
     case ASTNodeKind.IF_STATEMENT: {
       return "thenBlock";
@@ -262,6 +268,22 @@ export function astNodeChildListName(v: ASTNodeKind): string {
     }
     case ASTNodeKind.SWITCH_STATEMENT: {
       return "arms";
+    }
+    default: {
+      return "undefined";
+    }
+  }
+}
+
+// childF means one thing everywhere it is set.
+export function astNodeChildFName(v: ASTNodeKind): string {
+  switch (v) {
+    case ASTNodeKind.FUNCTION_DECL,
+         ASTNodeKind.METHOD_DECL,
+         ASTNodeKind.METHOD_SIG,
+         ASTNodeKind.TYPE_DECL,
+         ASTNodeKind.VARIANT_DECL: {
+      return "propagatesList";
     }
     default: {
       return "undefined";

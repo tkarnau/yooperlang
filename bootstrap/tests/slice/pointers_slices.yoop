@@ -1,0 +1,78 @@
+// Raw pointers, `null`, vtable declarations, and array slices.
+//
+// Three small features that all bottom out in "a pointer is a pointer":
+//
+//   unsafe_ptr   a raw address, gated on `import.unsafe;`
+//   null         a null pointer constant, which fits any unsafe_ptr and
+//                nothing else - the pointer twin of an untyped int literal
+//   xs[a..b]     a borrowing VIEW over part of an array: a data pointer and a
+//                length, sharing the base's storage
+//
+// The pointer conversion rule is worth stating: a TYPED pointer widens to the
+// opaque one and not back. `unsafe_ptr` means "some pointer" and
+// `unsafe_ptr<uint8>` is a promise about what it points at, so forgetting the
+// promise is safe and inventing one is not.
+
+import.unsafe;
+
+extern "C" from "stdio.h" {
+  function fopen(path: string, mode: string): unsafe_ptr;
+  function fclose(f: unsafe_ptr): c_int;
+}
+
+trait Readable {
+  function read(ref self): c_int;
+}
+
+// A VTABLE is the type-erased shape of a trait: a struct whose fields are
+// function pointers, one per method. Declared here to pin down that it parses,
+// resolves and lays out - BUILDING one (`Reader.from(ref s)`) is the erasure
+// machinery, which the bootstrap does not have.
+vtable Reader for Readable {
+  read: () => c_int,
+}
+
+type Handle {
+  raw: unsafe_ptr<void>,
+  tag: c_int,
+}
+
+function main(): int {
+  // A pointer that fails to open is null, and one that succeeds is not. Both
+  // directions matter: a comparison that always answered the same way would
+  // pass a one-sided test.
+  let missing: unsafe_ptr = fopen("/no/such/dir/nothing", "rb");
+  printf("missing null=%d\n", missing == null);
+
+  let real: unsafe_ptr = fopen("/dev/null", "rb");
+  printf("real null=%d\n", real == null);
+  fclose(real);
+
+  // `null` in a struct field, where it pins to the field's pointer type.
+  const h: Handle = { raw: null, tag: 7 };
+  printf("field null=%d tag=%d\n", h.raw == null, h.tag);
+
+  // Slices are half-open: `xs[1..3]` is elements 1 and 2.
+  const xs: int32[] = [10, 20, 30, 40, 50];
+  const mid: int32[] = xs[1..3];
+  printf("mid len=%llu %d %d\n", mid.len, mid[0], mid[1]);
+
+  // Either bound may be omitted. An absent end is the base's own length, which
+  // is the one thing the syntax cannot say.
+  const tail: int32[] = xs[3..];
+  const head: int32[] = xs[..2];
+  const all: int32[] = xs[..];
+  printf("tail=%llu head=%llu all=%llu\n", tail.len, head.len, all.len);
+
+  // An empty slice is legal and is not a special case.
+  printf("empty=%llu\n", xs[2..2].len);
+
+  // A slice BORROWS. Writing through it is visible in the base, which is the
+  // assertion a copying implementation would fail.
+  let ys: int32[] = [1, 2, 3];
+  let view: int32[] = ys[1..3];
+  view[0] = 99;
+  printf("borrowed base=%d view=%d\n", ys[1], view[0]);
+
+  return 0;
+}

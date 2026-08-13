@@ -15,9 +15,14 @@ export variant Operand {
   Bool   { value: bool },     // true / false, how LLVM spells an i1 immediate
   Temp   { id: usize },       // %t3
   StrRef { id: usize },       // @.str.0
+  // `@mathx_1__add` - a FUNCTION's address, which is what a function value is.
+  // There is nothing to load: a symbol IS a constant pointer in LLVM.
+  FuncRef { home: string, name: string },
   // `%v.3.addr` - a local's slot ADDRESS rather than its value. What `ref x`
   // evaluates to: a borrow is the address, and the slot already is one.
   SlotAddr { name: string, id: usize },
+  // `null` - LLVM spells a null pointer constant exactly that way.
+  Null,
   None,                       // a void call's non-result
 }
 
@@ -42,6 +47,15 @@ export function emitOperand(ref e: Emitter, op: Operand): void {
       text.push(ref e.fn, "%t");
       text.pushUint(ref e.fn, uint64(n));
     }
+    case Operand.FuncRef { home: h, name: n }: {
+      text.pushByte(ref e.fn, '@');
+      if (h.len > 0) {
+        text.push(ref e.fn, h);
+        text.push(ref e.fn, SYMBOL_MODULE_SEPARATOR);
+      }
+      text.push(ref e.fn, n);
+    }
+    case Operand.Null: { text.push(ref e.fn, "null"); }
     case Operand.StrRef { id: n }: {
       text.push(ref e.fn, "@.str.");
       text.pushUint(ref e.fn, uint64(n));

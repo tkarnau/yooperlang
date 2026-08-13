@@ -153,6 +153,34 @@ export function emitStoreToPtr(ref cx: Cx, ty: string, value: Operand, addr: usi
   endInstr(ref cx);
 }
 
+//   store i32 %t4, ptr %t2
+//
+// The address as an OPERAND, the storing twin of emitLoadFromAddr.
+export function emitStoreToAddr(ref cx: Cx, ty: string, value: Operand, addr: Operand): void {
+  startInstr(ref cx);
+  part(ref cx, "store ");
+  part(ref cx, ty);
+  part(ref cx, " ");
+  operand(ref cx, value);
+  part(ref cx, ", ptr ");
+  operand(ref cx, addr);
+  endInstr(ref cx);
+}
+
+//   %t5 = load i32, ptr @g
+//
+// The address as an OPERAND rather than a temp, for the cases where it is not
+// one - a `&x` slot address, or a pointer that came straight out of a call.
+export function emitLoadFromAddr(ref cx: Cx, dest: usize, ty: string, addr: Operand): void {
+  startInstr(ref cx);
+  temp(ref cx, dest);
+  part(ref cx, " = load ");
+  part(ref cx, ty);
+  part(ref cx, ", ptr ");
+  operand(ref cx, addr);
+  endInstr(ref cx);
+}
+
 //   %t5 = load i32, ptr %t3
 export function emitLoadFromPtr(ref cx: Cx, dest: usize, ty: string, addr: usize): void {
   startInstr(ref cx);

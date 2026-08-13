@@ -98,6 +98,9 @@ export enum ASTNodeKind implements Display {
   // (clearedBy <fn> on a restrictive kind / appliedBy <fn> on a conferred kind)
   KIND_TRANSITION_CLAUSE,
   KIND_PREFIX,
+  // One `appliesTo binding;` line inside a kind decl, recorded by its leading
+  // word. Nothing enforces kinds, so the rest of the clause is consumed.
+  KIND_CLAUSE,
 
   // phase 6.3 task / concurrency sugar
   WAIT_EXPRESSION,
@@ -163,6 +166,9 @@ export enum ASTNodeKind implements Display {
   TYPE_ANNOTATION_REF_TYPE,
   TYPE_ANNOTATION_TYPE_NAME,
   TYPE_ANNOTATION_ARRAY_TYPE,
+  // `(k: K) => uint64` - a function VALUE's type. childA is the parameter
+  // list-node, childB the return annotation.
+  TYPE_ANNOTATION_FUNC_TYPE,
   function toString(ref self): string {
     return kindName(self);
   }
@@ -231,6 +237,7 @@ const AST_NODE_KIND_NAMES: string[] = [
   "KIND_MARKER_CLAUSE",
   "KIND_TRANSITION_CLAUSE",
   "KIND_PREFIX",
+  "KIND_CLAUSE",
   "WAIT_EXPRESSION",
   "TASK_AUTO_WAIT",
   "TASK_RELEASE",
@@ -259,6 +266,7 @@ const AST_NODE_KIND_NAMES: string[] = [
   "TYPE_ANNOTATION_REF_TYPE",
   "TYPE_ANNOTATION_TYPE_NAME",
   "TYPE_ANNOTATION_ARRAY_TYPE",
+  "TYPE_ANNOTATION_FUNC_TYPE",
 ];
 
 // Maps an ASTNodeKind case to its source spelling. Used by Display sites

@@ -91,6 +91,8 @@ export variant Type propagates<disposable> {
   Void,
   UntypedInt,
   UntypedFloat,
+  // `null`, before it pins. The pointer twin of UntypedInt: it fits any
+  // `unsafe_ptr` and nothing else, so it carries no pointee of its own.
   UntypedNull,
   ErrorT,
   SelfPlaceholder,                        // trait-method `ref self` placeholder

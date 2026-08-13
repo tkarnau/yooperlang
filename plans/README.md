@@ -84,7 +84,11 @@ types file.
   their constructors and patterns, `trait` decls, `implements` clauses and
   methods in a type or variant body (`self` is a keyword, and its annotation is
   synthesized from the enclosing type), and template literals with `${...}`
-  interpolation. Not yet: enums, unions, `for x in`,
+  interpolation, `for x in xs` over an array, and `kind` declarations plus the
+  prefixed forms (`async fetch(...)`, `type X c_layout { ... }`), `propagates`
+  clauses, char literals, function types, raw pointers with `null`, vtable
+  declarations, array slices, bitwise operators, and address-of / dereference.
+  Not yet: enums, unions, `await`,
   `propagates`/`contains` clauses, type-parameter bounds - each a named "not
   supported yet" refusal rather than a mis-parse.
 - **Layer 3 - typecheck**: IN PROGRESS. The interned Type/Symbol/Program model
@@ -263,12 +267,284 @@ that changes when that std slice becomes reachable. Strings, integers of every
 width and bools interpolate; floats and structs are refused by name, pointing at
 the interpolation.
 
+**`for x in xs` landed next, over ARRAYS.** The counted form could already
+express all of it, so the point is not new power - it is that the index is gone,
+and with it every off-by-one the index made possible. The iterable is evaluated
+ONCE with its data pointer and length cached: re-evaluating per iteration would
+call `headersView(ref h)` on every step, and an array growing underneath the walk
+would change length mid-loop.
+
+The other form, a type implementing `Iterable<T>`, is refused BY NAME rather than
+reported as "not an array" - one is a feature to go build and the other is a
+mistake, and they should not read alike. It needs **generic traits**:
+`Iterable<T>` has to be instantiated before its `next` can be called, and the
+bootstrap records a trait's type params today without substituting them. Six std
+types implement it (`MapIter<K, V>`, `VecIter<T>`, `Range`, `Chars`, `DirIter`,
+`Rows`), so it is the next real piece of the trait system. Measured first: 7 of
+the bootstrap's own 8 for-in sites walk arrays, as do the http ones that were
+blocked, so the array form is what actually unblocks.
+
+**A gap this surfaced, wider than for-in, and fixed next: the bootstrap did not
+enforce `const` at all.** `const a: int = 1; a = 2;` compiled clean. `LocalScope`
+mapped a name to a TypeId and nothing else, so there was nothing to check
+against; it now carries a `Binding` with a mutability bit, set at all five
+declare sites.
+
+The rules were established by PROBING the reference rather than read off its
+source, because the two disagreed. Immutable: `const`, a for-in loop variable, a
+pattern binding. Mutable: `let`, a counted loop's counter, and parameters
+including `ref` ones - a parameter is a local copy, and a borrow exists to be
+written through. Constness is about the BINDING, so `p.x = 2` and `xs[0] = 9`
+through a const stay legal; deep immutability would be a different feature.
+
+One deliberate divergence: the reference refuses `a = 2` on a const and ALLOWS
+`a += 2` on the same binding. In the bootstrap the compound forms desugar to a
+plain assignment in the parser, so one check covers both, and closing that hole
+was free. Reproducing it would have meant writing code to be bug-compatible.
+
+**Kinds landed next, and the headline is that `async` is not a keyword.** It is
+declared in std/core/kinds.yoop as an ordinary `kind { appliesTo function;
+pausable; }`, and `async fetch(...)` is a function carrying it - as is
+`task worker(...)`, and as is anything a user declares. So the parser has no
+list of blessed words: a kind prefix is an identifier standing where the
+`function` keyword would, and the shape `IDENT IDENT (` is the whole tell. A
+kind on a TYPE goes after the name (`type SockAddrIn c_layout { ... }`).
+
+Kinds are AMBIENT - resolved by name against a graph-wide registry rather than
+through imports, because `async fetch(...)` in std/http names a kind declared in
+std/core/kinds.yoop with nothing linking the two files. The JS reference has the
+same registry for the same reason. An undeclared kind is refused with the
+reference's own message. Resolution happens in pass C rather than pass A, since
+pass A is what registers the kinds and a file may declare one below the function
+that carries it.
+
+Nothing enforces kinds, so clauses are recorded by their leading word and read by
+nobody - with one exception. `pausable` makes the function a COROUTINE, and
+codegen refuses to emit one by name, because an async function emitted as an
+ordinary function compiles, links, and then never suspends. That is a silent
+miscompile rather than a missing feature, which is the distinction worth paying a
+registry for.
+
+Scope was set by measuring: the bootstrap's own source is fully synchronous, and
+the only `async` anywhere in its std closure is two TRAIT METHOD SIGNATURES in
+std/core/traits.yoop, which have no body to emit. So self-hosting needs no
+coroutine lowering at all, and `llvm.coro.*` stays deferred.
+
+Two pre-existing bugs fell out, neither reachable before: `consumeKindPrefixWithArgs`
+read TWO identifiers where it should read one, and `findMatchingRParen` peeked at
+a constant offset instead of its loop index, so `aligned(16)` on a type decl HUNG
+the parser rather than failing.
+
+**`propagates` clauses and char literals landed next**, both picked by measuring
+the SELF-HOSTING closure rather than std at large: the 16 std files the
+bootstrap's own source actually imports. That is the list that matters, and it
+was 4 of 16 compiling.
+
+`propagates<disposable>` is not optional - the bootstrap's own source carries 48
+of them across 25 of its 86 files, so a compiler that cannot READ the clause
+cannot read the compiler. It goes on a function after the return type, on a
+`type` after the name, and on a `variant` after `implements`, and it is parsed
+and recorded like every other kind surface. It needed a new fat-node slot:
+FUNCTION_DECL had all five spoken for once kind prefixes landed in childE, and
+`childF` now means "propagates" everywhere.
+
+The parse problem worth remembering: `Buf propagates<tracked>` and
+`disposable Buf` are BOTH two identifiers in a row - one a type followed by a
+clause, the other a kind prefix followed by a type. `propagates` is contextual,
+so telling them apart means reading the second identifier's text rather than its
+tag. Getting it wrong makes `propagates` itself the type name.
+
+Char literals were nearly free: the lexer already decoded `'a'` to its codepoint
+into the token, so a char literal builds the same INT_LITERAL node a number does
+and pins to context identically. There is no char type, and adding one to carry
+the literal would have been the wrong shape - these exist for byte comparisons
+in a lexer. They work in switch patterns too, which have their own literal path.
+
+Two more JS-reference codegen bugs surfaced while writing fixtures, both crashes
+rather than wrong answers: `for x in [1, 2, 3]` (untyped int elements) and
+`for x in xs` where `xs: T[]` inside a generic function. The bootstrap handles
+both; the fixtures route around them since a `.expected` is asserted against both
+compilers.
+
+**`extern "intrinsic"` landed next, and it took generic traits with it.**
+Intrinsics are operations whose implementation IS the compiler: there is no
+symbol behind `stringAsBytes`, so a call becomes instructions rather than a
+`call` to anything. Six are lowered - `stringAsBytes`, `bytesAsStringUnchecked`,
+`arraySlice`, `heapAlloc`, `heapFree`, `stringFromBytesUnchecked` - and five of
+those are free or nearly so, which is the whole point: a yoop string is a
+NUL-terminated pointer and a `uint8[]` is that pointer plus a length, so
+converting between them is arithmetic. Only `stringFromBytesUnchecked`
+allocates, because a byte range has no NUL and a string must have one.
+
+Three rules worth keeping:
+
+- An intrinsic name must NOT go in `externNames`. That table means "emit this
+  call unmangled"; an intrinsic has no symbol at all. `Program.intrinsics` is
+  the separate table, PROGRAM-level for the same reason `kinds` is - the module
+  that calls `intr.stringAsBytes` is not the one that declared it.
+- The name list and the codegen dispatch are two halves of one table, so pass A
+  refuses a name codegen cannot lower. User code cannot fabricate an intrinsic.
+- An intrinsic extern is implicitly EXPORTED and a C extern is not - there is
+  nowhere to write `export`, since the block is the declaration.
+
+A generic intrinsic registers as an ordinary generic decl, so `heapAlloc<T>`
+infers `T` through the path every generic function already uses. That reuse is
+what kept this small; the only thing that differs is that there is no body to
+monomorphize.
+
+`ctxAlloc` / `ctxFree` are REFUSED by name. They route through `yoop_ctx_alloc`
+in the yoop runtime, and the bootstrap's link step is one clang call with no
+runtime on it. Lowering them to malloc/free instead would compile, run, and
+silently stop an installed arena from capturing the bytes - which is the entire
+reason they exist. **Linking the runtime is now the next real item**, and it is
+the same shape as std-root discovery: find the directory, add its `.c` files to
+the clang line.
+
+Generic TRAIT declarations came along because `std/core/kinds.yoop` declares
+`trait Joinable<T>` and intrinsics.yoop imports it. The parameters are now in
+scope while a trait's signatures resolve, which makes one DECLARE. It does not
+make one dispatch: instantiating `Iterable<T>` before calling its `next` is
+still open, and is what `for x in` over an iterable waits on.
+
+Self-hosting closure now: `types`, `kinds`, `intrinsics`, `numbers`, `debug`,
+`env`, `log` clean - 7 of 16, up from 4.
+
+**Function types landed next** - `(k: string) => uint64` as struct fields,
+parameters and locals. This is what `Map<K, V>` needs: a `KeyOps<K>` holding a
+hash and an equality function, so a map over a new key type is a pair of free
+functions rather than a trait impl.
+
+The design in one line: **a function value is its address, and its type is its
+signature**. There is no separate function-pointer type to convert to - an
+annotation and a declared function's signature intern to the same `Type.Func`,
+which is exactly what makes `{ hash: myHash }` typecheck with nothing in
+between. In LLVM it is a `ptr`, and the signature lives at the call site.
+
+That forced one real change: Func types have to compare **structurally**.
+Everything else in the type system is `id == id`, and Funcs cannot be, because a
+declared function's signature lives in the shell pass A registered for it and
+filled in place - so two identical signatures keep different TypeIds.
+`typeAccepts` is now the one place that knows.
+
+Parenthesized type GROUPS came along, because a return type is parsed greedily:
+`(k: K) => V[]` returns an array, and `((k: K) => V)[]` is an array of
+functions. The fork after a `(` is decided at one token - `)`, `ref`, or
+`IDENT :` means a parameter list - which is why parameters must be named.
+
+**A silent miscompile got closed on the way.** `fns[0](x)` and `g()(x)` were
+accepted and then lowered with the arguments DROPPED, the function pointer
+itself becoming the value. Both compilers do it; it was unreachable before,
+since the annotation did not parse. The bootstrap now refuses it by name.
+
+**Raw pointers, `null`, vtable declarations and array slices landed together** -
+three small features that all bottom out in "a pointer is a pointer".
+
+`unsafe_ptr` is gated on `import.unsafe;`, and the conversion rule is worth
+stating: a TYPED pointer widens to the opaque one and not back. `unsafe_ptr`
+means "some pointer" and `unsafe_ptr<uint8>` is a promise about what it points
+at, so forgetting the promise is safe and inventing one is not. `null` fits any
+raw pointer and nothing else - the pointer twin of an untyped int literal, with
+its own reserved TypeId. Every rule here was established by PROBING the
+reference rather than reading its source.
+
+A vtable is the type-erased shape of a trait, and the bootstrap types it as what
+it is: a struct of function pointers. That gives field access, layout and
+literals for free; the SYMBOL records that it erases a trait. Building one
+(`Reader.from(ref s)`) is the erasure machinery and is deliberately absent -
+nothing in the closure builds one, and inventing the rule before the machinery
+exists would be guessing. The `c_*` names came along as LP64 aliases; the
+bootstrap had `c_int` and `c_long` and was missing six.
+
+A slice BORROWS. `xs[a..b]` is a data pointer and a length over the base's own
+storage, so writing through one is visible in the base - the assertion a copying
+implementation would fail. It is the same three instructions the `arraySlice`
+intrinsic emits, which is the point: this is syntax for an operation that was
+already there. An omitted bound is 0 rather than a synthesized literal, because
+"to the end" is the base's length and codegen is the only layer holding it.
+
+**`&` turned out not to be bitwise AND.** It was ADDRESS-OF - `&m` handing a
+local to a foreign function - which is a different feature from the binary
+operator that shares the token. Both landed, along with `*p`, which is the
+inverse and blocked the identical seven files: taking an address you can never
+read through is a half-feature.
+
+`&x` is NOT `ref x`. A borrow is checked; `&` yields an `unsafe_ptr` with none
+of those guarantees, which is why both it and `*p` are gated on
+`import.unsafe;` - handing out a raw address without saying the file is unsafe
+would bypass the pointer-type gate by one character. Neither needs lookahead:
+`&` and `*` are each both a prefix and a binary operator, and the prefix switch
+runs where a binary operator cannot appear.
+
+The bitwise set came with them, and one thing there is worth keeping: **the
+integer opcode depends on the OPERAND's signedness, not the result's**. Three
+operators care - `/`, `%` and `>>` - and the bootstrap was emitting `sdiv` and
+`srem` unconditionally, which is latently wrong for unsigned operands above
+2^63. Fixed in the same function, since adding the signedness parameter and then
+not using it would have been odd.
+
+**A real parser bug fell out**, found by the first `*p = 9` test: assignment was
+parsed regardless of the caller's precedence, so a prefix operand swallowed it
+and `*p = 9` became `*(p = 9)`. It then reported "cannot assign to const p" and
+pointed at the wrong thing. Assignment now only parses at minPrecedence 0, where
+it belongs.
+
+**Then the typechecker gaps that real std code found.** Seven fixes, each
+invisible until std hit it and each producing a message far from its cause:
+
+- `ref self` inside `type Vec<T>` annotated as bare `Vec`, reporting "Vec is
+  generic, so it needs type arguments" and pointing at the method
+- a generic function's BODY had no type parameters in scope, so
+  `let new_data: T[] = ...` inside it reported "unknown type T"
+- instantiating a generic type DROPPED its methods and implemented traits, so
+  `Vec<string>` stopped satisfying what `Vec<T>` declares - surfacing as
+  "Vec_string does not implement Disposable.dispose"
+- `substitute` had no `Type.Func` case, so a method's signature survived
+  instantiation still saying `(ref Vec_T) => void`
+- trait satisfaction was checked DURING the fill, but the generic sweep runs
+  before traits are filled - so a generic implementer was told no trait required
+  its method, about a trait that simply was not populated yet
+- a cast PINNED its operand, so `uint8(48 + (rest % 10))` refused to add an int
+  to a uint64 - a difference the writer never wrote
+- a LEADING int literal defaulted to int32 before the right operand was known
+
+And one invariant violation worth calling out on its own: **six codegen query
+helpers read `tm.resolvedTypes` directly instead of going through
+`resolvedTypeAt`**, which is documented as the one place substitution happens.
+Inside a monomorphization each was silently wrong - the recorded type is still
+`T[]`, and the emitted IR operated on the template. That is exactly the class of
+bug the invariant exists to prevent, and it had been there since generics landed.
+
+`s.len` on a string came along with them - one `strlen`, since a string has no
+length beside it the way an array does.
+
+**The self-hosting closure is now fully accounted for: 9 of 16 compile end to
+end, and the other 7 are blocked on exactly ONE thing - linking the yoop
+runtime.** `vec`, `bytes`, `strings`, `text` and `map` reach codegen and stop at
+`ctxAlloc` / `ctxFree`; `fs` stops at `errno.get`, which lowers to
+`yoop_errno_get`; `test` stops at `ephemeral arenaScope(...) { }`, whose whole
+meaning is installing an allocator for the block. All three now say so by name
+rather than failing as three unrelated mysteries.
+
+**Linking the runtime is therefore the single next item, and it unblocks the
+rest of the closure by itself.** It is the same shape as std-root discovery:
+find the directory, add its `.c` files to the clang line. One thing beyond it is
+known and separate: a method on a GENERIC type typechecks but cannot be EMITTED
+yet - that needs one copy per instantiation, the way generic functions already
+get, which needs a current-type-instance on the Cx that no equivalent exists for.
+
+Past those, and not blocking a parse: **linking the yoop runtime**, which
+`ctxAlloc` / `ctxFree` need, and **instantiating a generic trait**, which
+`for x in` over an `Iterable<T>` needs.
+
 Probing all 45 non-test files under `std/` with the bootstrap: five compile all
 the way to clang (`core/atomic`, `core/types`, `debug`, `env`, `log`). Template
-literals are off the blocker list entirely; what those files hit next is:
+literals, for-in, and top-level async/kind are all off the blocker list. What
+those files hit next:
 
-- **`for x in <iterable>`** - 7 files, the new biggest bar
-- **`export kind` and `export async`** - 7 files
+- **`await` expressions** - 7 files, the new biggest bar, and the coroutine
+  surface this pass deliberately stopped short of
+- **`&` address-of** - 6 files
+- **`vtable` declarations** - 2 files
 - **`extern "intrinsic"`** with generics - 3 files
 - **`null` and the unsafe-pointer surface** - 3 files
 - the **`a..b` range expression**, and char literals

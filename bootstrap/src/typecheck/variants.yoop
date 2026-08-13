@@ -298,7 +298,9 @@ function bindPatternPayload(
         continue;
       }
 
-      if (!scopeDeclare(ref scope, binding.name, declared.typeId)) {
+      // Immutable: a pattern binding names part of the value being matched,
+      // and the arm reads it. Writing to it would change a copy.
+      if (!scopeDeclare(ref scope, binding.name, declared.typeId, false)) {
         reportError(
           ref prog,
           `"${binding.name}" is already declared, so this pattern cannot bind it`,

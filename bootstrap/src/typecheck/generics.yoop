@@ -29,7 +29,7 @@ module typecheck;
 */
 
 import { Vec }, * as vec from "std/core/vec.yoop";
-import { Map }, * as map from "std/collections/map.yoop";
+import { Map, MapIter, MapEntry }, * as map from "std/collections/map.yoop";
 import { disposable } from "std/core/kinds.yoop";
 import { Option } from "std/core/types.yoop";
 import * as str from "std/core/strings.yoop";
@@ -250,7 +250,12 @@ function fillInstance(ref prog: Program, ref inst: Instance): void {
         });
         i += 1;
       }
-      setInstanceStructFields(ref prog, inst.typeId, ref fields);
+      // Methods and implemented traits travel WITH the instance. Dropping them
+      // leaves `Vec<string>` with an empty method table, so it stops satisfying
+      // the very traits `Vec<T>` was declared to implement - which surfaces far
+      // away as "Vec_string does not implement Disposable.dispose".
+      let methods: Map<string, TypeId> = substitutedMethods(ref prog, ref mm, ref info.params, ref inst.args);
+      setInstanceStructFields(ref prog, inst.typeId, ref fields, ref methods, ref it);
     }
     case Type.Variant { decl: d, cases: cs, methods: mm, implementsTraits: it, generic: g }: {
       let cases: Vec<VariantCase> = vec.vecNew(cs.len);
@@ -270,7 +275,8 @@ function fillInstance(ref prog: Program, ref inst: Instance): void {
         vec.vecPush(ref cases, { name: source.name, ordinal: source.ordinal, fields: fields });
         c += 1;
       }
-      setInstanceVariantCases(ref prog, inst.typeId, ref cases);
+      let methods: Map<string, TypeId> = substitutedMethods(ref prog, ref mm, ref info.params, ref inst.args);
+      setInstanceVariantCases(ref prog, inst.typeId, ref cases, ref methods, ref it);
     }
     default: { }
   }
@@ -278,24 +284,52 @@ function fillInstance(ref prog: Program, ref inst: Instance): void {
 
 // Re-set the arena slot, keeping the instance's own name, module and generic
 // record - only the members come from the template.
-function setInstanceStructFields(ref prog: Program, typeId: TypeId, ref fields: Vec<Field>): void {
+// Each method's signature with the instance's arguments applied - `push` on
+// `Vec<string>` takes a string, not a T.
+function substitutedMethods(
+  ref prog: Program,
+  ref methods: Map<string, TypeId>,
+  ref params: Vec<TypeId>,
+  ref args: Vec<TypeId>
+): Map<string, TypeId> propagates<disposable> {
+  let out: Map<string, TypeId> = map.mapNew(0, map.stringKeyOps());
+  let it: MapIter<string, TypeId> = map.mapIter(ref methods);
+  for entry in it {
+    map.mapInsert(ref out, entry.key, substitute(ref prog, entry.value, ref params, ref args));
+  }
+  return out;
+}
+
+function setInstanceStructFields(
+  ref prog: Program,
+  typeId: TypeId,
+  ref fields: Vec<Field>,
+  ref methods: Map<string, TypeId>,
+  ref traits: Vec<TypeId>
+): void {
   switch (typeAt(ref prog, typeId)) {
-    case Type.Struct { decl: d, fields: old, methods: mm, implementsTraits: it, generic: g }: {
+    case Type.Struct { decl: d, fields: old, methods: oldM, implementsTraits: oldT, generic: g }: {
       setType(ref prog, typeId, Type.Struct {
         decl: { name: d.name, module: d.module, populated: true },
-        fields: fields, methods: mm, implementsTraits: it, generic: g,
+        fields: fields, methods: methods, implementsTraits: traits, generic: g,
       });
     }
     default: { }
   }
 }
 
-function setInstanceVariantCases(ref prog: Program, typeId: TypeId, ref cases: Vec<VariantCase>): void {
+function setInstanceVariantCases(
+  ref prog: Program,
+  typeId: TypeId,
+  ref cases: Vec<VariantCase>,
+  ref methods: Map<string, TypeId>,
+  ref traits: Vec<TypeId>
+): void {
   switch (typeAt(ref prog, typeId)) {
-    case Type.Variant { decl: d, cases: old, methods: mm, implementsTraits: it, generic: g }: {
+    case Type.Variant { decl: d, cases: old, methods: oldM, implementsTraits: oldT, generic: g }: {
       setType(ref prog, typeId, Type.Variant {
         decl: { name: d.name, module: d.module, populated: true },
-        cases: cases, methods: mm, implementsTraits: it, generic: g,
+        cases: cases, methods: methods, implementsTraits: traits, generic: g,
       });
     }
     default: { }
@@ -504,6 +538,19 @@ export function substitute(ref prog: Program, id: TypeId, ref params: Vec<TypeId
     }
     case Type.Variant { decl: d, cases: cs, methods: mm, implementsTraits: it, generic: g }: {
       return substituteInstance(ref prog, id, ref g, ref params, ref args);
+    }
+    // A FUNCTION type - a method's signature, or a function-typed field like
+    // `KeyOps<K>.hash`. Substituting through it is what turns
+    // `(ref Vec_T) => void` into `(ref Vec_string) => void`, and without it a
+    // method survives instantiation still talking about the template.
+    case Type.Func { params: fp, ret: fr, variadic: fv }: {
+      let params2: Vec<TypeId> = vec.vecNew(fp.len);
+      let i: usize = 0;
+      while (i < fp.len) {
+        vec.vecPush(ref params2, substitute(ref prog, vec.vecGet(ref fp, i), ref params, ref args));
+        i += 1;
+      }
+      return internFunc(ref prog, ref params2, substitute(ref prog, fr, ref params, ref args), fv);
     }
     default: { return id; }   // primitives and everything else are closed
   }

@@ -17,16 +17,38 @@ export function printfReturnType(): string {
   return "i32";
 }
 
-// The signed-integer opcode for a binary operator, or "" when there is no
-// lowering yet. Unsigned and float variants arrive with the types that need
-// them.
-export function llvmIntOp(tag: TokenTags): string {
+// The integer opcode for a binary operator, or "" when there is no lowering
+// yet. Float variants arrive with the types that need them.
+//
+// `signed` is the OPERAND's signedness, and three operators need it:
+//
+//   /   sdiv vs udiv     -9 / 2 is -4 signed and an enormous number unsigned
+//   %   srem vs urem     same
+//   >>  ashr vs lshr     an arithmetic shift keeps the sign bit
+//
+// Everything else has one instruction for both. `and`, `or` and `xor` are
+// bit-for-bit operations with no interpretation of the operands at all.
+export function llvmIntOp(tag: TokenTags, signed: bool): string {
   switch (tag) {
     case TokenTags.PLUS: { return "add"; }
     case TokenTags.MINUS: { return "sub"; }
     case TokenTags.MULT: { return "mul"; }
-    case TokenTags.DIVIDE: { return "sdiv"; }
-    case TokenTags.MODULUS: { return "srem"; }
+    case TokenTags.DIVIDE: {
+      if (signed) { return "sdiv"; }
+      return "udiv";
+    }
+    case TokenTags.MODULUS: {
+      if (signed) { return "srem"; }
+      return "urem";
+    }
+    case TokenTags.AMP: { return "and"; }
+    case TokenTags.PIPE: { return "or"; }
+    case TokenTags.CARET: { return "xor"; }
+    case TokenTags.LSHIFT: { return "shl"; }
+    case TokenTags.RSHIFT: {
+      if (signed) { return "ashr"; }
+      return "lshr";
+    }
     default: { return ""; }
   }
 }

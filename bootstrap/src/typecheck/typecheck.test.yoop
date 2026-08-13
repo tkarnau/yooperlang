@@ -1440,3 +1440,539 @@ suite function templateLiteralsAreStringsAndCheckTheirParts(): void {
     theory.detail = `reported ${badInner.diagnostics.len}: ${firstDiagnostic(ref badInner)}`;
   }
 }
+
+// ----- for ... in ------------------------------------------------------------
+
+suite function forInBindsTheElementType(): void {
+  let ok = checkSource("function f(xs: int[]): int { let t: int = 0; for x in xs { t = t + x; } return t; }");
+  let test theory: Case = t.asserts("the loop variable is usable as the element type") {
+    theory.isSuccessful = ok.diagnostics.len == 0;
+    theory.detail = `reported ${ok.diagnostics.len}: ${firstDiagnostic(ref ok)}`;
+  }
+
+  // The binding is the ELEMENT, not the array - the mistake a "for x in xs
+  // binds xs" implementation would make, and one nothing else would catch.
+  let wrongUse = checkSource("function f(xs: int[]): int { for x in xs { return x.len; } return 0; }");
+  let test theory: Case = t.asserts("the loop variable is the element, not the array") {
+    theory.isSuccessful = wrongUse.diagnostics.len > 0;
+    theory.detail = "reading `.len` off an int element produced no diagnostic";
+  }
+
+  let structElem = checkSource("type E { n: int, } function f(es: E[]): int { let t: int = 0; for e in es { t = t + e.n; } return t; }");
+  let test theory: Case = t.asserts("a struct element's fields are reachable") {
+    theory.isSuccessful = structElem.diagnostics.len == 0;
+    theory.detail = `reported ${structElem.diagnostics.len}: ${firstDiagnostic(ref structElem)}`;
+  }
+
+  // Scoped to the loop, so the name is gone afterwards.
+  let escaped = checkSource("function f(xs: int[]): int { for x in xs { } return x; }");
+  let test theory: Case = t.asserts("the loop variable does not outlive the loop") {
+    theory.isSuccessful = diagnosticsMention(ref escaped, "x");
+    theory.detail = `wanted an unknown-name diagnostic, got: ${firstDiagnostic(ref escaped)}`;
+  }
+
+  let jumps = checkSource("function f(xs: int[]): int { for x in xs { if (x == 1) { break; } continue; } return 0; }");
+  let test theory: Case = t.asserts("break and continue count this as a loop") {
+    theory.isSuccessful = jumps.diagnostics.len == 0;
+    theory.detail = `reported ${jumps.diagnostics.len}: ${firstDiagnostic(ref jumps)}`;
+  }
+
+  let notArray = checkSource("function f(n: int): int { for x in n { } return 0; }");
+  let test theory: Case = t.asserts("walking a non-array is refused by type name") {
+    theory.isSuccessful = diagnosticsMention(ref notArray, "needs an array");
+    theory.detail = `wanted a not-an-array refusal, got: ${firstDiagnostic(ref notArray)}`;
+  }
+
+  // An Iterable impl is a MISSING FEATURE, not a type error, and the two have
+  // to read differently - one is a thing to go build, the other is a mistake.
+  let iterable = checkSource("trait Iterable { function next(ref self): int; } type It implements Iterable { n: int, function next(ref self): int { return self.n; } } function f(it: It): int { for x in it { } return 0; }");
+  let test theory: Case = t.asserts("an Iterable impl is refused as unimplemented, not as a type error") {
+    theory.isSuccessful = diagnosticsMention(ref iterable, "implements Iterable");
+    theory.detail = `wanted an Iterable-specific refusal, got: ${firstDiagnostic(ref iterable)}`;
+  }
+}
+
+// ----- const enforcement -----------------------------------------------------
+
+// A binding carries MUTABILITY as well as a type, because `const a = 1; a = 2;`
+// has to be refused and the type alone cannot say so. Every one of these
+// compiled clean before that existed, which is why they are all here rather
+// than just the const case: what a rule ALLOWS is as easy to get wrong as what
+// it refuses, and a rule that refused parameters would pass a const-only test.
+suite function assignmentRespectsMutability(): void {
+  let constLocal = checkSource("function main(): int { const a: int = 1; a = 2; return a; }");
+  let test theory: Case = t.asserts("assigning to a const local is refused") {
+    theory.isSuccessful = diagnosticsMention(ref constLocal, "cannot assign to const \"a\"");
+    theory.detail = `wanted a const-assignment refusal, got: ${firstDiagnostic(ref constLocal)}`;
+  }
+
+  // The compound forms desugar to a plain assignment in the PARSER, so one
+  // check covers both. The JS reference misses this one - it refuses `a = 2`
+  // and allows `a += 2` on the same binding.
+  let compound = checkSource("function main(): int { const a: int = 1; a += 2; return a; }");
+  let test theory: Case = t.asserts("compound assignment to a const is refused too") {
+    theory.isSuccessful = diagnosticsMention(ref compound, "cannot assign to const \"a\"");
+    theory.detail = `wanted a const-assignment refusal, got: ${firstDiagnostic(ref compound)}`;
+  }
+
+  let letLocal = checkSource("function main(): int { let a: int = 1; a = 2; a += 3; return a; }");
+  let test theory: Case = t.asserts("a let local stays assignable, in both forms") {
+    theory.isSuccessful = letLocal.diagnostics.len == 0;
+    theory.detail = `reported ${letLocal.diagnostics.len}: ${firstDiagnostic(ref letLocal)}`;
+  }
+
+  // A parameter is a local COPY, so writing to it is ordinary rather than a
+  // mistake, and a `ref` parameter is mutable because that is the whole point
+  // of the borrow. Refusing either would break real code.
+  let param = checkSource("function f(a: int): int { a = 2; return a; }");
+  let test theory: Case = t.asserts("a parameter is assignable") {
+    theory.isSuccessful = param.diagnostics.len == 0;
+    theory.detail = `reported ${param.diagnostics.len}: ${firstDiagnostic(ref param)}`;
+  }
+
+  let refParam = checkSource("function f(ref a: int): void { a = 2; }");
+  let test theory: Case = t.asserts("a ref parameter is assignable - that is what a borrow is for") {
+    theory.isSuccessful = refParam.diagnostics.len == 0;
+    theory.detail = `reported ${refParam.diagnostics.len}: ${firstDiagnostic(ref refParam)}`;
+  }
+
+  let counter = checkSource("function main(): int { let t: int = 0; for (let i = 0; i < 2; i = i + 1) { t = t + 1; } return t; }");
+  let test theory: Case = t.asserts("a counted loop's counter is assignable - it is stepped") {
+    theory.isSuccessful = counter.diagnostics.len == 0;
+    theory.detail = `reported ${counter.diagnostics.len}: ${firstDiagnostic(ref counter)}`;
+  }
+
+  // The loop variable is a COPY of the element, so assigning to it writes to
+  // something discarded at the end of the iteration. Refusing says that;
+  // allowing it silently does nothing.
+  let loopVar = checkSource("function f(xs: int[]): int { for v in xs { v = 2; } return 0; }");
+  let test theory: Case = t.asserts("a for-in loop variable is not assignable") {
+    theory.isSuccessful = diagnosticsMention(ref loopVar, "cannot assign to const \"v\"");
+    theory.detail = `wanted a const-assignment refusal, got: ${firstDiagnostic(ref loopVar)}`;
+  }
+
+  let patternBinding = checkSource("variant V { A { n: int } } function f(v: V): int { switch (v) { case V.A { n: n }: { n = 2; return n; } } }");
+  let test theory: Case = t.asserts("a pattern binding is not assignable") {
+    theory.isSuccessful = diagnosticsMention(ref patternBinding, "cannot assign to const \"n\"");
+    theory.detail = `wanted a const-assignment refusal, got: ${firstDiagnostic(ref patternBinding)}`;
+  }
+
+  // Constness is about the BINDING, not the value behind it. Writing through a
+  // const binding is allowed, which is what the reference does, and changing
+  // that would be a different feature (deep immutability) rather than this one.
+  let fieldWrite = checkSource("type P { x: int, } function main(): int { const p: P = { x: 1 }; p.x = 2; return p.x; }");
+  let test theory: Case = t.asserts("a field of a const binding is still assignable") {
+    theory.isSuccessful = fieldWrite.diagnostics.len == 0;
+    theory.detail = `reported ${fieldWrite.diagnostics.len}: ${firstDiagnostic(ref fieldWrite)}`;
+  }
+
+  let indexWrite = checkSource("function main(): int { const xs: int[] = [1, 2]; xs[0] = 9; return xs[0]; }");
+  let test theory: Case = t.asserts("an element of a const array is still assignable") {
+    theory.isSuccessful = indexWrite.diagnostics.len == 0;
+    theory.detail = `reported ${indexWrite.diagnostics.len}: ${firstDiagnostic(ref indexWrite)}`;
+  }
+}
+
+// ----- kinds -----------------------------------------------------------------
+
+suite function kindPrefixesResolveAgainstTheRegistry(): void {
+  const decls = "kind tagged { appliesTo function; signature () => void; enumerable as \"tagged\"; } ";
+
+  let ok = checkSource(`${decls}tagged run(): void { } function main(): int { run(); return 0; }`);
+  let test theory: Case = t.asserts("a function carrying a declared kind checks clean") {
+    theory.isSuccessful = ok.diagnostics.len == 0;
+    theory.detail = `reported ${ok.diagnostics.len}: ${firstDiagnostic(ref ok)}`;
+  }
+
+  // A prefix is not decoration. A typo in one would otherwise produce an
+  // ordinary function and no complaint, which is the same message the JS
+  // reference gives for the same reason.
+  let unknown = checkSource("nope run(): void { } function main(): int { return 0; }");
+  let test theory: Case = t.asserts("an undeclared kind on a function is refused, by both names") {
+    theory.isSuccessful = diagnosticsMention(ref unknown, "unknown kind \"nope\" on function \"run\"");
+    theory.detail = `wanted an unknown-kind refusal, got: ${firstDiagnostic(ref unknown)}`;
+  }
+
+  // Kinds are ambient - reached BY NAME from a registry rather than through an
+  // import - so declaration order does not matter, the same way a function
+  // declared later is callable.
+  let afterUse = checkSource(`tagged run(): void { } ${decls}function main(): int { return 0; }`);
+  let test theory: Case = t.asserts("a kind declared after its use still resolves") {
+    theory.isSuccessful = afterUse.diagnostics.len == 0;
+    theory.detail = `reported ${afterUse.diagnostics.len}: ${firstDiagnostic(ref afterUse)}`;
+  }
+
+  // A kind's NAME binds like any other module-level declaration, which is what
+  // makes `import { disposable } from "std/core/kinds.yoop"` resolve.
+  let importable = checkTwoModules(
+    "module k;\nexport kind tainted { appliesTo binding; }",
+    "import { tainted } from \"./lib/k.yoop\";\nfunction main(): int { return 0; }"
+  );
+  let test theory: Case = t.asserts("an exported kind can be imported by name") {
+    theory.isSuccessful = importable.diagnostics.len == 0;
+    theory.detail = `reported ${importable.diagnostics.len}: ${firstDiagnostic(ref importable)}`;
+  }
+}
+
+// ----- intrinsics ------------------------------------------------------------
+
+suite function intrinsicExternsAreTheirOwnThing(): void {
+  const block = "extern \"intrinsic\" from \"compiler\" { function stringAsBytes(s: string): uint8[]; function arraySlice<T>(xs: T[], start: usize, end: usize): T[]; } ";
+
+  let ok = checkSource(`${block}function main(): int { const b: uint8[] = stringAsBytes("hi"); return int(b.len); }`);
+  let test theory: Case = t.asserts("an intrinsic call checks against its declared signature") {
+    theory.isSuccessful = ok.diagnostics.len == 0;
+    theory.detail = `reported ${ok.diagnostics.len}: ${firstDiagnostic(ref ok)}`;
+  }
+
+  // The name IS the lowering, so a fabricated one would typecheck and then fail
+  // in codegen with nothing useful to say. The reference refuses it too.
+  let fake = checkSource("extern \"intrinsic\" from \"compiler\" { function teleport(n: usize): usize; } function main(): int { return 0; }");
+  let test theory: Case = t.asserts("an intrinsic codegen has no lowering for is refused by name") {
+    theory.isSuccessful = diagnosticsMention(ref fake, "unknown intrinsic \"teleport\"");
+    theory.detail = `wanted an unknown-intrinsic refusal, got: ${firstDiagnostic(ref fake)}`;
+  }
+
+  let badArg = checkSource(`${block}function main(): int { const b: uint8[] = stringAsBytes(7); return 0; }`);
+  let test theory: Case = t.asserts("an intrinsic's arguments are checked like any other call's") {
+    theory.isSuccessful = badArg.diagnostics.len > 0;
+    theory.detail = "passing an int where a string was declared produced no diagnostic";
+  }
+
+  // A generic intrinsic goes through the SAME inference every generic function
+  // uses - `T` comes from the argument, and the result is the substituted type.
+  let generic = checkSource(`${block}function main(): int { const xs: int32[] = [1, 2, 3]; const part: int32[] = arraySlice(xs, 0, 2); return int(part.len); }`);
+  let test theory: Case = t.asserts("a generic intrinsic infers its type argument") {
+    theory.isSuccessful = generic.diagnostics.len == 0;
+    theory.detail = `reported ${generic.diagnostics.len}: ${firstDiagnostic(ref generic)}`;
+  }
+
+  let wrongElem = checkSource(`${block}function main(): int { const xs: int32[] = [1, 2, 3]; const part: uint8[] = arraySlice(xs, 0, 2); return 0; }`);
+  let test theory: Case = t.asserts("and the inferred element type is enforced") {
+    theory.isSuccessful = wrongElem.diagnostics.len > 0;
+    theory.detail = "assigning an int32[] slice to a uint8[] produced no diagnostic";
+  }
+
+  // An intrinsic is implicitly exported - the block is the declaration, so
+  // there is nowhere to write `export` - and every std module reaches them
+  // through `import * as intr`. A C extern is NOT.
+  let intrinsicImport = checkTwoModules(
+    "extern \"intrinsic\" from \"compiler\" { function stringAsBytes(s: string): uint8[]; }",
+    "import * as lib from \"./lib/k.yoop\";\nfunction main(): int { const b: uint8[] = lib.stringAsBytes(\"hi\"); return 0; }"
+  );
+  let test theory: Case = t.asserts("an intrinsic is visible through a namespace without `export`") {
+    theory.isSuccessful = intrinsicImport.diagnostics.len == 0;
+    theory.detail = `reported ${intrinsicImport.diagnostics.len}: ${firstDiagnostic(ref intrinsicImport)}`;
+  }
+
+  let cImport = checkTwoModules(
+    "extern \"C\" from \"stdio.h\" { function puts(s: string): int; }",
+    "import * as lib from \"./lib/k.yoop\";\nfunction main(): int { return lib.puts(\"hi\"); }"
+  );
+  let test theory: Case = t.asserts("a C extern is not, which is the difference") {
+    theory.isSuccessful = cImport.diagnostics.len > 0;
+    theory.detail = "an unexported C extern was reachable through a namespace";
+  }
+
+  let badAbi = checkSource("extern \"rust\" from \"lib\" { function f(): int; } function main(): int { return 0; }");
+  let test theory: Case = t.asserts("an ABI that is neither C nor intrinsic is refused") {
+    theory.isSuccessful = badAbi.diagnostics.len > 0;
+    theory.detail = "an unknown extern ABI produced no diagnostic";
+  }
+}
+
+// ----- function types --------------------------------------------------------
+
+suite function functionValuesAreTheirSignatures(): void {
+  const decls = "type Ops { hash: (k: string) => uint64, } function myHash(k: string): uint64 { return 1; } ";
+
+  // The point of the whole feature: a declared function and an annotation
+  // intern to the SAME Type.Func, so a named function drops into a
+  // function-typed field with nothing to convert.
+  let ok = checkSource(`${decls}function main(): int { const o: Ops = { hash: myHash }; return int(o.hash("x")); }`);
+  let test theory: Case = t.asserts("a named function fits a matching function-typed field") {
+    theory.isSuccessful = ok.diagnostics.len == 0;
+    theory.detail = `reported ${ok.diagnostics.len}: ${firstDiagnostic(ref ok)}`;
+  }
+
+  // Two functions with identical signatures are interchangeable, and two with
+  // different ones are not. A declared function's signature lives in the shell
+  // pass A registered, so these compare STRUCTURALLY rather than by id.
+  let wrongSig = checkSource("type Ops { hash: (k: string) => uint64, } function bad(n: int): uint64 { return 1; } function main(): int { const o: Ops = { hash: bad }; return 0; }");
+  let test theory: Case = t.asserts("a function with the wrong signature is refused") {
+    theory.isSuccessful = wrongSig.diagnostics.len > 0;
+    theory.detail = "assigning a mismatched function to a field produced no diagnostic";
+  }
+
+  let wrongRet = checkSource("type Ops { hash: (k: string) => uint64, } function bad(k: string): bool { return true; } function main(): int { const o: Ops = { hash: bad }; return 0; }");
+  let test theory: Case = t.asserts("the return type is part of the match") {
+    theory.isSuccessful = wrongRet.diagnostics.len > 0;
+    theory.detail = "a differing return type produced no diagnostic";
+  }
+
+  // Parameter NAMES are not: a function type is positional.
+  let renamed = checkSource("type Ops { hash: (key: string) => uint64, } function myHash(k: string): uint64 { return 1; } function main(): int { const o: Ops = { hash: myHash }; return 0; }");
+  let test theory: Case = t.asserts("parameter names do not participate in the match") {
+    theory.isSuccessful = renamed.diagnostics.len == 0;
+    theory.detail = `reported ${renamed.diagnostics.len}: ${firstDiagnostic(ref renamed)}`;
+  }
+
+  // An indirect call is checked against the FIELD's signature, like any call.
+  let badArg = checkSource(`${decls}function main(): int { const o: Ops = { hash: myHash }; return int(o.hash(7)); }`);
+  let test theory: Case = t.asserts("an indirect call's arguments are checked") {
+    theory.isSuccessful = badArg.diagnostics.len > 0;
+    theory.detail = "passing an int where a string was declared produced no diagnostic";
+  }
+
+  let arity = checkSource(`${decls}function main(): int { const o: Ops = { hash: myHash }; return int(o.hash("a", "b")); }`);
+  let test theory: Case = t.asserts("and so is its arity") {
+    theory.isSuccessful = arity.diagnostics.len > 0;
+    theory.detail = "calling a one-parameter field with two arguments produced no diagnostic";
+  }
+
+  // A field that is not function-typed is not callable, and the diagnostic must
+  // not claim it is a missing namespace.
+  let notCallable = checkSource("type P { n: int, } function main(): int { const p: P = { n: 1 }; return p.n(); }");
+  let test theory: Case = t.asserts("calling a non-function field is refused") {
+    theory.isSuccessful = notCallable.diagnostics.len > 0;
+    theory.detail = "calling an int field produced no diagnostic";
+  }
+}
+
+// ----- raw pointers, null, vtables, slices -----------------------------------
+
+suite function rawPointersAreGatedAndTyped(): void {
+  // The gate is the whole safety story: `unsafe_ptr` is unreachable without
+  // `import.unsafe;`, so a file using raw pointers says so at the top.
+  let ungated = checkSource("function f(p: unsafe_ptr): int { return 0; }");
+  let test theory: Case = t.asserts("unsafe_ptr without `import.unsafe;` is refused") {
+    theory.isSuccessful = diagnosticsMention(ref ungated, "import.unsafe");
+    theory.detail = `wanted the gate diagnostic, got: ${firstDiagnostic(ref ungated)}`;
+  }
+
+  let gated = checkSource("import.unsafe;\nfunction f(p: unsafe_ptr<uint8>): unsafe_ptr { return p; }");
+  let test theory: Case = t.asserts("a TYPED pointer widens to the opaque one") {
+    theory.isSuccessful = gated.diagnostics.len == 0;
+    theory.detail = `reported ${gated.diagnostics.len}: ${firstDiagnostic(ref gated)}`;
+  }
+
+  // ...and not back. `unsafe_ptr` is "some pointer"; narrowing it would be
+  // inventing a promise about what it points at.
+  let narrowing = checkSource("import.unsafe;\nfunction f(p: unsafe_ptr): unsafe_ptr<uint8> { return p; }");
+  let test theory: Case = t.asserts("the opaque pointer does not narrow") {
+    theory.isSuccessful = narrowing.diagnostics.len > 0;
+    theory.detail = "narrowing an opaque pointer produced no diagnostic";
+  }
+
+  let mismatched = checkSource("import.unsafe;\nfunction f(p: unsafe_ptr<uint8>): unsafe_ptr<int32> { return p; }");
+  let test theory: Case = t.asserts("pointee types must match") {
+    theory.isSuccessful = mismatched.diagnostics.len > 0;
+    theory.detail = "converting between pointee types produced no diagnostic";
+  }
+
+  let toPtr = checkSource("import.unsafe;\nfunction f(): unsafe_ptr<uint8> { return null; }");
+  let test theory: Case = t.asserts("null fits any raw pointer") {
+    theory.isSuccessful = toPtr.diagnostics.len == 0;
+    theory.detail = `reported ${toPtr.diagnostics.len}: ${firstDiagnostic(ref toPtr)}`;
+  }
+
+  // And nothing else - null is not a general "empty" value.
+  let toInt = checkSource("function f(): int { return null; }");
+  let test theory: Case = t.asserts("null does not fit an integer") {
+    theory.isSuccessful = toInt.diagnostics.len > 0;
+    theory.detail = "returning null from an int function produced no diagnostic";
+  }
+
+  let toString = checkSource("function f(): string { return null; }");
+  let test theory: Case = t.asserts("nor a string") {
+    theory.isSuccessful = toString.diagnostics.len > 0;
+    theory.detail = "returning null from a string function produced no diagnostic";
+  }
+}
+
+suite function slicesAndVtablesAreChecked(): void {
+  let ok = checkSource("function f(xs: int32[]): int32 { const s: int32[] = xs[1..3]; return s[0]; }");
+  let test theory: Case = t.asserts("a slice of an array is the same array type") {
+    theory.isSuccessful = ok.diagnostics.len == 0;
+    theory.detail = `reported ${ok.diagnostics.len}: ${firstDiagnostic(ref ok)}`;
+  }
+
+  let wrongElem = checkSource("function f(xs: int32[]): int { const s: uint8[] = xs[1..3]; return 0; }");
+  let test theory: Case = t.asserts("and keeps its element type") {
+    theory.isSuccessful = wrongElem.diagnostics.len > 0;
+    theory.detail = "assigning an int32 slice to a uint8[] produced no diagnostic";
+  }
+
+  let notArray = checkSource("function f(n: int): int { const s: int[] = n[1..2]; return 0; }");
+  let test theory: Case = t.asserts("slicing a non-array is refused by type name") {
+    theory.isSuccessful = diagnosticsMention(ref notArray, "only an array can be sliced");
+    theory.detail = `wanted a not-an-array refusal, got: ${firstDiagnostic(ref notArray)}`;
+  }
+
+  const readable = "trait Readable { function read(ref self): int; } ";
+  let vt = checkSource(`${readable}vtable Reader for Readable { read: () => int, } function main(): int { return 0; }`);
+  let test theory: Case = t.asserts("a vtable over a real trait checks clean") {
+    theory.isSuccessful = vt.diagnostics.len == 0;
+    theory.detail = `reported ${vt.diagnostics.len}: ${firstDiagnostic(ref vt)}`;
+  }
+
+  // Erasing something that is not a trait is the same class of mistake as
+  // `implements` on a non-trait, and reads the same way.
+  let notTrait = checkSource("type Helper { n: int, } vtable Reader for Helper { read: () => int, } function main(): int { return 0; }");
+  let test theory: Case = t.asserts("a vtable over a non-trait is refused") {
+    theory.isSuccessful = diagnosticsMention(ref notTrait, "is not a trait");
+    theory.detail = `wanted a non-trait refusal, got: ${firstDiagnostic(ref notTrait)}`;
+  }
+
+  // A vtable's NAME is a type, because a vtable is a struct of function
+  // pointers - that is what lets it be a parameter.
+  let asType = checkSource(`${readable}vtable Reader for Readable { read: () => int, } function take(r: Reader): int { return 0; } function main(): int { return 0; }`);
+  let test theory: Case = t.asserts("a vtable name resolves as a type") {
+    theory.isSuccessful = asType.diagnostics.len == 0;
+    theory.detail = `reported ${asType.diagnostics.len}: ${firstDiagnostic(ref asType)}`;
+  }
+}
+
+// ----- address-of and dereference --------------------------------------------
+
+suite function addressOfAndDerefAreGatedAndTyped(): void {
+  // Both are gated: handing out a raw address without saying the file is unsafe
+  // would let the `unsafe_ptr` gate be bypassed by one character.
+  let ungatedAddr = checkSource("function f(): int { let n: int32 = 1; const p: int = &n; return 0; }");
+  let test theory: Case = t.asserts("`&x` without `import.unsafe;` is refused") {
+    theory.isSuccessful = diagnosticsMention(ref ungatedAddr, "import.unsafe");
+    theory.detail = `wanted the gate diagnostic, got: ${firstDiagnostic(ref ungatedAddr)}`;
+  }
+
+  let ok = checkSource("import.unsafe;\nfunction f(): int32 { let n: int32 = 1; const p: unsafe_ptr<int32> = &n; return *p; }");
+  let test theory: Case = t.asserts("`&x` gives a pointer to x's type, and `*p` gives it back") {
+    theory.isSuccessful = ok.diagnostics.len == 0;
+    theory.detail = `reported ${ok.diagnostics.len}: ${firstDiagnostic(ref ok)}`;
+  }
+
+  let wrongPointee = checkSource("import.unsafe;\nfunction f(): int { let n: int32 = 1; const p: unsafe_ptr<uint8> = &n; return 0; }");
+  let test theory: Case = t.asserts("the pointee is the target's type, not any type") {
+    theory.isSuccessful = wrongPointee.diagnostics.len > 0;
+    theory.detail = "&int32 accepted as unsafe_ptr<uint8>";
+  }
+
+  // An address needs storage, and a temporary has none.
+  let temporary = checkSource("import.unsafe;\nfunction f(): int { const p: unsafe_ptr<int32> = &(1 + 2); return 0; }");
+  let test theory: Case = t.asserts("taking the address of a temporary is refused") {
+    theory.isSuccessful = temporary.diagnostics.len > 0;
+    theory.detail = "&(1 + 2) produced no diagnostic";
+  }
+
+  // The practical cost of widening: an opaque pointer has no pointee, so there
+  // is nothing for a read through it to produce.
+  let derefOpaque = checkSource("import.unsafe;\nfunction f(p: unsafe_ptr): int { return *p; }");
+  let test theory: Case = t.asserts("an opaque pointer cannot be dereferenced") {
+    theory.isSuccessful = diagnosticsMention(ref derefOpaque, "no pointee");
+    theory.detail = `wanted a no-pointee refusal, got: ${firstDiagnostic(ref derefOpaque)}`;
+  }
+
+  let derefInt = checkSource("import.unsafe;\nfunction f(n: int32): int32 { return *n; }");
+  let test theory: Case = t.asserts("dereferencing a non-pointer is refused by type name") {
+    theory.isSuccessful = diagnosticsMention(ref derefInt, "only a raw pointer");
+    theory.detail = `wanted a not-a-pointer refusal, got: ${firstDiagnostic(ref derefInt)}`;
+  }
+
+  // A store through a pointer targets the POINTEE, so the value is checked
+  // against that rather than against the pointer.
+  let storeThrough = checkSource("import.unsafe;\nfunction f(): void { let n: int32 = 1; const p: unsafe_ptr<int32> = &n; *p = 9; }");
+  let test theory: Case = t.asserts("a store through a pointer checks against the pointee") {
+    theory.isSuccessful = storeThrough.diagnostics.len == 0;
+    theory.detail = `reported ${storeThrough.diagnostics.len}: ${firstDiagnostic(ref storeThrough)}`;
+  }
+
+  let storeWrongType = checkSource("import.unsafe;\nfunction f(): void { let n: int32 = 1; const p: unsafe_ptr<int32> = &n; *p = \"x\"; }");
+  let test theory: Case = t.asserts("and refuses a value of the wrong type") {
+    theory.isSuccessful = storeWrongType.diagnostics.len > 0;
+    theory.detail = "storing a string through an int32 pointer produced no diagnostic";
+  }
+}
+
+// ----- what real std code found ----------------------------------------------
+
+// Every one of these was invisible until std hit it, and every one produced a
+// message far from its cause. They are grouped because that is what they have
+// in common: each is a place where a piece of context failed to travel.
+suite function genericContextTravels(): void {
+  // `ref self` inside a generic type is `Box<T>`, not bare `Box` - which
+  // otherwise reports "Box is generic, so it needs type arguments" pointing at
+  // the method, with nothing about `self` in it.
+  let selfInGeneric = checkSource("trait Sized { function size(ref self): usize; } type Box<T> implements Sized { value: T, function size(ref self): usize { return 1; } } function main(): int { return 0; }");
+  let test theory: Case = t.asserts("`ref self` in a generic type carries the type parameters") {
+    theory.isSuccessful = selfInGeneric.diagnostics.len == 0;
+    theory.detail = `reported ${selfInGeneric.diagnostics.len}: ${firstDiagnostic(ref selfInGeneric)}`;
+  }
+
+  // Trait satisfaction is checked in its own sweep because the GENERIC sweep
+  // runs before traits are filled. Declaring the trait AFTER the generic type
+  // is what exposes it.
+  let traitAfter = checkSource("type Box<T> implements Sized { value: T, function size(ref self): usize { return 1; } } trait Sized { function size(ref self): usize; } function main(): int { return 0; }");
+  let test theory: Case = t.asserts("a trait declared after a generic implementer still counts") {
+    theory.isSuccessful = traitAfter.diagnostics.len == 0;
+    theory.detail = `reported ${traitAfter.diagnostics.len}: ${firstDiagnostic(ref traitAfter)}`;
+  }
+
+  // ...and the check still FIRES, rather than being skipped into silence.
+  let stillChecked = checkSource("trait Sized { function size(ref self): usize; } type Box<T> implements Sized { value: T, } function main(): int { return 0; }");
+  let test theory: Case = t.asserts("and an unimplemented method is still refused") {
+    theory.isSuccessful = diagnosticsMention(ref stillChecked, "size");
+    theory.detail = `wanted a missing-method refusal, got: ${firstDiagnostic(ref stillChecked)}`;
+  }
+
+  // A generic function's BODY needs the parameters in scope, not just its
+  // signature: `let xs: T[] = ...` is an annotation inside the body.
+  let bodyParams = checkSource("function pair<T>(a: T, b: T): usize { const both: T[] = [a, b]; return both.len; } function main(): int { return 0; }");
+  let test theory: Case = t.asserts("a generic body may annotate with its own type parameters") {
+    theory.isSuccessful = bodyParams.diagnostics.len == 0;
+    theory.detail = `reported ${bodyParams.diagnostics.len}: ${firstDiagnostic(ref bodyParams)}`;
+  }
+}
+
+suite function literalsPinToTheirNeighbours(): void {
+  // A cast CONVERTS what it is given, so the target must not reach in and pin
+  // the operand - that made `uint8(48 + big)` refuse to add an int to a uint64.
+  let castOperand = checkSource("function f(rest: uint64): uint8 { return uint8(48 + (rest % 10)); }");
+  let test theory: Case = t.asserts("a cast does not pin its operand") {
+    theory.isSuccessful = castOperand.diagnostics.len == 0;
+    theory.detail = `reported ${castOperand.diagnostics.len}: ${firstDiagnostic(ref castOperand)}`;
+  }
+
+  // A LEADING literal has already defaulted to int32 by the time the right side
+  // is known, so it gets re-pinned. The trailing case worked all along.
+  let leading = checkSource("function f(n: uint64): uint64 { return 2 * n; }");
+  let test theory: Case = t.asserts("a leading literal takes the other operand's type") {
+    theory.isSuccessful = leading.diagnostics.len == 0;
+    theory.detail = `reported ${leading.diagnostics.len}: ${firstDiagnostic(ref leading)}`;
+  }
+
+  let trailing = checkSource("function f(n: uint64): uint64 { return n * 2; }");
+  let test theory: Case = t.asserts("as does a trailing one") {
+    theory.isSuccessful = trailing.diagnostics.len == 0;
+    theory.detail = `reported ${trailing.diagnostics.len}: ${firstDiagnostic(ref trailing)}`;
+  }
+
+  // Re-pinning must not paper over a REAL mismatch between two typed operands.
+  let realMismatch = checkSource("function f(a: uint8, b: uint64): uint64 { return a + b; }");
+  let test theory: Case = t.asserts("two typed operands of different widths are still refused") {
+    theory.isSuccessful = realMismatch.diagnostics.len > 0;
+    theory.detail = "uint8 + uint64 produced no diagnostic";
+  }
+}
+
+suite function stringLenIsByteLength(): void {
+  let ok = checkSource("function f(s: string): usize { return s.len; }");
+  let test theory: Case = t.asserts("a string has `.len`") {
+    theory.isSuccessful = ok.diagnostics.len == 0;
+    theory.detail = `reported ${ok.diagnostics.len}: ${firstDiagnostic(ref ok)}`;
+  }
+
+  let other = checkSource("function f(s: string): usize { return s.size; }");
+  let test theory: Case = t.asserts("and nothing else") {
+    theory.isSuccessful = other.diagnostics.len > 0;
+    theory.detail = "`s.size` produced no diagnostic";
+  }
+}

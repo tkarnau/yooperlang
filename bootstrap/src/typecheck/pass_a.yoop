@@ -47,6 +47,12 @@ function registerFileShells(
   isEntry: bool
 ): void {
   const programNode = nodeAt(ref m.ast, root);
+  // `import.unsafe;` is per FILE in the source but per MODULE here: a module's
+  // files share one namespace and one arena, so gating raw pointers per file
+  // would mean a type that resolves in one file and not its sibling.
+  if (programNode.flagA) {
+    tm.unsafeAllowed = true;
+  }
   let i: usize = 0;
   while (i < programNode.childCount) {
     const childId = childAt(ref m.ast, programNode, i);
@@ -66,18 +72,57 @@ function registerFileShells(
         registerVariantShell(ref prog, ref tm, declNode, moduleId, exported, ref m.ast);
       }
       case ASTNodeKind.EXTERN_BLOCK: {
-        // Each declared signature is an ordinary function NAME with an
-        // extraordinary symbol: it keeps its exact spelling for the linker.
-        // `Symbol.Func` all the same - what differs is mangling, which is
-        // codegen's business, so nothing here has to know.
+        // Each declared signature is an ordinary function NAME. What is
+        // extraordinary is its symbol, and the ABI decides which way:
+        //
+        //   "C"          the symbol exists in a library and keeps its exact
+        //                spelling for the linker, so it goes in `externNames`
+        //                and codegen does not mangle it
+        //   "intrinsic"  there IS no symbol - codegen lowers the call to
+        //                instructions - so it must NOT go in `externNames`, or
+        //                a call would be emitted to something nothing defines
+        const isIntrinsic = declNode.flagA;
         let x: usize = 0;
         while (x < declNode.childCount) {
           const externNode = nodeAt(ref m.ast, childAt(ref m.ast, declNode, x));
-          const externShell = internType(ref prog, Type.Func {
-            params: vec.vecNew(0), ret: TYPE_ERROR_ID, variadic: false,
-          });
-          bindName(ref prog, ref tm, externNode, Symbol.Func { typeId: externShell }, exported);
-          map.mapInsert(ref tm.externNames, externNode.name, true);
+          if (isIntrinsic && !isKnownIntrinsic(externNode.name)) {
+            // User code cannot fabricate an intrinsic: the name IS the
+            // lowering, so one codegen does not know would typecheck and then
+            // fail much later with nothing to say.
+            reportError(
+              ref prog,
+              `unknown intrinsic "${externNode.name}" - see std/core/intrinsics.yoop for the full list`,
+              externNode.sourceLoc
+            );
+            x += 1;
+            continue;
+          }
+          // An intrinsic is implicitly EXPORTED - there is nowhere to write
+          // `export`, since the block is the declaration - and every module in
+          // std reaches them through `import * as intr`. A C extern is not.
+          const visible = exported || isIntrinsic;
+
+          // A GENERIC intrinsic registers as an ordinary generic decl, so call
+          // sites infer `T` through the same path every generic function uses.
+          // What differs is only that there is no body to monomorphize, which
+          // is codegen's problem and not this pass's.
+          if (externNode.childA != 0) {
+            registerGenericShell(
+              ref prog, ref tm, externNode, moduleId, visible, GenericSort.FUNC, ref m.ast
+            );
+          } else {
+            const externShell = internType(ref prog, Type.Func {
+              params: vec.vecNew(0), ret: TYPE_ERROR_ID, variadic: false,
+            });
+            bindName(
+              ref prog, ref tm, externNode, Symbol.Func { typeId: externShell }, visible
+            );
+          }
+          if (!isIntrinsic) {
+            map.mapInsert(ref tm.externNames, externNode.name, true);
+          } else {
+            registerIntrinsic(ref prog, externNode.name);
+          }
           x += 1;
         }
       }
@@ -92,6 +137,28 @@ function registerFileShells(
           extendsTraits: vec.vecNew(0),
         });
         bindName(ref prog, ref tm, declNode, Symbol.Trait { typeId: traitShell }, exported);
+      }
+      case ASTNodeKind.VTABLE_DECL: {
+        // A vtable IS a struct - of function pointers, one per trait method -
+        // so it gets a struct shell and pass C fills it like any other. The
+        // SYMBOL is what records that it erases a trait.
+        const vtableShell = internType(ref prog, Type.Struct {
+          decl: { name: declNode.name, module: moduleId, populated: false },
+          fields: vec.vecNew(0),
+          methods: map.mapNew(0, map.stringKeyOps()),
+          implementsTraits: vec.vecNew(0),
+          generic: { origin: 0, args: vec.vecNew(0) },
+        });
+        bindName(ref prog, ref tm, declNode, Symbol.Vtable { typeId: vtableShell }, exported);
+      }
+      case ASTNodeKind.KIND_DECL: {
+        // A kind is a NAME and nothing else here. Nothing enforces kinds, so
+        // there is no shell to fill and no clause to resolve - but the name has
+        // to bind, because `import { disposable } from "std/core/kinds.yoop"`
+        // is how every file in the tree reaches one, and an unbound name there
+        // would fail the import rather than the enforcement.
+        registerKind(ref prog, declNode.name, hasClause(ref m.ast, declNode, PAUSABLE_CLAUSE));
+        bindName(ref prog, ref tm, declNode, Symbol.Kind { kindId: 0 }, exported);
       }
       case ASTNodeKind.CONST_DECL: {
         // A shell like every other: the annotation is pass C's to resolve, and
@@ -317,4 +384,34 @@ function bindName(
   if (exported) {
     map.mapInsert(ref tm.exports, declNode.name, symbolId);
   }
+}
+
+// The one kind clause the bootstrap reads. Everything else is recorded by the
+// parser and understood by nobody.
+const PAUSABLE_CLAUSE: string = "pausable";
+
+// Whether a kind decl carries a clause with this leading word.
+function hasClause(ref ast: AST, declNode: ASTNode, word: string): bool {
+  let i: usize = 0;
+  while (i < declNode.childCount) {
+    if (str.stringEq(nodeAt(ref ast, childAt(ref ast, declNode, i)).name, word)) {
+      return true;
+    }
+    i += 1;
+  }
+  return false;
+}
+
+// The intrinsics that exist. The name IS the lowering, so this list and
+// codegen's dispatch are two halves of one table - adding a name here without
+// a lowering there produces a call to a symbol nothing defines.
+function isKnownIntrinsic(name: string): bool {
+  return str.stringEq(name, "heapAlloc") ||
+    str.stringEq(name, "heapFree") ||
+    str.stringEq(name, "ctxAlloc") ||
+    str.stringEq(name, "ctxFree") ||
+    str.stringEq(name, "stringAsBytes") ||
+    str.stringEq(name, "stringFromBytesUnchecked") ||
+    str.stringEq(name, "bytesAsStringUnchecked") ||
+    str.stringEq(name, "arraySlice");
 }
