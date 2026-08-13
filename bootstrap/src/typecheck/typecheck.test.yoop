@@ -358,6 +358,62 @@ suite function qualifiedCallArgumentsAreCheckedToo(): void {
   }
 }
 
+// `ns.Type` in annotation position. A namespace has always carried the module's
+// exports; this is reaching a TYPE through one rather than a function.
+suite function namespacesReachTypesAndNotJustFunctions(): void {
+  const lib = "export type Point { x: int, y: int }\ntype Hidden { z: int }\n";
+
+  let ok = checkTwoModules(
+    lib,
+    "import * as lib from \"./lib.yoop\";\nfunction main(): int { const p: lib.Point = { x: 1, y: 2 }; return p.x; }"
+  );
+  let test theory: Case = t.asserts("a qualified type resolves against the module's exports") {
+    theory.isSuccessful = ok.diagnostics.len == 0;
+    theory.detail = `reported ${ok.diagnostics.len}: ${firstDiagnostic(ref ok)}`;
+  }
+
+  // The point of the whole feature: type equality is `id == id`, so a qualified
+  // name and a named import have to reach ONE symbol. Two nominal types that
+  // merely spell the same would fail this assignment.
+  let sameType = checkTwoModules(
+    lib,
+    "import { Point }, * as lib from \"./lib.yoop\";\nfunction takes(p: lib.Point): int { return p.x; }\nfunction main(): int { const p: Point = { x: 1, y: 2 }; return takes(p); }"
+  );
+  let test theory: Case = t.asserts("a qualified name and a named import are the SAME type") {
+    theory.isSuccessful = sameType.diagnostics.len == 0;
+    theory.detail = `reported ${sameType.diagnostics.len}: ${firstDiagnostic(ref sameType)}`;
+  }
+
+  // Three distinct mistakes, three distinct messages - the fix for each is in a
+  // different place, so they must not read alike.
+  let notExported = checkTwoModules(
+    lib,
+    "import * as lib from \"./lib.yoop\";\nfunction main(): int { const h: lib.Hidden = 0; return 0; }"
+  );
+  let test theory: Case = t.asserts("a declared-but-unexported type says so, and where to fix it") {
+    theory.isSuccessful = diagnosticsMention(ref notExported, "not exported");
+    theory.detail = `wanted an export diagnostic, got: ${firstDiagnostic(ref notExported)}`;
+  }
+
+  let noSuchExport = checkTwoModules(
+    lib,
+    "import * as lib from \"./lib.yoop\";\nfunction main(): int { const n: lib.Nope = 0; return 0; }"
+  );
+  let test theory: Case = t.asserts("a misspelled type names the namespace it looked in") {
+    theory.isSuccessful = diagnosticsMention(ref noSuchExport, "has no export");
+    theory.detail = `wanted a missing-export diagnostic, got: ${firstDiagnostic(ref noSuchExport)}`;
+  }
+
+  let noSuchNs = checkTwoModules(
+    lib,
+    "import * as lib from \"./lib.yoop\";\nfunction main(): int { const n: nope.Point = 0; return 0; }"
+  );
+  let test theory: Case = t.asserts("an unknown qualifier is reported as a namespace, not a type") {
+    theory.isSuccessful = diagnosticsMention(ref noSuchNs, "unknown namespace");
+    theory.detail = `wanted a namespace diagnostic, got: ${firstDiagnostic(ref noSuchNs)}`;
+  }
+}
+
 // ----- generics -------------------------------------------------------------
 
 const BOX: string = "type Box<T> { value: T }\n";
@@ -1572,6 +1628,31 @@ suite function assignmentRespectsMutability(): void {
   let test theory: Case = t.asserts("an element of a const array is still assignable") {
     theory.isSuccessful = indexWrite.diagnostics.len == 0;
     theory.detail = `reported ${indexWrite.diagnostics.len}: ${firstDiagnostic(ref indexWrite)}`;
+  }
+
+  // A field write needs an ADDRESS, so its base has to bottom out in a named
+  // binding. A path of fields does; a call's result does not - it lives in a
+  // temp with nowhere to store back to. A field READ is unrestricted, because
+  // it is an extractvalue on a loaded value and needs no address at all.
+  const nestedDecls = "type C { n: int, } type B { c: C, } type A { b: B, } ";
+  const mk = "function mk(): B { return { c: { n: 1 } }; } ";
+
+  let nestedWrite = checkSource(`${nestedDecls}function main(): int { let a: A = { b: { c: { n: 1 } } }; a.b.c.n = 5; return a.b.c.n; }`);
+  let test theory: Case = t.asserts("a nested field path is assignable") {
+    theory.isSuccessful = nestedWrite.diagnostics.len == 0;
+    theory.detail = `reported ${nestedWrite.diagnostics.len}: ${firstDiagnostic(ref nestedWrite)}`;
+  }
+
+  let callBase = checkSource(`${nestedDecls}${mk}function main(): int { mk().c.n = 5; return 0; }`);
+  let test theory: Case = t.asserts("a field of a call's result is refused - there is nowhere to store") {
+    theory.isSuccessful = diagnosticsMention(ref callBase, "can be assigned to");
+    theory.detail = `wanted an addressability refusal, got: ${firstDiagnostic(ref callBase)}`;
+  }
+
+  let callRead = checkSource(`${nestedDecls}${mk}function main(): int { return mk().c.n; }`);
+  let test theory: Case = t.asserts("but READING that same path is fine") {
+    theory.isSuccessful = callRead.diagnostics.len == 0;
+    theory.detail = `reported ${callRead.diagnostics.len}: ${firstDiagnostic(ref callRead)}`;
   }
 }
 

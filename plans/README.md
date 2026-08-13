@@ -626,16 +626,68 @@ where it should read 5.
 ## Where the bootstrap stands on self-hosting
 
 The closure - the 16 std files `bootstrap/src` imports - compiles completely.
-What remains before the bootstrap can compile ITSELF is its own source, which is
-a different and larger list: the bootstrap uses `async`-free code throughout but
-leans on `Result`/`Option` propagation (`?`), `switch` over variants with
-payloads, `@derive(display)`, and the test harness's `suite`/`test` kinds. Those
-are the next thing to measure, the same way the std closure was measured rather
-than guessed at.
+What remains before the bootstrap can compile ITSELF is its own source, and that
+has now been MEASURED rather than guessed at, the same way the std closure was.
 
-Past those, and not blocking a parse: **linking the yoop runtime**, which
-`ctxAlloc` / `ctxFree` need, and **instantiating a generic trait**, which
-`for x in` over an `Iterable<T>` needs.
+**The bootstrap compiles 0 of its own 86 non-test files today.** Probing each one
+gives a first blocker; because a directory module loads all its files, the honest
+unit is the MODULE, and there are ten of them. Each module's first blocker:
+
+    ast           @derive(display)
+    codegen       nested generic `>>` in a struct field
+    diagnostics   value `enum`
+    lex           float literals
+    link          two files in one module both `import * as fs`
+    parse         `?` propagation
+    source_graph  `ns.Type` in an annotation
+    typecheck     @derive(display)
+    utils         compound assignment on a field
+    main.yoop     `ns.Type` in an annotation
+
+A first blocker undercounts, since a file that clears one hits the next, so each
+item below is a STATIC count over all 86 files rather than a probe tally.
+
+- **`?` propagation - 379 sites in 18 files, and 16 of those 18 are `parse/`.**
+  The single biggest item, and far more concentrated than expected: it is
+  essentially a `parse/` feature. Nothing else in the compiler leans on it.
+- **File-scoped imports in a directory module - 130 sites across 6 modules.**
+  A namespace alias is currently MODULE-scoped, so the second file in `link/` to
+  write `import * as fs` collides with the first. This is the surprise of the
+  measurement: the probe showed it as a 2-file oddity in `link` because every
+  other module hit an earlier blocker first, but `vec` is imported 20 times in
+  `codegen`, 14 in `parse` and 13 in `typecheck`. Every file importing what it
+  uses is the natural way to write it, and the JS reference allows it. Imports
+  should be per-FILE where declarations are per-MODULE.
+- **Value `enum` - 6 decls in 6 files**, and they are core vocabulary
+  (`ASTNodeKind`, `TokenKind`, `Severity`). One of them, `ASTNodeKind`,
+  `implements Display`, so this is not purely a parse item.
+- **Compound assignment on a field - FIXED, see below.** 18 sites in 8 files,
+  and it turned out to need a feature of its own rather than a parser tweak.
+- **`@derive(display)` - 17 sites in 7 files.** Worth knowing: it is the ONLY
+  attribute the bootstrap's source uses. There is no general attribute surface to
+  build, just this one.
+- **Float literals - 5 sites in 2 files**, both in `lex/`. `Token` carries a
+  `floatVal` and `literals.yoop` does mantissa arithmetic, so `lex` cannot
+  compile without floats existing at all. This is the only item here that is a
+  whole missing primitive type rather than a syntax gap.
+- **`ns.Type` in an annotation - FIXED, see below.** One site (`fs.DirIter` in
+  `source_graph/load.yoop`), blocking two modules including the driver.
+- **Nested generic `>>` followed by a comma - FIXED, see below.** A BUG rather
+  than a missing feature, and the smallest item on the list.
+
+**`switch` over variants with payloads is already DONE** - 302 sites, and a
+fixture confirms constructors, payload bindings and exhaustiveness compile and
+run. It was on the list to measure and came off it; the README claimed it landed
+with variants and the claim holds.
+
+**The `suite` / `test` kinds are 110 decls across the 4 `.test.yoop` files, and
+they block nothing in the compiler binary.** They are what the bootstrap's own
+regression suite needs in order to RUN under the bootstrap. Worth separating from
+the other items: the compiler self-hosting and the test suite self-hosting are
+two milestones, and only the second one needs these.
+
+Past all of these, and not blocking a parse: **instantiating a generic trait**,
+which `for x in` over an `Iterable<T>` needs.
 
 Probing all 45 non-test files under `std/` with the bootstrap: five compile all
 the way to clang (`core/atomic`, `core/types`, `debug`, `env`, `log`). Template
@@ -650,18 +702,110 @@ those files hit next:
 - **`null` and the unsafe-pointer surface** - 3 files
 - the **`a..b` range expression**, and char literals
 
-Immediate build sequence:
+**Item 1 landed on 2026-08-12, and the first thing it did was correct itself.**
+The bug was NOT "a field, unlike a parameter" - it is **a `,` following a `>>`**,
+wherever that falls. A parameter followed by a comma failed exactly the same way,
+and a nested field with nothing after it compiled fine; the two probes that
+suggested a field/parameter split just happened to differ in what came next.
 
-1. DONE - token dump + parity harness (src/dumpTokens.js,
-   bootstrap/src/lex/dump.yoop, src/parity.test.js).
-2. Design the layer-2 AST dump. The two ASTs are different shapes (NODE_LIST
-   wrappers and annotation nodes here, plain arrays and annotation objects in
-   JS), so a normalized tree format has to come BEFORE the parser grows much
-   further. Then grow the parser toward what the bootstrap itself uses.
-3. Typecheck pass C (fill the shells: struct fields, function signatures), then
-   pass D (bodies + decoration); diff resolved types + diagnostics.
-4. Build codegen straight from the typed AST (skip the IR layer initially, as
-   JS does); diff the `.ll` and run the binary.
+The mechanism: `Box<Box<T>>` ends in ONE token, so the inner list consumes the
+`>>` and leaves a virtual `>` owed to the outer list. Between those two moments
+the cursor already sits past the whole annotation, so the outer list peeking for
+a `,` reads the NEXT field's separator as another type argument and swallows it.
+The fix is that a pending `>` closes the list: `parseTypeArgList` breaks on
+`ps.pendingGt` before it consults the real token stream at all.
+
+**A second bug came out of the slice fixture, which is the case for fixtures.**
+`isOpenInstance` was not recursive: it asked whether an ARGUMENT was a TypeParam,
+so `Box<Box<T>>` looked closed (its argument is `Box<T>`, a struct instance).
+Codegen then emitted a typedef for `Box_Box_T` whose field type was `Box_T` - a
+template it had correctly skipped - and clang rejected the dangling reference.
+Openness is a property of the whole type tree, so the walk now is too, through
+nominal arguments and the structural wrappers alike. Unreachable before, since
+the annotation could not parse with a comma after it.
+
+Immediate build sequence, ordered by what the measurement says rather than by
+apparent size. Cheap-and-unblocking first, so each step moves whole modules:
+
+1. DONE - the `>>` bug above. `codegen` now advances to item 2 and `typecheck`
+   to `@derive(display)`, which is what the measurement predicted.
+2. DONE - compound assignment on a field. See below; it was not the one-line
+   widening it looked like.
+3. DONE - `ns.Type` in an annotation. See below.
+4. **File-scoped imports in a directory module** - 130 sites, and nothing else
+   on this list touches as much of the tree. Scope an alias to its FILE while
+   declarations stay per-module.
+5. **`@derive(display)`** - 17 sites, one attribute, no general surface to build.
+6. **Value `enum`**, including `implements Display` on one.
+7. **`?` propagation** - the biggest single item, and worth doing with the others
+   out of the way since 16 of its 18 files are `parse/` and will still be sitting
+   behind their own module's blockers otherwise.
+8. **Floats** - a whole primitive type, needed only by `lex/`. Last because it is
+   the largest and the most self-contained.
+
+Then, as a separate milestone: the `suite` / `test` kinds, which self-host the
+bootstrap's own regression suite rather than the compiler.
+
+**Item 2 landed on 2026-08-12, and it was not the parser tweak it looked like.**
+Measuring the 18 sites first is what showed why: 8 of them are two or three
+levels deep (`cx.locals.nextSlot`, `cx.loops.frames.len`), and NESTED FIELD
+ASSIGNMENT did not exist - `a.b.c = v` was refused outright. So the item was
+really two pieces, and the deeper one was the missing feature.
+
+- **Nested field assignment.** `emitFieldAddress` now recurses: `a.b.c` geps
+  from `a`'s slot to `b`, then from THAT POINTER to `c`, through the
+  `emitGepFieldOfPtr` that variant payloads already needed. Pass D's rule
+  changed from "the base is a name" to "the base has an ADDRESS", which a field
+  path has and a call's result does not - so `f().x = v` stays refused while
+  `a.b.c = v` works. Reading `f().c.n` was always fine and still is; a read is
+  an extractvalue on a loaded value and needs no address at all.
+- **The desugaring, widened to a PLACE.** The compound forms have no node of
+  their own - they become `target = target <op> value` in the parser - so they
+  name the target twice. That is sound exactly when reading the target is free,
+  which is a name or a field path and nothing else. `xs[f()] += 1` would call
+  `f` twice and stays refused by name. The re-read is a COPY of the path rather
+  than the same NodeId, because the arena is a tree: sharing one node would have
+  pass D decorate it from two directions and codegen walk it twice.
+
+**Item 3 landed on 2026-08-13, and it was the small one the measurement said it
+was.** A `.` in annotation position can mean nothing else - there is no field
+access and no method call there - so the parser reads the first name as a
+QUALIFIER and the second as the type. The qualifier is interned into the string
+pool rather than kept in a second name field, the way an import specifier
+already keeps its export name, and `flagA` is what says there is one, because
+pool index 0 is a real string and a `strId` of 0 cannot mean "absent".
+
+Resolution goes through the namespace's EXPORTS and then rejoins the ordinary
+path, so a qualified generic (`vec.Vec<int>`) instantiates exactly like an
+imported one and an array suffix attaches the same way. It is checked FIRST in
+`resolveTypeName`, before the type-parameter, `unsafe_ptr` and primitive cases:
+a qualified name is none of those, and falling through would let an unlucky
+alias shadow something it has no relationship to.
+
+The assertion that matters is that `Point` imported by name and `lib.Point`
+qualified are ONE type. Type equality is `id == id`, so two nominal types that
+merely spell alike would fail to pass between the two annotations - the
+namespaces fixture builds a value as one and passes it as the other.
+
+Three refusals, deliberately worded apart, because the fix for each is in a
+different place: declared-but-not-exported (add `export`, in the other file),
+no such export (a typo here), and unknown namespace (the import is missing).
+
+**What did NOT come with it: a qualified PATTERN.** `case shapes.Tag.Hot:` is a
+different surface - patterns have their own parser - and nothing in the closure
+needs it, so it stays refused rather than half-built.
+
+`utils` cleared and immediately hit a NEW blocker worth recording:
+**`utils/sort.yoop` needs type-parameter BOUNDS** (`<T implements Comparable<T>>`).
+Bounds were deliberately deferred - a generic body is checked once with an opaque
+`T`, which is sound only because a parameter can promise nothing - so this is the
+first time self-hosting has demanded the decision that breaks that. It is now on
+the critical path rather than a someday item.
+
+Parity work, unchanged and still open: design the layer-2 AST dump. The two ASTs
+are different shapes (NODE_LIST wrappers and annotation nodes here, plain arrays
+and annotation objects in JS), so a normalized tree format has to come before the
+two parsers can be diffed.
 
 ---
 

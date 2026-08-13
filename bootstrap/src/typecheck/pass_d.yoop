@@ -1190,8 +1190,26 @@ function isComparison(tag: TokenTags): bool {
   }
 }
 
-// `target = value`. Only a plain name is assignable so far; fields and index
-// expressions arrive with the constructs that produce them.
+// Whether a field write's base has an ADDRESS to compute: a name, or a path of
+// fields reaching one. `a.b.c = v` walks down to `a`; `f().x = v` does not,
+// because a call's result lives in a temp with nowhere to store back to.
+//
+// A field READ needs none of this - it is an extractvalue on a loaded value, so
+// it works on any struct expression. The asymmetry is the same one a struct
+// field write already had, just applied one level at a time.
+function isAddressableFieldBase(ref ast: AST, id: NodeId): bool {
+  const node = nodeAt(ref ast, id);
+  if (node.kind == ASTNodeKind.IDENT) {
+    return true;
+  }
+  if (node.kind == ASTNodeKind.FIELD_ACCESS) {
+    return isAddressableFieldBase(ref ast, node.childA);
+  }
+  return false;
+}
+
+// `target = value`. A name, a field of an addressable base, a deref and an
+// index are assignable; anything else is refused by name.
 function checkAssignment(
   ref prog: Program,
   ref tm: TypedModule,
@@ -1233,11 +1251,16 @@ function checkAssignment(
     }
     vec.vecSet(ref tm.resolvedTypes, expr.childA, targetType);
   } else if (target.kind == ASTNodeKind.FIELD_ACCESS) {
-    // `p.x = v`. checkFieldAccess records the field's type, which the store
-    // needs; the base has to be assignable, which for now means a plain name.
-    const baseNode = nodeAt(ref ast, target.childA);
-    if (baseNode.kind != ASTNodeKind.IDENT) {
-      reportError(ref prog, "only a field of a named binding can be assigned to so far", target.sourceLoc);
+    // `p.x = v`, and `a.b.c = v`. checkFieldAccess records the field's type,
+    // which the store needs; the base has to have an ADDRESS, which means a
+    // name or a path of fields reaching one. A call's result has no address to
+    // store into, so `f().x = v` is still refused.
+    if (!isAddressableFieldBase(ref ast, target.childA)) {
+      reportError(
+        ref prog,
+        "only a field of a named binding, or of a field path reaching one, can be assigned to",
+        target.sourceLoc
+      );
       return TYPE_ERROR_ID;
     }
     targetType = checkFieldAccess(ref prog, ref tm, ref ast, target, TYPE_ERROR_ID, ref scope);

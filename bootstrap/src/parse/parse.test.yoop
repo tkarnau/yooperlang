@@ -273,10 +273,73 @@ suite function typeArgumentsParseInAnnotations(): void {
     theory.detail = `the inner argument is "${inner.name}" with argsList ${inner.childA}`;
   }
 
+  // A nested application ends in `>>`, which is ONE token. The inner list
+  // consumes it and leaves a virtual `>` owed to the outer one, so between
+  // those two moments the cursor already sits on whatever follows the whole
+  // annotation. If the outer list peeks at the real token stream there, a
+  // following `,` reads as another type argument and the list eats the next
+  // field, parameter or argument. These pin the three places that can follow.
+  let fields = parseOk("type T { a: Box<Vec<int>>, b: int }");
+  let test theory: Case = t.asserts("a `>>` field does not swallow the field after it") {
+    const decl = topLevel(ref fields, 0);
+    const second = nodeAt(ref fields, childAt(ref fields, decl, 1));
+    theory.isSuccessful = decl.childCount == 2 && str.stringEq(second.name, "b");
+    theory.detail = `the type has ${decl.childCount} field(s), the second named "${second.name}", wanted 2 and "b"`;
+  }
+
+  let params = parseOk("function f(a: Box<Vec<int>>, b: int): int { return 0; }");
+  let test theory: Case = t.asserts("a `>>` parameter does not swallow the parameter after it") {
+    const list = nodeAt(ref params, topLevel(ref params, 0).childB);
+    const second = nodeAt(ref params, childAt(ref params, list, 1));
+    theory.isSuccessful = list.childCount == 2 && str.stringEq(second.name, "b");
+    theory.detail = `the function has ${list.childCount} parameter(s), the second named "${second.name}", wanted 2 and "b"`;
+  }
+
+  let mid = parseOk("function f(): int { const v: Map<Box<Vec<int>>, string> = 0; return 0; }");
+  let test theory: Case = t.asserts("a `>>` argument closes its own list, not the enclosing one") {
+    const list = nodeAt(ref mid, firstVarDeclAnnotation(ref mid).childA);
+    const second = nodeAt(ref mid, childAt(ref mid, list, 1));
+    theory.isSuccessful = list.childCount == 2 && str.stringEq(second.name, "string");
+    theory.detail = `Map got ${list.childCount} argument(s), the second "${second.name}", wanted 2 and "string"`;
+  }
+
   let bare = parseOk("function f(): int { const v: int = 0; return 0; }");
   let test theory: Case = t.asserts("a plain annotation has no argument list") {
     theory.isSuccessful = firstVarDeclAnnotation(ref bare).childA == 0;
     theory.detail = "a non-generic annotation carries a type-argument list";
+  }
+
+  // `fs.DirIter` - a type reached through an imported namespace. The QUALIFIER
+  // is interned rather than kept in a second name field, and `flagA` is what
+  // says there is one: pool index 0 is a real string, so a `strId` of 0 cannot
+  // mean "absent".
+  let qualified = parseOk("function f(): int { const v: fs.DirIter = 0; return 0; }");
+  let test theory: Case = t.asserts("a qualified annotation keeps the TYPE as its name") {
+    const annot = firstVarDeclAnnotation(ref qualified);
+    theory.isSuccessful = annot.flagA && str.stringEq(annot.name, "DirIter");
+    theory.detail = `qualified=${annot.flagA}, name="${annot.name}", wanted true and "DirIter"`;
+  }
+
+  let test theory: Case = t.asserts("and the namespace in the string pool") {
+    const annot = firstVarDeclAnnotation(ref qualified);
+    theory.isSuccessful = str.stringEq(poolString(ref qualified, annot.strId), "fs");
+    theory.detail = `the qualifier interned as "${poolString(ref qualified, annot.strId)}", wanted "fs"`;
+  }
+
+  let test theory: Case = t.asserts("an UNqualified annotation is not marked as one") {
+    theory.isSuccessful = !firstVarDeclAnnotation(ref bare).flagA;
+    theory.detail = "a plain `int` annotation came back marked qualified";
+  }
+
+  // The qualifier is part of the type NAME, so everything that attaches to a
+  // plain one attaches here too, in the same order.
+  let qualGeneric = parseOk("function f(): int { const v: vec.Vec<int>[] = 0; return 0; }");
+  let test theory: Case = t.asserts("a qualified name still takes type arguments and an array suffix") {
+    const arr = firstVarDeclAnnotation(ref qualGeneric);
+    const inner = nodeAt(ref qualGeneric, arr.childA);
+    theory.isSuccessful = arr.kind == ASTNodeKind.TYPE_ANNOTATION_ARRAY_TYPE
+      && inner.flagA && str.stringEq(inner.name, "Vec") && inner.childA != 0;
+    theory.detail = `outer ${arr.kind}, inner "${inner.name}" qualified=${inner.flagA} args=${inner.childA}`;
   }
 
   let test theory: Case = t.asserts("an empty argument list is refused") {
@@ -1192,6 +1255,54 @@ suite function prefixAmpAndStarAreNotTheBinaryOnes(): void {
     theory.isSuccessful = stmt.kind == ASTNodeKind.ASSIGNMENT &&
       nodeAt(ref compound, stmt.childB).kind == ASTNodeKind.BINARY_EXPRESSION;
     theory.detail = `the value is ${nodeAt(ref compound, stmt.childB).kind}`;
+  }
+}
+
+// The compound forms have no node of their own - they desugar in the parser
+// into `target = target <op> value`, which is why one const check covers both
+// spellings. That desugaring names the target TWICE, so it is only sound on a
+// target that costs nothing to read: a name, or a path of fields reaching one.
+suite function compoundAssignmentDesugarsOnPlaceTargetsOnly(): void {
+  let field = parseOk("function f(): void { a.b.c += 1; }");
+  let test theory: Case = t.asserts("a nested field path desugars to a plain assignment") {
+    const stmt = nodeAt(ref field, firstStatement(ref field).childA);
+    theory.isSuccessful = stmt.kind == ASTNodeKind.ASSIGNMENT
+      && nodeAt(ref field, stmt.childA).kind == ASTNodeKind.FIELD_ACCESS
+      && nodeAt(ref field, stmt.childB).kind == ASTNodeKind.BINARY_EXPRESSION;
+    theory.detail = `got ${stmt.kind} with target ${nodeAt(ref field, stmt.childA).kind}`;
+  }
+
+  // The read half is a COPY, not the same NodeId. The arena is a tree: sharing
+  // one node between the read and the write would have pass D decorate it from
+  // two directions and codegen walk it twice under one entry.
+  let test theory: Case = t.asserts("the re-read is a separate node, not the target itself") {
+    const stmt = nodeAt(ref field, firstStatement(ref field).childA);
+    const combined = nodeAt(ref field, stmt.childB);
+    theory.isSuccessful = combined.childA != stmt.childA;
+    theory.detail = `the re-read is node ${combined.childA} and the target is ${stmt.childA}`;
+  }
+
+  let test theory: Case = t.asserts("the copy keeps the whole path, not just its last field") {
+    const stmt = nodeAt(ref field, firstStatement(ref field).childA);
+    const reread = nodeAt(ref field, nodeAt(ref field, stmt.childB).childA);
+    const base = nodeAt(ref field, reread.childA);
+    theory.isSuccessful = str.stringEq(reread.name, "c")
+      && base.kind == ASTNodeKind.FIELD_ACCESS && str.stringEq(base.name, "b");
+    theory.detail = `the re-read is "${reread.name}" over a ${base.kind} named "${base.name}"`;
+  }
+
+  // An index target would evaluate its subscript twice - once to read and once
+  // to write - so it stays refused until a real COMPOUND_ASSIGNMENT node lands.
+  let test theory: Case = t.asserts("an index target is refused rather than evaluated twice") {
+    const src = "function f(): void { xs[g()] += 1; }";
+    theory.isSuccessful = refusalMentions(src, "a name or a field path");
+    theory.detail = `wanted a place-target refusal, got: ${parseError(src)}`;
+  }
+
+  let test theory: Case = t.asserts("so is a call's result") {
+    const src = "function f(): void { g() += 1; }";
+    theory.isSuccessful = refusalMentions(src, "a name or a field path");
+    theory.detail = `wanted a place-target refusal, got: ${parseError(src)}`;
   }
 }
 

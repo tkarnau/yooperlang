@@ -153,7 +153,11 @@ rather than mis-compiled.
   * `break` and `continue`, checked to be inside a loop
   * comparisons `== != < > <= >=`, and `&&` / `||` with real short-circuiting
   * `true` / `false`, unary `-` and `!`, parenthesized grouping
-  * compound assignment (`x += 1`), including in a `for` step
+  * compound assignment (`x += 1`), including in a `for` step, on a name or a
+    field PATH (`cx.loops.frames.len -= 1`). Not on an index: the forms desugar
+    to `target = target <op> value`, and `xs[f()] += 1` would call `f` twice.
+  * nested field paths - `a.b.c = v` reads and writes, at any depth, as long as
+    the path bottoms out in a named binding
   * arrays: `T[]` annotations, `[a, b, c]` literals, `xs[i]` read and write,
     `xs.len`, and passing an array to a function
   * integer casts (`usize(n)`, `int8(x)`)
@@ -240,16 +244,23 @@ rather than mis-compiled.
     kind is enforced, so nothing reads them yet; the limitation is "not
     enforced" rather than "not parsed", and the JS reference additionally checks
     the kind was imported, which the bootstrap has no kind table to do.
+  * `ns.Type` in an ANNOTATION (`fs.DirIter`, `vec.Vec<int>[]`) - a type reached
+    through an imported namespace, resolved against that module's exports. The
+    qualified spelling and a named import reach the SAME type. A qualified
+    PATTERN (`case ns.Tag.Hot:`) is a separate surface and is not here.
   * `std/...` import paths, resolved against a root the compiler DISCOVERS:
     `YOOP_STD_ROOT` if set, otherwise a probe beside the executable. Values from
     std must come through a namespace (`import * as log from "std/log.yoop"`);
     types may be imported by name.
 
 Not yet: side-effect imports (`import "./init.yoop";`), the `modules/` import
-root, std AUTOLOADS, `ns.CONSTANT` (anything but a call through a namespace),
-type-parameter BOUNDS (`T implements Display`), kind prefixes in a type
-argument, value `enum`s, unions, `for x in xs`, module-level
-`let` / `const`, nested field paths (`a.b.c = v`), floats, traits, kinds.
+root, std AUTOLOADS, `ns.CONSTANT` and `ns.Variant.Case` in a PATTERN (a
+namespace reaches types and calls, and nothing else), type-parameter BOUNDS
+(`T implements Display`), kind
+prefixes in a type argument, value `enum`s, unions, `@derive(display)`, `?`
+propagation, floats, and a compound assignment on an INDEX (`xs[i] += 1`), which
+is refused rather than desugared because the desugaring would evaluate the
+subscript twice.
 
 
 **`std/core/types.yoop` and `std/log.yoop` compile** - `Result<T, E>` and
@@ -366,6 +377,14 @@ Two invariants control flow introduced, both easy to break:
 - **Templates are skipped by codegen.** A template's members are TypeParams,
   which have no LLVM type and which nothing ever holds a value of; only the
   instances substitution produced are real. `isOpenInstance` is the test.
+- **Openness is a property of the whole type TREE, so the test recurses.**
+  `Box<Box<T>>` has no TypeParam among its own arguments - the argument is
+  `Box<T>`, a struct instance - so a top-level check calls it closed and codegen
+  emits a typedef whose field type is `Box_T`, the template it just skipped.
+  Clang rejects the dangling reference. `typeMentionsTypeParam` walks nominal
+  arguments and the structural wrappers (`Ref`, `Array`, `Task`, `UnsafePtr`,
+  `Func`, `FuncPtr`) alike. It terminates because an argument is always built
+  before the instance carrying it, so the argument graph has no cycle.
 - **A generic function's body is CHECKED once and EMITTED once per
   instantiation.** Pass D checks it with its parameters left opaque, so its
   decoration is written in terms of them; codegen walks that same decoration per
@@ -384,6 +403,14 @@ Two invariants control flow introduced, both easy to break:
   `Vec<Map<string, TypeId>>` ends in a right-shift, so `consumeClosingGt`
   consumes it and remembers that one `>` is still owed. Same trick, same reason,
   as the JS reference's `pendingGtFromRshift`.
+- **A pending `>` CLOSES the list, so nothing may peek past it.** While one is
+  owed the cursor already sits beyond the whole annotation, so
+  `parseTypeArgList` must break on `ps.pendingGt` BEFORE it looks for a comma.
+  Without that, `Vec<Vec<T>>, g: int` reads the field separator as another type
+  argument and swallows the next field - and the failure surfaces as "expected
+  IDENT, got COLON" pointing at the field AFTER the one that is wrong. It bites
+  wherever a `,` follows a `>>`: fields, parameters, and the middle of an
+  enclosing argument list all break identically.
 - **The std root is DISCOVERED once, by the driver, and passed in.**
   `loadModuleGraph` takes it as a parameter rather than probing for it, so a
   caller that already knows its root - a test pointing at a stub, and eventually
@@ -595,6 +622,24 @@ Two invariants control flow introduced, both easy to break:
   check covers `a = 2` and `a += 2` both. The JS reference checks somewhere that
   the desugaring bypasses, so it refuses the first and allows the second on the
   same binding; the bootstrap deliberately does not copy that.
+- **Desugaring names the target TWICE, so it is gated on the target being a
+  PLACE** - a name, or a path of fields reaching one. Those cost nothing to read
+  a second time. `xs[f()] += 1` would call `f` once to read and again to write,
+  so an index target is refused by name until a real COMPOUND_ASSIGNMENT node
+  exists. `isPlaceExpr` is the gate and it is about SIDE EFFECTS, not about what
+  is assignable - pass D still decides that.
+- **The re-read is a COPY of the path, not the same NodeId.** The arena is a
+  TREE: sharing one node between the read and the write would have pass D
+  decorate it from two directions and codegen walk it twice under one entry.
+  `clonePlaceExpr` copies the source location along with the node, so a
+  diagnostic about the re-read points at what the writer actually wrote.
+- **A field WRITE needs its base to have an ADDRESS; a READ needs nothing.**
+  `a.b.c = v` walks down to a named binding, and `emitFieldAddress` recurses -
+  gep from `a`'s slot to `b`, then from THAT POINTER to `c` via
+  `emitGepFieldOfPtr`. `f().x = v` is refused because a call's result lives in a
+  temp with nowhere to store back to, while `f().x` reads fine as an
+  extractvalue on the loaded value. Same asymmetry as the one-level case, just
+  applied at every step.
 - **A `for ... in` iterable is evaluated ONCE**, before the loop, with its data
   pointer and length cached. Re-evaluating per iteration calls
   `headersView(ref h)` on every step, and an array that grows underneath the
@@ -628,6 +673,14 @@ Two invariants control flow introduced, both easy to break:
   path parameter on forty `reportError` call sites that all want the same
   answer. A bare `12:5` was already ambiguous across modules and became
   ambiguous within one.
+- **A qualified type annotation resolves through the namespace's EXPORTS, and
+  is checked FIRST.** `fs.DirIter` is never a type parameter, never
+  `unsafe_ptr`, and never a primitive spelling, so `resolveTypeName` handles the
+  qualified case before any of those - falling through would let an unlucky
+  alias shadow something unrelated. After the lookup it rejoins the ordinary
+  path, which is what makes `vec.Vec<int>[]` instantiate and take an array
+  suffix with no extra code. The QUALIFIER rides in `strId` with `flagA` saying
+  it is there, since pool index 0 is a real string.
 - **An import binds the source module's SymbolId - the same integer, not a
   copy.** Type equality is `id == id`, so this is what makes an imported `Point`
   compare equal to the declared one instead of being a second nominal type. It

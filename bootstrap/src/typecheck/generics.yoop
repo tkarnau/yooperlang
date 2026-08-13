@@ -645,13 +645,49 @@ export function isOpenInstance(ref prog: Program, id: TypeId): bool {
 function anyTypeParam(ref prog: Program, ref args: Vec<TypeId>): bool {
   let i: usize = 0;
   while (i < args.len) {
-    switch (typeAt(ref prog, vec.vecGet(ref args, i))) {
-      case Type.TypeParam { name: n, originDecl: o, bounds: b }: { return true; }
-      default: { }
+    if (typeMentionsTypeParam(ref prog, vec.vecGet(ref args, i))) {
+      return true;
     }
     i += 1;
   }
   return false;
+}
+
+// Whether a TypeParam appears ANYWHERE inside a type, not just at its top.
+//
+// `Box<Box<T>>` is open, and a check that only looked at the argument itself
+// would miss it: the argument is `Box<T>`, a struct instance rather than a bare
+// TypeParam. Codegen would then emit a typedef for `Box_Box_T` whose field type
+// is `Box_T` - a template it correctly skipped - and clang rejects the dangling
+// reference. Openness is a property of the whole tree, so the walk has to be.
+//
+// This terminates because a type argument is always built before the instance
+// that carries it, so the argument graph has no cycle.
+function typeMentionsTypeParam(ref prog: Program, id: TypeId): bool {
+  switch (typeAt(ref prog, id)) {
+    case Type.TypeParam { name: n, originDecl: o, bounds: b }: { return true; }
+    case Type.Struct { decl: d, fields: f, methods: mm, implementsTraits: it, generic: g }: {
+      return anyTypeParam(ref prog, ref g.args);
+    }
+    case Type.Variant { decl: d, cases: cs, methods: mm, implementsTraits: it, generic: g }: {
+      return anyTypeParam(ref prog, ref g.args);
+    }
+    case Type.Ref { inner: inner }: { return typeMentionsTypeParam(ref prog, inner); }
+    case Type.Array { elem: elem }: { return typeMentionsTypeParam(ref prog, elem); }
+    case Type.Task { result: result }: { return typeMentionsTypeParam(ref prog, result); }
+    case Type.UnsafePtr { pointee: pointee }: {
+      // The opaque `unsafe_ptr` has pointee 0, the reserved none-id.
+      if (pointee == 0) { return false; }
+      return typeMentionsTypeParam(ref prog, pointee);
+    }
+    case Type.Func { params: ps, ret: r, variadic: v }: {
+      return anyTypeParam(ref prog, ref ps) || typeMentionsTypeParam(ref prog, r);
+    }
+    case Type.FuncPtr { params: ps, ret: r }: {
+      return anyTypeParam(ref prog, ref ps) || typeMentionsTypeParam(ref prog, r);
+    }
+    default: { return false; }
+  }
 }
 
 // ----- naming ---------------------------------------------------------------

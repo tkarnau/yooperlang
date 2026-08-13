@@ -133,6 +133,15 @@ function parseTypeArgList(ref ps: ParserState): Result<NodeId, ParsingError> {
   disposable ids: Vec<NodeId> = vec.vecNew(2);
   while (true) {
     vec.vecPush(ref ids, parseTypeAnnotation(ref ps)?);
+    // A pending `>` CLOSES this list, so the real token stream must not be
+    // consulted while one is owed. The element just parsed ended in a `>>` that
+    // an inner list already consumed, which leaves the cursor sitting on
+    // whatever follows the OUTER `>` - in `Box<Box<T>>, g: int` that is the
+    // field separator, and peeking for a comma here reads it as another type
+    // argument and swallows the next field.
+    if (ps.pendingGt) {
+      break;
+    }
     if (SelfLexing.peek(ref ps).tag != TokenTags.COMMA) {
       break;
     }
@@ -292,6 +301,21 @@ export function parseTypeAnnotation(ref ps: ParserState): Result<NodeId, Parsing
   let typeNameNode = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.TYPE_ANNOTATION_TYPE_NAME);
   typeNameNode.childB = parseKindPrefixes(ref ps)?;
   let name = parseIdentAsName(ref ps)?;
+
+  // `fs.DirIter` - a type reached through an imported NAMESPACE. A `.` here can
+  // mean nothing else: annotation position has no field access and no method
+  // call, so the first name is the namespace and the second is the type.
+  //
+  // The qualifier is interned rather than kept in a second `name` field, the
+  // same way an import specifier keeps its export name. `flagA` is what says
+  // there is one, because pool index 0 is a real string and so a `strId` of 0
+  // cannot mean "absent".
+  if (SelfLexing.peek(ref ps).tag == TokenTags.DOT) {
+    SelfLexing.advance(ref ps)?; // consume `.`
+    typeNameNode.flagA = true;
+    typeNameNode.strId = internString(ref ps, name);
+    name = parseIdentAsName(ref ps)?;
+  }
   typeNameNode.name = name;
   // `Vec<int>`, `Result<int, string>` - the ARGUMENTS of a generic
   // application. Unambiguous here in a way it is not in an expression: `a < b`

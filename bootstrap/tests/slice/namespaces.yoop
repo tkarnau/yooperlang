@@ -15,6 +15,21 @@ function tag(): int {
   return 7;
 }
 
+// `mathx.Point` - a TYPE reached through the namespace, in annotation position.
+// The load-bearing part is that it is the SAME type as the `Point` imported by
+// name just above: type equality is `id == id`, so passing a `Point` here only
+// works if both spellings resolve to one symbol in mathx rather than to two
+// nominal types that merely look alike.
+function xOf(p: mathx.Point): int {
+  return p.x;
+}
+
+// And it composes with an array suffix, which is parsed after the qualified
+// name the same way it is after a plain one.
+function firstX(ps: mathx.Point[]): int {
+  return ps[0].x;
+}
+
 function main(): int {
   printf("add=%d\n", mathx.add(2, 3));
   printf("scale=%d\n", mathx.scale(4, 5));
@@ -29,5 +44,10 @@ function main(): int {
   // A qualified call is an ordinary expression: nestable, and usable as an
   // argument to another one.
   printf("nested=%d\n", mathx.add(counter.bump(10), mathx.scale(2, 3)));
+
+  // `p` was declared as `Point` and `q` as `mathx.Point`; both reach xOf.
+  const q: mathx.Point = { x: 11, y: 12 };
+  printf("qualified=%d %d\n", xOf(p), xOf(q));
+  printf("qualifiedArray=%d\n", firstX([q, p]));
   return 0;
 }

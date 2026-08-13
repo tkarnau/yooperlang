@@ -47,6 +47,15 @@ export function resolveTypeAnnotation(
 }
 
 function resolveTypeName(ref prog: Program, ref tm: TypedModule, ref ast: AST, annot: ASTNode): TypeId {
+  // `fs.DirIter` - qualified, so the name is the SOURCE module's business and
+  // none of the checks below apply. Handled first for exactly that reason: a
+  // qualified name is never a type parameter, never `unsafe_ptr`, and never a
+  // primitive spelling, so falling through would let a local `T` or an
+  // unfortunate module alias shadow something it has no relationship to.
+  if (annot.flagA) {
+    return resolveQualifiedTypeName(ref prog, ref tm, ref ast, annot);
+  }
+
   if (isVoidName(annot.name)) {
     return TYPE_VOID_ID;
   }
@@ -111,6 +120,62 @@ function resolveTypeName(ref prog: Program, ref tm: TypedModule, ref ast: AST, a
           return TYPE_ERROR_ID;
         }
       }
+    }
+  }
+}
+
+// `ns.Type` - the namespace names a module, and the type has to be one of its
+// EXPORTS. Everything after the lookup is the ordinary path, so a qualified
+// generic (`vec.Vec<int>`) instantiates exactly like an imported one.
+//
+// This runs in pass C, which is safe because pass B bound this module's
+// namespaces first and the graph is topologically ordered - the source module
+// was fully processed before this one started.
+function resolveQualifiedTypeName(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  annot: ASTNode
+): TypeId {
+  const nsName: string = vec.vecGet(ref ast.strings, annot.strId);
+
+  const nsSym = lookupOwnName(ref tm, nsName);
+  if (nsSym == SYMBOL_NONE_ID) {
+    reportError(ref prog, `unknown namespace "${nsName}"`, annot.sourceLoc);
+    return TYPE_ERROR_ID;
+  }
+
+  let sourceIndex: ModuleId = 0;
+  switch (symbolAt(ref prog, nsSym)) {
+    case Symbol.Namespace { module: mi }: { sourceIndex = mi; }
+    default: {
+      reportError(
+        ref prog,
+        `"${nsName}" is not an imported namespace, so it has no types to name`,
+        annot.sourceLoc
+      );
+      return TYPE_ERROR_ID;
+    }
+  }
+
+  let source = vec.vecGet(ref prog.modules, sourceIndex);
+  switch (map.mapGet(ref source.exports, annot.name)) {
+    case Option.Some { value: symId }: {
+      return typeIdOfSymbol(ref prog, ref tm, ref ast, symId, annot);
+    }
+    case Option.None: {
+      // Declared-but-not-exported is a different mistake from misspelled, and
+      // the fix is in a different file, so the two say different things.
+      if (lookupOwnName(ref source, annot.name) != SYMBOL_NONE_ID) {
+        reportError(
+          ref prog,
+          `"${annot.name}" is declared in module ${source.moduleId} but not exported - add \`export\` to its declaration`,
+          annot.sourceLoc
+        );
+      } else {
+        reportError(ref prog, `"${nsName}" has no export "${annot.name}"`, annot.sourceLoc);
+      }
+      return TYPE_ERROR_ID;
     }
   }
 }

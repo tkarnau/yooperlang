@@ -24,6 +24,22 @@ type Wrapper<T> {
   tag: int,
 }
 
+// A NESTED application ends in `>>`, which is one token - so the inner list
+// consumes it and owes the outer one a virtual `>`. Everything here has
+// something following the `>>`: another field, another type argument, another
+// parameter. That is the case that breaks if the outer list peeks at the real
+// token stream while the `>` is still owed, and `Vec<Vec<T>>` in codegen and
+// typecheck is the shape it was found on.
+type Nest<T> {
+  deep: Box<Box<T>>,
+  pair: Pair<Box<Box<T>>, int>,
+  tail: int,
+}
+
+function openNest(n: Nest<int>, bump: int): int {
+  return n.deep.value.value + n.pair.first.value.value + n.tail + bump;
+}
+
 variant Result<T, E> {
   Ok { value: T },
   Err { error: E },
@@ -67,6 +83,14 @@ function main(): int {
 
   const w: Wrapper<int> = { inner: { value: 5 }, tag: 1 };
   printf("wrapper=%d %d\n", w.inner.value, w.tag);
+
+  // 2 + 3 + 10 + 5 = 20
+  const nst: Nest<int> = {
+    deep: { value: { value: 2 } },
+    pair: { first: { value: { value: 3 } }, second: 4 },
+    tail: 10,
+  };
+  printf("nest=%d\n", openNest(nst, 5));
 
   const ok: Result<int, int> = Result.Ok { value: 42 };
   const bad: Result<int, int> = Result.Err { error: 9 };

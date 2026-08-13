@@ -82,12 +82,32 @@ export function emitStructFieldWrite(ref cx: Cx, target: ASTNode, targetId: Node
   return "";
 }
 
-// The address of `base.field`, where `base` is a named binding.
+// The address of `base.field`, where `base` is a named binding OR another field
+// access - so `a.b.c` geps from `a`'s slot to `b`, then from that pointer to
+// `c`. Pass D already refused any base that bottoms out in something without an
+// address, which is what makes the slot lookup below total.
 //
 // Shared by a field WRITE and by `ref base.field`, so a store and a borrow
 // cannot disagree about where a field lives.
 export function emitFieldAddress(ref cx: Cx, target: ASTNode, ref addr: usize): string {
   const baseNode = nodeAt(cx.ast, target.childA);
+
+  // A nested base has no slot of its own; its ADDRESS is what the outer gep
+  // starts from, so compute that first and then step one field further in.
+  if (baseNode.kind == ASTNodeKind.FIELD_ACCESS) {
+    let basePtr: usize = 0;
+    const err = emitFieldAddress(ref cx, baseNode, ref basePtr);
+    if (err.len > 0) {
+      return err;
+    }
+    const outerTy = typeOf(ref cx, target.childA);
+    const outerPos = fieldPositionOf(ref cx, target.childA, target.name);
+    const outerDest = freshTemp(cx.e);
+    emitGepFieldOfPtr(ref cx, outerDest, outerTy, basePtr, outerPos);
+    addr = outerDest;
+    return "";
+  }
+
   switch (lookupLocal(cx.locals, baseNode.name)) {
     case Option.None: {
       return internalError("no stack slot for field base", baseNode.name);

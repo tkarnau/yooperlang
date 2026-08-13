@@ -247,31 +247,30 @@ export function parseExpression(ref ps: ParserState, minPrecedence: int): Parsin
   // Compound assignment, desugared here into `target = target <op> value`.
   //
   // The JS reference keeps a dedicated COMPOUND_ASSIGNMENT node so the lvalue
-  // is addressed once - that matters for `xs[f()] += 1`, where re-reading the
-  // target would call `f` twice. Here the only assignable target is a plain
-  // name, and re-reading a name is free, so desugaring is safe. Revisit when
-  // index and field targets land.
+  // is addressed once. Desugaring instead NAMES THE TARGET TWICE, so it is only
+  // sound when reading the target has no side effect and costs nothing - which
+  // is exactly a name, or a path of field accesses reaching one. Those are what
+  // `isPlaceExpr` admits, and everything else is refused rather than silently
+  // evaluated twice.
   const compoundOp = binaryOpOfCompound(SelfLexing.peek(ref ps).tag);
   if (compoundOp != TokenTags.NOTOKEN) {
-    // The predicted moment: index targets exist now, so the desugaring is no
-    // longer universally safe. `xs[f()] += 1` would evaluate `f()` twice - once
-    // to read and once to write. Refuse it until COMPOUND_ASSIGNMENT lands,
-    // rather than silently miscompiling.
-    if (node.kind != ASTNodeKind.IDENT) {
+    // `xs[f()] += 1` is the case this protects: re-reading the target would
+    // call `f` once to read and again to write. An index target stays refused
+    // until a real COMPOUND_ASSIGNMENT node lands, rather than miscompiling.
+    if (!isPlaceExpr(ref ps, node)) {
       return Result.Err { error: SelfLexing.createParsingError(
         ref ps,
-        `compound assignment is only supported on a plain name so far - write it out as "target = target <op> value"`,
+        `compound assignment is only supported on a name or a field path so far - write it out as "target = target <op> value"`,
         peekLengthUsize(ref ps),
       )};
     }
     SelfLexing.advance(ref ps)?;
     const targetId = SelfLexing.pushNode(ref ps, node);
 
-    let reread = SelfLexing.buildSourcedNode(ref ps, node.kind);
-    reread.name = node.name;
+    const rereadId = clonePlaceExpr(ref ps, targetId)?;
     let combined = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.BINARY_EXPRESSION);
     combined.operator = compoundOp;
-    combined.childA = SelfLexing.pushNode(ref ps, reread);
+    combined.childA = rereadId;
     combined.childB = parseExpression(ref ps, 0)?;
 
     let assign = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.ASSIGNMENT);
@@ -301,6 +300,60 @@ export function parseExpression(ref ps: ParserState, minPrecedence: int): Parsin
   }
   // return
   return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
+}
+
+// Whether an expression is a PLACE that can be read twice for free: a name, or
+// a path of field accesses reaching one. `self.cur` and `cx.loops.frames.len`
+// qualify; `xs[i]`, a call, and anything computed do not.
+//
+// This is the whole safety argument for desugaring the compound forms. It is
+// deliberately about SIDE EFFECTS rather than about what is assignable - pass D
+// still decides that, and refuses the targets this admits but cannot store to.
+function isPlaceExpr(ref ps: ParserState, node: ASTNode): bool {
+  if (node.kind == ASTNodeKind.IDENT) {
+    return true;
+  }
+  if (node.kind == ASTNodeKind.FIELD_ACCESS) {
+    return isPlaceExpr(ref ps, nodeAt(ref ps.ast, node.childA));
+  }
+  return false;
+}
+
+// A fresh copy of a place expression, for the read half of a desugared compound
+// assignment.
+//
+// The arena is a TREE, so the read and the write cannot share one NodeId: pass D
+// decorates by NodeId and would reach the same node from two directions, and
+// codegen would walk it twice under one entry. Copying keeps every node with
+// exactly one parent.
+//
+// The source location travels with the copy, so a diagnostic about the re-read
+// points at what the writer wrote rather than at the operator.
+function clonePlaceExpr(ref ps: ParserState, id: NodeId): Result<NodeId, ParsingError> {
+  const src = nodeAt(ref ps.ast, id);
+  if (src.kind == ASTNodeKind.IDENT) {
+    let copy = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.IDENT);
+    copy.name = src.name;
+    copy.sourceLoc = src.sourceLoc;
+    return Result.Ok { value: SelfLexing.pushNode(ref ps, copy) };
+  }
+  if (src.kind == ASTNodeKind.FIELD_ACCESS) {
+    // The base is copied FIRST: pushing it may grow the arena, and `src` is
+    // already a value copy, so nothing here reads through a stale index.
+    const baseId = clonePlaceExpr(ref ps, src.childA)?;
+    let copy = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.FIELD_ACCESS);
+    copy.name = src.name;
+    copy.sourceLoc = src.sourceLoc;
+    copy.childA = baseId;
+    return Result.Ok { value: SelfLexing.pushNode(ref ps, copy) };
+  }
+  // isPlaceExpr gates every caller, so reaching here is a parser bug rather
+  // than anything the writer did.
+  return Result.Err { error: SelfLexing.createParsingError(
+    ref ps,
+    `internal: cannot copy ${src.kind} as a compound-assignment target`,
+    peekLengthUsize(ref ps),
+  )};
 }
 
 // `( arg, arg )` after a callee name. Returns a NODE_LIST NodeId; an empty

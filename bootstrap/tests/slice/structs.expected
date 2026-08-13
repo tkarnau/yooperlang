@@ -2,4 +2,7 @@ manhattan=0 7
 shifted=13 -4
 copy=99 original=3
 end=14
+nested=5 5 30
+borrowed=11 36
+write=2
 exit=0

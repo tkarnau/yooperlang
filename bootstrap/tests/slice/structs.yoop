@@ -31,6 +31,30 @@ function endOf(s: Span): usize {
   return s.start + s.len;
 }
 
+// A NESTED field path. `a.b.c` geps from `a`'s slot to `b` and then from that
+// pointer to `c`, so a write reaches storage the outer struct owns rather than
+// a loaded copy - which is what `nested` below is really asserting.
+type Counter {
+  hits: int,
+}
+
+type Bucket {
+  counter: Counter,
+  id: int,
+}
+
+type Registry {
+  bucket: Bucket,
+  total: int,
+}
+
+// Through a BORROW, and two levels down. A by-value receiver would leave the
+// caller's registry untouched and print the pre-call number.
+function record(ref reg: Registry, n: int): void {
+  reg.bucket.counter.hits += n;
+  reg.total += n;
+}
+
 function main(): int {
   const origin: Point = { x: 0, y: 0 };
   const p: Point = { x: 3, y: -4 };
@@ -46,5 +70,19 @@ function main(): int {
 
   const s: Span = { len: 4, start: 10 };
   printf("end=%zu\n", endOf(s));
+
+  // Nested field paths, written both ways. The compound forms desugar to
+  // `target = target <op> value`, so each of these names the path twice.
+  let reg: Registry = { bucket: { counter: { hits: 1 }, id: 7 }, total: 10 };
+  reg.bucket.counter.hits += 4;   // 1 + 4
+  reg.bucket.id -= 2;             // 7 - 2
+  reg.total *= 3;                 // 10 * 3
+  printf("nested=%d %d %d\n", reg.bucket.counter.hits, reg.bucket.id, reg.total);
+
+  record(ref reg, 6);             // hits 5 + 6, total 30 + 6
+  printf("borrowed=%d %d\n", reg.bucket.counter.hits, reg.total);
+
+  reg.bucket.counter.hits = 2;
+  printf("write=%d\n", reg.bucket.counter.hits);
   return 0;
 }
