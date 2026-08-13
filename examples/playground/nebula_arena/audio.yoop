@@ -80,8 +80,8 @@ export type AudioEngine implements Disposable {
     hit: int16[],
     function dispose(ref self): void {
         if (self.dev != 0) { SDL_CloseAudioDevice(self.dev); }
-        intr.heap_free(self.fire);
-        intr.heap_free(self.hit);
+        intr.heapFree(self.fire);
+        intr.heapFree(self.hit);
     }
 }
 
@@ -99,7 +99,7 @@ function noise_sample(ref state: int32): float64 {
 // no click at either end.
 function render_fire(): int16[] {
     let n: int32 = SAMPLE_RATE * FIRE_MS / 1000;
-    let buf: int16[] = intr.heap_alloc(usize(n));
+    let buf: int16[] = intr.heapAlloc(usize(n));
     const PI: float64 = 3.141592653589793;
     let phase: float64 = 0.0;
     let i: int32 = 0;
@@ -119,7 +119,7 @@ function render_fire(): int16[] {
 // noise, all under an exponential decay - a sharp transient with a tail.
 function render_hit(): int16[] {
     let n: int32 = SAMPLE_RATE * HIT_MS / 1000;
-    let buf: int16[] = intr.heap_alloc(usize(n));
+    let buf: int16[] = intr.heapAlloc(usize(n));
     const PI: float64 = 3.141592653589793;
     let phase: float64 = 0.0;
     let noise_state: int32 = 0x1234567;

@@ -39,7 +39,22 @@ typedef struct {
 
 void* yoop_get_allocator(void);
 void  yoop_set_allocator(void* src);
+
+// Allocate through the current allocator. NEVER returns NULL: an exhausted
+// allocator prints what it wanted and what was available, flushes stdout so
+// the program's own output survives, and exits(1). A silent null here used to
+// surface as a SIGSEGV several frames later with no output at all.
 void* yoop_ctx_alloc(size_t size, size_t align);
+
+// The non-fatal sibling: returns NULL instead of exiting, for callers that
+// genuinely handle exhaustion.
+void* yoop_ctx_alloc_try(size_t size, size_t align);
+
+// Record why an allocation is about to fail, for the abort path to report.
+// Called by an allocator immediately before it returns NULL; consumed by the
+// next yoop_ctx_alloc failure. Pass NULL to clear.
+void  yoop_alloc_note_failure(const char* note);
+
 void  yoop_ctx_free(void* ptr);
 
 // ---- the per-task allocator context ---------------------------------------

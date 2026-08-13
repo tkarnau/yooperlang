@@ -1,0 +1,20 @@
+// A stand-in for the real standard library, small enough to be inside the
+// bootstrap's language subset.
+//
+// The real std/ needs traits, generics and kinds - none of which the bootstrap
+// compiles yet - so pointing YOOP_STD_ROOT here is what lets the `std/`
+// RESOLUTION path be tested end to end before the language can reach the real
+// thing. Both compilers honour the same variable, so both run this fixture.
+
+export type Span {
+  start: int,
+  len: int,
+}
+
+export function twice(n: int): int {
+  return n * 2;
+}
+
+export function endOf(s: Span): int {
+  return s.start + s.len;
+}

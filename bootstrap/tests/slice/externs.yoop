@@ -1,0 +1,33 @@
+// `extern` blocks: functions that exist somewhere else.
+//
+// An extern is the one kind of function whose symbol keeps its exact spelling -
+// `abs` has to be the name the linker resolves against libc, so it is never
+// mangled and never has a body. Everything else the bootstrap emits carries a
+// module prefix; these do not, and that asymmetry is the whole feature.
+//
+// `import.unsafe;` is here too: a module-level FLAG rather than an import, and
+// the same keyword, which is why the `.` is what tells them apart.
+
+import.unsafe;
+
+extern "C" from "stdlib.h" {
+  function abs(n: int): int;
+  function labs(n: int64): int64;
+}
+
+extern "C" from "stdio.h" {
+  function puts(s: string): int;
+}
+
+function distance(a: int, b: int): int {
+  return abs(a - b);
+}
+
+function main(): int {
+  puts("a line straight from libc");
+  printf("abs=%d %d\n", abs(-7), distance(3, 11));
+
+  const wide: int64 = -900000;
+  printf("labs=%lld\n", labs(wide));
+  return 0;
+}

@@ -1,0 +1,30 @@
+// Function parameters: read in arithmetic, passed to other functions, and
+// mixed with locals. Each param is spilled to a stack slot on entry so the
+// body has one uniform rule for reading a name.
+function add(a: int, b: int): int {
+  return a + b;
+}
+
+function scaled(x: int, factor: int): int {
+  const doubled = x * 2;
+  return doubled * factor;
+}
+
+// An argument is checked AGAINST its parameter, which is what pins an untyped
+// literal to it. `wide(7)` gives the 7 an int64 rather than defaulting it to
+// int32 and then complaining the two widths differ.
+function wide(n: int64): int64 {
+  return n * 2;
+}
+
+function narrowParam(n: int8): int8 {
+  return n;
+}
+
+function main(): int {
+  printf("add(3, 4) = %d\n", add(3, 4));
+  printf("scaled(5, 10) = %d\n", scaled(5, 10));
+  printf("wide(7) = %lld\n", wide(7));
+  printf("narrowParam(5) = %d\n", narrowParam(5));
+  return add(20, 2);
+}

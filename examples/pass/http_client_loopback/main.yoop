@@ -36,13 +36,13 @@ extern "C" from "yoop_runtime" {
 // The listener binds port 0 rather than a hard-coded number so this fixture
 // cannot collide with anything else listening - which is what lets the e2e
 // suite run tests concurrently. std/net reports the assigned port back through
-// TcpListener.bound_port.
+// TcpListener.boundPort.
 let boundPort: int32 = 0;
 
 // Answers a GET with a fixed body, and a POST with the body it was sent.
 type EchoHandler implements Handler {
     greeting: string,
-    function handle(ref self, ref req: Request, ref resp: Response): HandleOutcome {
+    async handle(ref self, ref req: Request, ref resp: Response): HandleOutcome {
         if (types.methodEq(req.method, HttpMethod.Post)) {
             types.respondText(ref resp, types.ok(), `echo:${types.bodyText(ref req)}\n`);
             return HandleOutcome.Ok;
@@ -53,13 +53,13 @@ type EchoHandler implements Handler {
 }
 
 task serverTask(): int32 {
-    let disposable lr: ListenResult = tcp.tcp_listen("127.0.0.1", 0, 32);
+    let disposable lr: ListenResult = tcp.tcpListen("127.0.0.1", 0, 32);
     if (lr.error.len > 0) {
         printf(`server bind err: ${lr.error}\n`);
         return 1;
     }
     // Publish the port the kernel chose, so the client half can dial it.
-    boundPort = lr.listener.bound_port;
+    boundPort = lr.listener.boundPort;
     let h: EchoHandler = { greeting: "ping-pong\n" };
     let d: Dispatcher = Dispatcher.from(ref h);
     switch (await http.serveDefault(ref lr.listener, ref d, 2)) {
@@ -72,14 +72,14 @@ task serverTask(): int32 {
 // Async: every client call suspends rather than blocking a worker.
 async exercise(): Result<int32, HttpError> {
     let c: Client = client.clientNew();
-    let base: string = strings.string_concat(
-        "http://127.0.0.1:", fmt.int_to_string(int64(boundPort)));
+    let base: string = strings.stringConcat(
+        "http://127.0.0.1:", fmt.intToString(int64(boundPort)));
 
-    disposable got: ClientResponse = await client.get(ref c, strings.string_concat(base, "/"))?;
+    disposable got: ClientResponse = await client.get(ref c, strings.stringConcat(base, "/"))?;
     printf(`status=${got.status.code} body=${client.responseText(ref got)}`);
 
     disposable posted: ClientResponse =
-        await client.post(ref c, strings.string_concat(base, "/items"), "text/plain", "hello")?;
+        await client.post(ref c, strings.stringConcat(base, "/items"), "text/plain", "hello")?;
     printf(`status=${posted.status.code} body=${client.responseText(ref posted)}`);
     return Result.Ok { value: 0 };
 }
@@ -91,7 +91,7 @@ task exerciseTask(): Result<int32, HttpError> {
 function main(): int32 {
     joined sh = serverTask();
     // Give the server a moment to bind. Racing the accept loop is fine -
-    // tcp_connect retries until accept(2) takes the fd.
+    // tcpConnect retries until accept(2) takes the fd.
     let _slept: int32 = yoop_sleep_ms(100);
 
     // main is the sync/async boundary - spawn the async work as a task.

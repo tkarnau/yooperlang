@@ -70,7 +70,7 @@ function main(): int32 {
     let ar: mem.Arena = mem.arenaNew(65536);
 
     pooled a = parked(fds[0], ar);
-    conc.sleep_ms(120);                 // let `a` reach its suspend point
+    conc.sleepMs(120);                 // let `a` reach its suspend point
     printf("parked\n");
 
     // `neighbor` is guaranteed to run while `a` is suspended: nothing writes

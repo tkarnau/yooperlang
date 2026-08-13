@@ -74,7 +74,7 @@ function draw(ref st: State, ref ren: sdl.Ren, ref font: sdl.Font, ref th: Theme
     sdl.fill_rect(ref ren, 0, 0, WIN_W, HEADER_H, th.header_bg);
     let title: string = `algoscope  -  ${st.filename}`;
     sdl.draw_text(ref ren, ref font,title, PAD, 10, th.text);
-    let hint: string = `depth ${fmt.int_to_string(int64(st.max_depth))}    [up/down] fn   [-/=] depth   [wheel] scroll   [esc] quit`;
+    let hint: string = `depth ${fmt.intToString(int64(st.max_depth))}    [up/down] fn   [-/=] depth   [wheel] scroll   [esc] quit`;
     sdl.draw_text(ref ren, ref font,hint, LEFT_W + PAD, 10, th.dim);
 
     // Left panel background + divider.
@@ -140,14 +140,14 @@ function main(): int32 {
     let path: string = "/tmp/x.ast.json";
     if (sdl.argc() > 1) { path = sdl.argv(1); }
 
-    disposable buf: Vec<uint8> = vec.vec_new(usize(16384));
-    let err: string = fs.read_file_into(ref buf, path);
-    if (!str.string_eq(err, "")) {
+    disposable buf: Vec<uint8> = vec.vecNew(usize(16384));
+    let err: string = fs.readFileInto(ref buf, path);
+    if (!str.stringEq(err, "")) {
         printf("algoscope: cannot read %s: %s\n", path, err);
         return 1;
     }
 
-    let root: json.JsonValue = json.parse_bytes(vec.vec_as_array(ref buf));
+    let root: json.JsonValue = json.parse_bytes(vec.vecAsArray(ref buf));
     let filename: string = json.as_str(json.obj_get(root, "filename"));
     let program: json.JsonValue = json.obj_get(root, "ast");
     let fns: json.JsonValue[] = ast.top_functions(program);
@@ -179,7 +179,7 @@ function main(): int32 {
     };
 
     // Event-driven render loop: redraw only after input changes the view.
-    let ebuf: uint8[] = intr.heap_alloc(usize(256));
+    let ebuf: uint8[] = intr.heapAlloc(usize(256));
     let running: bool = true;
     let dirty: bool = true;
     while (running) {

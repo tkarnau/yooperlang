@@ -228,7 +228,55 @@ export const tokenScanList = [
   { str: "@", tag: TokenTags.at },
 ].toSorted((a, b) => b.str.length - a.str.length);
 
+// Reserved words. A word that is here cannot be a parameter, a local, or a
+// field name ANYWHERE in a program, which is why this list is deliberately
+// short and why anything that can be recognized from its position is not on it.
+//
+// CONTEXTUAL keywords - recognized by the parser from where they appear, and
+// therefore absent here on purpose - are:
+//
+//   module                    only as the first item of a file
+//   contains                  only inside a kind decl / propagation clause
+//   conferred restrictive     only in kind-clause position
+//   clearedBy appliedBy       only in kind-clause position
+//   refcounted pausable       only in kind-clause position
+//   provides signature        only in kind-clause position
+//   enumerable                only in kind-clause position
+//   kind                      only at declaration position (`kind Name {`)
+//   requires propagates       only in kind-clause / decl-suffix position
+//   binding parameter field   only inside an `appliesTo` clause
+//   scope                     only after `mustNotEscape`
+//   io                        only inside a `forbids` clause
+//   layout align              only as a type-decl clause
+//   library                   only after `from` in an extern block
+//
+// The last eight of those were reserved words until the yooperdoom takeaways
+// (2.2) reported the cost: `kind` is legal as a struct FIELD but illegal as a
+// local or parameter, so `Room.kind` compiles and `specialFor(kind: uint8)`
+// does not, and the collision surfaces nowhere near where the name was
+// chosen. `field`, `scope`, `io`, `align`, and `requires` are the same trap
+// with a lower hit rate. Each is unambiguous from its position, so none of
+// them needed to be reserved.
+//
+// The compound clause verbs (`appliesTo`, `mustCall`, `ownsBlock`,
+// `beforeScopeEnd`, `mustNotEscape`, `mustNotShare`, `forbids`,
+// `acrossScopes`, `globalState`) stay reserved. They could be demoted by the
+// same argument, but no one reaches for `mustNotEscape` as a variable name,
+// and every demotion costs a contextual recognizer to maintain.
+//
+// `in`, `from`, and `as` cannot be demoted - they carry real grammar in
+// positions where an identifier is also legal (`for x in`, `import ... from`,
+// `import * as`). They get a targeted diagnostic instead of a fix.
+// NULL PROTOTYPE, and it is load-bearing. This table is consulted as
+// `keywordTagList[value]` with `value` being arbitrary user source text, so an
+// ordinary object literal answers `Object.prototype`'s members: an identifier
+// spelled `toString`, `valueOf`, `constructor` or `hasOwnProperty` came back as
+// a native function and was lexed as that garbage tag instead of an `ident`.
+// The symptom is a parse error on a declaration that is perfectly legal
+// (`function toString(ref self): string;` -> "expected ident, got undefined").
+// `Object.values` in parser.js is own-properties-only, so it is unaffected.
 export const keywordTagList = {
+  __proto__: null,
   let: TokenTags.let,
   function: TokenTags.function,
   const: TokenTags.const,
@@ -244,7 +292,6 @@ export const keywordTagList = {
   extern: TokenTags.extern,
   from: TokenTags.from,
   as: TokenTags.as,
-  library: TokenTags.library,
   ref: TokenTags.ref,
   break: TokenTags.break,
   continue: TokenTags.continue,
@@ -255,32 +302,17 @@ export const keywordTagList = {
   self: TokenTags.self,
   extends: TokenTags.extends,
   vtable: TokenTags.vtable,
-  kind: TokenTags.kind,
   appliesTo: TokenTags.appliesTo,
-  requires: TokenTags.requires,
   mustCall: TokenTags.mustCall,
   ownsBlock: TokenTags.ownsBlock,
   beforeScopeEnd: TokenTags.beforeScopeEnd,
-  binding: TokenTags.binding,
   mustNotEscape: TokenTags.mustNotEscape,
   mustNotShare: TokenTags.mustNotShare,
   forbids: TokenTags.forbids,
-  scope: TokenTags.scope,
   acrossScopes: TokenTags.acrossScopes,
-  parameter: TokenTags.parameter,
-  field: TokenTags.field,
-  io: TokenTags.io,
   globalState: TokenTags.globalState,
   wait: TokenTags.wait,
   await: TokenTags.await,
-  propagates: TokenTags.propagates,
-  // `contains` is recognized CONTEXTUALLY by the parser inside kind decls and
-  // propagation clauses (`isContainsKeywordIdent`). It lexes as an ordinary
-  // IDENT so it stays usable as a normal identifier in user code
-  // (chat-agent-papercut #3).
-  // contains: TokenTags.contains,  // intentionally absent
-  layout: TokenTags.layout,
-  align: TokenTags.align,
   switch: TokenTags.switch,
   case: TokenTags.case,
   default: TokenTags.default,

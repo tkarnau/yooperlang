@@ -1,0 +1,53 @@
+module source_graph;
+
+// Import-path ARITHMETIC: a written path plus the file that wrote it, to one
+// canonical absolute path. What that path is allowed to BE - a .yoop file, a
+// module directory, one of the roots the bootstrap does not resolve yet - is
+// policy, and lives in `resolveImportTarget` in walk.yoop.
+
+import * as fs from "std/fs.yoop";
+import * as str from "std/core/strings.yoop";
+import { Result } from "std/core/types.yoop";
+
+export function resolveImportPath(
+  importerAbsPath: string,
+  sourcePath: string,
+  stdRoot: string
+): Result<string, string> {
+  const isStd = str.stringStartsWith(sourcePath, "std/");
+  let joinedPath: string;
+  if (isStd) {
+    const rest = str.sliceFrom(sourcePath, 4); // drop "std/", root at stdRoot
+    joinedPath = fs.pathJoin([stdRoot, rest]);
+  } else {
+    const isRel = str.stringStartsWith(sourcePath, "./")
+      || str.stringStartsWith(sourcePath, "../");
+    const isAbs = str.stringStartsWith(sourcePath, "/");
+    if (!isRel && !isAbs) {
+      return Result.Err {
+        error: `import path "${sourcePath}" must be relative (./...), absolute, or start with std/`
+      };
+    }
+    if (isAbs) {
+      joinedPath = sourcePath;
+    } else {
+      const baseDir = fs.dirName(importerAbsPath);
+      joinedPath = fs.pathJoin([baseDir, sourcePath]);
+    }
+  }
+
+  // Existence is checked BEFORE canonicalizing, not after. normalizePath fails
+  // on a path that is not there, so the other order answers a missing import
+  // with "unable to identify a canonical path" - which reads as a compiler
+  // problem rather than as the typo it almost always is.
+  if (!fs.exists(joinedPath)) {
+    return Result.Err { error: `cannot resolve import ${sourcePath} from ${importerAbsPath}: file not found` };
+  }
+
+  const canonicalPath = fs.normalizePath(joinedPath);
+  if (canonicalPath.len == 0) {
+    return Result.Err { error: `unable to identify a canonical path from ${joinedPath}` };
+  }
+
+  return Result.Ok { value: canonicalPath };
+}

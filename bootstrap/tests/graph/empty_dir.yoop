@@ -1,0 +1,3 @@
+import { a } from "./onlytests";
+
+function main(): int { return a(); }

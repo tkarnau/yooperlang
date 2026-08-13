@@ -1,0 +1,15 @@
+module shapes;
+
+// Deliberately named to sort BEFORE the file that declares Color and Bits.
+// Resolving these two signatures captures both types while they are still
+// pass-A shells, which is what the fill-in-place discipline has to survive.
+
+export function pickColor(): Color {
+  return Color.GREEN;
+}
+
+export function bitsOf(n: int32): Bits {
+  let b: Bits;
+  b.asInt = n;
+  return b;
+}

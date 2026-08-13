@@ -1,0 +1,79 @@
+// Function types - `(k: string) => uint64`.
+//
+// A function VALUE is its address, and nothing more. That is the whole design:
+// `{ hash: myHash }` type-checks because a declared function's signature and an
+// annotation like `(k: string) => uint64` intern to the SAME `Type.Func`, so
+// there is nothing to convert and no wrapper to carry. In LLVM it is a `ptr`,
+// and the signature lives at the call site.
+//
+// This is what `Map<K, V>` needs: it takes a `KeyOps<K>` struct holding a hash
+// and an equality function, so a map over a new key type is a pair of free
+// functions rather than a trait implementation.
+//
+// The parse rule worth knowing: after a `(`, a `)`, a `ref`, or `IDENT :` means
+// a function type's parameter list; anything else is a parenthesized type
+// GROUP. A group exists only to attach `[]`, because a return type is parsed
+// greedily - `(k: K) => V[]` is a function returning an array, and
+// `((k: K) => V)[]` is an array of functions.
+
+// The length rides as a parameter rather than being read off the string: the
+// bootstrap has no `.len` on a string yet, and the point here is the CALL, not
+// the hashing.
+type Ops {
+  hash: (k: string, n: uint64) => uint64,
+  eq: (a: string, b: string) => bool,
+}
+
+type Table {
+  ops: Ops,
+  seed: uint64,
+}
+
+function scaledHash(k: string, n: uint64): uint64 {
+  return n * 31;
+}
+
+function constantHash(k: string, n: uint64): uint64 {
+  return 7;
+}
+
+function alwaysEq(a: string, b: string): bool {
+  return true;
+}
+
+// A function type as a PARAMETER, and calling through it - the shape a generic
+// container uses to accept its key operations.
+function hashWith(ops: Ops, k: string, n: uint64): uint64 {
+  return ops.hash(k, n);
+}
+
+// Returning a struct full of function values, which is how std spells
+// `stringKeyOps()`.
+function scaledOps(): Ops {
+  return { hash: scaledHash, eq: alwaysEq };
+}
+
+function main(): int {
+  const ops: Ops = { hash: scaledHash, eq: alwaysEq };
+  printf("direct=%llu\n", ops.hash("abcd", 4));
+  printf("eq=%d\n", ops.eq("a", "b"));
+
+  // Through a parameter.
+  printf("param=%llu\n", hashWith(ops, "abcdefg", 7));
+
+  // Through a NESTED field - the callee's base is itself a field read, which
+  // is a different path from a plain local.
+  const t: Table = { ops: scaledOps(), seed: 3 };
+  printf("nested=%llu\n", t.ops.hash("ab", 2));
+
+  // Two structurally identical function types are ONE type, so a different
+  // function with the same signature drops straight in.
+  let swapped: Ops = { hash: constantHash, eq: alwaysEq };
+  printf("swapped=%llu\n", swapped.hash("ignored", 0));
+
+  // Reassigning the field, since a function value is just a value.
+  swapped.hash = scaledHash;
+  printf("reassigned=%llu\n", swapped.hash("xyz", 3));
+
+  return 0;
+}

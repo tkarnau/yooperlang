@@ -1,0 +1,1978 @@
+// Tests for the `typecheck` module - currently pass A.
+//
+// These drive the real pipeline (lex -> parse -> typecheck) over source
+// literals rather than poking Program by hand, so a change in the AST shape
+// shows up here as a failing assertion instead of a stale test that still
+// passes.
+
+import.test;
+import * as t from "std/test.yoop";
+import { suite, test, Case } from "std/test.yoop";
+import * as intr from "std/core/intrinsics.yoop";
+import * as str from "std/core/strings.yoop";
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { Map }, * as map from "std/collections/map.yoop";
+import { Option } from "std/core/types.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import { ASTNodeKind, childAt, nodeAt } from "../ast";
+import { Module, ModuleGraph, LoadModuleResult, moduleFromSource, singleModuleGraph } from "../source_graph";
+import { Program, TypedModule, Symbol, Type, typecheckProgram, initProgram } from "../typecheck";
+import { Diagnostic, errorAt } from "../diagnostics";
+
+suite function passARegistersATopLevelFunction(): void {
+  let prog = checkSource("function answer(): int { return 42; }");
+
+  let test theory: Case = t.asserts("the function name is bound in the module namespace") {
+    theory.isSuccessful = hasName(ref prog, "answer");
+    theory.detail = `"answer" is not in the module namespace after pass A`;
+  }
+  let test theory: Case = t.asserts("a function inside the supported subset checks clean") {
+    theory.isSuccessful = prog.diagnostics.len == 0;
+    theory.detail = `reported ${prog.diagnostics.len} diagnostic(s) on a program that is entirely in the subset`;
+  }
+}
+
+suite function parametersBindAsLocals(): void {
+  let prog = checkSource("function add(a: int, b: int): int { return a + b; }");
+
+  let test theory: Case = t.asserts("a parameter is readable in the body") {
+    theory.isSuccessful = prog.diagnostics.len == 0;
+    theory.detail = `reading a parameter reported ${prog.diagnostics.len} diagnostic(s): ${firstDiagnostic(ref prog)}`;
+  }
+
+  let dup = checkSource("function bad(a: int, a: int): int { return a; }");
+  let test theory: Case = t.asserts("two parameters with the same name is a diagnostic") {
+    theory.isSuccessful = dup.diagnostics.len > 0;
+    theory.detail = "duplicate parameter name produced no diagnostic";
+  }
+
+  let shadow = checkSource("function f(a: int): int { const a = 1; return a; }");
+  let test theory: Case = t.asserts("a local may not shadow a parameter") {
+    theory.isSuccessful = shadow.diagnostics.len > 0;
+    theory.detail = "a local redeclaring a parameter produced no diagnostic";
+  }
+}
+
+suite function passARegistersATypeDecl(): void {
+  let prog = checkSource("type Point { }\nfunction main(): int { return 0; }");
+
+  let test theory: Case = t.asserts("the type name is bound alongside the function") {
+    theory.isSuccessful = hasName(ref prog, "Point") && hasName(ref prog, "main");
+    theory.detail = `wanted both "Point" and "main" bound; the module namespace is missing one`;
+  }
+}
+
+suite function passACatchesRedeclaration(): void {
+  let prog = checkSource("function dup(): int { return 0; }\nfunction dup(): int { return 1; }");
+
+  let test theory: Case = t.asserts("declaring the same name twice is a diagnostic, not a silent overwrite") {
+    theory.isSuccessful = prog.diagnostics.len == 1;
+    theory.detail = `wanted exactly 1 diagnostic for the duplicate "dup", got ${prog.diagnostics.len}`;
+  }
+}
+
+suite function reservedTypeIdsComeFirst(): void {
+  let prog = checkSource("function main(): int { return 0; }");
+
+  let test theory: Case = t.asserts("the singleton types occupy the reserved low ids") {
+    // ids.yoop pins these; initProgram pushes them in that order.
+    theory.isSuccessful = prog.types.len >= 3;
+    theory.detail = `the type arena has ${prog.types.len} entries, wanted at least the 3 reserved singletons`;
+  }
+  let test theory: Case = t.asserts("SymbolId 0 is never handed out") {
+    // A real symbol at index 0 would make "not found" indistinguishable from
+    // the first thing declared.
+    theory.isSuccessful = prog.symbols.len >= 2;
+    theory.detail = `the symbol arena has ${prog.symbols.len} entries; index 0 must be the dead slot`;
+  }
+}
+
+// lex -> parse -> typecheck over a source literal. A parse failure comes back as
+// an empty Program, which fails whichever assertion asked about it.
+function checkSource(src: string): Program {
+  let srcBuf: Vec<uint8> = vec.vecNew(src.len + 1);
+  vec.vecExtendFrom(ref srcBuf, intr.stringAsBytes(src));
+
+  switch (moduleFromSource("test", "test.yoop", srcBuf)) {
+    case LoadModuleResult.Err { error: e }: {
+      // A parse failure has to come back as a DIAGNOSTIC, not as an empty
+      // Program. Otherwise a test asserting "this is refused" cannot tell
+      // "refused by the parser" from "accepted silently" - both would read as
+      // zero diagnostics, and the assertion would be meaningless.
+      return parseFailureProgram(e);
+    }
+    case LoadModuleResult.Ok { value: m }: {
+      let graph = singleModuleGraph(m);
+      return typecheckProgram(ref graph);
+    }
+  }
+}
+
+function hasName(ref prog: Program, name: string): bool {
+  if (prog.modules.len == 0) {
+    return false;
+  }
+  let tm = vec.vecGet(ref prog.modules, 0);
+  return map.mapContainsKey(ref tm.names, name);
+}
+
+// Locals: the parts that never reach an executable, so a slice fixture cannot
+// cover them.
+suite function localsInferAndBind(): void {
+  let prog = checkSource("function main(): int { const n = 7; return n; }");
+
+  let test theory: Case = t.asserts("a const with no annotation infers from its initializer") {
+    theory.isSuccessful = prog.diagnostics.len == 0;
+    theory.detail = `inferring const n = 7 reported ${prog.diagnostics.len} diagnostic(s): ${firstDiagnostic(ref prog)}`;
+  }
+}
+
+suite function localsRejectBadPrograms(): void {
+  let dup = checkSource("function main(): int { const n = 1; const n = 2; return n; }");
+  let test theory: Case = t.asserts("declaring the same local twice is a diagnostic") {
+    theory.isSuccessful = dup.diagnostics.len > 0;
+    theory.detail = "redeclaring n produced no diagnostic";
+  }
+
+  let unknown = checkSource("function main(): int { return nope; }");
+  let test theory: Case = t.asserts("reading an undeclared name is a diagnostic") {
+    theory.isSuccessful = unknown.diagnostics.len > 0;
+    theory.detail = "reading undeclared nope produced no diagnostic";
+  }
+
+  let mismatch = checkSource("function main(): int { const s: string = 1; return 0; }");
+  let test theory: Case = t.asserts("an initializer that fights its annotation is a diagnostic") {
+    theory.isSuccessful = mismatch.diagnostics.len > 0;
+    theory.detail = "binding an int literal to a string-annotated local produced no diagnostic";
+  }
+
+  let bare = checkSource("function main(): int { let x; return 0; }");
+  let test theory: Case = t.asserts("a local with neither annotation nor initializer is a diagnostic") {
+    theory.isSuccessful = bare.diagnostics.len > 0;
+    theory.detail = "let x; with nothing to infer from produced no diagnostic";
+  }
+}
+
+// ----- module-level consts --------------------------------------------------
+
+suite function moduleConstsAreInlinedValues(): void {
+  let ok = checkSource("const N: int = 7;\nfunction main(): int { return N + 1; }");
+  let test theory: Case = t.asserts("a module const is readable from a body") {
+    theory.isSuccessful = ok.diagnostics.len == 0;
+    theory.detail = `reading a module const reported: ${firstDiagnostic(ref ok)}`;
+  }
+
+  // A LOCAL of the same name wins, which is the precedence every language gives
+  // them and the one a reader assumes.
+  let shadowed = checkSource("const N: int = 7;\nfunction main(): int { const N = 1; return N; }");
+  let test theory: Case = t.asserts("a local of the same name shadows the const") {
+    theory.isSuccessful = shadowed.diagnostics.len == 0;
+    theory.detail = `shadowing a module const reported: ${firstDiagnostic(ref shadowed)}`;
+  }
+
+  // The initializer has to be something there IS to inline.
+  let computed = checkSource("const N: int = other();\nfunction other(): int { return 1; }\nfunction main(): int { return N; }");
+  let test theory: Case = t.asserts("a non-literal initializer is refused by name") {
+    theory.isSuccessful = diagnosticsMention(ref computed, "integer literal initializer");
+    theory.detail = `wanted a const-eval refusal, got: ${firstDiagnostic(ref computed)}`;
+  }
+
+  let unannotated = checkSource("const N = 7;\nfunction main(): int { return N; }");
+  let test theory: Case = t.asserts("a module const needs an annotation") {
+    theory.isSuccessful = diagnosticsMention(ref unannotated, "needs a type annotation");
+    theory.detail = `wanted an annotation diagnostic, got: ${firstDiagnostic(ref unannotated)}`;
+  }
+
+  let mutable = checkSource("let N: int = 7;\nfunction main(): int { return N; }");
+  let test theory: Case = t.asserts("module-level `let` is refused rather than treated as a const") {
+    theory.isSuccessful = diagnosticsMention(ref mutable, "module-level \"let\"");
+    theory.detail = `wanted a module-let refusal, got: ${firstDiagnostic(ref mutable)}`;
+  }
+
+  // Cross-module: the VALUE travels, because there is no global to point at.
+  let imported = checkTwoModules(
+    "export const WIDTH: int = 80;",
+    "import { WIDTH } from \"./lib.yoop\";\nfunction main(): int { return WIDTH; }"
+  );
+  let test theory: Case = t.asserts("an exported const is readable from another module") {
+    theory.isSuccessful = imported.diagnostics.len == 0;
+    theory.detail = `importing a const reported: ${firstDiagnostic(ref imported)}`;
+  }
+}
+
+suite function discardBindsNothing(): void {
+  const RES: string = "variant Res { Ok { value: int }, Err { code: int, detail: int } }\n";
+
+  let ok = checkSource(`${RES}function f(r: Res): int { switch (r) { case Res.Ok { value: v }: { return v; } case Res.Err { code: c, detail: _ }: { return c; } } }\nfunction main(): int { return 0; }`);
+  let test theory: Case = t.asserts("`_` names a field without binding it") {
+    theory.isSuccessful = ok.diagnostics.len == 0;
+    theory.detail = `a discard binding reported: ${firstDiagnostic(ref ok)}`;
+  }
+
+  // Named but not bound - so it does not become readable.
+  let read = checkSource(`${RES}function f(r: Res): int { switch (r) { case Res.Ok { value: v }: { return v; } case Res.Err { code: c, detail: _ }: { return _; } } }\nfunction main(): int { return 0; }`);
+  let test theory: Case = t.asserts("a discarded field is not readable") {
+    theory.isSuccessful = read.diagnostics.len > 0;
+    theory.detail = "reading `_` after discarding it produced no diagnostic";
+  }
+
+  // Discarding is not the same as omitting: every field still has to be NAMED,
+  // so a case that grows one breaks its patterns loudly.
+  let omitted = checkSource(`${RES}function f(r: Res): int { switch (r) { case Res.Ok { value: v }: { return v; } case Res.Err { code: c }: { return c; } } }\nfunction main(): int { return 0; }`);
+  let test theory: Case = t.asserts("omitting a field is still an error") {
+    theory.isSuccessful = diagnosticsMention(ref omitted, "must bind all of them");
+    theory.detail = `wanted a bind-all diagnostic, got: ${firstDiagnostic(ref omitted)}`;
+  }
+
+  // Two discards in one pattern must not collide the way two real bindings of
+  // one name would.
+  let twice = checkSource(`${RES}function f(r: Res): int { switch (r) { case Res.Ok { value: v }: { return v; } case Res.Err { code: _, detail: _ }: { return 0; } } }\nfunction main(): int { return 0; }`);
+  let test theory: Case = t.asserts("two discards in one pattern do not collide") {
+    theory.isSuccessful = twice.diagnostics.len == 0;
+    theory.detail = `two discard bindings reported: ${firstDiagnostic(ref twice)}`;
+  }
+}
+
+// ----- borrows --------------------------------------------------------------
+
+suite function refIsADistinctTypeFromTheThingBorrowed(): void {
+  const CLEAR: string = "function clear(ref n: int): void { n = 0; }\n";
+
+  let ok = checkSource(`${CLEAR}function main(): int { let n: int = 1; clear(ref n); return n; }`);
+  let test theory: Case = t.asserts("a borrow satisfies a `ref` parameter") {
+    theory.isSuccessful = ok.diagnostics.len == 0;
+    theory.detail = `passing a borrow reported: ${firstDiagnostic(ref ok)}`;
+  }
+
+  // Writing `ref` is REQUIRED, not inferred: the reader has to be able to see
+  // at the call which arguments the callee may write through.
+  let byValue = checkSource(`${CLEAR}function main(): int { let n: int = 1; clear(n); return n; }`);
+  let test theory: Case = t.asserts("passing a value where a borrow is wanted is a diagnostic") {
+    theory.isSuccessful = diagnosticsMention(ref byValue, "is ref int32, not int32");
+    theory.detail = `wanted a ref-vs-value diagnostic, got: ${firstDiagnostic(ref byValue)}`;
+  }
+
+  // And the other direction.
+  let byRef = checkSource("function takes(n: int): int { return n; }\nfunction main(): int { let n: int = 1; return takes(ref n); }");
+  let test theory: Case = t.asserts("passing a borrow where a value is wanted is a diagnostic") {
+    theory.isSuccessful = byRef.diagnostics.len > 0;
+    theory.detail = "passing `ref n` to a by-value parameter produced no diagnostic";
+  }
+
+  // The BODY sees a plain `int`, not a `ref int` - a borrow IS the thing it
+  // borrows as far as the callee is concerned, which is what keeps every read
+  // and write in the body from needing to know about references.
+  let body = checkSource("function addTo(ref n: int, by: int): void { n = n + by; }\nfunction main(): int { return 0; }");
+  let test theory: Case = t.asserts("a `ref` parameter reads as its pointee inside the body") {
+    theory.isSuccessful = body.diagnostics.len == 0;
+    theory.detail = `arithmetic on a ref parameter reported: ${firstDiagnostic(ref body)}`;
+  }
+
+  // A borrow needs an ADDRESS, and only a named binding has one.
+  let temp = checkSource("function f(ref n: int): void { }\nfunction g(): int { return 1; }\nfunction main(): int { f(ref g()); return 0; }");
+  let test theory: Case = t.asserts("`ref` of a non-name is refused by name") {
+    theory.isSuccessful = diagnosticsMention(ref temp, "takes a named binding");
+    theory.detail = `wanted a named-binding diagnostic, got: ${firstDiagnostic(ref temp)}`;
+  }
+}
+
+// ----- calls ----------------------------------------------------------------
+
+const ADD: string = "function add(a: int, b: int): int { return a + b; }\n";
+
+suite function callArgumentsAreCheckedAgainstParameters(): void {
+  let ok = checkSource(`${ADD}function main(): int { return add(1, 2); }`);
+  let test theory: Case = t.asserts("a matching call checks clean") {
+    theory.isSuccessful = ok.diagnostics.len == 0;
+    theory.detail = `a well-formed call reported ${ok.diagnostics.len} diagnostic(s): ${firstDiagnostic(ref ok)}`;
+  }
+
+  let tooFew = checkSource(`${ADD}function main(): int { return add(1); }`);
+  let test theory: Case = t.asserts("too few arguments is a diagnostic") {
+    theory.isSuccessful = diagnosticsMention(ref tooFew, "takes 2 argument(s), got 1");
+    theory.detail = `wanted an arity diagnostic, got: ${firstDiagnostic(ref tooFew)}`;
+  }
+
+  let tooMany = checkSource(`${ADD}function main(): int { return add(1, 2, 3); }`);
+  let test theory: Case = t.asserts("too many arguments is a diagnostic") {
+    theory.isSuccessful = diagnosticsMention(ref tooMany, "takes 2 argument(s), got 3");
+    theory.detail = `wanted an arity diagnostic, got: ${firstDiagnostic(ref tooMany)}`;
+  }
+
+  // The POSITION is named, because "wrong argument type" on a five-argument
+  // call is most of a message and none of the answer.
+  let wrongType = checkSource(`${ADD}function main(): int { return add(1, "x"); }`);
+  let test theory: Case = t.asserts("an argument of the wrong type names its position") {
+    theory.isSuccessful = diagnosticsMention(ref wrongType, "argument 2 of \"add\"");
+    theory.detail = `wanted a positional type diagnostic, got: ${firstDiagnostic(ref wrongType)}`;
+  }
+
+  // Each argument is checked AGAINST its parameter, so an untyped literal pins
+  // to it. Without that, `wide(7)` would default the 7 to int32 and then
+  // complain that int32 and int64 differ.
+  let pinned = checkSource("function wide(n: int64): int64 { return n; }\nfunction main(): int { return 0; }\nfunction f(): int64 { return wide(7); }");
+  let test theory: Case = t.asserts("an untyped literal pins to the parameter's width") {
+    theory.isSuccessful = pinned.diagnostics.len == 0;
+    theory.detail = `passing 7 to an int64 parameter reported: ${firstDiagnostic(ref pinned)}`;
+  }
+
+  // printf is variadic and has no signature to check against - it must keep
+  // taking whatever it is given.
+  let variadic = checkSource("function main(): int { printf(\"%d %s\\n\", 1, \"two\"); return 0; }");
+  let test theory: Case = t.asserts("printf still takes any arguments") {
+    theory.isSuccessful = variadic.diagnostics.len == 0;
+    theory.detail = `printf with mixed arguments reported: ${firstDiagnostic(ref variadic)}`;
+  }
+
+  // A mistake INSIDE an argument must still be reported when the callee itself
+  // is unknown, rather than hidden behind the unknown-name error.
+  let both = checkSource("function main(): int { return nope(missing); }");
+  let test theory: Case = t.asserts("an unknown callee does not hide errors in its arguments") {
+    theory.isSuccessful = diagnosticsMention(ref both, "unknown function")
+      && diagnosticsMention(ref both, "unknown name");
+    theory.detail = `wanted both diagnostics, got ${both.diagnostics.len}: ${firstDiagnostic(ref both)}`;
+  }
+}
+
+suite function qualifiedCallArgumentsAreCheckedToo(): void {
+  // The signature is the SOURCE module's and the arguments are in THIS module's
+  // scope; both sides are program-wide TypeIds, so nothing is translated.
+  let wrong = checkTwoModules(
+    "export function add(a: int, b: int): int { return a + b; }",
+    "import * as lib from \"./lib.yoop\";\nfunction main(): int { return lib.add(1); }"
+  );
+  let test theory: Case = t.asserts("a namespaced call checks arity") {
+    theory.isSuccessful = diagnosticsMention(ref wrong, "takes 2 argument(s), got 1");
+    theory.detail = `wanted an arity diagnostic, got: ${firstDiagnostic(ref wrong)}`;
+  }
+
+  let imported = checkTwoModules(
+    "export function add(a: int, b: int): int { return a + b; }",
+    "import { add } from \"./lib.yoop\";\nfunction main(): int { return add(1, \"x\"); }"
+  );
+  let test theory: Case = t.asserts("an imported call checks argument types") {
+    theory.isSuccessful = diagnosticsMention(ref imported, "argument 2");
+    theory.detail = `wanted a positional type diagnostic, got: ${firstDiagnostic(ref imported)}`;
+  }
+}
+
+// ----- generics -------------------------------------------------------------
+
+const BOX: string = "type Box<T> { value: T }\n";
+
+suite function genericTypesInstantiateOnDemand(): void {
+  let ok = checkSource(`${BOX}function main(): int { const b: Box<int> = { value: 1 }; return b.value; }`);
+  let test theory: Case = t.asserts("a generic applied to an argument checks clean") {
+    theory.isSuccessful = ok.diagnostics.len == 0;
+    theory.detail = `using Box<int> reported ${ok.diagnostics.len} diagnostic(s): ${firstDiagnostic(ref ok)}`;
+  }
+
+  // The substituted field really is the argument's type, not the parameter's.
+  let wrong = checkSource(`${BOX}function main(): int { const b: Box<int> = { value: "x" }; return 0; }`);
+  let test theory: Case = t.asserts("a field takes the SUBSTITUTED type") {
+    theory.isSuccessful = wrong.diagnostics.len > 0;
+    theory.detail = "assigning a string to Box<int>.value produced no diagnostic";
+  }
+
+  // Two applications of one decl must be two DISTINCT types, or a Box<string>
+  // would be interchangeable with a Box<int>. Asserted through a RETURN rather
+  // than a call argument, because call arguments are not matched against
+  // parameters yet - for any type, not just these.
+  let mixed = checkSource(`${BOX}function f(): Box<int> { const s: Box<string> = { value: "x" }; return s; }\nfunction main(): int { return 0; }`);
+  let test theory: Case = t.asserts("two instantiations are different types") {
+    theory.isSuccessful = diagnosticsMention(ref mixed, "cannot return");
+    theory.detail = `wanted Box<string> and Box<int> to differ, got: ${firstDiagnostic(ref mixed)}`;
+  }
+
+  // And the SAME application twice is one type, or nothing could be passed
+  // between two annotations that spell it the same way.
+  let same = checkSource(`${BOX}function f(): Box<int> { const b: Box<int> = { value: 1 }; return b; }\nfunction main(): int { return 0; }`);
+  let test theory: Case = t.asserts("the same application twice is ONE type") {
+    theory.isSuccessful = same.diagnostics.len == 0;
+    theory.detail = `two Box<int> annotations disagreed: ${firstDiagnostic(ref same)}`;
+  }
+}
+
+suite function genericApplicationsAreChecked(): void {
+  let bare = checkSource(`${BOX}function main(): int { const b: Box = { value: 1 }; return 0; }`);
+  let test theory: Case = t.asserts("a generic used without arguments says how many it needs") {
+    theory.isSuccessful = diagnosticsMention(ref bare, "needs type arguments");
+    theory.detail = `wanted a missing-arguments diagnostic, got: ${firstDiagnostic(ref bare)}`;
+  }
+
+  let tooMany = checkSource(`${BOX}function main(): int { const b: Box<int, int> = { value: 1 }; return 0; }`);
+  let test theory: Case = t.asserts("the wrong number of arguments is a diagnostic") {
+    theory.isSuccessful = diagnosticsMention(ref tooMany, "type argument(s), got");
+    theory.detail = `wanted an arity diagnostic, got: ${firstDiagnostic(ref tooMany)}`;
+  }
+
+  let notGeneric = checkSource("type Point { x: int }\nfunction main(): int { const p: Point<int> = { x: 1 }; return 0; }");
+  let test theory: Case = t.asserts("arguments on a non-generic type are a diagnostic") {
+    theory.isSuccessful = diagnosticsMention(ref notGeneric, "is not generic");
+    theory.detail = `wanted a not-generic diagnostic, got: ${firstDiagnostic(ref notGeneric)}`;
+  }
+
+  // A type parameter is in scope ONLY inside its own decl's body.
+  let escaped = checkSource(`${BOX}function main(): int { const t: T = 1; return 0; }`);
+  let test theory: Case = t.asserts("a type parameter is not visible outside its decl") {
+    theory.isSuccessful = diagnosticsMention(ref escaped, "unknown type");
+    theory.detail = `wanted an unknown-type diagnostic for T, got: ${firstDiagnostic(ref escaped)}`;
+  }
+}
+
+suite function genericFunctionsInferTheirTypeArguments(): void {
+  const ID: string = "function identity<T>(x: T): T { return x; }\n";
+
+  // From the ARGUMENT: nothing else mentions T.
+  let fromArg = checkSource(`${ID}function main(): int { const n: int = 1; return identity(n); }`);
+  let test theory: Case = t.asserts("an argument determines the type parameter") {
+    theory.isSuccessful = fromArg.diagnostics.len == 0;
+    theory.detail = `inferring from an argument reported: ${firstDiagnostic(ref fromArg)}`;
+  }
+
+  // From the EXPECTED type: nothing but the RETURN mentions T. This is exactly
+  // `Option.None` - a payload-less case of a generic variant carries no value
+  // to infer from, so the annotation is the only thing that can say which
+  // instantiation it is.
+  const MAKE: string = "variant Maybe<T> { Some { value: T }, Nothing }\nfunction nothing<T>(): Maybe<T> { return Maybe.Nothing; }\n";
+  let fromExpected = checkSource(`${MAKE}function main(): int { const m: Maybe<int> = nothing(); return 0; }`);
+  let test theory: Case = t.asserts("the expected type determines a parameter the arguments do not") {
+    theory.isSuccessful = fromExpected.diagnostics.len == 0;
+    theory.detail = `inferring from the expected type reported: ${firstDiagnostic(ref fromExpected)}`;
+  }
+
+  // Neither source says anything, so it has to be REFUSED rather than guessed.
+  let unanchored = checkSource(`${MAKE}function main(): int { const m = nothing(); return 0; }`);
+  let test theory: Case = t.asserts("a parameter nothing determines names itself") {
+    theory.isSuccessful = diagnosticsMention(ref unanchored, "cannot infer \"T\"");
+    theory.detail = `wanted an inference diagnostic naming T, got: ${firstDiagnostic(ref unanchored)}`;
+  }
+
+  // An inferred signature is checked like any other: once T is int32, a string
+  // argument is as wrong as it would be in a concrete function.
+  let mismatch = checkSource("function pairUp<T>(a: T, b: T): T { return a; }\nfunction main(): int { const n: int = 1; const s: string = \"x\"; return pairUp(n, s); }");
+  let test theory: Case = t.asserts("arguments are checked against the INFERRED signature") {
+    theory.isSuccessful = mismatch.diagnostics.len > 0;
+    theory.detail = "passing an int and a string to pairUp<T>(a: T, b: T) produced no diagnostic";
+  }
+
+  // The BODY is checked once with T opaque. That is what catches an operation
+  // no instantiation could support, without re-checking per instance.
+  let opaque = checkSource("function bad<T>(x: T): T { return x + 1; }\nfunction main(): int { return 0; }");
+  let test theory: Case = t.asserts("an operation an opaque T cannot support is a diagnostic") {
+    theory.isSuccessful = opaque.diagnostics.len > 0;
+    theory.detail = "adding 1 to an unbounded T produced no diagnostic";
+  }
+}
+
+suite function genericVariantsTakeTheirInstanceFromContext(): void {
+  const RESULT: string = "variant Result<T, E> { Ok { value: T }, Err { error: E } }\n";
+
+  let ok = checkSource(`${RESULT}function main(): int { const r: Result<int, int> = Result.Ok { value: 1 }; return 0; }`);
+  let test theory: Case = t.asserts("an annotated constructor resolves its instantiation") {
+    theory.isSuccessful = ok.diagnostics.len == 0;
+    theory.detail = `constructing Result<int, int> reported ${ok.diagnostics.len} diagnostic(s): ${firstDiagnostic(ref ok)}`;
+  }
+
+  // `Result<int, string>` and `Result<int, int>` share the case name `Ok`, so
+  // the constructor alone cannot say which instantiation it is.
+  let unanchored = checkSource(`${RESULT}function main(): int { const r = Result.Ok { value: 1 }; return 0; }`);
+  let test theory: Case = t.asserts("an unannotated constructor says it cannot tell which") {
+    theory.isSuccessful = diagnosticsMention(ref unanchored, "cannot tell which");
+    theory.detail = `wanted a which-instantiation diagnostic, got: ${firstDiagnostic(ref unanchored)}`;
+  }
+
+  let sw = checkSource(`${RESULT}function f(r: Result<int, int>): int { switch (r) { case Result.Ok { value: v }: { return v; } case Result.Err { error: e }: { return e; } } }\nfunction main(): int { return 0; }`);
+  let test theory: Case = t.asserts("a switch over an instance takes its patterns from the scrutinee") {
+    theory.isSuccessful = sw.diagnostics.len == 0;
+    theory.detail = `switching over Result<int, int> reported ${sw.diagnostics.len} diagnostic(s): ${firstDiagnostic(ref sw)}`;
+  }
+
+  // Substitution has to reach INTO each case's payload independently.
+  let payload = checkSource(`${RESULT}function f(r: Result<int, string>): int { switch (r) { case Result.Ok { value: v }: { return v; } case Result.Err { error: e }: { return e; } } }\nfunction main(): int { return 0; }`);
+  let test theory: Case = t.asserts("each case's payload substitutes its own parameter") {
+    // `Err`'s payload is `string` here, so returning it from an int function is
+    // the error - which only shows up if E substituted independently of T.
+    theory.isSuccessful = payload.diagnostics.len > 0;
+    theory.detail = "returning Result<int, string>'s string payload as an int produced no diagnostic";
+  }
+}
+
+// ----- variants -------------------------------------------------------------
+
+// Everything a fixture cannot reach, because the program has to be REFUSED.
+const SHAPE: string = "variant Shape { Circle { r: int }, Rect { w: int, h: int }, Empty }\n";
+
+suite function variantsCheckTheirConstructors(): void {
+  let ok = checkSource(`${SHAPE}function main(): int { const c: Shape = Shape.Circle { r: 1 }; return 0; }`);
+  let test theory: Case = t.asserts("a well-formed constructor checks clean") {
+    theory.isSuccessful = ok.diagnostics.len == 0;
+    theory.detail = `constructing a case reported ${ok.diagnostics.len} diagnostic(s): ${firstDiagnostic(ref ok)}`;
+  }
+
+  let bare = checkSource(`${SHAPE}function main(): int { const c: Shape = Shape.Empty; return 0; }`);
+  let test theory: Case = t.asserts("a payload-less constructor is recognized through a field access") {
+    theory.isSuccessful = bare.diagnostics.len == 0;
+    theory.detail = `Shape.Empty reported ${bare.diagnostics.len} diagnostic(s): ${firstDiagnostic(ref bare)}`;
+  }
+
+  let unknown = checkSource(`${SHAPE}function main(): int { const c: Shape = Shape.Oval { r: 1 }; return 0; }`);
+  let test theory: Case = t.asserts("an unknown case names the variant") {
+    theory.isSuccessful = diagnosticsMention(ref unknown, "has no case");
+    theory.detail = `wanted a no-such-case diagnostic, got: ${firstDiagnostic(ref unknown)}`;
+  }
+
+  let short = checkSource(`${SHAPE}function main(): int { const c: Shape = Shape.Rect { w: 1 }; return 0; }`);
+  let test theory: Case = t.asserts("a payload missing a field is a diagnostic") {
+    theory.isSuccessful = diagnosticsMention(ref short, "field(s), got");
+    theory.detail = `wanted a field-count diagnostic, got: ${firstDiagnostic(ref short)}`;
+  }
+
+  let wrongType = checkSource(`${SHAPE}function main(): int { const c: Shape = Shape.Circle { r: "x" }; return 0; }`);
+  let test theory: Case = t.asserts("a payload field of the wrong type is a diagnostic") {
+    theory.isSuccessful = wrongType.diagnostics.len > 0;
+    theory.detail = "a string in an int field produced no diagnostic";
+  }
+}
+
+suite function variantSwitchesMustBeExhaustive(): void {
+  const covered = `${SHAPE}function f(s: Shape): int { switch (s) { case Shape.Circle { r: r }: { return r; } case Shape.Rect { w: w, h: h }: { return w; } case Shape.Empty: { return 0; } } }\nfunction main(): int { return 0; }`;
+  let ok = checkSource(covered);
+  let test theory: Case = t.asserts("covering every case needs no default") {
+    theory.isSuccessful = ok.diagnostics.len == 0;
+    theory.detail = `an exhaustive switch reported ${ok.diagnostics.len} diagnostic(s): ${firstDiagnostic(ref ok)}`;
+  }
+
+  // The missing case is NAMED, because "not exhaustive" on a ten-case variant
+  // is a worse message than the compiler can afford to give.
+  const missing = `${SHAPE}function f(s: Shape): int { switch (s) { case Shape.Circle { r: r }: { return r; } case Shape.Rect { w: w, h: h }: { return w; } } }\nfunction main(): int { return 0; }`;
+  let gap = checkSource(missing);
+  let test theory: Case = t.asserts("a missing case is named") {
+    theory.isSuccessful = diagnosticsMention(ref gap, "does not cover \"Empty\"");
+    theory.detail = `wanted the missing case named, got: ${firstDiagnostic(ref gap)}`;
+  }
+
+  // A default that can never run is dead code, and usually a misspelled case.
+  const both = `${SHAPE}function f(s: Shape): int { switch (s) { case Shape.Circle { r: r }: { return r; } case Shape.Rect { w: w, h: h }: { return w; } case Shape.Empty: { return 0; } default: { return -1; } } }\nfunction main(): int { return 0; }`;
+  let dead = checkSource(both);
+  let test theory: Case = t.asserts("a default on an exhaustive switch is a diagnostic") {
+    theory.isSuccessful = diagnosticsMention(ref dead, "can never run");
+    theory.detail = `wanted a dead-default diagnostic, got: ${firstDiagnostic(ref dead)}`;
+  }
+
+  const twice = `${SHAPE}function f(s: Shape): int { switch (s) { case Shape.Circle { r: r }: { return r; } case Shape.Circle { r: q }: { return q; } default: { return 0; } } }\nfunction main(): int { return 0; }`;
+  let dup = checkSource(twice);
+  let test theory: Case = t.asserts("matching one case twice is a diagnostic") {
+    theory.isSuccessful = diagnosticsMention(ref dup, "matched twice");
+    theory.detail = `wanted a duplicate-case diagnostic, got: ${firstDiagnostic(ref dup)}`;
+  }
+}
+
+suite function variantPatternsBindTheirPayload(): void {
+  const usesBinding = `${SHAPE}function f(s: Shape): int { switch (s) { case Shape.Rect { w: w, h: h }: { return w * h; } default: { return 0; } } }\nfunction main(): int { return 0; }`;
+  let ok = checkSource(usesBinding);
+  let test theory: Case = t.asserts("a bound payload field is readable in the arm") {
+    theory.isSuccessful = ok.diagnostics.len == 0;
+    theory.detail = `reading a binding reported ${ok.diagnostics.len} diagnostic(s): ${firstDiagnostic(ref ok)}`;
+  }
+
+  // The binding is arm-LOCAL, exactly like any other name declared in a block.
+  const escapes = `${SHAPE}function f(s: Shape): int { switch (s) { case Shape.Circle { r: r }: { return r; } default: { return 0; } } return r; }\nfunction main(): int { return 0; }`;
+  let leaked = checkSource(escapes);
+  let test theory: Case = t.asserts("a binding is not visible after the switch") {
+    theory.isSuccessful = leaked.diagnostics.len > 0;
+    theory.detail = "a pattern binding survived its arm";
+  }
+
+  // A case that grows a field should break its patterns loudly rather than
+  // leave one silently unbound.
+  const partial = `${SHAPE}function f(s: Shape): int { switch (s) { case Shape.Rect { w: w }: { return w; } default: { return 0; } } }\nfunction main(): int { return 0; }`;
+  let half = checkSource(partial);
+  let test theory: Case = t.asserts("binding only some of a case's fields is a diagnostic") {
+    theory.isSuccessful = diagnosticsMention(ref half, "must bind all of them");
+    theory.detail = `wanted a bind-all diagnostic, got: ${firstDiagnostic(ref half)}`;
+  }
+}
+
+suite function variantAndIntegerSwitchesDoNotMix(): void {
+  const intPattern = `${SHAPE}function f(s: Shape): int { switch (s) { case 1: { return 1; } default: { return 0; } } }\nfunction main(): int { return 0; }`;
+  let wrong = checkSource(intPattern);
+  let test theory: Case = t.asserts("a literal pattern on a variant switch is a diagnostic") {
+    theory.isSuccessful = diagnosticsMention(ref wrong, "must be variant cases");
+    theory.detail = `wanted a pattern-kind diagnostic, got: ${firstDiagnostic(ref wrong)}`;
+  }
+
+  const casePattern = "function f(n: int): int { switch (n) { case Shape.Circle { r: r }: { return r; } default: { return 0; } } }\nfunction main(): int { return 0; }";
+  let alsoWrong = checkSource(casePattern);
+  let test theory: Case = t.asserts("a variant pattern on an integer switch is a diagnostic") {
+    theory.isSuccessful = diagnosticsMention(ref alsoWrong, "must be literals");
+    theory.detail = `wanted a pattern-kind diagnostic, got: ${firstDiagnostic(ref alsoWrong)}`;
+  }
+
+  const otherVariant = `${SHAPE}variant Other { A, B }\nfunction f(s: Shape): int { switch (s) { case Other.A: { return 1; } default: { return 0; } } }\nfunction main(): int { return 0; }`;
+  let mixed = checkSource(otherVariant);
+  let test theory: Case = t.asserts("a pattern from another variant is a diagnostic") {
+    theory.isSuccessful = diagnosticsMention(ref mixed, "the pattern matches");
+    theory.detail = `wanted a wrong-variant diagnostic, got: ${firstDiagnostic(ref mixed)}`;
+  }
+}
+
+// The first diagnostic message, for failure detail. "" when there are none.
+function firstDiagnostic(ref prog: Program): string {
+  if (prog.diagnostics.len == 0) {
+    return "";
+  }
+  return vec.vecGet(ref prog.diagnostics, 0).message;
+}
+
+// True when any diagnostic names `needle`. A refusal with the wrong message
+// sends the reader somewhere else, so the text is part of the assertion.
+function diagnosticsMention(ref prog: Program, needle: string): bool {
+  let i: usize = 0;
+  while (i < prog.diagnostics.len) {
+    const message = vec.vecGet(ref prog.diagnostics, i).message;
+    if (str.stringIndexOf(message, needle) < message.len) {
+      return true;
+    }
+    i += 1;
+  }
+  return false;
+}
+
+// ----- pass B: imports -------------------------------------------------------
+
+suite function importsBindTheSourceModulesSymbol(): void {
+  let prog = checkTwoModules(
+    "export function add(a: int, b: int): int { return a + b; }",
+    "import { add } from \"./lib.yoop\";\nfunction main(): int { return add(1, 2); }"
+  );
+
+  let test theory: Case = t.asserts("an imported function is callable") {
+    theory.isSuccessful = prog.diagnostics.len == 0;
+    theory.detail = `calling an imported function reported ${prog.diagnostics.len} diagnostic(s): ${firstDiagnostic(ref prog)}`;
+  }
+
+  // The point of binding the SymbolId rather than copying anything: one symbol,
+  // named from two modules.
+  let test theory: Case = t.asserts("both modules name the same SymbolId") {
+    theory.isSuccessful = symbolIdIn(ref prog, 0, "add") == symbolIdIn(ref prog, 1, "add")
+      && symbolIdIn(ref prog, 1, "add") != 0;
+    theory.detail = `lib has SymbolId ${symbolIdIn(ref prog, 0, "add")} for "add" and the entry has ${symbolIdIn(ref prog, 1, "add")}`;
+  }
+}
+
+suite function importedTypesKeepTheirIdentity(): void {
+  let prog = checkTwoModules(
+    "export type Point { x: int, y: int }",
+    "import { Point } from \"./lib.yoop\";\nfunction main(): int { const p: Point = { x: 1, y: 2 }; return p.x; }"
+  );
+
+  let test theory: Case = t.asserts("an imported type resolves in an annotation and a literal") {
+    theory.isSuccessful = prog.diagnostics.len == 0;
+    theory.detail = `using an imported type reported ${prog.diagnostics.len} diagnostic(s): ${firstDiagnostic(ref prog)}`;
+  }
+
+  // Type equality is `id == id`. A second nominal type for the imported Point
+  // would make every value passed between the two modules a type error, so this
+  // is the assertion the whole import design exists to satisfy.
+  let test theory: Case = t.asserts("the imported Point IS the declared Point") {
+    theory.isSuccessful = symbolIdIn(ref prog, 0, "Point") == symbolIdIn(ref prog, 1, "Point")
+      && symbolIdIn(ref prog, 1, "Point") != 0;
+    theory.detail = `lib has SymbolId ${symbolIdIn(ref prog, 0, "Point")} for "Point" and the entry has ${symbolIdIn(ref prog, 1, "Point")}`;
+  }
+}
+
+suite function importAliasesBindTheLocalName(): void {
+  let prog = checkTwoModules(
+    "export function scale(n: int): int { return n * 2; }",
+    "import { scale as times } from \"./lib.yoop\";\nfunction main(): int { return times(2); }"
+  );
+
+  let test theory: Case = t.asserts("the alias is callable") {
+    theory.isSuccessful = prog.diagnostics.len == 0;
+    theory.detail = `calling through an alias reported ${prog.diagnostics.len} diagnostic(s): ${firstDiagnostic(ref prog)}`;
+  }
+
+  let test theory: Case = t.asserts("the export name is NOT bound alongside the alias") {
+    theory.isSuccessful = symbolIdIn(ref prog, 1, "scale") == 0;
+    theory.detail = "`scale as times` bound `scale` too; an alias replaces the name, it does not add one";
+  }
+
+  let original = checkTwoModules(
+    "export function scale(n: int): int { return n * 2; }",
+    "import { scale as times } from \"./lib.yoop\";\nfunction main(): int { return scale(2); }"
+  );
+  let test theory: Case = t.asserts("calling the export name through an alias is a diagnostic") {
+    theory.isSuccessful = original.diagnostics.len > 0;
+    theory.detail = "calling `scale` when only `times` was bound produced no diagnostic";
+  }
+}
+
+suite function importsOfNamesTheSourceDoesNotOfferAreRefused(): void {
+  let unexported = checkTwoModules(
+    "function hidden(): int { return 1; }\nexport function shown(): int { return 2; }",
+    "import { hidden } from \"./lib.yoop\";\nfunction main(): int { return hidden(); }"
+  );
+  // "has no export hidden" would send the reader hunting for a typo in a name
+  // that is right there in the file, so the two cases get different messages.
+  let test theory: Case = t.asserts("importing a declared-but-unexported name says to add `export`") {
+    theory.isSuccessful = diagnosticsMention(ref unexported, "not exported");
+    theory.detail = `wanted a diagnostic about the missing \`export\`, got: ${firstDiagnostic(ref unexported)}`;
+  }
+
+  let missing = checkTwoModules(
+    "export function shown(): int { return 2; }",
+    "import { nope } from \"./lib.yoop\";\nfunction main(): int { return nope(); }"
+  );
+  let test theory: Case = t.asserts("importing a name that does not exist says the module has no such export") {
+    theory.isSuccessful = diagnosticsMention(ref missing, "has no export");
+    theory.detail = `wanted a "has no export" diagnostic, got: ${firstDiagnostic(ref missing)}`;
+  }
+}
+
+suite function stdValueImportsMustUseTheNamespaceForm(): void {
+  // Common std function names - `info`, `error`, `panic`, `get` - would compete
+  // with the user's own identifiers if they could be imported bare, and
+  // `log.error(...)` says where it came from at every call site. Same rule, and
+  // the same message, as src/jsyooptypecheck/imports.js.
+  let value = checkTwoModules(
+    "export function twice(n: int): int { return n * 2; }",
+    "import { twice } from \"std/core/tiny.yoop\";\nfunction main(): int { return twice(1); }"
+  );
+  let test theory: Case = t.asserts("a bare value import from std is refused") {
+    theory.isSuccessful = diagnosticsMention(ref value, "must use the namespace form");
+    theory.detail = `wanted a namespace-form diagnostic, got: ${firstDiagnostic(ref value)}`;
+  }
+
+  // Types are exempt: capitalized, far fewer of them, and `Vec` reads worse as
+  // `vec.Vec`.
+  let typeImport = checkTwoModules(
+    "export type Span { start: int, len: int }",
+    "import { Span } from \"std/core/tiny.yoop\";\nfunction main(): int { const s: Span = { start: 1, len: 2 }; return s.len; }"
+  );
+  let test theory: Case = t.asserts("a TYPE import from std is allowed") {
+    theory.isSuccessful = typeImport.diagnostics.len == 0;
+    theory.detail = `importing a std type reported ${typeImport.diagnostics.len} diagnostic(s): ${firstDiagnostic(ref typeImport)}`;
+  }
+
+  // The rule is about std, not about imports. A user module's values import
+  // bare, which is what every other fixture here relies on.
+  let user = checkTwoModules(
+    "export function twice(n: int): int { return n * 2; }",
+    "import { twice } from \"./lib.yoop\";\nfunction main(): int { return twice(1); }"
+  );
+  let test theory: Case = t.asserts("a bare value import from a USER module is fine") {
+    theory.isSuccessful = user.diagnostics.len == 0;
+    theory.detail = `a user-module value import reported ${user.diagnostics.len} diagnostic(s): ${firstDiagnostic(ref user)}`;
+  }
+}
+
+suite function namespacesReachAModulesExports(): void {
+  let prog = checkTwoModules(
+    "export function add(a: int, b: int): int { return a + b; }",
+    "import * as lib from \"./lib.yoop\";\nfunction main(): int { return lib.add(1, 2); }"
+  );
+
+  let test theory: Case = t.asserts("a qualified call resolves and types") {
+    theory.isSuccessful = prog.diagnostics.len == 0;
+    theory.detail = `calling through a namespace reported ${prog.diagnostics.len} diagnostic(s): ${firstDiagnostic(ref prog)}`;
+  }
+
+  // A namespace binds ONE name. `add` on its own must still be unknown, or the
+  // namespace would be a second, invisible way to import every export.
+  let test theory: Case = t.asserts("a namespace does not bind its members") {
+    theory.isSuccessful = symbolIdIn(ref prog, 1, "add") == 0 && symbolIdIn(ref prog, 1, "lib") != 0;
+    theory.detail = "importing `* as lib` bound `add` directly too";
+  }
+}
+
+suite function namespaceMembersRespectExport(): void {
+  // The rule that makes a namespace safe: it reaches the source module's
+  // EXPORTS, not its names, so `ns.hidden()` fails exactly as `import { hidden }`
+  // does rather than being a way around the keyword.
+  let hidden = checkTwoModules(
+    "function hidden(): int { return 1; }\nexport function shown(): int { return 2; }",
+    "import * as lib from \"./lib.yoop\";\nfunction main(): int { return lib.hidden(); }"
+  );
+  let test theory: Case = t.asserts("an unexported member says to add `export`") {
+    theory.isSuccessful = diagnosticsMention(ref hidden, "not exported");
+    theory.detail = `wanted a diagnostic about the missing \`export\`, got: ${firstDiagnostic(ref hidden)}`;
+  }
+
+  let missing = checkTwoModules(
+    "export function shown(): int { return 2; }",
+    "import * as lib from \"./lib.yoop\";\nfunction main(): int { return lib.nope(); }"
+  );
+  let test theory: Case = t.asserts("a member that does not exist names the namespace") {
+    theory.isSuccessful = diagnosticsMention(ref missing, "has no export");
+    theory.detail = `wanted a "has no export" diagnostic, got: ${firstDiagnostic(ref missing)}`;
+  }
+
+  // `p.x(...)` on a struct local reaches the qualified-call path too, since the
+  // parser cannot tell the two apart. It has to say something better than
+  // "has no export".
+  let notNamespace = checkTwoModules(
+    "export type Point { x: int, y: int }",
+    "import { Point } from \"./lib.yoop\";\nfunction main(): int { const p: Point = { x: 1, y: 2 }; return p.x(); }"
+  );
+  let test theory: Case = t.asserts("qualifying a call with something that is not a namespace says so") {
+    theory.isSuccessful = diagnosticsMention(ref notNamespace, "not an imported namespace");
+    theory.detail = `wanted a not-a-namespace diagnostic, got: ${firstDiagnostic(ref notNamespace)}`;
+  }
+
+  let unknownBase = checkTwoModules(
+    "export function shown(): int { return 2; }",
+    "function main(): int { return nope.shown(); }"
+  );
+  let test theory: Case = t.asserts("an unknown qualifying name is an unknown name") {
+    theory.isSuccessful = diagnosticsMention(ref unknownBase, "unknown name");
+    theory.detail = `wanted an unknown-name diagnostic, got: ${firstDiagnostic(ref unknownBase)}`;
+  }
+}
+
+suite function aNamespaceMayNotCollideWithALocalDeclaration(): void {
+  let prog = checkTwoModules(
+    "export function add(a: int, b: int): int { return a + b; }",
+    "import * as tag from \"./lib.yoop\";\nfunction tag(): int { return 2; }\nfunction main(): int { return tag(); }"
+  );
+
+  let test theory: Case = t.asserts("a namespace name this module already declares is a diagnostic") {
+    theory.isSuccessful = diagnosticsMention(ref prog, "collides");
+    theory.detail = `wanted a collision diagnostic, got: ${firstDiagnostic(ref prog)}`;
+  }
+}
+
+suite function diagnosticsNameTheFileTheyCameFrom(): void {
+  // A bare "12:5" is a real location in every file of the program at once. Once
+  // a module can span files it is not even enough to know which MODULE, so the
+  // path is stamped on rather than reconstructed by the reader.
+  let prog = checkTwoModules(
+    "export function shown(): int { return 2; }",
+    "import { shown } from \"./lib.yoop\";\nfunction main(): int { return nope; }"
+  );
+
+  let test theory: Case = t.asserts("an error carries the file it was found in") {
+    theory.isSuccessful = prog.diagnostics.len > 0
+      && str.stringEq(vec.vecGet(ref prog.diagnostics, 0).filePath, "entry.yoop");
+    theory.detail = `the diagnostic names file "${firstDiagnosticFile(ref prog)}", wanted "entry.yoop"`;
+  }
+
+  // The error is in the LIBRARY this time, so the two must not be confused.
+  let inLib = checkTwoModules(
+    "export function shown(): int { return nope; }",
+    "import { shown } from \"./lib.yoop\";\nfunction main(): int { return shown(); }"
+  );
+  let test theory: Case = t.asserts("an error in an imported module names THAT file") {
+    theory.isSuccessful = inLib.diagnostics.len > 0
+      && str.stringEq(vec.vecGet(ref inLib.diagnostics, 0).filePath, "lib.yoop");
+    theory.detail = `the diagnostic names file "${firstDiagnosticFile(ref inLib)}", wanted "lib.yoop"`;
+  }
+}
+
+function firstDiagnosticFile(ref prog: Program): string {
+  if (prog.diagnostics.len == 0) {
+    return "";
+  }
+  return vec.vecGet(ref prog.diagnostics, 0).filePath;
+}
+
+suite function onlyTheEntryModuleMayDeclareMain(): void {
+  let prog = checkTwoModules(
+    "export function main(): int { return 1; }",
+    "import { main as libMain } from \"./lib.yoop\";\nfunction main(): int { return libMain(); }"
+  );
+
+  // `main` is the one symbol that keeps its bare C name, so two of them emit
+  // two `@main`. The linker would catch it, naming object files rather than
+  // source lines.
+  let test theory: Case = t.asserts("an imported module declaring main is a diagnostic") {
+    theory.isSuccessful = diagnosticsMention(ref prog, "only the entry module may declare");
+    theory.detail = `wanted a diagnostic about a second main, got: ${firstDiagnostic(ref prog)}`;
+  }
+}
+
+suite function anImportMayNotCollideWithALocalDeclaration(): void {
+  let prog = checkTwoModules(
+    "export function tag(): int { return 1; }",
+    "import { tag } from \"./lib.yoop\";\nfunction tag(): int { return 2; }\nfunction main(): int { return tag(); }"
+  );
+
+  let test theory: Case = t.asserts("importing a name this module already declares is a diagnostic") {
+    theory.isSuccessful = diagnosticsMention(ref prog, "collides");
+    theory.detail = `wanted a collision diagnostic, got: ${firstDiagnostic(ref prog)}`;
+  }
+}
+
+// The SymbolId bound to `name` in module `index`, or 0 (the never-handed-out
+// sentinel) when the name is not bound there.
+function symbolIdIn(ref prog: Program, index: usize, name: string): usize {
+  if (index >= prog.modules.len) {
+    return 0;
+  }
+  let tm = vec.vecGet(ref prog.modules, index);
+  switch (map.mapGet(ref tm.names, name)) {
+    case Option.Some { value: symId }: { return symId; }
+    case Option.None: { return 0; }
+  }
+}
+
+// A two-module graph built by hand: the library at index 0 and the entry at
+// index 1, with the entry's import edges pointed at index 0.
+//
+// That is exactly the shape walk.yoop produces from the filesystem, minus the
+// filesystem - which is what lets pass B be driven from source literals here
+// while the slice fixture covers the real path end to end.
+function checkTwoModules(libSrc: string, entrySrc: string): Program propagates<disposable> {
+  let lib: Module;
+  switch (moduleFromSource("lib_0", "lib.yoop", bufferOf(libSrc))) {
+    case LoadModuleResult.Err { error: e }: { return parseFailureProgram(e); }
+    case LoadModuleResult.Ok { value: m }: { lib = m; }
+  }
+  let entry: Module;
+  switch (moduleFromSource("entry_1", "entry.yoop", bufferOf(entrySrc))) {
+    case LoadModuleResult.Err { error: e }: { return parseFailureProgram(e); }
+    case LoadModuleResult.Ok { value: m }: { entry = m; }
+  }
+
+  // Every IMPORT_DECL in the entry resolves to the one library module. The edge
+  // list belongs to the FILE, so it is read back out of the Vec and written
+  // whole - pushing into a copy would leave the module with no edges at all.
+  let entryFile = vec.vecGet(ref entry.files, 0);
+  const program = nodeAt(ref entry.ast, entryFile.root);
+  let i: usize = 0;
+  while (i < program.childCount) {
+    const declId = childAt(ref entry.ast, program, i);
+    if (nodeAt(ref entry.ast, declId).kind != ASTNodeKind.IMPORT_DECL) {
+      break;
+    }
+    vec.vecPush(ref entryFile.imports, {
+      nodeId: declId,
+      resolvedModuleIndex: 0,
+      resolvedModuleId: "lib_0",
+    });
+    i += 1;
+  }
+  vec.vecSet(ref entry.files, 0, entryFile);
+
+  let modules: Vec<Module> = vec.vecNew(2);
+  vec.vecPush(ref modules, lib);
+  vec.vecPush(ref modules, entry);
+  let autoLoads: Map<string, string> = map.mapNew(0, map.stringKeyOps());
+  let graph: ModuleGraph = {
+    modules: modules,
+    entryIndex: 1,
+    autoLoadModuleIds: autoLoads,
+  };
+  return typecheckProgram(ref graph);
+}
+
+function bufferOf(src: string): Vec<uint8> propagates<disposable> {
+  let buf: Vec<uint8> = vec.vecNew(src.len + 1);
+  vec.vecExtendFrom(ref buf, intr.stringAsBytes(src));
+  return buf;
+}
+
+// A parse failure has to come back as a DIAGNOSTIC, not as an empty Program -
+// see the note in checkSource.
+function parseFailureProgram(message: string): Program propagates<disposable> {
+  // A REAL Program with one diagnostic in it, rather than a hand-built literal.
+  // initProgram is where the arenas and their reserved slots are decided, and a
+  // literal here went stale every time one of them was added.
+  let prog = initProgram();
+  vec.vecPush(ref prog.diagnostics, errorAt(message, { pos: 0, line: 0, column: 0, length: 0 }));
+  return prog;
+}
+
+// Control flow: the parts that never reach an executable.
+suite function controlFlowChecksConditions(): void {
+  let ok = checkSource("function main(): int { if (1 < 2) { return 1; } return 0; }");
+  let test theory: Case = t.asserts("a comparison is a valid condition") {
+    theory.isSuccessful = ok.diagnostics.len == 0;
+    theory.detail = `a comparison condition reported ${ok.diagnostics.len} diagnostic(s): ${firstDiagnostic(ref ok)}`;
+  }
+
+  let bad = checkSource("function main(): int { if (1) { return 1; } return 0; }");
+  let test theory: Case = t.asserts("an int condition is a diagnostic") {
+    theory.isSuccessful = bad.diagnostics.len > 0;
+    theory.detail = "a non-bool condition produced no diagnostic";
+  }
+
+  let loop = checkSource("function main(): int { let i: int = 0; while (i < 3) { i = i + 1; } return i; }");
+  let test theory: Case = t.asserts("a while loop with an assignment checks clean") {
+    theory.isSuccessful = loop.diagnostics.len == 0;
+    theory.detail = `the loop reported ${loop.diagnostics.len} diagnostic(s): ${firstDiagnostic(ref loop)}`;
+  }
+}
+
+suite function blockScopingIsEnforced(): void {
+  // A name declared inside a branch must not survive the branch, or codegen
+  // would read a slot that only one path ever wrote.
+  let leaked = checkSource("function main(): int { if (1 < 2) { const a = 1; } return a; }");
+  let test theory: Case = t.asserts("a branch-local name is not visible after the branch") {
+    theory.isSuccessful = leaked.diagnostics.len > 0;
+    theory.detail = "reading a branch-local after the branch produced no diagnostic";
+  }
+
+  // Sibling branches are separate scopes, so reusing the name is fine.
+  let siblings = checkSource("function main(): int { if (1 < 2) { const a = 1; } else { const a = 2; } return 0; }");
+  let test theory: Case = t.asserts("sibling branches may reuse a name") {
+    theory.isSuccessful = siblings.diagnostics.len == 0;
+    theory.detail = `sibling branches reusing a name reported ${siblings.diagnostics.len}: ${firstDiagnostic(ref siblings)}`;
+  }
+}
+
+suite function assignmentIsChecked(): void {
+  let unknown = checkSource("function main(): int { nope = 1; return 0; }");
+  let test theory: Case = t.asserts("assigning to an undeclared name is a diagnostic") {
+    theory.isSuccessful = unknown.diagnostics.len > 0;
+    theory.detail = "assigning to an undeclared name produced no diagnostic";
+  }
+
+  let mismatch = checkSource("function main(): int { let s: string = \"a\"; s = 1; return 0; }");
+  let test theory: Case = t.asserts("assigning the wrong type is a diagnostic") {
+    theory.isSuccessful = mismatch.diagnostics.len > 0;
+    theory.detail = "assigning an int to a string local produced no diagnostic";
+  }
+}
+
+suite function loopJumpsNeedALoop(): void {
+  let outside = checkSource("function main(): int { break; return 0; }");
+  let test theory: Case = t.asserts("break outside a loop is a diagnostic") {
+    theory.isSuccessful = outside.diagnostics.len > 0;
+    theory.detail = "break at function level produced no diagnostic";
+  }
+
+  let outsideCont = checkSource("function main(): int { continue; return 0; }");
+  let test theory: Case = t.asserts("continue outside a loop is a diagnostic") {
+    theory.isSuccessful = outsideCont.diagnostics.len > 0;
+    theory.detail = "continue at function level produced no diagnostic";
+  }
+
+  // Inside an `if` that is itself inside a loop still counts as in the loop.
+  let nested = checkSource("function main(): int { let i: int = 0; while (i < 3) { if (i == 1) { break; } i = i + 1; } return i; }");
+  let test theory: Case = t.asserts("break inside a branch inside a loop is fine") {
+    theory.isSuccessful = nested.diagnostics.len == 0;
+    theory.detail = `break inside a nested branch reported ${nested.diagnostics.len}: ${firstDiagnostic(ref nested)}`;
+  }
+
+  // The depth has to come back down when the loop closes.
+  let after = checkSource("function main(): int { let i: int = 0; while (i < 1) { i = i + 1; } break; return 0; }");
+  let test theory: Case = t.asserts("break after a loop closes is still a diagnostic") {
+    theory.isSuccessful = after.diagnostics.len > 0;
+    theory.detail = "break after the loop produced no diagnostic - loopDepth did not unwind";
+  }
+}
+
+suite function forLoopScopesItsCounter(): void {
+  let ok = checkSource("function main(): int { let t: int = 0; for (let i = 0; i < 3; i = i + 1) { t = t + i; } return t; }");
+  let test theory: Case = t.asserts("a for loop with a declared counter checks clean") {
+    theory.isSuccessful = ok.diagnostics.len == 0;
+    theory.detail = `the for loop reported ${ok.diagnostics.len}: ${firstDiagnostic(ref ok)}`;
+  }
+
+  let leaked = checkSource("function main(): int { for (let i = 0; i < 3; i = i + 1) { } return i; }");
+  let test theory: Case = t.asserts("the counter is not visible after the loop") {
+    theory.isSuccessful = leaked.diagnostics.len > 0;
+    theory.detail = "reading the counter after the loop produced no diagnostic";
+  }
+
+  let constCounter = checkSource("function main(): int { for (const i = 0; i < 3; i = i + 1) { } return 0; }");
+  let test theory: Case = t.asserts("a const counter is refused") {
+    theory.isSuccessful = constCounter.diagnostics.len > 0;
+    theory.detail = "a const for-loop counter produced no diagnostic";
+  }
+}
+
+suite function logicalAndUnaryAreTyped(): void {
+  let ok = checkSource("function main(): int { const a = true && !false; if (a) { return 1; } return 0; }");
+  let test theory: Case = t.asserts("bool literals, ! and && compose cleanly") {
+    theory.isSuccessful = ok.diagnostics.len == 0;
+    theory.detail = `reported ${ok.diagnostics.len}: ${firstDiagnostic(ref ok)}`;
+  }
+
+  let notInt = checkSource("function main(): int { const a = !5; return 0; }");
+  let test theory: Case = t.asserts("! on an int is a diagnostic") {
+    theory.isSuccessful = notInt.diagnostics.len > 0;
+    theory.detail = "applying ! to an int produced no diagnostic";
+  }
+
+  let andInt = checkSource("function main(): int { const a = 1 && 2; return 0; }");
+  let test theory: Case = t.asserts("&& on ints is a diagnostic") {
+    theory.isSuccessful = andInt.diagnostics.len > 0;
+    theory.detail = "&& over ints produced no diagnostic";
+  }
+
+  let negBool = checkSource("function main(): int { const a = -true; return 0; }");
+  let test theory: Case = t.asserts("unary - on a bool is a diagnostic") {
+    theory.isSuccessful = negBool.diagnostics.len > 0;
+    theory.detail = "negating a bool produced no diagnostic";
+  }
+
+  // A comparison already yields bool, so this is the common real-world shape.
+  let chained = checkSource("function main(): int { let n: int = 5; if (n > 1 && n < 10) { return 1; } return 0; }");
+  let test theory: Case = t.asserts("a range check composes two comparisons") {
+    theory.isSuccessful = chained.diagnostics.len == 0;
+    theory.detail = `reported ${chained.diagnostics.len}: ${firstDiagnostic(ref chained)}`;
+  }
+}
+
+suite function compoundAssignmentDesugars(): void {
+  let ok = checkSource("function main(): int { let n: int = 1; n += 2; n *= 3; return n; }");
+  let test theory: Case = t.asserts("compound assignment checks like the expanded form") {
+    theory.isSuccessful = ok.diagnostics.len == 0;
+    theory.detail = `reported ${ok.diagnostics.len}: ${firstDiagnostic(ref ok)}`;
+  }
+
+  let badType = checkSource("function main(): int { let s: string = \"a\"; s += 1; return 0; }");
+  let test theory: Case = t.asserts("compound assignment still type-checks the operands") {
+    theory.isSuccessful = badType.diagnostics.len > 0;
+    theory.detail = "adding an int to a string local produced no diagnostic";
+  }
+}
+
+suite function arraysAreTyped(): void {
+  // `.len` is usize, so it does not mix with an int32 element without a cast -
+  // the JS reference rejects that too. Keep the widths apart here.
+  let ok = checkSource("function main(): int { const xs: int[] = [1, 2, 3]; let n: usize = xs.len; return xs[0]; }");
+  let test theory: Case = t.asserts("a literal, an index and .len compose") {
+    theory.isSuccessful = ok.diagnostics.len == 0;
+    theory.detail = `reported ${ok.diagnostics.len}: ${firstDiagnostic(ref ok)}`;
+  }
+
+  // Structural interning: two separate `int[]` annotations must be the SAME
+  // TypeId, or passing one to the other is a spurious mismatch.
+  let passed = checkSource("function take(xs: int[]): usize { return xs.len; } function main(): int { const ys: int[] = [1]; return 0; }");
+  let test theory: Case = t.asserts("two int[] annotations are the same type") {
+    theory.isSuccessful = passed.diagnostics.len == 0;
+    theory.detail = `passing int[] to an int[] parameter reported ${passed.diagnostics.len}: ${firstDiagnostic(ref passed)}`;
+  }
+
+  let mixed = checkSource("function main(): int { const xs = [1, true]; return 0; }");
+  let test theory: Case = t.asserts("mixed element types are a diagnostic") {
+    theory.isSuccessful = mixed.diagnostics.len > 0;
+    theory.detail = "an array of an int and a bool produced no diagnostic";
+  }
+
+  let emptyBare = checkSource("function main(): int { const xs = []; return 0; }");
+  let test theory: Case = t.asserts("an unannotated empty literal is a diagnostic") {
+    theory.isSuccessful = emptyBare.diagnostics.len > 0;
+    theory.detail = "an empty literal with nothing to infer from produced no diagnostic";
+  }
+
+  let indexNonArray = checkSource("function main(): int { let n: int = 1; return n[0]; }");
+  let test theory: Case = t.asserts("indexing a non-array is a diagnostic") {
+    theory.isSuccessful = indexNonArray.diagnostics.len > 0;
+    theory.detail = "indexing an int produced no diagnostic";
+  }
+
+  let badField = checkSource("function main(): int { const xs: int[] = [1]; return xs.size; }");
+  let test theory: Case = t.asserts("an unknown array field is a diagnostic") {
+    theory.isSuccessful = badField.diagnostics.len > 0;
+    theory.detail = "xs.size produced no diagnostic";
+  }
+
+  // The desugaring re-reads the target, so it is only sound on a plain name.
+  let compoundIndex = checkSource("function main(): int { let xs: int[] = [1]; xs[0] += 1; return xs[0]; }");
+  let test theory: Case = t.asserts("compound assignment to an index is refused, not miscompiled") {
+    theory.isSuccessful = compoundIndex.diagnostics.len > 0;
+    theory.detail = "xs[0] += 1 was accepted; the desugaring would evaluate the index twice";
+  }
+}
+
+suite function integerWidthsStayApart(): void {
+  // usize and int32 are different types, matching the JS reference. The
+  // diagnostic has to NAME both, or a width mismatch is a guessing game.
+  let mixed = checkSource("function main(): int { const xs: int[] = [1]; return xs[0] + xs.len; }");
+  let test theory: Case = t.asserts("mixing int32 and usize in + is a diagnostic") {
+    theory.isSuccessful = mixed.diagnostics.len > 0;
+    theory.detail = "adding an int32 element to a usize length produced no diagnostic";
+  }
+
+  let badReturn = checkSource("function f(xs: int[]): int { return xs.len; } function main(): int { return 0; }");
+  let test theory: Case = t.asserts("returning usize from an int function is a diagnostic") {
+    theory.isSuccessful = badReturn.diagnostics.len > 0;
+    theory.detail = "returning a usize as int32 produced no diagnostic";
+  }
+}
+
+suite function castsAreChecked(): void {
+  let ok = checkSource("function main(): int { const xs: int[] = [1]; return int(xs.len); }");
+  let test theory: Case = t.asserts("a cast makes widths mix") {
+    theory.isSuccessful = ok.diagnostics.len == 0;
+    theory.detail = `int(xs.len) reported ${ok.diagnostics.len}: ${firstDiagnostic(ref ok)}`;
+  }
+
+  let twoArgs = checkSource("function main(): int { return int(1, 2); }");
+  let test theory: Case = t.asserts("a cast takes exactly one argument") {
+    theory.isSuccessful = twoArgs.diagnostics.len > 0;
+    theory.detail = "int(1, 2) produced no diagnostic";
+  }
+
+  let fromBool = checkSource("function main(): int { return int(true); }");
+  let test theory: Case = t.asserts("casting a bool to an int is a diagnostic") {
+    theory.isSuccessful = fromBool.diagnostics.len > 0;
+    theory.detail = "int(true) produced no diagnostic - only numeric casts are supported";
+  }
+
+  let fromArray = checkSource("function main(): int { const xs: int[] = [1]; return int(xs); }");
+  let test theory: Case = t.asserts("casting an array is a diagnostic") {
+    theory.isSuccessful = fromArray.diagnostics.len > 0;
+    theory.detail = "int(xs) produced no diagnostic";
+  }
+
+  // A cast target is a TYPE name, so it must not be shadowed by the symbol
+  // lookup that handles ordinary calls.
+  let notACall = checkSource("function main(): int { let n: int64 = int64(1); return int(n); }");
+  let test theory: Case = t.asserts("a primitive name is a cast, not an unknown function") {
+    theory.isSuccessful = notACall.diagnostics.len == 0;
+    theory.detail = `reported ${notACall.diagnostics.len}: ${firstDiagnostic(ref notACall)}`;
+  }
+}
+
+suite function switchesAreChecked(): void {
+  let ok = checkSource("function main(): int { switch (1) { case 1: { return 1; } default: { return 0; } } }");
+  let test theory: Case = t.asserts("an integer switch with a default checks clean") {
+    theory.isSuccessful = ok.diagnostics.len == 0;
+    theory.detail = `reported ${ok.diagnostics.len}: ${firstDiagnostic(ref ok)}`;
+  }
+
+  // An integer switch can never be exhaustive, so the default is required.
+  let noDefault = checkSource("function main(): int { switch (1) { case 1: { return 1; } } return 0; }");
+  let test theory: Case = t.asserts("an integer switch without a default is a diagnostic") {
+    theory.isSuccessful = noDefault.diagnostics.len > 0;
+    theory.detail = "a switch with no default produced no diagnostic";
+  }
+
+  let twoDefaults = checkSource("function main(): int { switch (1) { default: { return 1; } default: { return 2; } } }");
+  let test theory: Case = t.asserts("two default arms is a diagnostic") {
+    theory.isSuccessful = twoDefaults.diagnostics.len > 0;
+    theory.detail = "two defaults produced no diagnostic";
+  }
+
+  let overBool = checkSource("function main(): int { switch (true) { case 1: { return 1; } default: { return 0; } } }");
+  let test theory: Case = t.asserts("switching over a bool is refused for now") {
+    theory.isSuccessful = overBool.diagnostics.len > 0;
+    theory.detail = "switching over a bool produced no diagnostic";
+  }
+
+  // An arm body is a block, so it scopes like one.
+  let armScope = checkSource("function main(): int { switch (1) { case 1: { const a = 1; } default: { } } return a; }");
+  let test theory: Case = t.asserts("an arm-local name is not visible after the switch") {
+    theory.isSuccessful = armScope.diagnostics.len > 0;
+    theory.detail = "reading an arm-local after the switch produced no diagnostic";
+  }
+}
+
+suite function structsAreChecked(): void {
+  const decl = "type P { x: int, y: int } ";
+
+  let ok = checkSource(`${decl}function main(): int { const p: P = { x: 1, y: 2 }; return p.x + p.y; }`);
+  let test theory: Case = t.asserts("a literal, a field read and arithmetic compose") {
+    theory.isSuccessful = ok.diagnostics.len == 0;
+    theory.detail = `reported ${ok.diagnostics.len}: ${firstDiagnostic(ref ok)}`;
+  }
+
+  // Order does not matter, because fields are addressed by position.
+  let reordered = checkSource(`${decl}function main(): int { const p: P = { y: 2, x: 1 }; return p.x; }`);
+  let test theory: Case = t.asserts("literal fields may be written in any order") {
+    theory.isSuccessful = reordered.diagnostics.len == 0;
+    theory.detail = `reported ${reordered.diagnostics.len}: ${firstDiagnostic(ref reordered)}`;
+  }
+
+  let missing = checkSource(`${decl}function main(): int { const p: P = { x: 1 }; return p.x; }`);
+  let test theory: Case = t.asserts("a literal missing a field is a diagnostic") {
+    theory.isSuccessful = missing.diagnostics.len > 0;
+    theory.detail = "a literal with only one of two fields produced no diagnostic";
+  }
+
+  let unknownField = checkSource(`${decl}function main(): int { const p: P = { x: 1, y: 2, z: 3 }; return p.x; }`);
+  let test theory: Case = t.asserts("an unknown field in a literal is a diagnostic") {
+    theory.isSuccessful = unknownField.diagnostics.len > 0;
+    theory.detail = "a literal with an extra field produced no diagnostic";
+  }
+
+  let badFieldType = checkSource(`${decl}function main(): int { const p: P = { x: true, y: 2 }; return p.x; }`);
+  let test theory: Case = t.asserts("a field value of the wrong type is a diagnostic") {
+    theory.isSuccessful = badFieldType.diagnostics.len > 0;
+    theory.detail = "assigning a bool to an int field produced no diagnostic";
+  }
+
+  let readMissing = checkSource(`${decl}function main(): int { const p: P = { x: 1, y: 2 }; return p.z; }`);
+  let test theory: Case = t.asserts("reading an unknown field is a diagnostic") {
+    theory.isSuccessful = readMissing.diagnostics.len > 0;
+    theory.detail = "p.z produced no diagnostic";
+  }
+
+  // Which struct a literal is comes from context, so a bare one is ambiguous.
+  let noContext = checkSource(`${decl}function main(): int { const p = { x: 1, y: 2 }; return p.x; }`);
+  let test theory: Case = t.asserts("an unannotated literal is a diagnostic") {
+    theory.isSuccessful = noContext.diagnostics.len > 0;
+    theory.detail = "a literal with nothing to take its type from produced no diagnostic";
+  }
+
+  let assignField = checkSource(`${decl}function main(): int { let p: P = { x: 1, y: 2 }; p.x = 5; return p.x; }`);
+  let test theory: Case = t.asserts("assigning to a field checks clean") {
+    theory.isSuccessful = assignField.diagnostics.len == 0;
+    theory.detail = `reported ${assignField.diagnostics.len}: ${firstDiagnostic(ref assignField)}`;
+  }
+
+  let assignBadType = checkSource(`${decl}function main(): int { let p: P = { x: 1, y: 2 }; p.x = true; return p.x; }`);
+  let test theory: Case = t.asserts("assigning the wrong type to a field is a diagnostic") {
+    theory.isSuccessful = assignBadType.diagnostics.len > 0;
+    theory.detail = "p.x = true produced no diagnostic";
+  }
+}
+
+// ----- traits ----------------------------------------------------------------
+
+suite function traitsAreCheckedAgainstTheirImplementers(): void {
+  const display = "trait Display { function toString(ref self): string; } ";
+
+  let ok = checkSource(`${display}type P implements Display { x: int, function toString(ref self): string { return "p"; } } function main(): int { const p: P = { x: 1 }; printf("%s", Display.toString(ref p)); return 0; }`);
+  let test theory: Case = t.asserts("a type that implements what it claims checks clean") {
+    theory.isSuccessful = ok.diagnostics.len == 0;
+    theory.detail = `reported ${ok.diagnostics.len}: ${firstDiagnostic(ref ok)}`;
+  }
+
+  // Claiming a trait is a promise. Unkept, it would otherwise surface at the
+  // call site as a missing method on a type that says it has one.
+  let missing = checkSource(`${display}type P implements Display { x: int, } function main(): int { return 0; }`);
+  let test theory: Case = t.asserts("a claimed trait with no method is refused, by method name") {
+    theory.isSuccessful = diagnosticsMention(ref missing, "toString");
+    theory.detail = `wanted a diagnostic naming the missing method, got: ${firstDiagnostic(ref missing)}`;
+  }
+
+  // There are no inherent methods, so a method with no trait behind it can
+  // never be called - `Trait.method(ref x)` is the only spelling there is.
+  let inherent = checkSource(`${display}type P implements Display { x: int, function toString(ref self): string { return "p"; } function extra(ref self): int { return 1; } } function main(): int { return 0; }`);
+  let test theory: Case = t.asserts("a method no trait requires is refused") {
+    theory.isSuccessful = diagnosticsMention(ref inherent, "extra");
+    theory.detail = `wanted a diagnostic naming the unrequired method, got: ${firstDiagnostic(ref inherent)}`;
+  }
+
+  let notTrait = checkSource("type Helper { n: int, } type P implements Helper { x: int, } function main(): int { return 0; }");
+  let test theory: Case = t.asserts("implementing something that is not a trait is refused") {
+    theory.isSuccessful = diagnosticsMention(ref notTrait, "is not a trait");
+    theory.detail = `wanted a diagnostic naming the non-trait, got: ${firstDiagnostic(ref notTrait)}`;
+  }
+}
+
+suite function traitCallsResolveThroughTheReceiver(): void {
+  const decls = "trait Display { function toString(ref self): string; } type P implements Display { x: int, function toString(ref self): string { return \"p\"; } } ";
+
+  // Static dispatch has nothing to dispatch ON without a receiver, so the
+  // diagnostic has to say so rather than report an arity mismatch.
+  let noReceiver = checkSource(`${decls}function main(): int { printf("%s", Display.toString()); return 0; }`);
+  let test theory: Case = t.asserts("a trait call with no receiver is refused") {
+    theory.isSuccessful = noReceiver.diagnostics.len > 0;
+    theory.detail = "a receiverless trait call produced no diagnostic";
+  }
+
+  let unknownMethod = checkSource(`${decls}function main(): int { const p: P = { x: 1 }; return Display.width(ref p); }`);
+  let test theory: Case = t.asserts("a method the trait does not declare is refused") {
+    theory.isSuccessful = unknownMethod.diagnostics.len > 0;
+    theory.detail = "calling an undeclared trait method produced no diagnostic";
+  }
+
+  // The receiver's CONCRETE type is what picks the method, so a receiver that
+  // does not implement the trait has nothing to pick.
+  let wrongReceiver = checkSource(`${decls}type Q { n: int, } function main(): int { const q: Q = { n: 1 }; printf("%s", Display.toString(ref q)); return 0; }`);
+  let test theory: Case = t.asserts("a receiver without the method is refused") {
+    theory.isSuccessful = wrongReceiver.diagnostics.len > 0;
+    theory.detail = "a receiver that does not implement the trait produced no diagnostic";
+  }
+
+  // A method body is checked like any other function body. Nothing else does
+  // this - the module walk only reaches top-level names, so a method body would
+  // otherwise go unchecked all the way to codegen.
+  let badBody = checkSource("trait Display { function toString(ref self): string; } type P implements Display { x: int, function toString(ref self): string { return self.x; } } function main(): int { return 0; }");
+  let test theory: Case = t.asserts("a method body is checked against its own return type") {
+    theory.isSuccessful = badBody.diagnostics.len > 0;
+    theory.detail = "returning an int from a string method produced no diagnostic";
+  }
+
+  let unknownSelfField = checkSource("trait Display { function toString(ref self): string; } type P implements Display { x: int, function toString(ref self): string { return self.nope; } } function main(): int { return 0; }");
+  let test theory: Case = t.asserts("self is typed as the enclosing type, so a bad field on it is caught") {
+    theory.isSuccessful = diagnosticsMention(ref unknownSelfField, "nope");
+    theory.detail = `wanted a diagnostic naming the unknown field, got: ${firstDiagnostic(ref unknownSelfField)}`;
+  }
+}
+
+// ----- template literals -----------------------------------------------------
+
+suite function templateLiteralsAreStringsAndCheckTheirParts(): void {
+  let ok = checkSource("function f(n: int, s: string, b: bool): string { return `${s}: ${n} ${b}`; }");
+  let test theory: Case = t.asserts("a string, an integer and a bool can all be interpolated") {
+    theory.isSuccessful = ok.diagnostics.len == 0;
+    theory.detail = `reported ${ok.diagnostics.len}: ${firstDiagnostic(ref ok)}`;
+  }
+
+  // A template literal BUILDS a string, so it is one - which is what lets it be
+  // returned from a `string` function and passed to `%s`.
+  let wrongReturn = checkSource("function f(): int { return `text`; }");
+  let test theory: Case = t.asserts("a template literal is typed as a string") {
+    theory.isSuccessful = wrongReturn.diagnostics.len > 0;
+    theory.detail = "returning a template literal from an int function produced no diagnostic";
+  }
+
+  // Refused in pass D, pointing at the interpolation, so codegen never meets a
+  // part it has no lowering for.
+  let structPart = checkSource("type P { x: int, } function f(p: P): string { return `${p}`; }");
+  let test theory: Case = t.asserts("interpolating a struct is refused by type name") {
+    theory.isSuccessful = diagnosticsMention(ref structPart, "P");
+    theory.detail = `wanted a diagnostic naming the type, got: ${firstDiagnostic(ref structPart)}`;
+  }
+
+  // Floats are deliberately out of this pass rather than missing by accident,
+  // so the refusal has to name the type instead of "unsupported expression".
+  let floatPart = checkSource("function f(x: float64): string { return `${x}`; }");
+  let test theory: Case = t.asserts("interpolating a float is refused by type name") {
+    theory.isSuccessful = diagnosticsMention(ref floatPart, "float64");
+    theory.detail = `wanted a diagnostic naming float64, got: ${firstDiagnostic(ref floatPart)}`;
+  }
+
+  // The expression inside an interpolation is checked like any other, so a
+  // mistake in it is reported once, at its own location - not swallowed and not
+  // doubled up with a "cannot interpolate" for the resulting error type.
+  let badInner = checkSource("function f(): string { return `${nope}`; }");
+  let test theory: Case = t.asserts("an unknown name inside an interpolation is reported once") {
+    theory.isSuccessful = badInner.diagnostics.len == 1 && diagnosticsMention(ref badInner, "nope");
+    theory.detail = `reported ${badInner.diagnostics.len}: ${firstDiagnostic(ref badInner)}`;
+  }
+}
+
+// ----- for ... in ------------------------------------------------------------
+
+suite function forInBindsTheElementType(): void {
+  let ok = checkSource("function f(xs: int[]): int { let t: int = 0; for x in xs { t = t + x; } return t; }");
+  let test theory: Case = t.asserts("the loop variable is usable as the element type") {
+    theory.isSuccessful = ok.diagnostics.len == 0;
+    theory.detail = `reported ${ok.diagnostics.len}: ${firstDiagnostic(ref ok)}`;
+  }
+
+  // The binding is the ELEMENT, not the array - the mistake a "for x in xs
+  // binds xs" implementation would make, and one nothing else would catch.
+  let wrongUse = checkSource("function f(xs: int[]): int { for x in xs { return x.len; } return 0; }");
+  let test theory: Case = t.asserts("the loop variable is the element, not the array") {
+    theory.isSuccessful = wrongUse.diagnostics.len > 0;
+    theory.detail = "reading `.len` off an int element produced no diagnostic";
+  }
+
+  let structElem = checkSource("type E { n: int, } function f(es: E[]): int { let t: int = 0; for e in es { t = t + e.n; } return t; }");
+  let test theory: Case = t.asserts("a struct element's fields are reachable") {
+    theory.isSuccessful = structElem.diagnostics.len == 0;
+    theory.detail = `reported ${structElem.diagnostics.len}: ${firstDiagnostic(ref structElem)}`;
+  }
+
+  // Scoped to the loop, so the name is gone afterwards.
+  let escaped = checkSource("function f(xs: int[]): int { for x in xs { } return x; }");
+  let test theory: Case = t.asserts("the loop variable does not outlive the loop") {
+    theory.isSuccessful = diagnosticsMention(ref escaped, "x");
+    theory.detail = `wanted an unknown-name diagnostic, got: ${firstDiagnostic(ref escaped)}`;
+  }
+
+  let jumps = checkSource("function f(xs: int[]): int { for x in xs { if (x == 1) { break; } continue; } return 0; }");
+  let test theory: Case = t.asserts("break and continue count this as a loop") {
+    theory.isSuccessful = jumps.diagnostics.len == 0;
+    theory.detail = `reported ${jumps.diagnostics.len}: ${firstDiagnostic(ref jumps)}`;
+  }
+
+  let notArray = checkSource("function f(n: int): int { for x in n { } return 0; }");
+  let test theory: Case = t.asserts("walking a non-array is refused by type name") {
+    theory.isSuccessful = diagnosticsMention(ref notArray, "needs an array");
+    theory.detail = `wanted a not-an-array refusal, got: ${firstDiagnostic(ref notArray)}`;
+  }
+
+  // An Iterable impl is a MISSING FEATURE, not a type error, and the two have
+  // to read differently - one is a thing to go build, the other is a mistake.
+  let iterable = checkSource("trait Iterable { function next(ref self): int; } type It implements Iterable { n: int, function next(ref self): int { return self.n; } } function f(it: It): int { for x in it { } return 0; }");
+  let test theory: Case = t.asserts("an Iterable impl is refused as unimplemented, not as a type error") {
+    theory.isSuccessful = diagnosticsMention(ref iterable, "implements Iterable");
+    theory.detail = `wanted an Iterable-specific refusal, got: ${firstDiagnostic(ref iterable)}`;
+  }
+}
+
+// ----- const enforcement -----------------------------------------------------
+
+// A binding carries MUTABILITY as well as a type, because `const a = 1; a = 2;`
+// has to be refused and the type alone cannot say so. Every one of these
+// compiled clean before that existed, which is why they are all here rather
+// than just the const case: what a rule ALLOWS is as easy to get wrong as what
+// it refuses, and a rule that refused parameters would pass a const-only test.
+suite function assignmentRespectsMutability(): void {
+  let constLocal = checkSource("function main(): int { const a: int = 1; a = 2; return a; }");
+  let test theory: Case = t.asserts("assigning to a const local is refused") {
+    theory.isSuccessful = diagnosticsMention(ref constLocal, "cannot assign to const \"a\"");
+    theory.detail = `wanted a const-assignment refusal, got: ${firstDiagnostic(ref constLocal)}`;
+  }
+
+  // The compound forms desugar to a plain assignment in the PARSER, so one
+  // check covers both. The JS reference misses this one - it refuses `a = 2`
+  // and allows `a += 2` on the same binding.
+  let compound = checkSource("function main(): int { const a: int = 1; a += 2; return a; }");
+  let test theory: Case = t.asserts("compound assignment to a const is refused too") {
+    theory.isSuccessful = diagnosticsMention(ref compound, "cannot assign to const \"a\"");
+    theory.detail = `wanted a const-assignment refusal, got: ${firstDiagnostic(ref compound)}`;
+  }
+
+  let letLocal = checkSource("function main(): int { let a: int = 1; a = 2; a += 3; return a; }");
+  let test theory: Case = t.asserts("a let local stays assignable, in both forms") {
+    theory.isSuccessful = letLocal.diagnostics.len == 0;
+    theory.detail = `reported ${letLocal.diagnostics.len}: ${firstDiagnostic(ref letLocal)}`;
+  }
+
+  // A parameter is a local COPY, so writing to it is ordinary rather than a
+  // mistake, and a `ref` parameter is mutable because that is the whole point
+  // of the borrow. Refusing either would break real code.
+  let param = checkSource("function f(a: int): int { a = 2; return a; }");
+  let test theory: Case = t.asserts("a parameter is assignable") {
+    theory.isSuccessful = param.diagnostics.len == 0;
+    theory.detail = `reported ${param.diagnostics.len}: ${firstDiagnostic(ref param)}`;
+  }
+
+  let refParam = checkSource("function f(ref a: int): void { a = 2; }");
+  let test theory: Case = t.asserts("a ref parameter is assignable - that is what a borrow is for") {
+    theory.isSuccessful = refParam.diagnostics.len == 0;
+    theory.detail = `reported ${refParam.diagnostics.len}: ${firstDiagnostic(ref refParam)}`;
+  }
+
+  let counter = checkSource("function main(): int { let t: int = 0; for (let i = 0; i < 2; i = i + 1) { t = t + 1; } return t; }");
+  let test theory: Case = t.asserts("a counted loop's counter is assignable - it is stepped") {
+    theory.isSuccessful = counter.diagnostics.len == 0;
+    theory.detail = `reported ${counter.diagnostics.len}: ${firstDiagnostic(ref counter)}`;
+  }
+
+  // The loop variable is a COPY of the element, so assigning to it writes to
+  // something discarded at the end of the iteration. Refusing says that;
+  // allowing it silently does nothing.
+  let loopVar = checkSource("function f(xs: int[]): int { for v in xs { v = 2; } return 0; }");
+  let test theory: Case = t.asserts("a for-in loop variable is not assignable") {
+    theory.isSuccessful = diagnosticsMention(ref loopVar, "cannot assign to const \"v\"");
+    theory.detail = `wanted a const-assignment refusal, got: ${firstDiagnostic(ref loopVar)}`;
+  }
+
+  let patternBinding = checkSource("variant V { A { n: int } } function f(v: V): int { switch (v) { case V.A { n: n }: { n = 2; return n; } } }");
+  let test theory: Case = t.asserts("a pattern binding is not assignable") {
+    theory.isSuccessful = diagnosticsMention(ref patternBinding, "cannot assign to const \"n\"");
+    theory.detail = `wanted a const-assignment refusal, got: ${firstDiagnostic(ref patternBinding)}`;
+  }
+
+  // Constness is about the BINDING, not the value behind it. Writing through a
+  // const binding is allowed, which is what the reference does, and changing
+  // that would be a different feature (deep immutability) rather than this one.
+  let fieldWrite = checkSource("type P { x: int, } function main(): int { const p: P = { x: 1 }; p.x = 2; return p.x; }");
+  let test theory: Case = t.asserts("a field of a const binding is still assignable") {
+    theory.isSuccessful = fieldWrite.diagnostics.len == 0;
+    theory.detail = `reported ${fieldWrite.diagnostics.len}: ${firstDiagnostic(ref fieldWrite)}`;
+  }
+
+  let indexWrite = checkSource("function main(): int { const xs: int[] = [1, 2]; xs[0] = 9; return xs[0]; }");
+  let test theory: Case = t.asserts("an element of a const array is still assignable") {
+    theory.isSuccessful = indexWrite.diagnostics.len == 0;
+    theory.detail = `reported ${indexWrite.diagnostics.len}: ${firstDiagnostic(ref indexWrite)}`;
+  }
+}
+
+// ----- kinds -----------------------------------------------------------------
+
+suite function kindPrefixesResolveAgainstTheRegistry(): void {
+  const decls = "kind tagged { appliesTo function; signature () => void; enumerable as \"tagged\"; } ";
+
+  let ok = checkSource(`${decls}tagged run(): void { } function main(): int { run(); return 0; }`);
+  let test theory: Case = t.asserts("a function carrying a declared kind checks clean") {
+    theory.isSuccessful = ok.diagnostics.len == 0;
+    theory.detail = `reported ${ok.diagnostics.len}: ${firstDiagnostic(ref ok)}`;
+  }
+
+  // A prefix is not decoration. A typo in one would otherwise produce an
+  // ordinary function and no complaint, which is the same message the JS
+  // reference gives for the same reason.
+  let unknown = checkSource("nope run(): void { } function main(): int { return 0; }");
+  let test theory: Case = t.asserts("an undeclared kind on a function is refused, by both names") {
+    theory.isSuccessful = diagnosticsMention(ref unknown, "unknown kind \"nope\" on function \"run\"");
+    theory.detail = `wanted an unknown-kind refusal, got: ${firstDiagnostic(ref unknown)}`;
+  }
+
+  // Kinds are ambient - reached BY NAME from a registry rather than through an
+  // import - so declaration order does not matter, the same way a function
+  // declared later is callable.
+  let afterUse = checkSource(`tagged run(): void { } ${decls}function main(): int { return 0; }`);
+  let test theory: Case = t.asserts("a kind declared after its use still resolves") {
+    theory.isSuccessful = afterUse.diagnostics.len == 0;
+    theory.detail = `reported ${afterUse.diagnostics.len}: ${firstDiagnostic(ref afterUse)}`;
+  }
+
+  // A kind's NAME binds like any other module-level declaration, which is what
+  // makes `import { disposable } from "std/core/kinds.yoop"` resolve.
+  let importable = checkTwoModules(
+    "module k;\nexport kind tainted { appliesTo binding; }",
+    "import { tainted } from \"./lib/k.yoop\";\nfunction main(): int { return 0; }"
+  );
+  let test theory: Case = t.asserts("an exported kind can be imported by name") {
+    theory.isSuccessful = importable.diagnostics.len == 0;
+    theory.detail = `reported ${importable.diagnostics.len}: ${firstDiagnostic(ref importable)}`;
+  }
+}
+
+// ----- intrinsics ------------------------------------------------------------
+
+suite function intrinsicExternsAreTheirOwnThing(): void {
+  const block = "extern \"intrinsic\" from \"compiler\" { function stringAsBytes(s: string): uint8[]; function arraySlice<T>(xs: T[], start: usize, end: usize): T[]; } ";
+
+  let ok = checkSource(`${block}function main(): int { const b: uint8[] = stringAsBytes("hi"); return int(b.len); }`);
+  let test theory: Case = t.asserts("an intrinsic call checks against its declared signature") {
+    theory.isSuccessful = ok.diagnostics.len == 0;
+    theory.detail = `reported ${ok.diagnostics.len}: ${firstDiagnostic(ref ok)}`;
+  }
+
+  // The name IS the lowering, so a fabricated one would typecheck and then fail
+  // in codegen with nothing useful to say. The reference refuses it too.
+  let fake = checkSource("extern \"intrinsic\" from \"compiler\" { function teleport(n: usize): usize; } function main(): int { return 0; }");
+  let test theory: Case = t.asserts("an intrinsic codegen has no lowering for is refused by name") {
+    theory.isSuccessful = diagnosticsMention(ref fake, "unknown intrinsic \"teleport\"");
+    theory.detail = `wanted an unknown-intrinsic refusal, got: ${firstDiagnostic(ref fake)}`;
+  }
+
+  let badArg = checkSource(`${block}function main(): int { const b: uint8[] = stringAsBytes(7); return 0; }`);
+  let test theory: Case = t.asserts("an intrinsic's arguments are checked like any other call's") {
+    theory.isSuccessful = badArg.diagnostics.len > 0;
+    theory.detail = "passing an int where a string was declared produced no diagnostic";
+  }
+
+  // A generic intrinsic goes through the SAME inference every generic function
+  // uses - `T` comes from the argument, and the result is the substituted type.
+  let generic = checkSource(`${block}function main(): int { const xs: int32[] = [1, 2, 3]; const part: int32[] = arraySlice(xs, 0, 2); return int(part.len); }`);
+  let test theory: Case = t.asserts("a generic intrinsic infers its type argument") {
+    theory.isSuccessful = generic.diagnostics.len == 0;
+    theory.detail = `reported ${generic.diagnostics.len}: ${firstDiagnostic(ref generic)}`;
+  }
+
+  let wrongElem = checkSource(`${block}function main(): int { const xs: int32[] = [1, 2, 3]; const part: uint8[] = arraySlice(xs, 0, 2); return 0; }`);
+  let test theory: Case = t.asserts("and the inferred element type is enforced") {
+    theory.isSuccessful = wrongElem.diagnostics.len > 0;
+    theory.detail = "assigning an int32[] slice to a uint8[] produced no diagnostic";
+  }
+
+  // An intrinsic is implicitly exported - the block is the declaration, so
+  // there is nowhere to write `export` - and every std module reaches them
+  // through `import * as intr`. A C extern is NOT.
+  let intrinsicImport = checkTwoModules(
+    "extern \"intrinsic\" from \"compiler\" { function stringAsBytes(s: string): uint8[]; }",
+    "import * as lib from \"./lib/k.yoop\";\nfunction main(): int { const b: uint8[] = lib.stringAsBytes(\"hi\"); return 0; }"
+  );
+  let test theory: Case = t.asserts("an intrinsic is visible through a namespace without `export`") {
+    theory.isSuccessful = intrinsicImport.diagnostics.len == 0;
+    theory.detail = `reported ${intrinsicImport.diagnostics.len}: ${firstDiagnostic(ref intrinsicImport)}`;
+  }
+
+  let cImport = checkTwoModules(
+    "extern \"C\" from \"stdio.h\" { function puts(s: string): int; }",
+    "import * as lib from \"./lib/k.yoop\";\nfunction main(): int { return lib.puts(\"hi\"); }"
+  );
+  let test theory: Case = t.asserts("a C extern is not, which is the difference") {
+    theory.isSuccessful = cImport.diagnostics.len > 0;
+    theory.detail = "an unexported C extern was reachable through a namespace";
+  }
+
+  let badAbi = checkSource("extern \"rust\" from \"lib\" { function f(): int; } function main(): int { return 0; }");
+  let test theory: Case = t.asserts("an ABI that is neither C nor intrinsic is refused") {
+    theory.isSuccessful = badAbi.diagnostics.len > 0;
+    theory.detail = "an unknown extern ABI produced no diagnostic";
+  }
+}
+
+// ----- function types --------------------------------------------------------
+
+suite function functionValuesAreTheirSignatures(): void {
+  const decls = "type Ops { hash: (k: string) => uint64, } function myHash(k: string): uint64 { return 1; } ";
+
+  // The point of the whole feature: a declared function and an annotation
+  // intern to the SAME Type.Func, so a named function drops into a
+  // function-typed field with nothing to convert.
+  let ok = checkSource(`${decls}function main(): int { const o: Ops = { hash: myHash }; return int(o.hash("x")); }`);
+  let test theory: Case = t.asserts("a named function fits a matching function-typed field") {
+    theory.isSuccessful = ok.diagnostics.len == 0;
+    theory.detail = `reported ${ok.diagnostics.len}: ${firstDiagnostic(ref ok)}`;
+  }
+
+  // Two functions with identical signatures are interchangeable, and two with
+  // different ones are not. A declared function's signature lives in the shell
+  // pass A registered, so these compare STRUCTURALLY rather than by id.
+  let wrongSig = checkSource("type Ops { hash: (k: string) => uint64, } function bad(n: int): uint64 { return 1; } function main(): int { const o: Ops = { hash: bad }; return 0; }");
+  let test theory: Case = t.asserts("a function with the wrong signature is refused") {
+    theory.isSuccessful = wrongSig.diagnostics.len > 0;
+    theory.detail = "assigning a mismatched function to a field produced no diagnostic";
+  }
+
+  let wrongRet = checkSource("type Ops { hash: (k: string) => uint64, } function bad(k: string): bool { return true; } function main(): int { const o: Ops = { hash: bad }; return 0; }");
+  let test theory: Case = t.asserts("the return type is part of the match") {
+    theory.isSuccessful = wrongRet.diagnostics.len > 0;
+    theory.detail = "a differing return type produced no diagnostic";
+  }
+
+  // Parameter NAMES are not: a function type is positional.
+  let renamed = checkSource("type Ops { hash: (key: string) => uint64, } function myHash(k: string): uint64 { return 1; } function main(): int { const o: Ops = { hash: myHash }; return 0; }");
+  let test theory: Case = t.asserts("parameter names do not participate in the match") {
+    theory.isSuccessful = renamed.diagnostics.len == 0;
+    theory.detail = `reported ${renamed.diagnostics.len}: ${firstDiagnostic(ref renamed)}`;
+  }
+
+  // An indirect call is checked against the FIELD's signature, like any call.
+  let badArg = checkSource(`${decls}function main(): int { const o: Ops = { hash: myHash }; return int(o.hash(7)); }`);
+  let test theory: Case = t.asserts("an indirect call's arguments are checked") {
+    theory.isSuccessful = badArg.diagnostics.len > 0;
+    theory.detail = "passing an int where a string was declared produced no diagnostic";
+  }
+
+  let arity = checkSource(`${decls}function main(): int { const o: Ops = { hash: myHash }; return int(o.hash("a", "b")); }`);
+  let test theory: Case = t.asserts("and so is its arity") {
+    theory.isSuccessful = arity.diagnostics.len > 0;
+    theory.detail = "calling a one-parameter field with two arguments produced no diagnostic";
+  }
+
+  // A field that is not function-typed is not callable, and the diagnostic must
+  // not claim it is a missing namespace.
+  let notCallable = checkSource("type P { n: int, } function main(): int { const p: P = { n: 1 }; return p.n(); }");
+  let test theory: Case = t.asserts("calling a non-function field is refused") {
+    theory.isSuccessful = notCallable.diagnostics.len > 0;
+    theory.detail = "calling an int field produced no diagnostic";
+  }
+}
+
+// ----- raw pointers, null, vtables, slices -----------------------------------
+
+suite function rawPointersAreGatedAndTyped(): void {
+  // The gate is the whole safety story: `unsafe_ptr` is unreachable without
+  // `import.unsafe;`, so a file using raw pointers says so at the top.
+  let ungated = checkSource("function f(p: unsafe_ptr): int { return 0; }");
+  let test theory: Case = t.asserts("unsafe_ptr without `import.unsafe;` is refused") {
+    theory.isSuccessful = diagnosticsMention(ref ungated, "import.unsafe");
+    theory.detail = `wanted the gate diagnostic, got: ${firstDiagnostic(ref ungated)}`;
+  }
+
+  let gated = checkSource("import.unsafe;\nfunction f(p: unsafe_ptr<uint8>): unsafe_ptr { return p; }");
+  let test theory: Case = t.asserts("a TYPED pointer widens to the opaque one") {
+    theory.isSuccessful = gated.diagnostics.len == 0;
+    theory.detail = `reported ${gated.diagnostics.len}: ${firstDiagnostic(ref gated)}`;
+  }
+
+  // ...and not back. `unsafe_ptr` is "some pointer"; narrowing it would be
+  // inventing a promise about what it points at.
+  let narrowing = checkSource("import.unsafe;\nfunction f(p: unsafe_ptr): unsafe_ptr<uint8> { return p; }");
+  let test theory: Case = t.asserts("the opaque pointer does not narrow") {
+    theory.isSuccessful = narrowing.diagnostics.len > 0;
+    theory.detail = "narrowing an opaque pointer produced no diagnostic";
+  }
+
+  let mismatched = checkSource("import.unsafe;\nfunction f(p: unsafe_ptr<uint8>): unsafe_ptr<int32> { return p; }");
+  let test theory: Case = t.asserts("pointee types must match") {
+    theory.isSuccessful = mismatched.diagnostics.len > 0;
+    theory.detail = "converting between pointee types produced no diagnostic";
+  }
+
+  let toPtr = checkSource("import.unsafe;\nfunction f(): unsafe_ptr<uint8> { return null; }");
+  let test theory: Case = t.asserts("null fits any raw pointer") {
+    theory.isSuccessful = toPtr.diagnostics.len == 0;
+    theory.detail = `reported ${toPtr.diagnostics.len}: ${firstDiagnostic(ref toPtr)}`;
+  }
+
+  // And nothing else - null is not a general "empty" value.
+  let toInt = checkSource("function f(): int { return null; }");
+  let test theory: Case = t.asserts("null does not fit an integer") {
+    theory.isSuccessful = toInt.diagnostics.len > 0;
+    theory.detail = "returning null from an int function produced no diagnostic";
+  }
+
+  let toString = checkSource("function f(): string { return null; }");
+  let test theory: Case = t.asserts("nor a string") {
+    theory.isSuccessful = toString.diagnostics.len > 0;
+    theory.detail = "returning null from a string function produced no diagnostic";
+  }
+}
+
+suite function slicesAndVtablesAreChecked(): void {
+  let ok = checkSource("function f(xs: int32[]): int32 { const s: int32[] = xs[1..3]; return s[0]; }");
+  let test theory: Case = t.asserts("a slice of an array is the same array type") {
+    theory.isSuccessful = ok.diagnostics.len == 0;
+    theory.detail = `reported ${ok.diagnostics.len}: ${firstDiagnostic(ref ok)}`;
+  }
+
+  let wrongElem = checkSource("function f(xs: int32[]): int { const s: uint8[] = xs[1..3]; return 0; }");
+  let test theory: Case = t.asserts("and keeps its element type") {
+    theory.isSuccessful = wrongElem.diagnostics.len > 0;
+    theory.detail = "assigning an int32 slice to a uint8[] produced no diagnostic";
+  }
+
+  let notArray = checkSource("function f(n: int): int { const s: int[] = n[1..2]; return 0; }");
+  let test theory: Case = t.asserts("slicing a non-array is refused by type name") {
+    theory.isSuccessful = diagnosticsMention(ref notArray, "only an array can be sliced");
+    theory.detail = `wanted a not-an-array refusal, got: ${firstDiagnostic(ref notArray)}`;
+  }
+
+  const readable = "trait Readable { function read(ref self): int; } ";
+  let vt = checkSource(`${readable}vtable Reader for Readable { read: () => int, } function main(): int { return 0; }`);
+  let test theory: Case = t.asserts("a vtable over a real trait checks clean") {
+    theory.isSuccessful = vt.diagnostics.len == 0;
+    theory.detail = `reported ${vt.diagnostics.len}: ${firstDiagnostic(ref vt)}`;
+  }
+
+  // Erasing something that is not a trait is the same class of mistake as
+  // `implements` on a non-trait, and reads the same way.
+  let notTrait = checkSource("type Helper { n: int, } vtable Reader for Helper { read: () => int, } function main(): int { return 0; }");
+  let test theory: Case = t.asserts("a vtable over a non-trait is refused") {
+    theory.isSuccessful = diagnosticsMention(ref notTrait, "is not a trait");
+    theory.detail = `wanted a non-trait refusal, got: ${firstDiagnostic(ref notTrait)}`;
+  }
+
+  // A vtable's NAME is a type, because a vtable is a struct of function
+  // pointers - that is what lets it be a parameter.
+  let asType = checkSource(`${readable}vtable Reader for Readable { read: () => int, } function take(r: Reader): int { return 0; } function main(): int { return 0; }`);
+  let test theory: Case = t.asserts("a vtable name resolves as a type") {
+    theory.isSuccessful = asType.diagnostics.len == 0;
+    theory.detail = `reported ${asType.diagnostics.len}: ${firstDiagnostic(ref asType)}`;
+  }
+}
+
+// ----- address-of and dereference --------------------------------------------
+
+suite function addressOfAndDerefAreGatedAndTyped(): void {
+  // Both are gated: handing out a raw address without saying the file is unsafe
+  // would let the `unsafe_ptr` gate be bypassed by one character.
+  let ungatedAddr = checkSource("function f(): int { let n: int32 = 1; const p: int = &n; return 0; }");
+  let test theory: Case = t.asserts("`&x` without `import.unsafe;` is refused") {
+    theory.isSuccessful = diagnosticsMention(ref ungatedAddr, "import.unsafe");
+    theory.detail = `wanted the gate diagnostic, got: ${firstDiagnostic(ref ungatedAddr)}`;
+  }
+
+  let ok = checkSource("import.unsafe;\nfunction f(): int32 { let n: int32 = 1; const p: unsafe_ptr<int32> = &n; return *p; }");
+  let test theory: Case = t.asserts("`&x` gives a pointer to x's type, and `*p` gives it back") {
+    theory.isSuccessful = ok.diagnostics.len == 0;
+    theory.detail = `reported ${ok.diagnostics.len}: ${firstDiagnostic(ref ok)}`;
+  }
+
+  let wrongPointee = checkSource("import.unsafe;\nfunction f(): int { let n: int32 = 1; const p: unsafe_ptr<uint8> = &n; return 0; }");
+  let test theory: Case = t.asserts("the pointee is the target's type, not any type") {
+    theory.isSuccessful = wrongPointee.diagnostics.len > 0;
+    theory.detail = "&int32 accepted as unsafe_ptr<uint8>";
+  }
+
+  // An address needs storage, and a temporary has none.
+  let temporary = checkSource("import.unsafe;\nfunction f(): int { const p: unsafe_ptr<int32> = &(1 + 2); return 0; }");
+  let test theory: Case = t.asserts("taking the address of a temporary is refused") {
+    theory.isSuccessful = temporary.diagnostics.len > 0;
+    theory.detail = "&(1 + 2) produced no diagnostic";
+  }
+
+  // The practical cost of widening: an opaque pointer has no pointee, so there
+  // is nothing for a read through it to produce.
+  let derefOpaque = checkSource("import.unsafe;\nfunction f(p: unsafe_ptr): int { return *p; }");
+  let test theory: Case = t.asserts("an opaque pointer cannot be dereferenced") {
+    theory.isSuccessful = diagnosticsMention(ref derefOpaque, "no pointee");
+    theory.detail = `wanted a no-pointee refusal, got: ${firstDiagnostic(ref derefOpaque)}`;
+  }
+
+  let derefInt = checkSource("import.unsafe;\nfunction f(n: int32): int32 { return *n; }");
+  let test theory: Case = t.asserts("dereferencing a non-pointer is refused by type name") {
+    theory.isSuccessful = diagnosticsMention(ref derefInt, "only a raw pointer");
+    theory.detail = `wanted a not-a-pointer refusal, got: ${firstDiagnostic(ref derefInt)}`;
+  }
+
+  // A store through a pointer targets the POINTEE, so the value is checked
+  // against that rather than against the pointer.
+  let storeThrough = checkSource("import.unsafe;\nfunction f(): void { let n: int32 = 1; const p: unsafe_ptr<int32> = &n; *p = 9; }");
+  let test theory: Case = t.asserts("a store through a pointer checks against the pointee") {
+    theory.isSuccessful = storeThrough.diagnostics.len == 0;
+    theory.detail = `reported ${storeThrough.diagnostics.len}: ${firstDiagnostic(ref storeThrough)}`;
+  }
+
+  let storeWrongType = checkSource("import.unsafe;\nfunction f(): void { let n: int32 = 1; const p: unsafe_ptr<int32> = &n; *p = \"x\"; }");
+  let test theory: Case = t.asserts("and refuses a value of the wrong type") {
+    theory.isSuccessful = storeWrongType.diagnostics.len > 0;
+    theory.detail = "storing a string through an int32 pointer produced no diagnostic";
+  }
+}
+
+// ----- what real std code found ----------------------------------------------
+
+// Every one of these was invisible until std hit it, and every one produced a
+// message far from its cause. They are grouped because that is what they have
+// in common: each is a place where a piece of context failed to travel.
+suite function genericContextTravels(): void {
+  // `ref self` inside a generic type is `Box<T>`, not bare `Box` - which
+  // otherwise reports "Box is generic, so it needs type arguments" pointing at
+  // the method, with nothing about `self` in it.
+  let selfInGeneric = checkSource("trait Sized { function size(ref self): usize; } type Box<T> implements Sized { value: T, function size(ref self): usize { return 1; } } function main(): int { return 0; }");
+  let test theory: Case = t.asserts("`ref self` in a generic type carries the type parameters") {
+    theory.isSuccessful = selfInGeneric.diagnostics.len == 0;
+    theory.detail = `reported ${selfInGeneric.diagnostics.len}: ${firstDiagnostic(ref selfInGeneric)}`;
+  }
+
+  // Trait satisfaction is checked in its own sweep because the GENERIC sweep
+  // runs before traits are filled. Declaring the trait AFTER the generic type
+  // is what exposes it.
+  let traitAfter = checkSource("type Box<T> implements Sized { value: T, function size(ref self): usize { return 1; } } trait Sized { function size(ref self): usize; } function main(): int { return 0; }");
+  let test theory: Case = t.asserts("a trait declared after a generic implementer still counts") {
+    theory.isSuccessful = traitAfter.diagnostics.len == 0;
+    theory.detail = `reported ${traitAfter.diagnostics.len}: ${firstDiagnostic(ref traitAfter)}`;
+  }
+
+  // ...and the check still FIRES, rather than being skipped into silence.
+  let stillChecked = checkSource("trait Sized { function size(ref self): usize; } type Box<T> implements Sized { value: T, } function main(): int { return 0; }");
+  let test theory: Case = t.asserts("and an unimplemented method is still refused") {
+    theory.isSuccessful = diagnosticsMention(ref stillChecked, "size");
+    theory.detail = `wanted a missing-method refusal, got: ${firstDiagnostic(ref stillChecked)}`;
+  }
+
+  // A generic function's BODY needs the parameters in scope, not just its
+  // signature: `let xs: T[] = ...` is an annotation inside the body.
+  let bodyParams = checkSource("function pair<T>(a: T, b: T): usize { const both: T[] = [a, b]; return both.len; } function main(): int { return 0; }");
+  let test theory: Case = t.asserts("a generic body may annotate with its own type parameters") {
+    theory.isSuccessful = bodyParams.diagnostics.len == 0;
+    theory.detail = `reported ${bodyParams.diagnostics.len}: ${firstDiagnostic(ref bodyParams)}`;
+  }
+}
+
+suite function literalsPinToTheirNeighbours(): void {
+  // A cast CONVERTS what it is given, so the target must not reach in and pin
+  // the operand - that made `uint8(48 + big)` refuse to add an int to a uint64.
+  let castOperand = checkSource("function f(rest: uint64): uint8 { return uint8(48 + (rest % 10)); }");
+  let test theory: Case = t.asserts("a cast does not pin its operand") {
+    theory.isSuccessful = castOperand.diagnostics.len == 0;
+    theory.detail = `reported ${castOperand.diagnostics.len}: ${firstDiagnostic(ref castOperand)}`;
+  }
+
+  // A LEADING literal has already defaulted to int32 by the time the right side
+  // is known, so it gets re-pinned. The trailing case worked all along.
+  let leading = checkSource("function f(n: uint64): uint64 { return 2 * n; }");
+  let test theory: Case = t.asserts("a leading literal takes the other operand's type") {
+    theory.isSuccessful = leading.diagnostics.len == 0;
+    theory.detail = `reported ${leading.diagnostics.len}: ${firstDiagnostic(ref leading)}`;
+  }
+
+  let trailing = checkSource("function f(n: uint64): uint64 { return n * 2; }");
+  let test theory: Case = t.asserts("as does a trailing one") {
+    theory.isSuccessful = trailing.diagnostics.len == 0;
+    theory.detail = `reported ${trailing.diagnostics.len}: ${firstDiagnostic(ref trailing)}`;
+  }
+
+  // Re-pinning must not paper over a REAL mismatch between two typed operands.
+  let realMismatch = checkSource("function f(a: uint8, b: uint64): uint64 { return a + b; }");
+  let test theory: Case = t.asserts("two typed operands of different widths are still refused") {
+    theory.isSuccessful = realMismatch.diagnostics.len > 0;
+    theory.detail = "uint8 + uint64 produced no diagnostic";
+  }
+}
+
+suite function stringLenIsByteLength(): void {
+  let ok = checkSource("function f(s: string): usize { return s.len; }");
+  let test theory: Case = t.asserts("a string has `.len`") {
+    theory.isSuccessful = ok.diagnostics.len == 0;
+    theory.detail = `reported ${ok.diagnostics.len}: ${firstDiagnostic(ref ok)}`;
+  }
+
+  let other = checkSource("function f(s: string): usize { return s.size; }");
+  let test theory: Case = t.asserts("and nothing else") {
+    theory.isSuccessful = other.diagnostics.len > 0;
+    theory.detail = "`s.size` produced no diagnostic";
+  }
+}

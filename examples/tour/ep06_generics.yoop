@@ -18,7 +18,7 @@ function identity<T>(x: T): T {
 
 // Bounded: the body may only use what the bound guarantees.
 function describe<T implements Display>(ref x: T): string {
-    return `[${Display.to_string(ref x)}]`;
+    return `[${Display.toString(ref x)}]`;
 }
 
 // Generic struct. `Box<int32>` and `Box<Tag>` are separate concrete types.

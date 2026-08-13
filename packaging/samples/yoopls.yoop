@@ -65,7 +65,7 @@ type Row implements Line {
     mtime: int64,
 
     function render(ref self): string {
-        return str.string_concat_all([
+        return str.stringConcatAll([
             typeChar(self.kind), permString(self.perm), " ",
             str.padStart(`${self.links}`, 3, " "), " ",
             str.padEnd(self.owner, 9, " "),
@@ -153,9 +153,9 @@ function permString(perm: int32): string {
     while (i < 9) {
         // common, expected, bitwise operations are supported
         if ((perm & (1 << (8 - i))) != 0) {
-            out = str.string_concat(out, letters[usize(i % 3)]);
+            out = str.stringConcat(out, letters[usize(i % 3)]);
         } else {
-            out = str.string_concat(out, "-");
+            out = str.stringConcat(out, "-");
         }
         i = i + 1;
     }
@@ -199,14 +199,14 @@ function sortByTime(ref rows: Vec<Row>): void {
 // the obligation here is that `rows` is allocated and the reference is returned
 // and the dispose method is not called (we don't want to here anyhow).
 function scan(path: string): Listing propagates<disposable> {
-    let rows: Vec<Row> = vec.vec_new(32);
+    let rows: Vec<Row> = vec.vecNew(32);
     let bytes: int64 = 0;
     disposable dir = fs.openDir(path); // `dir`'s disposable obligation is marked here (no let/const)
                                        // this means that the compiler will emit the `Dispose.dispose(ref dir)` at
                                        // every scope-exit condition, automatically. Like `using` or `defer` in
                                        // other languages.
     for name in dir { // for-loop because dir is an iterable type: see DirIter in std/fs.yoop
-        const meta: FileMeta = fs.statPath(str.string_concat_all([path, "/", name]));
+        const meta: FileMeta = fs.statPath(str.stringConcatAll([path, "/", name]));
         if (meta.ok) {
             const row: Row = {
                 name: name,
@@ -217,7 +217,7 @@ function scan(path: string): Listing propagates<disposable> {
                 group: meta.group,
                 mtime: meta.mtime,
             };
-            vec.vec_push(ref rows, row);
+            vec.vecPush(ref rows, row);
             bytes = bytes + meta.size;
         }
     }
@@ -242,7 +242,7 @@ function main(): int32 {
     // we don't want to copy these large values, we just
     // want to pass in a pointer to where they live.
     printf(`${Line.render(ref entries)}\n`);
-    for row in vec.vec_as_array(ref entries.rows) {
+    for row in vec.vecAsArray(ref entries.rows) {
         printf(`${Line.render(ref row)}\n`);
     }
     return 0;

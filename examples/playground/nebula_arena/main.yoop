@@ -200,7 +200,7 @@ function run_scene(): void {
 
     // CPU staging buffer for sprite verts (sized for worst case).
     let max_verts: usize = usize(state.PARTICLE_POOL + state.ENEMY_POOL + state.BULLET_POOL + state.POWERUP_POOL + 1);
-    let cpu_buf: float32[] = intr.heap_alloc(max_verts * VERT_FLOATS);
+    let cpu_buf: float32[] = intr.heapAlloc(max_verts * VERT_FLOATS);
 
     let disposable mut_state: state.GameState = state.init_state(int32(sdl.ticks()));
     let disposable sfx: audio.AudioEngine = audio.init_audio();
@@ -275,7 +275,7 @@ function run_scene(): void {
     gl.delete_buffers(1, &neb_vbo);
     gl.delete_buffers(1, &sp_vbo);
 
-    intr.heap_free(cpu_buf);
+    intr.heapFree(cpu_buf);
 }
 
 // ── Entry point ──────────────────────────────────────────────────────

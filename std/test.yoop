@@ -26,7 +26,7 @@
 // directory) or `yoopiler strange_add.test.yoop` (just that file).
 
 import { ephemeral } from "./core/kinds.yoop";
-import { string_eq, string_index_of } from "./core/strings.yoop";
+import { stringEq, stringIndexOf } from "./core/strings.yoop";
 import { arenaScope } from "./core/alloc.yoop";
 import { argCount, argAt } from "./env.yoop";
 
@@ -43,6 +43,22 @@ let FAILED: int32 = 0;
 // Bytes of arena handed to each suite. Every allocation a suite makes through
 // the ambient allocator comes from here and is reclaimed in bulk when the
 // suite ends, so a leaking test cannot poison the next one.
+//
+// A suite that asks for more than this DIES, on purpose and loudly: the
+// runtime prints what it wanted and what the arena had left, then exits. The
+// failing suite is named on the line immediately above, because the abort
+// flushes stdout first and every suite prints its `# <name>` TAP line before
+// the arena scope opens.
+//
+// That flush is the whole fix. Before it, an over-budget suite was a null
+// deref inside vecPush, the process died with `signal: 'SIGSEGV'` and
+// `output: [null, null, null]`, and every line the run had already printed
+// went with it - so the last thing visible was a PASSING case from an earlier
+// suite. See plans/yooperdoom-takeaways.md 1.2.
+//
+// If a test genuinely needs more than a megabyte, the honest answer is
+// usually that it should not be reading that much (yooperdoom hit this trying
+// to load a 28 MB IWAD in a fixture). Raise this only after asking that.
 const SUITE_ARENA_BYTES: usize = 1048576;
 
 // ----- a single case ----------------------------------------------------
@@ -69,7 +85,7 @@ export type Case implements HandlesCase {
         } else {
             FAILED = FAILED + 1;
             printf("not ok %d - %s\n", CASE_INDEX, self.name);
-            if (!string_eq(self.detail, "")) {
+            if (!stringEq(self.detail, "")) {
                 printf("    %s\n", self.detail);
             }
         }
@@ -125,9 +141,9 @@ function selected(name: string): bool {
     return false;
 }
 
-// Substring test. `string_index_of` returns the haystack length on a miss.
+// Substring test. `stringIndexOf` returns the haystack length on a miss.
 function contains(haystack: string, needle: string): bool {
-    const found = string_index_of(haystack, needle);
+    const found = stringIndexOf(haystack, needle);
     return found < haystack.len;
 }
 

@@ -1,0 +1,26 @@
+// Regression: a field whose type ends in `>>` followed by a trailing comma.
+// The nested application consumes the `>>` and leaves a pending `>` for the
+// OUTER list, so the type-arg loop has to check for the close before it checks
+// for a comma - otherwise the field separator reads as a trailing comma inside
+// the type argument list.
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { Map }, * as map from "std/collections/map.yoop";
+import { disposable } from "std/core/kinds.yoop";
+
+type Scopes propagates<disposable> {
+  blocks: Vec<Map<string, int32>>,
+  depth: int32,
+}
+
+function main(): int32 {
+  disposable s: Scopes = { blocks: vec.vecNew(2), depth: 0 };
+  // Annotated because `V` is not inferable from `stringKeyOps()` alone and
+  // there is no turbofish - the known generic-inference gap, not part of this
+  // regression.
+  let block: Map<string, int32> = map.mapNew(0, map.stringKeyOps());
+  vec.vecPush(ref s.blocks, block);
+  let first = vec.vecGet(ref s.blocks, 0);
+  map.mapInsert(ref first, "a", 7);
+  printf("blocks=%d a=%d\n", s.blocks.len, map.mapLen(ref first));
+  return 0;
+}

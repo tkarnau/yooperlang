@@ -1,0 +1,243 @@
+// std/time.yoop - the wall clock and the calendar.
+//
+// Two clocks exist and they are not interchangeable. This module is the WALL
+// clock: what a human calls "now", suitable for timestamping a log line, a
+// filename, or a record. It can jump - an NTP correction or a manual change
+// moves it, forwards or backwards.
+//
+// For measuring how long something took, or for a deadline, use the MONOTONIC
+// clock (`nowNs` in std/core/cancel or std/runtime) instead. It never steps,
+// which is the property a duration needs and the reason the runtime keeps the
+// two apart. Subtracting two `nowUnix` readings across an NTP correction gives
+// a negative elapsed time.
+//
+//     import * as time from "std/time.yoop";
+//
+//     let stamp: string = time.iso8601(time.utcNow());   // 2026-08-11T19:04:07Z
+//     printf(`${time.localNow()}\n`);                    // DateTime is Display
+//
+// plans/yooperdoom-takeaways.md 4.2: a project numbered its history files
+// `run-0007-*` rather than timestamping them, explicitly because "a timestamp
+// needs a clock this program has no other reason to read".
+
+// The out-parameters of yoop_time_parts are `unsafe_ptr<int32>` - the same
+// shape std/fs.yoop's stat bridge uses, and the reason this pragma is here.
+// It stays confined to the extern block; nothing this module exports is
+// unsafe.
+import.unsafe;
+
+import { Display } from "std/core/traits.yoop";
+import * as fmt from "std/core/format.yoop";
+import * as str from "std/core/strings.yoop";
+
+extern "C" from "yoop_runtime" {
+    function yoop_wall_ns(): uint64;
+    function yoop_time_parts(
+        epoch: int64,
+        utc: int32,
+        year: unsafe_ptr<int32>,
+        month: unsafe_ptr<int32>,
+        day: unsafe_ptr<int32>,
+        hour: unsafe_ptr<int32>,
+        minute: unsafe_ptr<int32>,
+        second: unsafe_ptr<int32>,
+        weekday: unsafe_ptr<int32>,
+        yearday: unsafe_ptr<int32>,
+        utcOffsetMinutes: unsafe_ptr<int32>
+    ): int32;
+}
+
+const NS_PER_SEC: uint64 = 1000000000;
+const NS_PER_MS: uint64 = 1000000;
+
+// ----- reading the clock --------------------------------------------------
+
+// Nanoseconds since the Unix epoch. Full resolution; the other readers are
+// this one divided down.
+export function nowNanos(): uint64 {
+    return yoop_wall_ns();
+}
+
+// Milliseconds since the Unix epoch - the unit most wire formats use.
+export function nowMillis(): int64 {
+    return int64(yoop_wall_ns() / NS_PER_MS);
+}
+
+// Seconds since the Unix epoch. `int64` rather than `uint64` because this is
+// the type every C API and every serialization format uses for a timestamp,
+// and because dates before 1970 are negative.
+export function nowUnix(): int64 {
+    return int64(yoop_wall_ns() / NS_PER_SEC);
+}
+
+// ----- the calendar -------------------------------------------------------
+
+// A broken-down calendar time.
+//
+// Written the way a human writes them, not the way `struct tm` stores them:
+// `month` is 1-12 and `year` is the full year. `weekday` is 0 = Sunday and
+// `yearday` is 0-based, both matching C.
+//
+// `utcOffsetMinutes` is this time's offset from UTC - 0 for a UTC value, and
+// whatever the zone and daylight-saving rules say for a local one. It is a
+// field rather than a global because the offset is a property of the INSTANT,
+// not of the machine: the same computer is at -300 in January and -240 in
+// July.
+export type DateTime implements Display {
+    year: int32,
+    month: int32,
+    day: int32,
+    hour: int32,
+    minute: int32,
+    second: int32,
+    weekday: int32,
+    yearday: int32,
+    utcOffsetMinutes: int32,
+    // False when the conversion failed - an epoch the platform's time_t
+    // cannot represent. Every other field is then zero.
+    ok: bool,
+
+    // ISO-8601, which is the only rendering that sorts correctly as text and
+    // is unambiguous across locales.
+    function toString(ref self): string {
+        return iso8601(self);
+    }
+}
+
+function partsOf(epoch: int64, utc: int32): DateTime {
+    let year: int32 = 0;
+    let month: int32 = 0;
+    let day: int32 = 0;
+    let hour: int32 = 0;
+    let minute: int32 = 0;
+    let second: int32 = 0;
+    let weekday: int32 = 0;
+    let yearday: int32 = 0;
+    let offset: int32 = 0;
+
+    let ok: int32 = yoop_time_parts(
+        epoch, utc,
+        &year, &month, &day, &hour, &minute, &second,
+        &weekday, &yearday, &offset);
+
+    if (ok == 0) {
+        return {
+            year: 0, month: 0, day: 0, hour: 0, minute: 0, second: 0,
+            weekday: 0, yearday: 0, utcOffsetMinutes: 0, ok: false,
+        };
+    }
+    return {
+        year: year, month: month, day: day,
+        hour: hour, minute: minute, second: second,
+        weekday: weekday, yearday: yearday,
+        utcOffsetMinutes: offset, ok: true,
+    };
+}
+
+// Break a Unix second into UTC calendar fields.
+export function utcFrom(epoch: int64): DateTime {
+    return partsOf(epoch, 1);
+}
+
+// Break a Unix second into LOCAL calendar fields, honouring the machine's
+// timezone and whether daylight saving was in effect at that instant.
+export function localFrom(epoch: int64): DateTime {
+    return partsOf(epoch, 0);
+}
+
+export function utcNow(): DateTime {
+    return utcFrom(nowUnix());
+}
+
+export function localNow(): DateTime {
+    return localFrom(nowUnix());
+}
+
+// ----- rendering ----------------------------------------------------------
+
+// Zero-padded decimal, which is most of what a timestamp is. Uses
+// `strings.padStart` over `format.intToString` rather than a hand-rolled
+// digit loop - the exact pairing the takeaways found four copies of in a
+// project that had both modules available and never found them (4.1).
+function pad2(v: int32): string {
+    return str.padStart(fmt.intToString(int64(v)), 2, "0");
+}
+
+function pad4(v: int32): string {
+    return str.padStart(fmt.intToString(int64(v)), 4, "0");
+}
+
+// ISO-8601 / RFC 3339: `2026-08-11T19:04:07Z`, or with a `+HH:MM` / `-HH:MM`
+// offset for a local time.
+//
+// The only rendering worth having as the default: it sorts correctly as plain
+// text, it is unambiguous about which number is the month, and every language
+// on the other end of a wire can parse it.
+export function iso8601(dt: DateTime): string {
+    if (!dt.ok) { return "invalid-time"; }
+
+    let head: string = str.stringConcatAll([
+        pad4(dt.year), "-", pad2(dt.month), "-", pad2(dt.day),
+        "T",
+        pad2(dt.hour), ":", pad2(dt.minute), ":", pad2(dt.second),
+    ]);
+
+    if (dt.utcOffsetMinutes == 0) {
+        return str.stringConcat(head, "Z");
+    }
+
+    let total: int32 = dt.utcOffsetMinutes;
+    let sign: string = "+";
+    if (total < 0) {
+        sign = "-";
+        total = 0 - total;
+    }
+    return str.stringConcatAll([
+        head, sign, pad2(total / 60), ":", pad2(total % 60),
+    ]);
+}
+
+// `2026-08-11`, for a filename or a log directory.
+export function dateOnly(dt: DateTime): string {
+    if (!dt.ok) { return "invalid-date"; }
+    return str.stringConcatAll([pad4(dt.year), "-", pad2(dt.month), "-", pad2(dt.day)]);
+}
+
+// `19:04:07`.
+export function timeOnly(dt: DateTime): string {
+    if (!dt.ok) { return "invalid-time"; }
+    return str.stringConcatAll([pad2(dt.hour), ":", pad2(dt.minute), ":", pad2(dt.second)]);
+}
+
+// A timestamp safe to put in a filename on every platform: no colons (illegal
+// on Windows, awkward everywhere), no timezone suffix. `20260811-190407`.
+export function fileStamp(dt: DateTime): string {
+    if (!dt.ok) { return "invalid-time"; }
+    return str.stringConcatAll([
+        pad4(dt.year), pad2(dt.month), pad2(dt.day),
+        "-",
+        pad2(dt.hour), pad2(dt.minute), pad2(dt.second),
+    ]);
+}
+
+const DAY_NAMES: string[] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+const MONTH_NAMES: string[] = [
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+];
+
+// Three-letter English day name, or "" when the field is out of range.
+// English-only and deliberately so: a real localization story is a different
+// project, and a wrong-language name is worse than an ISO date.
+export function weekdayName(dt: DateTime): string {
+    if (!dt.ok) { return ""; }
+    if (dt.weekday < 0 || dt.weekday > 6) { return ""; }
+    return DAY_NAMES[usize(dt.weekday)];
+}
+
+// Three-letter English month name, or "" when the field is out of range.
+export function monthName(dt: DateTime): string {
+    if (!dt.ok) { return ""; }
+    if (dt.month < 1 || dt.month > 12) { return ""; }
+    return MONTH_NAMES[usize(dt.month - 1)];
+}

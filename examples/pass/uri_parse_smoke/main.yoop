@@ -9,7 +9,7 @@ extern "C" from "stdio.h" {
 }
 
 function show(label: string, url: string): void {
-    let p: Result<Uri, string> = net.parse_uri(url);
+    let p: Result<Uri, string> = net.parseUri(url);
     switch (p) {
         case Result.Ok { value: u }: {
             printf(`${label} scheme=${u.scheme} host=${u.host} port=${u.port} target=${u.target}\n`);
@@ -36,6 +36,6 @@ function main(): int32 {
 // with-port scheme=http host=example.com port=8080 target=/foo
 // https     scheme=https host=api.example.com port=443 target=/v1?x=1
 // ipv6      scheme=http host=::1 port=18080 target=/
-// no-host   err=parse_uri: empty authority
-// no-scheme err=parse_uri: missing "://"
-// bad-port  err=parse_uri: trailing garbage in port
+// no-host   err=parseUri: empty authority
+// no-scheme err=parseUri: missing "://"
+// bad-port  err=parseUri: trailing garbage in port

@@ -1,0 +1,7 @@
+digit 1 0
+alpha 1 1 0
+classify 1 2 0
+nl=10 tab=9 cr=13 nul=0
+quote=39 backslash=92
+wide=65 narrow=65
+exit=0

@@ -1,0 +1,17 @@
+module geo;
+
+// Deliberately sorts BEFORE point.yoop, and uses `Point` which point.yoop
+// declares. Files of a module are parsed in name order, so this only works if a
+// module's namespace is filled before any body is checked - which is what pass A
+// running over every file first buys.
+//
+// There is no import here, and there must not be: siblings in a module already
+// see each other.
+
+export function boxArea(p: Point): int {
+  return p.x * p.y;
+}
+
+export function scaled(p: Point, by: int): Point {
+  return { x: p.x * by, y: p.y * by };
+}

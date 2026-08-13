@@ -76,7 +76,7 @@ function main(): int32 {
     let s: Scale = { factor: 3 };
 
     // Build the heterogeneous handler list. Each slot wraps a different impl.
-    let handlers: Dispatcher[] = intr.heap_alloc(3);
+    let handlers: Dispatcher[] = intr.heapAlloc(3);
     handlers[0] = Dispatcher.from(ref c);
     handlers[1] = Dispatcher.from(ref a);
     handlers[2] = Dispatcher.from(ref s);
@@ -96,7 +96,7 @@ function main(): int32 {
     let only: int32 = Dispatcher.handle(ref direct, 11);
     printf(`scale-only=${only}\n`);
 
-    intr.heap_free(handlers);
+    intr.heapFree(handlers);
     return 0;
 }
 

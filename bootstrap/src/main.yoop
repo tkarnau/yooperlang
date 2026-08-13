@@ -1,71 +1,98 @@
 /*
   Author: Tom Karnau
 
-  Main entry point for the self-hosted yooperlang compiler
+  The self-hosted yooperlang compiler.
+
+    yoopiler_boot <entry.yoop> [-o <out>]
+
+  Runs the whole pipeline - module graph, lex, parse, typecheck, codegen, link -
+  and produces an executable. The language subset it accepts is small and grows
+  from the bottom up; anything outside it is refused BY NAME rather than
+  mis-compiled. bootstrap/README.md has the current subset.
 */
 
 import * as log from "std/log.yoop";
-import * as intr from "std/core/intrinsics.yoop";
-import * as debug from "std/debug.yoop";
-import { Display } from "std/core/traits.yoop";
-import * as strings from "std/core/strings.yoop";
+import * as env from "std/env.yoop";
 import { Vec }, * as vec from "std/core/vec.yoop";
-import { Disposable, disposable } from "std/core/kinds.yoop";
-import * as fs from "std/fs.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import { Result } from "std/core/types.yoop";
+import { Text }, * as text from "std/core/text.yoop";
 
-import { isHexDigit } from "./source_processing/char_utils.yoop";
-import { tokenize, Token } from "./source_processing/lexer.yoop";
-import { parse } from "./source_processing/parser.yoop";
-import { tokenScanList } from "./contracts.yoop";
-import { loadModuleGraph, LoadGraphResult } from "./source_graph/module_graph.yoop";
-import { typecheckProgram } from "./typecheck/typecheck.yoop";
-
-@precompile {
-  log.info("hello, yooper from a precompile!");
-}
+import { loadModuleGraph, LoadGraphResult, discoverStdRoot } from "./source_graph";
+import { typecheckProgram, Program } from "./typecheck";
+import { Severity, formatLocation } from "./diagnostics";
+import { codegenProgram } from "./codegen";
+import { linkExecutable } from "./link";
 
 function main(): int {
-  log.info("hello, yooper!");
-
-  runCompilerAssertions(); // ensures tokens and other utilties we added here are still working correctly
-  // need unit testing solution of some kind...
-
-  // smoke test for now: load a common source file into a one-module graph (single file program).
-  const entryPath = "/Users/tom/dev/personal/yooperlang/bootstrap/examples/single_module.yoop";
-  // this loadModuleGraph(path) lexes and parses the main source file into a graph (imports and other things add more modules/nodes to that graph)
-  switch (loadModuleGraph(entryPath)) { 
-    case LoadGraphResult.Err { error: e }: {
-      log.info(`module graph load failed: ${e}`);
-    }
-    case LoadGraphResult.Ok { value: moduleGraph }: {
-      // vec.vec_get: even though modules is an dynamic array (1D vector), you must reference the
-      // Vector module and pass the vector reference pointer and the desired index to get at a pointer to the specific module we want
-      const entryMod = vec.vec_get(ref moduleGraph.modules, moduleGraph.entryIndex);
-      log.info(`entry AST dump: ${entryMod.ast}`); // derive(display) on AST gives us free stringify now.
-
-      // Layer 3: hand the parsed graph to the typechecker. It is an empty shell
-      // for now (returns a Program with no types/symbols/diagnostics) - this
-      // wires the call so the layer can be built out incrementally.
-      let prog = typecheckProgram(ref moduleGraph);
-      log.info(`prog dump: ${prog}`);
-    }
+  if (env.argCount() < 2) {
+    log.error("usage: yoopiler_boot <entry.yoop> [-o <out>]");
+    return 2;
+  }
+  const entryPath = env.argAt(1);
+  let outPath = "a.out";
+  if (env.argCount() >= 4) {
+    outPath = env.argAt(3);   // `-o <out>`
   }
 
-  return 0;
+  // Where `std/...` resolves. Discovered once here and handed to the graph, so
+  // the layer that RESOLVES paths never has to probe for a directory.
+  const stdRoot = discoverStdRoot(env.argAt(0));
+
+  switch (loadModuleGraph(entryPath, stdRoot)) {
+    case LoadGraphResult.Err { error: e }: {
+      log.error(`${e}`);
+      return 1;
+    }
+    case LoadGraphResult.Ok { value: moduleGraph }: {
+      // `disposable` here because the unhandled-disposable warning caught it:
+      // Program owns the type/symbol arenas and every TypedModule's maps.
+      disposable prog: Program = typecheckProgram(ref moduleGraph);
+      if (reportDiagnostics(ref prog) > 0) {
+        return 1;
+      }
+      log.info("typecheck: ok");
+
+      switch (codegenProgram(ref prog, ref moduleGraph)) {
+        case Result.Err { error: e }: {
+          log.error(`codegen: ${e}`);
+          return 1;
+        }
+        case Result.Ok { value: ir }: {
+          log.info("llvm IR: ok");
+          disposable irText: Text = ir;
+          disposable irPath: Text = text.fromString(outPath);
+          text.push(ref irPath, ".ll");
+          const linkErr = linkExecutable(ref irText, text.view(ref irPath), outPath);
+          if (linkErr.len > 0) {
+            log.error(linkErr);
+            return 1;
+          }
+          log.info(`compiled: ${outPath}`);
+          return 0;
+        }
+      }
+    }
+  }
 }
 
-function runCompilerAssertions(): void {
-  debug.assert(strings.string_eq(tokenScanList[0].str, "..."), "tokenScanList is not sorted");
-  const testSplittingStr = "this_is_a_test";
-  disposable pieces: Vec<string> = vec.vec_new(0);
-  const splitResult = strings.split(ref pieces, testSplittingStr, "_", false);
-  debug.assert(pieces.len == 4, `split expected 4 elements, found ${pieces.len}: result ${splitResult}, ${pieces.data[0]}`);
-  debug.assert(strings.string_eq(pieces.data[0], "this"), `split failed, expected "this" in slot 1, found ${pieces.data[0]}`);
-  debug.assert(strings.string_eq(pieces.data[1], "is"), `split failed, expected "is" in slot 2, found ${pieces.data[1]}`);
-  debug.assert(strings.string_eq(pieces.data[2], "a"), `split failed, expected "a" in slot 3, found ${pieces.data[2]}`);
-  debug.assert(strings.string_eq(pieces.data[3], "test"), `split failed, expected "test" in slot 4, found ${pieces.data[3]}`);
-
-  // file stuff
-  // const normalizeResult = fs.normalizePath("./bootstrap/../bootstrap/src/main.yoop");
-  // debug.assert(strings.string_eq(normalizeResult, "main.yoop"), `normalizePath failed, exepected "main.yoop", found ${normalizeResult}`);
+// Prints every accumulated diagnostic and returns the error count. Warnings do
+// not stop the compile.
+function reportDiagnostics(ref prog: Program): usize {
+  let errors: usize = 0;
+  let i: usize = 0;
+  while (i < prog.diagnostics.len) {
+    const d = vec.vecGet(ref prog.diagnostics, i);
+    switch (d.severity) {
+      case Severity.ERROR: {
+        errors += 1;
+        log.error(`${formatLocation(ref d)}: ${d.message}`);
+      }
+      case Severity.WARNING: {
+        log.info(`${formatLocation(ref d)}: warning: ${d.message}`);
+      }
+    }
+    i += 1;
+  }
+  return errors;
 }

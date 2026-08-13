@@ -1,0 +1,78 @@
+// plans/yooperdoom-takeaways.md 2.4: a bare `disposable` binding is const,
+// and `let disposable` is the mutable opt-in.
+//
+// This reads as a papercut until you see what the const is protecting. The
+// auto-cleanup a `disposable` binding gets fires ONCE, at scope end, on
+// whatever the binding holds THEN. Rebinding therefore drops the outgoing
+// value without disposing it, and the compiler cannot see the leak - from its
+// side the obligation was discharged, just against the wrong value.
+//
+// So const is the default and `let` is the informed opt-in, with the rule
+// that you dispose the outgoing value yourself before overwriting it. That is
+// exactly what a "transform this buffer in a loop" shape needs.
+//
+// Scopes here are functions rather than bare `{ ... }` blocks, because a bare
+// block is not a statement form in Yoop today - see the note in the takeaways
+// plan. Nothing about this fixture depends on that.
+
+import { Disposable, disposable } from "std/core/kinds.yoop";
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+// Stands in for any owned resource. LIVE counts what has not been disposed,
+// so the fixture can prove nothing leaked rather than just claiming it.
+let LIVE: int32 = 0;
+
+type Buf implements Disposable {
+    id: int32,
+    open: bool,
+
+    function dispose(ref self): void {
+        // Idempotent, which is the disposer's own responsibility under the
+        // advisory ownership model: dispose may be called by hand AND the
+        // compiler injects one, so it must not double-count.
+        if (self.open) {
+            self.open = false;
+            LIVE = LIVE - 1;
+        }
+    }
+}
+
+function bufNew(id: int32): Buf {
+    LIVE = LIVE + 1;
+    return { id: id, open: true };
+}
+
+// The const form. Cleanup is injected at the closing brace.
+function constForm(): void {
+    disposable fixed: Buf = bufNew(1);
+    printf(`const form: id=${fixed.id} live=${LIVE}\n`);
+}
+
+// The mutable form, with the obligation it carries: dispose the outgoing
+// value BEFORE reassigning, or it leaks.
+function letForm(): void {
+    let disposable cur: Buf = bufNew(10);
+    for (let step = 0; step < 3; step += 1) {
+        let next: Buf = bufNew(cur.id + 1);
+        Disposable.dispose(ref cur);   // the outgoing value, by hand
+        cur = next;
+    }
+    // Mutable also means the fields are assignable.
+    cur.id = 99;
+    printf(`let form: id=${cur.id} live=${LIVE}\n`);
+}
+
+function main(): int32 {
+    constForm();
+    printf(`after const scope: live=${LIVE}\n`);
+
+    letForm();
+    // The injected cleanup at scope end took the LAST value; every earlier
+    // one was disposed by hand on the way through, so nothing is outstanding.
+    printf(`after let scope: live=${LIVE}\n`);
+
+    return 0;
+}

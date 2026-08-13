@@ -43,7 +43,7 @@ const repoRoot = path.resolve(import.meta.dirname, "..");
 //
 // Safe because the tests share nothing - each mkdtemps its own build dir, and
 // the two fixtures that LISTEN bind port 0 and read the kernel-assigned port
-// back out of TcpListener.bound_port rather than agreeing on a fixed number.
+// back out of TcpListener.boundPort rather than agreeing on a fixed number.
 //
 // Measured, full suite, 24-core Windows box, interleaved to cancel drift:
 //
@@ -273,6 +273,381 @@ describe("e2e: pass fixtures compile, run, and produce expected output", { concu
     );
   });
 
+  // The property that breaks SILENTLY: one `import` added to std/http and
+  // suddenly every program that speaks HTTP needs OpenSSL installed to build.
+  // Link flags are collected program-wide, which is why std/tls and std/https
+  // are separate modules (plans/tls.md D4) - and why this is worth asserting
+  // rather than trusting.
+  //
+  // Needs no clang: it inspects what the driver WOULD hand the linker.
+  it("plain HTTP does not drag in OpenSSL; https:// does", () => {
+    const plain = compileEntry(path.join(repoRoot, "examples/pass/hello_server/main.yoop"));
+    assert.deepEqual(
+      plain.linkFlags,
+      [],
+      "a plain HTTP program must not link OpenSSL",
+    );
+    assert.deepEqual(
+      glueSourcesForLinkFlags(plain.linkFlags),
+      [],
+      "a plain HTTP program must not compile the TLS shim",
+    );
+
+    const secure = compileEntry(path.join(repoRoot, "examples/pass/https_client/main.yoop"));
+    assert.ok(
+      secure.linkFlags.includes("ssl"),
+      `expected an https program to name ssl, got: ${secure.linkFlags.join(",")}`,
+    );
+    assert.ok(
+      glueSourcesForLinkFlags(secure.linkFlags).some((p) => p.endsWith("yoop_tls.c")),
+      "expected an https program to compile the TLS shim",
+    );
+  });
+
+  it("https_client: a real TLS handshake, three refusals, and https:// through the client", async (t) => {
+    // plans/tls.md phase 1. The peer is a NODE HTTPS server: a TLS client
+    // tested only against itself proves almost nothing, and the value is
+    // handshaking with an implementation that rejects us if we get it wrong.
+    //
+    // The three REFUSALS matter more than the connection. A handshake
+    // succeeding says little; a client that cannot be made to refuse has no
+    // security property at all - which is the same lesson the conferred-kind
+    // gate taught (yooperdoom-takeaways 0.1).
+    const skip = tlsSkipReason();
+    if (skip) {
+      t.skip(`TLS: ${skip}`);
+      return;
+    }
+    const server = await startTlsServer();
+    try {
+      const ca = path.join(repoRoot, "examples/pass/https_client/testdata/ca.pem");
+      const { stdout, exitCode } = await runFixtureEntry(
+        "examples/pass/https_client/main.yoop",
+        { args: [String(server.port), ca] },
+      );
+      assert.equal(exitCode, 0);
+      assert.equal(
+        stdout,
+        // Trusting the right CA: connects AND round-trips a request, so the
+        // data path is covered and not just the handshake.
+        "verified   connected body=tls-hello:/hi\n" +
+          // The throwaway CA is not in the system roots.
+          "no CA      refused\n" +
+          // Valid certificate, wrong host. Chain verification alone does NOT
+          // close this - it needs the hostname/IP check.
+          "wrong name refused\n" +
+          // ...and the escape hatch is what opens the gate, nothing else.
+          "verify off connected\n" +
+          // The payoff: an `https://` URL through the ORDINARY client, with
+          // no TLS at the call site. std/http takes Reader/Writer (phase 0)
+          // and TlsStream implements Readable/Writable (phase 1), so
+          // std/https is only where the two meet.
+          "client     200 tls-hello:/hi\n" +
+          "done\n",
+      );
+    } finally {
+      server.stop();
+    }
+  });
+
+  it("http_no_socket: a full HTTP exchange over in-memory Reader/Writer", async () => {
+    // plans/tls.md phase 0. std/http used to name TcpStream in every
+    // signature; it now takes the erased Reader/Writer vtables, so anything
+    // implementing Readable/Writable can drive it - which is what will let a
+    // TlsStream slot in with no other change.
+    //
+    // Useful on its own merits too: a server test with no port, no timing and
+    // no cleanup, that can hand the server bytes no real client would send.
+    const { stdout, exitCode } = await runFixtureEntry("examples/pass/http_no_socket/main.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(
+      stdout,
+      "get  served=1 bytes=110\n" +
+        "get  status=HTTP/1.1 200 OK\n" +
+        "get  body=path:/hello\n" +
+        "post served=1 bytes=109\n" +
+        "post status=HTTP/1.1 200 OK\n" +
+        "post body=echo:hullo\n" +
+        // The chunked decoder runs on the same path as the socket server,
+        // with no socket to frame it: 3/abc + 2/de.
+        "chunk served=1 bytes=109\n" +
+        "chunk status=HTTP/1.1 200 OK\n" +
+        "chunk body=echo:abcde\n" +
+        // Malformed input answers 400 rather than falling over.
+        "bad  served=1 bytes=148\n" +
+        "bad  status=HTTP/1.1 400 Bad Request\n" +
+        'bad  body=400 Bad Request: header line has no ":"\n' +
+        "\n" +
+        "done\n",
+    );
+  });
+
+  it("http_concurrent: serveConcurrent overlaps connections, holds its cap, and 503s over it", async () => {
+    // `peak=2` is the assertion that matters: two connections were being
+    // handled at the same instant. Under `serve`, which awaits each
+    // connection to completion before accepting the next, it is 1 by
+    // construction no matter the timing.
+    //
+    // The refusals are made deterministic by the fixture (two holders take
+    // both slots and sleep past the point where the late clients connect),
+    // so `rejected=2` is not a timing coincidence.
+    const { stdout, exitCode } = await runFixtureEntry("examples/pass/http_concurrent/main.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(
+      stdout,
+      "peak=2\n" +
+        "withinCap=1\n" +
+        "rejected=2\n" +
+        // The clients and the server agree about how many were refused.
+        "refusedSeen=1\n" +
+        "accepted+rejected=4\n" +
+        // Every connection task decremented its slot on the way out.
+        "drained=1\n",
+    );
+  });
+
+  it("http_proxy: a handler forwards through the HTTP client (async Handler.handle)", async () => {
+    // The program that could not be written before. `Handler.handle` was
+    // synchronous while `client.send` is async, so a handler could not call
+    // the client - which rules out every sidecar, gateway, and load balancer,
+    // since a proxy is a handler whose body is a client call.
+    //
+    // `via=origin` is the assertion that matters: that header was set by the
+    // ORIGIN, and the client never connected to the origin.
+    const { stdout, exitCode } = await runFixtureEntry("examples/pass/http_proxy/main.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(
+      stdout,
+      "get  200 origin-hello via=origin proxied=yes\n" +
+        "post 200 origin-echo:payload via=origin proxied=yes\n" +
+        "done\n",
+    );
+  });
+
+  it("http_chunked: decodes chunked bodies in both directions, and rejects bad framing", async () => {
+    // The peer here is a RAW socket writing canned bytes, because a real HTTP
+    // server cannot produce the cases that matter - a bad hex size, a missing
+    // CRLF after the data, both framings at once. The client and server halves
+    // are the real std/http ones.
+    const { stdout, exitCode } = await runFixtureEntry("examples/pass/http_chunked/main.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(
+      stdout,
+      'simple  ok  "hello world"\n' +
+        // Uppercase hex size, chunk extensions, and a trailer field.
+        'extras  ok  "abcdefghijklmnopqrstuvwxyz"\n' +
+        // 40 chunks of 4 bytes across many reads: the incremental path, where
+        // the decoder resumes mid-body without re-walking or double-copying.
+        "many    ok  len=160\n" +
+        "badsize err 400 chunk size is not hexadecimal\n" +
+        "nocrlf  err 400 chunk data is not followed by CRLF\n" +
+        // RFC 9112: the request-smuggling ambiguity, rejected.
+        "both    err 400 message has both Transfer-Encoding and Content-Length\n" +
+        // The receiving direction: our server decoding a chunked request body
+        // that arrived across two writes.
+        'request ok  "got:chunked-body!"\n' +
+        "done\n",
+    );
+  });
+
+  it("time_calendar.yoop: wall clock + calendar, checked against fixed epochs", async () => {
+    // Reproducible with `new Date(epoch * 1000).toISOString()`. Assertions are
+    // UTC-only on purpose: local rendering depends on the machine's timezone.
+    const { stdout, exitCode } = await runFixture("examples/pass/time_calendar.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(
+      stdout,
+      "epoch  1970-01-01T00:00:00Z\n" +
+        "before 1969-12-31T23:59:59Z\n" +
+        "recent 2025-08-12T12:00:00Z\n" +
+        "leapday 2024-02-29T00:00:00Z\n" +
+        "nyeve   2024-12-31T23:59:59Z\n" +
+        "nyday   2025-01-01T00:00:00Z\n" +
+        "date  2025-08-12\n" +
+        "time  12:00:00\n" +
+        "stamp 20250812-120000\n" +
+        "names Tue Aug\n" +
+        "parts 2025 8 12 12 0 0\n" +
+        "wday 2 yday 223 offset 0\n" +
+        "display 2025-08-12T12:00:00Z\n" +
+        "local ok=1\n" +
+        "now ahead=1\n" +
+        "ms consistent=1\n",
+    );
+  });
+
+  it("sha256_hmac.yoop matches the FIPS 180-4 / RFC 4231 vectors", async () => {
+    // Every expected value below is reproducible with one line of Node:
+    //   crypto.createHash("sha256").update(x).digest("hex")
+    //   crypto.createHmac("sha256", k).update(m).digest("hex")
+    // A hash tested only against itself is not tested.
+    const { stdout, exitCode } = await runFixture("examples/pass/sha256_hmac.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(
+      stdout,
+      "empty  e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\n" +
+        "abc    ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad\n" +
+        "len56  248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1\n" +
+        "1000a  41edece42d63e8d9bf515a9ba6932e1c20cbc9f5a5d134645adb5db1b9737ea3\n" +
+        // The streaming path, fed one byte at a time, must agree with the
+        // one-shot above - that is what checks the partial-block bookkeeping.
+        "stream 41edece42d63e8d9bf515a9ba6932e1c20cbc9f5a5d134645adb5db1b9737ea3\n" +
+        "hmacfox f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8\n" +
+        "rfc1    b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7\n" +
+        "rfc2    5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843\n" +
+        // 131-byte key: longer than the 64-byte BLOCK, so HMAC hashes it
+        // first. Using the 32-byte digest size here instead is the classic
+        // bug, and it produces a stable MAC that disagrees with everyone.
+        "longkey 60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54\n" +
+        "ct same=1\n" +
+        "ct diff=0\n",
+    );
+  });
+
+  it("base64_roundtrip.yoop: RFC 4648 vectors, both alphabets, binary round-trip", async () => {
+    const { stdout, exitCode } = await runFixture("examples/pass/base64_roundtrip.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(
+      stdout,
+      "enc  -> \n" +
+        "enc f -> Zg==\n" +
+        "enc fo -> Zm8=\n" +
+        "enc foo -> Zm9v\n" +
+        "enc foob -> Zm9vYg==\n" +
+        "enc fooba -> Zm9vYmE=\n" +
+        "enc foobar -> Zm9vYmFy\n" +
+        "dec Zg== -> f (1)\n" +
+        "dec Zm9vYmE= -> fooba (5)\n" +
+        "dec Zm9vYmFy -> foobar (6)\n" +
+        "dec Zm9vYmE -> fooba (5)\n" +
+        "dec Zm9v\nYmFy -> foobar (6)\n" +
+        "url ->>>??? -> Pj4-Pz8_\n" +
+        "std ->>>??? -> Pj4+Pz8/\n" +
+        "dec Pj4-Pz8_ -> >>>??? (6)\n" +
+        "dec Pj4+Pz8/ -> >>>??? (6)\n" +
+        "dec !!!! -> ERR base64: invalid character\n" +
+        "dec Z -> ERR base64: truncated input\n" +
+        "dec Zg==Zg== -> ERR base64: data after padding\n" +
+        "binary encoded len=344 predicted=344\n" +
+        "binary roundtrip 1 (256 bytes)\n",
+    );
+  });
+
+  it("short_circuit.yoop: `&&` / `||` do not evaluate the right side needlessly", async () => {
+    const { stdout, exitCode } = await runFixture("examples/pass/short_circuit.yoop");
+    assert.equal(exitCode, 0);
+    // The "ran N side(s)" lines are the assertion that matters. A bitwise
+    // lowering produces the same VALUES and would pass a value-only test.
+    assert.equal(
+      stdout,
+      "false && _ ran 1 side(s)\n" +
+        "true || _ taken\n" +
+        "true || _ ran 1 side(s)\n" +
+        "true && true taken\n" +
+        "true && _ ran 2 side(s)\n" +
+        "null guard ok\n" +
+        "bounds guard ok\n" +
+        "underflow guard ok\n" +
+        "or guard ok\n" +
+        "nested=1\n" +
+        "loop guard ok, steps=1\n",
+    );
+  });
+
+  it("contextual_keywords.yoop: demoted keywords work as fields, params, and locals", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "examples/pass/contextual_keywords.yoop",
+    );
+    assert.equal(exitCode, 0);
+    assert.equal(
+      stdout,
+      "fields: 1 2 3 4 5 6\n" +
+        "more:   7 8 9 10 11 12\n" +
+        "sum=78\n" +
+        "locals: 42 43\n",
+    );
+  });
+
+  it("disposable_rebind.yoop: `let disposable` rebinds, and nothing leaks doing it", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "examples/pass/disposable_rebind.yoop",
+    );
+    assert.equal(exitCode, 0);
+    // The `live=0` lines are the assertion that matters: every value handed
+    // over in the rebinding loop was disposed, not just the last one.
+    assert.equal(
+      stdout,
+      "const form: id=1 live=1\n" +
+        "after const scope: live=0\n" +
+        "let form: id=99 live=1\n" +
+        "after let scope: live=0\n",
+    );
+  });
+
+  it("arena_exhausted.yoop: an exhausted allocator names itself instead of segfaulting", async () => {
+    const { stdout, stderr, exitCode } = await runFixture(
+      "examples/pass/arena_exhausted.yoop",
+    );
+    assert.equal(exitCode, 1);
+    // The whole point: buffered stdout is flushed before the process dies, so
+    // everything printed up to the failing allocation survives to locate it.
+    // This used to come back as `output: [null, null, null]` with SIGSEGV.
+    assert.equal(stdout, "this line must survive the abort\n");
+    assert.match(stderr, /^yoop: allocation failed: wanted 4096 bytes \(align 8\)/);
+    assert.match(stderr, /arena exhausted: capacity 1024, 0 used, 1024 free/);
+  });
+
+  it("untyped_literal_pinning.yoop: compound literal expressions never reach codegen unpinned", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "examples/pass/untyped_literal_pinning.yoop",
+    );
+    assert.equal(exitCode, 0);
+    assert.equal(
+      stdout,
+      "int32 rhs\n" +
+        "int32 lhs\n" +
+        "uint8 ok\n" +
+        "int64 ok\n" +
+        "float32 ok\n" +
+        "both untyped int\n" +
+        "both untyped float\n" +
+        "done\n",
+    );
+  });
+
+  it("env_vars.yoop: get / has / getOr, and unset vs explicitly-empty", async () => {
+    // YOOP_E2E_UNSET_VAR is deliberately absent: runFixture merges opts.env
+    // over process.env, so a variable can be added but not removed here.
+    const { stdout, exitCode } = await runFixture("examples/pass/env_vars.yoop", {
+      env: { YOOP_E2E_SET: "hello", YOOP_E2E_EMPTY: "" },
+    });
+    assert.equal(exitCode, 0);
+    assert.equal(
+      stdout,
+      "set=[hello] has=yes\n" +
+        "empty=[] has=yes\n" +
+        "missing=[] has=no len=0\n" +
+        "orSet=[hello]\n" +
+        "orEmpty=[]\n" +
+        "orMissing=[fallback]\n",
+    );
+  });
+
+  it("bool_eq.yoop: `==` / `!=` work on two bools", async () => {
+    const { stdout, exitCode } = await runFixture("examples/pass/bool_eq.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(
+      stdout,
+      "t!=f\n" +
+        "t==t\n" +
+        "f==f\n" +
+        "t==true\n" +
+        "!(t==f)\n" +
+        "agree(f,f)\n" +
+        "same=1 diff=0\n",
+    );
+  });
+
   it("operators_full.yoop covers bitwise + shift + ~ + compound-assign", async () => {
     const { stdout, exitCode } = await runFixture("examples/pass/operators_full.yoop");
     assert.equal(exitCode, 0);
@@ -449,19 +824,19 @@ describe("e2e: pass fixtures compile, run, and produce expected output", { concu
     }
   });
 
-  // Phase 10.F: `wait_until(h, deadline_ns): WaitResult<T>` covers Done +
+  // Phase 10.F: `waitUntil(h, deadline_ns): WaitResult<T>` covers Done +
   // Timeout. The fast task completes well inside its 1s deadline; the slow
   // task sleeps 200ms past its 50ms deadline so Timeout fires deterministically.
-  it("wait_until_smoke: wait_until returns Done before the deadline and Timeout after it", async () => {
+  it("wait_until_smoke: waitUntil returns Done before the deadline and Timeout after it", async () => {
     const { stdout, exitCode } = await runFixtureEntry("examples/pass/wait_until_smoke.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "fast done=49\nlazy timed out\n");
   });
 
   // Phase 10.F.2: external cancellation via `cancel(h)`. A second pooled
-  // task fires the cancel mid-wait; the main thread's wait_until (with a
+  // task fires the cancel mid-wait; the main thread's waitUntil (with a
   // 1s deadline that's not the path-of-success) observes WaitResult.Cancelled.
-  it("cancel_smoke: cancel(h) makes wait_until return WaitResult.Cancelled", async () => {
+  it("cancel_smoke: cancel(h) makes waitUntil return WaitResult.Cancelled", async () => {
     const { stdout, exitCode } = await runFixtureEntry("examples/pass/cancel_smoke.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "cancelled as expected\n");
@@ -505,7 +880,7 @@ describe("e2e: pass fixtures compile, run, and produce expected output", { concu
   // `Readable.read`. A structural is-this-the-none-token check is what
   // makes that work - testing "has the token fired yet" instead makes a
   // live deadline-less token look absent, which silently routes back to
-  // the uninterruptible ffi_recv and hangs this test forever.
+  // the uninterruptible ffiRecv and hangs this test forever.
   it("io_cancel_smoke: a cancel token unparks an accept blocked in the multiplexer", async () => {
     const { stdout, exitCode } = await runFixtureEntry("examples/pass/io_cancel_smoke.yoop");
     assert.equal(exitCode, 0);
@@ -602,6 +977,20 @@ describe("e2e: pass fixtures compile, run, and produce expected output", { concu
     );
   });
 
+  // A task joining other tasks without holding a worker. Pinned to ONE
+  // worker on purpose: `joiner` is itself a task waiting on two more, so a
+  // blocking join would hold the single worker while the tasks it waits for
+  // sit unstarted in the queue. That is a deadlock, so a regression here
+  // shows up as a timeout rather than a wrong answer.
+  it("task_await_join: awaitTask suspends the joiner instead of blocking its worker", async () => {
+    const { stdout, exitCode } = await runFixtureEntry(
+      "examples/pass/task_await_join.yoop",
+      { env: { YOOP_NUM_WORKERS: "1" } },
+    );
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "joiner=42\nfanOut=6\nalreadyDone=100\n");
+  });
+
   // The end of the async story: std/net and std/http are async top to
   // bottom, so an HTTP server plus three concurrent clients - four tasks
   // all doing socket I/O - multiplex onto ONE worker thread.
@@ -662,7 +1051,7 @@ describe("e2e: pass fixtures compile, run, and produce expected output", { concu
     assert.equal(stdout, "ran query\n");
   });
 
-  it("map_smoke: Map<string, int32> via string_key_ops covers insert/get/remove/grow", async () => {
+  it("map_smoke: Map<string, int32> via stringKeyOps covers insert/get/remove/grow", async () => {
     const { stdout, exitCode } = await runFixtureEntry("examples/pass/map_smoke/main.yoop");
     assert.equal(exitCode, 0);
     assert.equal(
@@ -677,7 +1066,7 @@ describe("e2e: pass fixtures compile, run, and produce expected output", { concu
     );
   });
 
-  it("map_int32_keys: Map<int32, string> via int32_key_ops covers get/remove/contains", async () => {
+  it("map_int32_keys: Map<int32, string> via int32KeyOps covers get/remove/contains", async () => {
     const { stdout, exitCode } = await runFixtureEntry("examples/pass/map_int32_keys.yoop");
     assert.equal(exitCode, 0);
     assert.equal(
@@ -713,7 +1102,7 @@ describe("e2e: pass fixtures compile, run, and produce expected output", { concu
     );
   });
 
-  it("map_iter: for entry in map_iter(ref m) walks occupied slots via Iterable<MapEntry>", async () => {
+  it("mapIter: for entry in mapIter(ref m) walks occupied slots via Iterable<MapEntry>", async () => {
     const { stdout, exitCode } = await runFixtureEntry("examples/pass/map_iter.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "keys_sum=10 vals_sum=1000\n");
@@ -1046,7 +1435,7 @@ describe("e2e: pass fixtures compile, run, and produce expected output", { concu
   // through `Variant.Inner { kids: Struct[] }` used to capture the
   // empty-variants shell when the typechecker resolved its field types.
   // `sizeOfType(Struct)` then ran on the stale shell and undersized the
-  // struct; `heap_alloc<Struct>(n)` allocated half the bytes LLVM expects
+  // struct; `heapAlloc<Struct>(n)` allocated half the bytes LLVM expects
   // and writes corrupted the heap. The fix makes pass C mutate the shell
   // in place. Would fail to run cleanly under the old typechecker.
   it("variant_struct_forward_ref.yoop: struct captures variant shell before its variants populate", async () => {
@@ -1288,7 +1677,7 @@ describe("e2e: pass fixtures compile, run, and produce expected output", { concu
     assert.equal(stdout, "direct=1 explicit=2 bare=3 field=4 viaTask=14\n");
   });
 
-  it("concurrent_pipe.yoop: a task parks inside the multiplexer, wakes when bytes arrive, sleep_ms delays the producer", async () => {
+  it("concurrent_pipe.yoop: a task parks inside the multiplexer, wakes when bytes arrive, sleepMs delays the producer", async () => {
     const { stdout, exitCode } = await runFixture("examples/pass/concurrent_pipe.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "got=88\n");
@@ -1357,10 +1746,17 @@ async function runFixtureEntry(relPath, opts = {}) {
   const clangArgs = [
     llPath,
     ...prebuiltRuntimeObjects(RUNTIME_SOURCES),
+    // The same two hooks runFixture and the real driver apply, so a fixture
+    // that names an external library links here exactly as it would under
+    // yoopiler. Missing them was invisible until a fixture actually named
+    // one: std/tls asks for OpenSSL, and without these the link fails with
+    // `library 'ssl' not found` even though the driver builds it fine.
+    ...glueSourcesForLinkFlags(linkFlags ?? []),
     ...(opts.debug ? ["-g"] : []),
     "-O0",
     "-o",
     binPath,
+    ...librarySearchArgs(),
     ...allLinkFlags.flatMap(lowerLinkFlag),
     ...windowsClangArgs(),
   ];
@@ -1368,13 +1764,67 @@ async function runFixtureEntry(relPath, opts = {}) {
   // `env` mirrors runFixture's option - needed by fixtures that pin
   // YOOP_NUM_WORKERS to prove a scheduling property.
   const env = opts.env ? { ...process.env, ...opts.env } : process.env;
-  const result = await runProc(binPath, [], { env, timeout: opts.timeoutMs ?? 30000 });
+  // `args` reaches the fixture through std/env's argAt. Used by fixtures that
+  // have to be told something the test discovered at run time - a port a
+  // helper server bound, a path to a generated file.
+  const result = await runProc(binPath, opts.args ?? [], {
+    env,
+    timeout: opts.timeoutMs ?? 30000,
+  });
   return {
     stdout: result.stdout,
     stderr: result.stderr,
     exitCode: result.status,
     binPath,
   };
+}
+
+// Why the TLS tests cannot run here, or null if they can.
+//
+// std/tls links OpenSSL, which is a real external dependency rather than
+// something the repo vendors. A contributor without it should get a skipped
+// test naming the reason, not a wall of unresolved symbols - the same
+// arrangement dwarfSkipReason makes for lldb.
+let tlsSkipMemo;
+function tlsSkipReason() {
+  if (tlsSkipMemo !== undefined) return tlsSkipMemo;
+  const probe = `#include <openssl/ssl.h>\nint main(void){ return TLS_client_method() ? 0 : 1; }\n`;
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "yoop_tlsprobe_"));
+  const src = path.join(dir, "probe.c");
+  fs.writeFileSync(src, probe);
+  const out = path.join(dir, "probe" + EXE_SUFFIX);
+  const res = spawnSync(
+    resolveClang(),
+    [src, "-o", out, ...librarySearchArgs(), ...lowerLinkFlag("ssl"), ...windowsClangArgs()],
+    { encoding: "utf8", env: clangEnv() },
+  );
+  fs.rmSync(dir, { recursive: true, force: true });
+  tlsSkipMemo = res.status === 0 ? null : "OpenSSL headers/libraries not found";
+  return tlsSkipMemo;
+}
+
+// Start the throwaway Node HTTPS server and wait for it to report its port.
+// Binds port 0 so this cannot collide with anything, which is what lets the
+// e2e suite keep running tests concurrently.
+function startTlsServer() {
+  const script = path.join(repoRoot, "examples/pass/https_client/testdata/tls_server.mjs");
+  const child = spawn(process.execPath, [script], { stdio: ["ignore", "pipe", "pipe"] });
+  return new Promise((resolve, reject) => {
+    let buf = "";
+    const timer = setTimeout(() => {
+      child.kill("SIGKILL");
+      reject(new Error("tls_server.mjs did not report a port in time"));
+    }, 15000);
+    child.stdout.on("data", (d) => {
+      buf += d;
+      const m = buf.match(/^PORT (\d+)/m);
+      if (m) {
+        clearTimeout(timer);
+        resolve({ port: Number(m[1]), stop: () => child.kill("SIGKILL") });
+      }
+    });
+    child.on("error", (e) => { clearTimeout(timer); reject(e); });
+  });
 }
 
 // Typecheck a multi-file fixture (entry + imports) and return errors.
@@ -1426,14 +1876,33 @@ describe("e2e: multi-file pass fixtures compile and produce expected output", { 
     assert.equal(exitCode, 0);
     assert.equal(stdout, "(1, 2)\n");
   });
+
+  it("nested_generic_trailing_comma: `Vec<Map<K, V>>,` parses", async () => {
+    const { stdout, exitCode } = await runFixtureEntry("examples/pass/nested_generic_trailing_comma.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "blocks=1 a=1\n");
+  });
+
+  // Regression: pass C used to REPLACE the enum/union table entry rather than
+  // fill the pass-A shell in place. Files inside one module have no dependency
+  // order, so the sibling that sorts first resolved both types while they were
+  // still shells and kept holding them - the enum arrived with a null
+  // `underlying` ("cannot switch over enum Color") and the union with empty
+  // fields ("union Bits has no field asInt"). The fixture's filenames are load
+  // bearing: aa_uses.yoop must sort before zz_decls.yoop.
+  it("dir_module_shell_order: enum/union shells are filled in place, not replaced", async () => {
+    const { stdout, exitCode } = await runFixtureEntry("examples/pass/dir_module_shell_order/main.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "green\nbits=42\n");
+  });
 });
 
 // Phase 13.C: @derive(display) - pre-typecheck expansion generates the
-// Display.to_string method from a struct's field annotations. Fixtures run
+// Display.toString method from a struct's field annotations. Fixtures run
 // through runFixtureEntry (compileEntry): the expansion needs the driver's
 // module graph with std/core/traits.yoop autoloaded.
 describe("e2e: Phase 13.C @derive(display)", { concurrency: E2E_CONCURRENCY }, () => {
-  it("derive_display_basic: derived to_string via explicit printf format arg", async () => {
+  it("derive_display_basic: derived toString via explicit printf format arg", async () => {
     // Also the regression test for the printf lowering fix: a template
     // literal VALUE arg after an explicit format literal fills the %s
     // instead of contributing a doubled directive.
@@ -1478,10 +1947,10 @@ describe("e2e: Phase 13.C @derive(display)", { concurrency: E2E_CONCURRENCY }, (
     assert.equal(stdout, "Pt { x: 10, y: 20 }\n");
   });
 
-  it("derive_manual_to_string: deriving over a manual to_string is an error", () => {
+  it("derive_manual_to_string: deriving over a manual toString is an error", () => {
     const { errors } = typecheckFixtureEntry("examples/fail/derive_manual_to_string.yoop");
     assert.ok(
-      errors.some((e) => /already defines "to_string"/.test(e.message)),
+      errors.some((e) => /already defines "toString"/.test(e.message)),
       `expected the derive clash error, got: ${errors.map((e) => e.message).join(" | ")}`,
     );
   });
@@ -1518,10 +1987,10 @@ describe("e2e: Phase 13.C @derive(display)", { concurrency: E2E_CONCURRENCY }, (
     );
   });
 
-  it("derive_variant_manual_to_string: deriving over a manual variant to_string is an error", () => {
+  it("derive_variant_manual_to_string: deriving over a manual variant toString is an error", () => {
     const { errors } = typecheckFixtureEntry("examples/fail/derive_variant_manual_to_string.yoop");
     assert.ok(
-      errors.some((e) => /variant "Shape" already defines "to_string"/.test(e.message)),
+      errors.some((e) => /variant "Shape" already defines "toString"/.test(e.message)),
       `expected the variant clash error, got: ${errors.map((e) => e.message).join(" | ")}`,
     );
   });
@@ -1619,7 +2088,7 @@ describe("e2e: Phase 13.C @derive(display)", { concurrency: E2E_CONCURRENCY }, (
   });
 
   // Phase 9.B: bool[] arrays
-  it("bool_array: bool[] literal/index/heap_alloc/Vec paths all work", async () => {
+  it("bool_array: bool[] literal/index/heapAlloc/Vec paths all work", async () => {
     const { stdout, exitCode } = await runFixtureEntry(
       "examples/pass/bool_array.yoop",
     );
@@ -2054,10 +2523,10 @@ describe("e2e: Phase 13.C @derive(display)", { concurrency: E2E_CONCURRENCY }, (
 
   // Phase 8.H: byte / string / Vec primitives and the parse_request_line
   // smoke test. Each fixture imports from std/core/* and exercises the new
-  // intrinsics (array_slice / string_as_bytes / string_from_bytes_unchecked)
+  // intrinsics (arraySlice / stringAsBytes / stringFromBytesUnchecked)
   // through their pure-yoop wrappers.
 
-  it("bytes_smoke: bytes_eq + bytes_index_of + bytes_starts_with + bytes_slice", async () => {
+  it("bytes_smoke: bytesEq + bytesIndexOf + bytesStartsWith + bytesSlice", async () => {
     const { stdout, exitCode } = await runFixtureEntry("examples/pass/bytes_smoke/main.yoop");
     assert.equal(exitCode, 0);
     assert.equal(
@@ -2066,7 +2535,7 @@ describe("e2e: Phase 13.C @derive(display)", { concurrency: E2E_CONCURRENCY }, (
     );
   });
 
-  it("strings_smoke: string_eq + starts_with + index_of + slice + concat + concat_all + from_bytes round-trip", async () => {
+  it("strings_smoke: stringEq + starts_with + index_of + slice + concat + concat_all + from_bytes round-trip", async () => {
     const { stdout, exitCode } = await runFixtureEntry("examples/pass/strings_smoke/main.yoop");
     assert.equal(exitCode, 0);
     assert.equal(
@@ -2084,8 +2553,8 @@ describe("e2e: Phase 13.C @derive(display)", { concurrency: E2E_CONCURRENCY }, (
     );
   });
 
-  // Yoopstore-papercut #4: bulk Vec fill (vec_from_array + vec_extend_from).
-  it("vec_extend_from: vec_from_array copies and vec_extend_from grows once", async () => {
+  // Yoopstore-papercut #4: bulk Vec fill (vecFromArray + vecExtendFrom).
+  it("vecExtendFrom: vecFromArray copies and vecExtendFrom grows once", async () => {
     const { stdout, stderr, exitCode } = await runFixture("examples/pass/vec_extend_from.yoop", { trackHeap: true });
     assert.equal(exitCode, 0);
     assert.equal(
@@ -2098,7 +2567,7 @@ describe("e2e: Phase 13.C @derive(display)", { concurrency: E2E_CONCURRENCY }, (
   // Yoopstore-papercut #5: owned Bytes buffer with copy / seal constructors.
   // trackHeap asserts the from_vec seal doesn't double-free or leak the
   // transferred buffer.
-  it("bytes_owned: bytes_from_array + bytes_from_vec seal + transfer-up dispose", async () => {
+  it("bytes_owned: bytesFromArray + bytesFromVec seal + transfer-up dispose", async () => {
     const { stdout, stderr, exitCode } = await runFixture("examples/pass/bytes_owned.yoop", { trackHeap: true });
     assert.equal(exitCode, 0);
     assert.equal(
@@ -2112,8 +2581,8 @@ describe("e2e: Phase 13.C @derive(display)", { concurrency: E2E_CONCURRENCY }, (
   // `string` cannot do - own its storage, grow, and be indexed by codepoint.
   // trackHeap is the point of the fixture as much as stdout is: every Text
   // here is reclaimed by the injected `disposable` cleanup, where a raw
-  // string built by string_concat is both leaked AND invisible to the
-  // counter (it mallocs directly rather than through ctx_alloc).
+  // string built by stringConcat is both leaked AND invisible to the
+  // counter (it mallocs directly rather than through ctxAlloc).
   it("text_basics: Text builds, grows, borrows, and walks codepoints", async () => {
     const { stdout, stderr, exitCode } = await runFixture("examples/pass/text_basics.yoop", { trackHeap: true });
     assert.equal(exitCode, 0);
@@ -2154,9 +2623,9 @@ describe("e2e: Phase 13.C @derive(display)", { concurrency: E2E_CONCURRENCY }, (
     );
   });
 
-  // Yoopstore-papercut #2 follow-ups: std/fs exists() / file_size() via a
+  // Yoopstore-papercut #2 follow-ups: std/fs exists() / fileSize() via a
   // stat runtime helper, plus real errno reasons in failure messages.
-  it("fs_metadata: exists/file_size report state and errno surfaces the real reason", async () => {
+  it("fs_metadata: exists/fileSize report state and errno surfaces the real reason", async () => {
     const { stdout, exitCode } = await runFixture("examples/pass/fs_metadata.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout.split("\n")[0], "before=0 after=1 size=5 missing=-1 werr.len=0");
@@ -2200,7 +2669,11 @@ describe("e2e: Phase 13.C @derive(display)", { concurrency: E2E_CONCURRENCY }, (
       "bad-method : 501 unsupported method \"BREW\"\n" +
       "bad-version: 505 unsupported HTTP version \"HTTP/9.9\"\n" +
       "bad-length : 400 Content-Length is not a number\n" +
-      "chunked    : 501 chunked transfer encoding is not supported\n" +
+      // A chunked head parses now; the framing is the read loop's job, and
+      // examples/pass/http_chunked covers the decoding itself.
+      "chunked    : accepted chunked=1\n" +
+      // Both framings at once is the request-smuggling shape, still refused.
+      "both-framings: 400 message has both Transfer-Encoding and Content-Length\n" +
       "encoded-sep: 400 decoding request path \"/a%2Fb\": encoded path separator is not allowed\n",
     );
   });
@@ -2224,17 +2697,22 @@ describe("e2e: Phase 13.C @derive(display)", { concurrency: E2E_CONCURRENCY }, (
     // MODULE, so all seven of its source files mangle against one module id
     // derived from the directory. Same for the router assertions below.
     assert.match(ir, /define ptr @http_.*__serveConnection\(.*ptr %__ret\) presplitcoroutine/);
-    // The handler itself stays SYNCHRONOUS - it takes a buffered request
-    // and fills a response, so there is nothing for it to await. Async
-    // stops at the I/O boundary rather than coloring user handlers, and
-    // the absence of presplitcoroutine on this define is what proves it.
+    // The handler is ASYNC too now, and this assertion is the inverse of what
+    // it used to be. Async used to stop at the I/O boundary deliberately, to
+    // bound how far the colour spread - but `client.send` is async, so a
+    // synchronous handler could not call the HTTP client, which made a PROXY
+    // unwritable. See examples/pass/http_proxy.
+    //
+    // A handler that does no I/O (this one) pays one frame allocation and
+    // never suspends: an async function with no await runs straight through
+    // on its first step.
     const handlerDefine = ir
       .split("\n")
       .find((l) => l.startsWith("define") && l.includes("__HelloHandler__Handler__handle("));
     assert.ok(handlerDefine, "handler define not found");
     assert.ok(
-      !handlerDefine.includes("presplitcoroutine"),
-      `handler should stay synchronous, got: ${handlerDefine}`,
+      handlerDefine.includes("presplitcoroutine"),
+      `handler should carry the coroutine ABI, got: ${handlerDefine}`,
     );
     // The TCP layer reaches the multiplexer through the async arming path.
     assert.match(ir, /declare i32 @yoop_io_arm_readable/);
@@ -2266,7 +2744,7 @@ describe("e2e: Phase 13.C @derive(display)", { concurrency: E2E_CONCURRENCY }, (
   });
 
   // Phase 10.I: pure URL parser - no sockets.
-  it("uri_parse_smoke: parse_uri handles http/https/ipv6 + error cases", async () => {
+  it("uri_parse_smoke: parseUri handles http/https/ipv6 + error cases", async () => {
     const { stdout, exitCode } = await runFixtureEntry("examples/pass/uri_parse_smoke/main.yoop");
     assert.equal(exitCode, 0);
     assert.equal(
@@ -2275,9 +2753,9 @@ describe("e2e: Phase 13.C @derive(display)", { concurrency: E2E_CONCURRENCY }, (
       "with-port scheme=http host=example.com port=8080 target=/foo\n" +
       "https     scheme=https host=api.example.com port=443 target=/v1?x=1\n" +
       "ipv6      scheme=http host=::1 port=18080 target=/\n" +
-      "no-host   err=parse_uri: empty authority\n" +
-      "no-scheme err=parse_uri: missing \"://\"\n" +
-      "bad-port  err=parse_uri: trailing garbage in port\n",
+      "no-host   err=parseUri: empty authority\n" +
+      "no-scheme err=parseUri: missing \"://\"\n" +
+      "bad-port  err=parseUri: trailing garbage in port\n",
     );
   });
 
@@ -4091,7 +4569,7 @@ describe("e2e: fail fixtures fail at the right stage with the right message", { 
   // kind, and the conferred-passthrough rule that makes it usable.
   //
   // No trackHeap assertion here on purpose: a string's storage comes from a
-  // direct @malloc rather than through ctx_alloc, so the counter sees the
+  // direct @malloc rather than through ctxAlloc, so the counter sees the
   // frees and not the allocations. Routing that through the context is S4.
   it("owned_string.yoop: passthrough, plain-slot flow, and strFree", async () => {
     const { stdout, exitCode } = await runFixture("examples/pass/owned_string.yoop");
@@ -4162,6 +4640,19 @@ describe("e2e: fail fixtures fail at the right stage with the right message", { 
       /parameter 's' of 'str.strFree' requires kind 'owned'/.test(e.message),
     );
     assert.equal(sinkHits.length, 2, `expected both in-arm sinks rejected, got: ${msgs}`);
+  });
+
+  it("disposable_const_assign.yoop rejects both rebinding and field assignment on a bare `disposable`", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/disposable_const_assign.yoop");
+    const msgs = errors.map((e) => e.message).join(" | ");
+    assert.ok(
+      errors.some((e) => /cannot assign to field of const "b"/.test(e.message)),
+      `expected field-assign rejection, got: ${msgs}`,
+    );
+    assert.ok(
+      errors.some((e) => /cannot assign to const "b"/.test(e.message)),
+      `expected rebind rejection, got: ${msgs}`,
+    );
   });
 
   it("clearance_clearedby_on_conferred.yoop rejects clearedBy on a non-restrictive kind", () => {

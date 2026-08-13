@@ -1,0 +1,283 @@
+module source_graph;
+
+/*
+  Building the module graph: follow every import, depth first, leaves first.
+
+  The whole layer is one recursive function plus three pieces of bookkeeping:
+
+    modules  the finished modules, in the order they were completed. Because a
+             module is only appended AFTER its imports are, that order is a
+             topological sort - which is what lets typecheck run one pass over
+             the list instead of a fixpoint, and what makes a module's index its
+             ModuleId.
+    byPath   absolute path -> index, so a diamond (two modules importing the
+             same third) loads it once and both point at the same module.
+    onStack  the paths whose subtree is still loading. Meeting one again IS an
+             import cycle, and this is the only place that can see it.
+
+  A module is read, parsed and held as a LOCAL while its imports load, then
+  moved into `modules`. That ordering is why the id can be the final index: it
+  is not known until the recursion below this module has finished.
+*/
+
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { Map }, * as map from "std/collections/map.yoop";
+import { disposable, Disposable } from "std/core/kinds.yoop";
+import { Option, Result } from "std/core/types.yoop";
+import * as fs from "std/fs.yoop";
+import * as str from "std/core/strings.yoop";
+import { ASTNodeKind, childAt, nodeAt } from "../ast";
+
+// The DFS state. Not exported: `loadModuleGraph` is the only entry point, and
+// the whole thing lives for exactly one call.
+//
+// The two bookkeeping maps are SCAFFOLDING - they die with the call, while
+// `modules` is moved into the graph the caller keeps. They are owned here
+// anyway, because a `ref` field cannot be re-borrowed (`ref st.byPath` would be
+// a `ref ref Map`), so `loadModuleGraph` disposes them by hand instead.
+type Loader propagates<disposable> {
+  modules: Vec<Module>,
+  byPath: Map<string, usize>,
+  onStack: Map<string, bool>,
+  stdRoot: string,
+}
+
+// A loaded module's index in `Loader.modules`, or the error that stopped us.
+type LoadUnitResult = Result<usize, string>;
+
+// `stdRoot` is where `std/...` imports resolve. It is a PARAMETER rather than
+// something this layer discovers, so a caller that already knows its root (a
+// test pointing at a stub, and eventually the LSP) never touches the
+// filesystem probing in std_root.yoop. The driver discovers it and passes it.
+export function loadModuleGraph(entryPath: string, stdRoot: string): LoadGraphResult {
+  if (!fs.exists(entryPath)) {
+    return LoadGraphResult.Err { error: `entry file not found: ${entryPath}` };
+  }
+  const entryAbs = fs.normalizePath(entryPath);
+  if (entryAbs.len == 0) {
+    return LoadGraphResult.Err { error: `unable to identify a canonical path from ${entryPath}` };
+  }
+
+  // Annotated locals rather than inline construction: `V` is not inferable from
+  // `stringKeyOps()` alone and there is no turbofish. The struct COPIES them,
+  // which shares the storage - so `loader.byPath` is the one that gets disposed
+  // below and these two names go unused after this point.
+  let byPath: Map<string, usize> = map.mapNew(0, map.stringKeyOps());
+  let onStack: Map<string, bool> = map.mapNew(0, map.stringKeyOps());
+  let loader: Loader = {
+    modules: vec.vecNew(4),
+    byPath: byPath,
+    onStack: onStack,
+    stdRoot: stdRoot,
+  };
+
+  const loaded = loadUnit(ref loader, entryAbs, entryPath, true);
+  // The scaffolding goes now, on both paths. `modules` does not: on success it
+  // is MOVED into the graph (the one-owner discipline the rest of this module
+  // follows), and on failure the compile ends in the next breath - see
+  // main.yoop - so reclaiming the modules loaded so far would buy nothing.
+  Disposable.dispose(ref loader.byPath);
+  Disposable.dispose(ref loader.onStack);
+
+  switch (loaded) {
+    case Result.Err { error: e }: {
+      return LoadGraphResult.Err { error: e };
+    }
+    case Result.Ok { value: entryIndex }: {
+      // No std autoloads wired yet; an empty map keeps the ModuleGraph shape
+      // whole. Annotated because `V` is not inferable from stringKeyOps alone.
+      let autoLoads: Map<string, string> = map.mapNew(0, map.stringKeyOps());
+      return LoadGraphResult.Ok { value: {
+        modules: loader.modules,
+        entryIndex: entryIndex,
+        autoLoadModuleIds: autoLoads,
+      }};
+    }
+  }
+}
+
+// Load whatever MODULE owns `absPath`, plus everything it imports. Returns its
+// index.
+//
+// Keyed by the file path rather than by the module, because that is what an
+// import names. Every file of a directory module maps to the same index, which
+// is what makes `import "./ast/node.yoop"` and `import "./ast"` reach the same
+// module - and what lets the second importer of either be a lookup.
+function loadUnit(ref st: Loader, absPath: string, blamePath: string, isEntry: bool): LoadUnitResult {
+  switch (map.mapGet(ref st.byPath, absPath)) {
+    case Option.Some { value: known }: { return Result.Ok { value: known }; }
+    case Option.None: { }
+  }
+  if (map.mapContainsKey(ref st.onStack, absPath)) {
+    return Result.Err { error: `import cycle detected involving ${absPath}` };
+  }
+  map.mapInsert(ref st.onStack, absPath, true);
+
+  let mod: Module;
+  switch (loadOwningModule(absPath, blamePath, isEntry)) {
+    case LoadModuleResult.Err { error: e }: { return Result.Err { error: e }; }
+    case LoadModuleResult.Ok { value: m }: { mod = m; }
+  }
+
+  // Every file of the module goes on the stack, not just the one that was
+  // named: a cycle through a SIBLING is still a cycle, and it would otherwise
+  // only be caught after the sibling had been loaded a second time.
+  markFilesOnStack(ref st, ref mod, true);
+
+  const err = loadImportsOf(ref st, ref mod);
+  if (err.len > 0) {
+    return Result.Err { error: err };
+  }
+
+  markFilesOnStack(ref st, ref mod, false);
+  map.mapRemove(ref st.onStack, absPath);
+
+  const index = st.modules.len;
+  mod.id = moduleIdFor(moduleIdentityPath(ref mod, absPath), index);
+  // Every file of the module answers to the same index, so a later import of
+  // any of them - or of the directory - finds it.
+  let f: usize = 0;
+  while (f < mod.files.len) {
+    map.mapInsert(ref st.byPath, vec.vecGet(ref mod.files, f).absPath, index);
+    f += 1;
+  }
+  if (mod.dir.len > 0) {
+    map.mapInsert(ref st.byPath, mod.dir, index);
+  }
+  map.mapInsert(ref st.byPath, absPath, index);
+  vec.vecPush(ref st.modules, mod);
+  return Result.Ok { value: index };
+}
+
+// What the module's id is derived from: the DIRECTORY for a directory module,
+// since that is its identity, and the file otherwise.
+function moduleIdentityPath(ref mod: Module, absPath: string): string {
+  if (mod.dir.len > 0) {
+    return mod.dir;
+  }
+  return absPath;
+}
+
+function markFilesOnStack(ref st: Loader, ref mod: Module, on: bool): void {
+  let f: usize = 0;
+  while (f < mod.files.len) {
+    const path = vec.vecGet(ref mod.files, f).absPath;
+    if (on) {
+      map.mapInsert(ref st.onStack, path, true);
+    } else {
+      map.mapRemove(ref st.onStack, path);
+    }
+    f += 1;
+  }
+}
+
+// Resolve and load every import in every file of `mod`, recording an edge per
+// import decl. Returns "" on success.
+function loadImportsOf(ref st: Loader, ref mod: Module): string {
+  let f: usize = 0;
+  while (f < mod.files.len) {
+    const err = loadImportsOfFile(ref st, ref mod, f);
+    if (err.len > 0) {
+      return err;
+    }
+    f += 1;
+  }
+  return "";
+}
+
+function loadImportsOfFile(ref st: Loader, ref mod: Module, fileIndex: usize): string {
+  // The file is read back out of the Vec each time an edge is pushed, because
+  // `imports` has to be written to the entry IN the Vec and not to a copy.
+  const absPath = vec.vecGet(ref mod.files, fileIndex).absPath;
+  const programNode = nodeAt(ref mod.ast, vec.vecGet(ref mod.files, fileIndex).root);
+
+  let i: usize = 0;
+  while (i < programNode.childCount) {
+    const declId = childAt(ref mod.ast, programNode, i);
+    const decl = nodeAt(ref mod.ast, declId);
+    if (decl.kind != ASTNodeKind.IMPORT_DECL) {
+      break;   // imports-first: the parser guarantees the run is contiguous
+    }
+
+    const sourcePath = vec.vecGet(ref mod.ast.strings, decl.strId);
+    let targetAbs: string;
+    switch (resolveImportTarget(absPath, sourcePath, st.stdRoot)) {
+      case Result.Err { error: e }: { return e; }
+      case Result.Ok { value: abs }: { targetAbs = abs; }
+    }
+
+    // Importing your OWN module is not a dependency, it is a mistake with a
+    // confusing failure: the cycle check would catch it and report a cycle,
+    // which is not what happened.
+    const ownErr = refuseSelfImport(ref mod, absPath, sourcePath, targetAbs);
+    if (ownErr.len > 0) {
+      return ownErr;
+    }
+
+    switch (loadUnit(ref st, targetAbs, absPath, false)) {
+      case Result.Err { error: e }: { return e; }
+      case Result.Ok { value: targetIndex }: {
+        let file = vec.vecGet(ref mod.files, fileIndex);
+        vec.vecPush(ref file.imports, {
+          nodeId: declId,
+          resolvedModuleIndex: targetIndex,
+          resolvedModuleId: vec.vecGet(ref st.modules, targetIndex).id,
+        });
+        vec.vecSet(ref mod.files, fileIndex, file);
+      }
+    }
+    i += 1;
+  }
+  return "";
+}
+
+// "" unless the import names the importer's own module.
+function refuseSelfImport(ref mod: Module, absPath: string, sourcePath: string, targetAbs: string): string {
+  if (mod.dir.len == 0) {
+    if (str.stringEq(targetAbs, absPath)) {
+      return `${absPath} imports itself ("${sourcePath}")`;
+    }
+    return "";
+  }
+  if (str.stringEq(targetAbs, mod.dir) || str.stringEq(fs.dirName(targetAbs), mod.dir)) {
+    return `${absPath} imports its own module ("${sourcePath}") - a module's source files already see each other, so drop the import`;
+  }
+  return "";
+}
+
+// One import path -> one absolute source file, with the forms the bootstrap
+// does not handle refused BY NAME. `resolveImportPath` in resolve.yoop is the
+// path arithmetic; this is the policy around it.
+function resolveImportTarget(
+  importerAbsPath: string,
+  sourcePath: string,
+  stdRoot: string
+): Result<string, string> {
+  if (str.stringStartsWith(sourcePath, "modules/")) {
+    return Result.Err {
+      error: `import "${sourcePath}" from ${importerAbsPath}: the modules/ import root is not supported by the bootstrap compiler yet`
+    };
+  }
+
+  // A std import that cannot resolve is usually a broken INSTALL rather than a
+  // typo, so it gets the message that says which root was searched. Checked
+  // before resolving so the answer does not depend on why the path failed.
+  if (str.stringStartsWith(sourcePath, "std/")) {
+    const problem = stdRootProblem(stdRoot);
+    if (problem.len > 0) {
+      return Result.Err { error: `import "${sourcePath}" from ${importerAbsPath}: ${problem}` };
+    }
+  }
+
+  const resolved = resolveImportPath(importerAbsPath, sourcePath, stdRoot)?;
+
+  // A path either names a `.yoop` file or a module DIRECTORY. Anything else is
+  // refused with the extension message rather than a bare "not found", which
+  // would point at the wrong problem.
+  if (!fs.hasYoopFileNameSuffix(sourcePath) && !fs.statPath(resolved).isDir) {
+    return Result.Err {
+      error: `import path "${sourcePath}" must end in .yoop, or name a module directory`
+    };
+  }
+  return Result.Ok { value: resolved };
+}

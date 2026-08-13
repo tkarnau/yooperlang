@@ -1,0 +1,175 @@
+module codegen;
+
+// The module-level `%struct.X = type { ... }` lines.
+//
+// Split from the walk in codegen.yoop because this is the one part of codegen
+// that reads the TYPE ARENA rather than the AST - it emits a definition per
+// declared struct, not per construct encountered.
+
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { Text }, * as text from "std/core/text.yoop";
+import { Map }, * as map from "std/collections/map.yoop";
+import { Option } from "std/core/types.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import { ASTNode, childAt, nodeAt } from "../ast";
+import { Module } from "../source_graph";
+import { Program, TypedModule, Type, TypeId, Field, VariantCase, Symbol, moduleIdOf, symbolAt,
+  typeAt, variantPayloadSize, isOpenInstance } from "../typecheck";
+
+// `%struct.Point = type { i32, i32 }` for every struct the program declared.
+//
+// Emitted in TypeId order, which is the order pass A registered the decls, so a
+// struct whose field is another struct sees that type defined first. Two structs
+// that referenced each other would need a pointer somewhere to be representable
+// at all, so the ordering constraint costs nothing real.
+//
+// Emitted for every declared struct rather than only the used ones - an unused
+// type definition is free, and tracking usage would be bookkeeping for nothing.
+function emitStructTypeDefs(ref e: Emitter, ref prog: Program): void {
+  let id: usize = 0;
+  while (id < prog.types.len) {
+    switch (typeAt(ref prog, id)) {
+      // A TEMPLATE is skipped: its members are TypeParams, which have no LLVM
+      // type and which nothing ever holds a value of. Only the INSTANCES
+      // substitution produced are real types, and they are in this same arena.
+      case Type.Struct { decl: d, fields: f, methods: mm, implementsTraits: it, generic: g }: {
+        if (d.populated && !isOpenInstance(ref prog, id)) {
+          emitStructTypeDef(ref e, ref prog, moduleIdOf(ref prog, d.module), d.name, ref f);
+        }
+      }
+      case Type.Variant { decl: d, cases: cs, methods: mm, implementsTraits: it, generic: g }: {
+        if (d.populated && !isOpenInstance(ref prog, id)) {
+          emitVariantTypeDefs(ref e, ref prog, id, moduleIdOf(ref prog, d.module), d.name, ref cs);
+        }
+      }
+      default: { }
+    }
+    id += 1;
+  }
+}
+
+// The variant itself, plus one payload struct per case that carries something:
+//
+//   %variant.m__Shape = type { i32, [16 x i8] }
+//   %variantc.m__Shape__Circle = type { i32 }
+//   %variantc.m__Shape__Rect = type { i32, i32 }
+//
+// The payload is a byte ARRAY rather than a union because LLVM has no union:
+// one blob big enough for the largest case, addressed as whichever case struct
+// the tag says it holds. A payload-less case contributes no struct at all -
+// there would be nothing in it.
+function emitVariantTypeDefs(
+  ref e: Emitter,
+  ref prog: Program,
+  variantType: TypeId,
+  moduleId: string,
+  name: string,
+  ref cases: Vec<VariantCase>
+): void {
+  text.push(ref e.globals, variantLlvmName(moduleId, name));
+  text.push(ref e.globals, " = type { ");
+  text.push(ref e.globals, VARIANT_TAG_TYPE);
+  text.push(ref e.globals, ", [");
+  text.pushUint(ref e.globals, uint64(variantPayloadSize(ref prog, variantType)));
+  text.push(ref e.globals, " x i8] }\n");
+
+  let i: usize = 0;
+  while (i < cases.len) {
+    let c = vec.vecGet(ref cases, i);
+    if (c.fields.len > 0) {
+      text.push(ref e.globals, variantCaseLlvmName(moduleId, name, c.name));
+      text.push(ref e.globals, " = type { ");
+      let f: usize = 0;
+      while (f < c.fields.len) {
+        if (f > 0) {
+          text.push(ref e.globals, ", ");
+        }
+        text.push(ref e.globals, llvmType(ref prog, vec.vecGet(ref c.fields, f).typeId));
+        f += 1;
+      }
+      text.push(ref e.globals, " }\n");
+    }
+    i += 1;
+  }
+}
+
+//   declare i32 @yoop_log_info(ptr)
+//
+// One line per extern, in the module-level globals. The name is NOT mangled:
+// an extern IS the linker's spelling, which is the whole point of declaring one.
+export function emitExternDeclares(
+  ref e: Emitter,
+  ref prog: Program,
+  ref tm: TypedModule,
+  m: Module,
+  blockNode: ASTNode
+): void {
+  let i: usize = 0;
+  while (i < blockNode.childCount) {
+    const externNode = nodeAt(ref m.ast, childAt(ref m.ast, blockNode, i));
+    text.push(ref e.globals, "declare ");
+    text.push(ref e.globals, externReturnType(ref prog, ref tm, externNode.name));
+    text.push(ref e.globals, " @");
+    text.push(ref e.globals, externNode.name);
+    text.push(ref e.globals, "(");
+    emitExternParams(ref e, ref prog, ref tm, externNode.name);
+    text.push(ref e.globals, ")\n");
+    i += 1;
+  }
+}
+
+function externReturnType(ref prog: Program, ref tm: TypedModule, name: string): string {
+  switch (externFuncType(ref prog, ref tm, name)) {
+    case Type.Func { params: p, ret: r, variadic: v }: { return llvmType(ref prog, r); }
+    default: { return "void"; }
+  }
+}
+
+function emitExternParams(ref e: Emitter, ref prog: Program, ref tm: TypedModule, name: string): void {
+  switch (externFuncType(ref prog, ref tm, name)) {
+    case Type.Func { params: p, ret: r, variadic: v }: {
+      let i: usize = 0;
+      while (i < p.len) {
+        if (i > 0) {
+          text.push(ref e.globals, ", ");
+        }
+        text.push(ref e.globals, llvmType(ref prog, vec.vecGet(ref p, i)));
+        i += 1;
+      }
+    }
+    default: { }
+  }
+}
+
+// The Func type pass C filled for an extern, by name.
+function externFuncType(ref prog: Program, ref tm: TypedModule, name: string): Type propagates<disposable> {
+  switch (map.mapGet(ref tm.names, name)) {
+    case Option.Some { value: symId }: {
+      switch (symbolAt(ref prog, symId)) {
+        case Symbol.Func { typeId: t }: { return typeAt(ref prog, t); }
+        default: { return Type.ErrorT; }
+      }
+    }
+    case Option.None: { return Type.ErrorT; }
+  }
+}
+
+function emitStructTypeDef(
+  ref e: Emitter,
+  ref prog: Program,
+  moduleId: string,
+  name: string,
+  ref fields: Vec<Field>
+): void {
+  text.push(ref e.globals, structLlvmName(moduleId, name));
+  text.push(ref e.globals, " = type { ");
+  let i: usize = 0;
+  while (i < fields.len) {
+    if (i > 0) {
+      text.push(ref e.globals, ", ");
+    }
+    text.push(ref e.globals, llvmType(ref prog, vec.vecGet(ref fields, i).typeId));
+    i += 1;
+  }
+  text.push(ref e.globals, " }\n");
+}

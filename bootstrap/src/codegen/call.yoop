@@ -1,0 +1,149 @@
+module codegen;
+
+// Call expressions.
+//
+// The ordering rule is the whole content of this file: every argument is
+// lowered BEFORE the call line is written, because an argument can emit its own
+// instructions and those have to land first. Holding the results as Operand
+// values is what makes that possible without building any text early.
+
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { Map }, * as map from "std/collections/map.yoop";
+import { Text }, * as text from "std/core/text.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import { ASTNode, NodeId, childAt, nodeAt } from "../ast";
+
+// Arguments are lowered FIRST - each may emit its own instructions, and those
+// have to land before the call. Their operands are held as values, so nothing
+// is formatted until emitCall runs.
+function emitCallExpr(ref cx: Cx, expr: ASTNode, exprId: NodeId, ref out: Operand): string {
+  // An intrinsic is not a call: the compiler IS its implementation, so it
+  // lowers to instructions. Checked first, because everything below this point
+  // is about finding a SYMBOL to call and an intrinsic has none.
+  if (isIntrinsicCall(ref cx, expr)) {
+    return emitIntrinsicCall(ref cx, expr, exprId, ref out);
+  }
+  // A cast is not a call - pass D typed it as the target primitive, and the
+  // lowering is one conversion instruction (or none). Only an UNQUALIFIED name
+  // can be one: `ns.usize(x)` reaches a member of `ns`, whatever it is named.
+  if (expr.childB == 0 && isPrimTypeName(expr.name)) {
+    return emitCast(ref cx, expr, exprId, ref out);
+  }
+
+  disposable args: Vec<CallArg> = vec.vecNew(4);
+  // The node ids run in parallel with the operands, because varargs promotion
+  // below needs each argument's TYPE, not just its lowered value.
+  disposable argIds: Vec<NodeId> = vec.vecNew(4);
+  if (expr.childA != 0) {
+    const list = nodeAt(cx.ast, expr.childA);
+    let i: usize = 0;
+    while (i < list.childCount) {
+      const argId = childAt(cx.ast, list, i);
+      let value: Operand = Operand.None;
+      const err = emitExpr(ref cx, argId, ref value);
+      if (err.len > 0) { return err; }
+      vec.vecPush(ref args, { ty: typeOf(ref cx, argId), value: value });
+      vec.vecPush(ref argIds, argId);
+      i += 1;
+    }
+  }
+
+  // printf is the one variadic callee we know about; emitCall owns what a
+  // variadic call site has to spell out. Unqualified only, for the same reason
+  // the cast check above is.
+  const isPrintf = expr.childB == 0 && text.equals(expr.name, "printf");
+  let retTy = typeOf(ref cx, exprId);
+  if (isPrintf) {
+    cx.e.usesPrintf = true;
+    retTy = printfReturnType();
+    const perr = promoteVarargs(ref cx, ref args, ref argIds);
+    if (perr.len > 0) {
+      return perr;
+    }
+  }
+
+  const isVoid = text.equals(retTy, "void");
+  let dest: usize = 0;
+  if (!isVoid) {
+    dest = freshTemp(cx.e);
+  }
+  // An INDIRECT call - `m.ops.hash(key)` - reads the function out of a field
+  // and calls through it. Pass D recorded which calls those are, because the
+  // shape is identical to `ns.fn()` in the AST and only name resolution can
+  // tell them apart.
+  if (map.mapContainsKey(ref cx.tm.indirectCalls, uint64(exprId))) {
+    let base: Operand = Operand.None;
+    const berr = emitExpr(ref cx, expr.childB, ref base);
+    if (berr.len > 0) {
+      return berr;
+    }
+    const fnPtr = freshTemp(cx.e);
+    emitExtractValue(
+      ref cx, fnPtr, typeOf(ref cx, expr.childB), base,
+      fieldPositionOf(ref cx, expr.childB, expr.name)
+    );
+    emitCallIndirect(ref cx, dest, retTy, fnPtr, ref args);
+    if (isVoid) {
+      out = Operand.None;
+    } else {
+      out = Operand.Temp { id: dest };
+    }
+    return "";
+  }
+
+  const callee = calleeSymbol(ref cx, expr, exprId);
+  emitCall(ref cx, dest, retTy, callee.home, callee.name, isPrintf, ref args);
+
+  if (isVoid) {
+    out = Operand.None;
+  } else {
+    out = Operand.Temp { id: dest };
+  }
+  return "";
+}
+
+// `usize(n)` - one integer conversion, or a pass-through when the widths agree.
+function emitCast(ref cx: Cx, expr: ASTNode, exprId: NodeId, ref out: Operand): string {
+  const list = nodeAt(cx.ast, expr.childA);
+  const argId = childAt(cx.ast, list, 0);
+
+  let value: Operand = Operand.None;
+  const err = emitExpr(ref cx, argId, ref value);
+  if (err.len > 0) {
+    return err;
+  }
+
+  const op = castOpFor(ref cx, argId, exprId);
+  if (op.len == 0) {
+    // Same width - nothing to emit, the operand IS the result. This is the
+    // common case for `usize(i)` where `i` is already 64-bit.
+    out = value;
+    return "";
+  }
+
+  const dest = freshTemp(cx.e);
+  emitIntCast(ref cx, dest, op, typeOf(ref cx, argId), value, typeOf(ref cx, exprId));
+  out = Operand.Temp { id: dest };
+  return "";
+}
+
+// Widen every argument past the format string to what C varargs expect.
+//
+// The first argument is the format string itself (already `ptr`), so promotion
+// starts at index 1. An argument that is already the promoted width passes
+// through untouched.
+function promoteVarargs(ref cx: Cx, ref args: Vec<CallArg>, ref argIds: Vec<NodeId>): string {
+  let i: usize = 1;
+  while (i < args.len) {
+    const arg = vec.vecGet(ref args, i);
+    const argId = vec.vecGet(ref argIds, i);
+    const promoted = promotedVarargTypeOf(ref cx, argId);
+    if (promoted.len > 0 && !text.equals(promoted, arg.ty)) {
+      const dest = freshTemp(cx.e);
+      emitIntCast(ref cx, dest, varargWidenOp(ref cx, argId), arg.ty, arg.value, promoted);
+      vec.vecSet(ref args, i, { ty: promoted, value: Operand.Temp { id: dest } });
+    }
+    i += 1;
+  }
+  return "";
+}

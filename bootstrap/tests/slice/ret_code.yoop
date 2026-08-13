@@ -1,0 +1,5 @@
+// The smallest thing that proves every layer exists: a return value that
+// reaches the process exit code.
+function main(): int {
+  return 42;
+}

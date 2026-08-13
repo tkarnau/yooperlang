@@ -1,0 +1,38 @@
+// plans/yooperdoom-takeaways.md 4.2: reading environment variables.
+//
+// `std/env.yoop` had argCount/argAt and nothing else, so a program that wanted
+// configuration took flags instead. The three exports here are the whole
+// surface, and the interesting one is the distinction `get` alone cannot make:
+// an unset variable and one explicitly set to "" both read as "", so `has` is
+// what tells them apart and `getOr` only substitutes for the unset case.
+
+import * as env from "std/env.yoop";
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+function yesNo(b: bool): string {
+    if (b) { return "yes"; }
+    return "no";
+}
+
+function main(): int32 {
+    // Set to a value.
+    printf(`set=[${env.get("YOOP_E2E_SET")}] has=${yesNo(env.has("YOOP_E2E_SET"))}\n`);
+
+    // Set, but to the empty string. Reads as "" and IS present.
+    printf(`empty=[${env.get("YOOP_E2E_EMPTY")}] has=${yesNo(env.has("YOOP_E2E_EMPTY"))}\n`);
+
+    // Never set. Also reads as "", and is NOT present - never null, so
+    // reading .len straight off it is safe.
+    let missing: string = env.get("YOOP_E2E_UNSET_VAR");
+    printf(`missing=[${missing}] has=${yesNo(env.has("YOOP_E2E_UNSET_VAR"))} len=${missing.len}\n`);
+
+    // getOr substitutes only for the unset one. An explicit "" is a value.
+    printf(`orSet=[${env.getOr("YOOP_E2E_SET", "fallback")}]\n`);
+    printf(`orEmpty=[${env.getOr("YOOP_E2E_EMPTY", "fallback")}]\n`);
+    printf(`orMissing=[${env.getOr("YOOP_E2E_UNSET_VAR", "fallback")}]\n`);
+
+    return 0;
+}

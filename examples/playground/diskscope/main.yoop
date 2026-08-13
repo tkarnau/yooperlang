@@ -78,10 +78,10 @@ function relayout(arena: mem.Arena, ref nodes: Vec<FsNode>, root: int32, node_co
   mem.arenaReset(arena);
   // Install `arena` as the current allocator for this block only - there is no
   // value to name, just an ambient state change, so `ephemeral` (a region kind)
-  // fits: `intr.ctx_alloc` below draws from the arena, and the allocator is
+  // fits: `intr.ctxAlloc` below draws from the arena, and the allocator is
   // popped at the closing `}` (even on the early return).
   ephemeral mem.allocatorScope(arena) {
-    let rects: Rect[] = intr.ctx_alloc(usize(node_count));
+    let rects: Rect[] = intr.ctxAlloc(usize(node_count));
     let i: int32 = 0;
     while (i < node_count) {
       rects[usize(i)] = { x: 0, y: 0, w: 0, h: 0, vis: false };
@@ -104,7 +104,7 @@ function draw(ref st: State, ref nodes: Vec<FsNode>, rects: Rect[], ref ds: Dept
     while (i < n) {
         let r: Rect = rects[usize(i)];
         if (r.vis) {
-            let node: FsNode = vec.vec_get(ref nodes, usize(i));
+            let node: FsNode = vec.vecGet(ref nodes, usize(i));
             if (node.kind == EntryKind.FILE) {
                 let c: uint32 = tm.tile_color(st.mode, ref ds, ref ks, node);
                 sdl.fill_rect(ref ren, r.x, r.y, r.w, r.h, c);
@@ -135,19 +135,19 @@ function draw(ref st: State, ref nodes: Vec<FsNode>, rects: Rect[], ref ds: Dept
 }
 
 function draw_header(ref st: State, ref nodes: Vec<FsNode>, ref ren: sdl.Ren, ref font: sdl.Font, ref th: Theme): void {
-    let root_node: FsNode = vec.vec_get(ref nodes, usize(st.root));
+    let root_node: FsNode = vec.vecGet(ref nodes, usize(st.root));
     let mode_name: string = "kind";
     if (st.mode == ColorMode.Depth) { mode_name = "depth"; }
-    let left: string = str.string_concat_all([
+    let left: string = str.stringConcatAll([
         root_node.name, "    ", fsw.human_size(root_node.size),
-        "    ", fmt.int_to_string(int64(nodes.len)), " entries    color: ", mode_name,
+        "    ", fmt.intToString(int64(nodes.len)), " entries    color: ", mode_name,
         "  [c] toggle  [esc] quit",
     ]);
     sdl.draw_text(ref ren, ref font, left, 8, 6, th.text);
 
     if (st.hover >= 0 && usize(st.hover) < nodes.len) {
-        let h: FsNode = vec.vec_get(ref nodes, usize(st.hover));
-        let info: string = str.string_concat_all([h.name, "   ", fsw.human_size(h.size)]);
+        let h: FsNode = vec.vecGet(ref nodes, usize(st.hover));
+        let info: string = str.stringConcatAll([h.name, "   ", fsw.human_size(h.size)]);
         sdl.draw_text(ref ren, ref font, info, st.win_w / 2 + 60, 6, th.hover_text);
     }
 }
@@ -160,7 +160,7 @@ function main(): int32 {
 
     // Scan the tree into the default (malloc) allocator: robust for a tree of
     // unknown size. `disposable` injects the buffer cleanup at program exit.
-    disposable nodes: Vec<FsNode> = vec.vec_new(usize(4096));
+    disposable nodes: Vec<FsNode> = vec.vecNew(usize(4096));
     let budget: int32 = MAX_NODES;
     let root: int32 = fsw.scan(ref nodes, root_path, root_path, 0, ref budget);
     if (root < 0) {
@@ -212,7 +212,7 @@ function main(): int32 {
 
     let rects: Rect[] = relayout(arena, ref nodes, root, node_count, 0, HEADER_H, st.win_w, st.win_h - HEADER_H);
 
-    let ebuf: uint8[] = intr.heap_alloc(usize(256));
+    let ebuf: uint8[] = intr.heapAlloc(usize(256));
     let running: bool = true;
     let dirty: bool = true;
     while (running) {

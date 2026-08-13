@@ -1883,11 +1883,74 @@ describe("parse: reserved keywords in name-only positions", () => {
     assert.equal(vc.fields[0].name, "type");
   });
 
-  it("user-defined function param still rejects keyword names", () => {
+  it("user-defined function param still rejects keyword names, and names the word", () => {
+    // Still rejected; the message is what changed. It used to read `expected
+    // rparen, got type`, which describes the parser's state rather than the
+    // mistake, and left the reader to notice that their parameter name is a
+    // keyword (yooperdoom-takeaways 2.2).
     assert.throws(
       () => parse("function f(type: int32): void { return; }"),
-      /expected rparen, got type/,
+      /"type" is a reserved word and cannot be used as a name/,
     );
+  });
+
+  it("names the reason for the three keywords that cannot be made contextual", () => {
+    for (const [word, reason] of [
+      ["in", /for x in xs/],
+      ["from", /import \.\.\. from/],
+      ["as", /import \* as ns/],
+    ]) {
+      assert.throws(
+        () => parse(`function f(${word}: int32): void { return; }`),
+        reason,
+        `expected the "${word}" diagnostic to say why it is reserved`,
+      );
+    }
+  });
+
+  // yooperdoom-takeaways 2.5 / 2.4b: two shapes Yoop does not have, where the
+  // old diagnostic described the parser's state instead of the rule.
+  it("a nested function declaration says to move it to module scope", () => {
+    assert.throws(
+      () => parse("function f(): void { function g(): void { return; } }"),
+      /functions cannot be declared inside another function body/,
+    );
+  });
+
+  it("a bare block says it is not a statement, instead of a struct-literal error", () => {
+    // Used to be `expected colon, got ident` pointing at `x`, because the
+    // brace fell through to expression parsing and was read as a struct
+    // literal the user was not writing.
+    assert.throws(
+      () => parse("function f(): void { { let x: int32 = 1; } }"),
+      /a bare "\{ \.\.\. \}" block is not a statement/,
+    );
+  });
+
+  it("a struct literal in expression position still parses", () => {
+    // The bare-block check must not touch a `{` that arrives through an
+    // initializer or an argument rather than at statement start.
+    const ast = parse("function f(): void { let p: P = { x: 1, y: 2 }; }");
+    const decl = ast.body[0].body.body[0];
+    assert.equal(decl.assignment.kind, ASTNodeKind.STRUCT_LITERAL);
+    assert.equal(decl.assignment.fields.length, 2);
+  });
+
+  // The other half of 2.2: these WERE reserved and are now contextual, so
+  // they work as ordinary parameter names.
+  it("accepts the demoted contextual keywords as parameter names", () => {
+    for (const word of [
+      "kind", "requires", "propagates", "binding", "parameter",
+      "field", "scope", "io", "layout", "align", "library", "contains",
+    ]) {
+      const ast = parse(`function f(${word}: int32): void { return; }`);
+      const decl = ast.body[0];
+      assert.equal(
+        decl.params[0].name,
+        word,
+        `expected "${word}" to be usable as a parameter name`,
+      );
+    }
   });
 });
 

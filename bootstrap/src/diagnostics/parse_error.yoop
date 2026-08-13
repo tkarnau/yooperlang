@@ -1,0 +1,68 @@
+module diagnostics;
+
+// The fail-fast half of the error channel. Lex and parse stop at the first
+// problem and return one of these; its Display impl renders the offending line
+// with a caret under the column, so a caller can print the error directly.
+//
+// It borrows the source bytes (`src`) rather than owning them: the module that
+// was being read outlives the error every time, and copying the whole file to
+// report one bad token would be absurd.
+
+import * as str from "std/core/strings.yoop";
+import * as bytes from "std/core/bytes.yoop";
+import { Result } from "std/core/types.yoop";
+import { Display } from "std/core/traits.yoop";
+
+export type ParsingError implements Display {
+  sourceLoc: SourceLocation,
+  isParseError: bool,
+  rawMessage: string,
+  src: ref uint8[],
+  err: string,
+  function toString(ref self): string {
+    let lowerBound: usize;
+    let upperBound: usize;
+    let relativePos: usize = 4;
+    if (self.sourceLoc.column >= 5) {
+      lowerBound = self.sourceLoc.pos - 5;
+    } else {
+      lowerBound = self.sourceLoc.pos - self.sourceLoc.column;
+      relativePos = self.sourceLoc.column;
+    }
+
+    const srcRef = self.src;
+    let maxOffSet: usize = 5;
+    if (srcRef.len <= 5) {
+      maxOffSet = srcRef.len;
+    }
+    if (self.sourceLoc.column < (srcRef.len - maxOffSet)) {
+      upperBound = self.sourceLoc.pos + maxOffSet;
+    } else {
+      upperBound = self.sourceLoc.pos;
+    }
+
+    let codestr: string = "";
+    const codestrRes = str.stringFromBytes(bytes.bytesSlice(srcRef, lowerBound, upperBound));
+    switch (codestrRes) {
+      case Result.Err { error: e }: {
+        codestr = e;
+      }
+      case Result.Ok { value: v}: {
+        codestr = v;
+      }
+    }
+    let caretStr = "^";
+    let caretStrCtr: usize = 0;
+    while (caretStrCtr < relativePos) {
+      caretStr = ` ${caretStr}`;
+      caretStrCtr += 1;
+    }
+    return `err: ${self.err},
+sourceLoc: ${self.sourceLoc},
+rawMessage: ${self.rawMessage},
+isParseError: ${self.isParseError}
+code:
+\t${codestr}
+\t${caretStr}`;
+  }
+}

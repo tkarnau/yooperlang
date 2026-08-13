@@ -93,14 +93,14 @@ function parse_argv(): Args {
     let i: int32 = 1;
     while (i < ac) {
         let arg: string = yoop_argv(i);
-        if (strings.string_eq(arg, "-o")) {
+        if (strings.stringEq(arg, "-o")) {
             i = i + 1;
             if (i >= ac) {
                 a.error = "missing value for -o";
                 return a;
             }
             a.output_path = yoop_argv(i);
-        } else if (strings.string_eq(arg, "--lib")) {
+        } else if (strings.stringEq(arg, "--lib")) {
             i = i + 1;
             if (i >= ac) {
                 a.error = "missing value for --lib";
@@ -108,21 +108,21 @@ function parse_argv(): Args {
             }
             a.library_name = yoop_argv(i);
             a.use_library = true;
-        } else if (strings.string_eq(arg, "--header")) {
+        } else if (strings.stringEq(arg, "--header")) {
             i = i + 1;
             if (i >= ac) {
                 a.error = "missing value for --header";
                 return a;
             }
             a.header_label = yoop_argv(i);
-        } else if (strings.string_eq(arg, "--prefix")) {
+        } else if (strings.stringEq(arg, "--prefix")) {
             i = i + 1;
             if (i >= ac) {
                 a.error = "missing value for --prefix";
                 return a;
             }
             a.prefix = yoop_argv(i);
-        } else if (strings.string_eq(arg, "--no-macros")) {
+        } else if (strings.stringEq(arg, "--no-macros")) {
             a.no_macros = true;
         } else if (a.header_path.len == 0) {
             a.header_path = arg;
@@ -146,8 +146,8 @@ function parse_argv(): Args {
 // ── shell out to clang -E ────────────────────────────────────────────────────
 
 function read_pipe_all(fp: unsafe_ptr<FILE>): Vec<uint8> propagates<disposable> {
-    let out: Vec<uint8> = vec.vec_new(16384);
-    let chunk: uint8[] = intr.heap_alloc(8192);
+    let out: Vec<uint8> = vec.vecNew(16384);
+    let chunk: uint8[] = intr.heapAlloc(8192);
     while (true) {
         let n: c_size_t = fread(chunk.ptr, 1, c_size_t(chunk.len), fp);
         if (n == 0) {
@@ -156,7 +156,7 @@ function read_pipe_all(fp: unsafe_ptr<FILE>): Vec<uint8> propagates<disposable> 
         let count: usize = usize(n);
         let i: usize = 0;
         while (i < count) {
-            vec.vec_push(ref out, chunk[i]);
+            vec.vecPush(ref out, chunk[i]);
             i = i + 1;
         }
     }
@@ -173,7 +173,7 @@ function run_clang_preprocess(header_path: string): Vec<uint8> propagates<dispos
     // segfaults -- a loud failure mode that we accept for v0 (the
     // language has no ref-T null check today; the language_showcase
     // example uses the same convention).
-    let cmd: string = strings.string_concat_all(["clang -E -P \"", header_path, "\""]);
+    let cmd: string = strings.stringConcatAll(["clang -E -P \"", header_path, "\""]);
     let fp: unsafe_ptr<FILE> = popen(cmd, "r");
     let buf: Vec<uint8> = read_pipe_all(fp);
     let _rc: int32 = pclose(fp);
@@ -186,7 +186,7 @@ function run_clang_preprocess(header_path: string): Vec<uint8> propagates<dispos
 // in the input becomes `const GL_VERTEX_SHADER: uint32 = 0x8B31;` in
 // the output.
 function run_clang_macros(header_path: string): Vec<uint8> propagates<disposable> {
-    let cmd: string = strings.string_concat_all(["clang -E -dM \"", header_path, "\""]);
+    let cmd: string = strings.stringConcatAll(["clang -E -dM \"", header_path, "\""]);
     let fp: unsafe_ptr<FILE> = popen(cmd, "r");
     let buf: Vec<uint8> = read_pipe_all(fp);
     let _rc: int32 = pclose(fp);
@@ -240,12 +240,12 @@ function is_ws(c: uint8): bool {
 }
 
 function bytes_to_string(buf: uint8[], start: usize, end: usize): string {
-    let slice: uint8[] = bytes.bytes_slice(buf, start, end);
-    return intr.string_from_bytes_unchecked(slice);
+    let slice: uint8[] = bytes.bytesSlice(buf, start, end);
+    return intr.stringFromBytesUnchecked(slice);
 }
 
 function tokenize(src: uint8[]): Vec<CTok> propagates<disposable> {
-    let out: Vec<CTok> = vec.vec_new(1024);
+    let out: Vec<CTok> = vec.vecNew(1024);
     let pos: usize = 0;
     while (pos < src.len) {
         let c: uint8 = src[pos];
@@ -285,7 +285,7 @@ function tokenize(src: uint8[]): Vec<CTok> propagates<disposable> {
             let s: usize = pos;
             while (pos < src.len && is_ident_cont(src[pos])) { pos = pos + 1; }
             let t: CTok = { tk: TK_IDENT, text: bytes_to_string(src, s, pos) };
-            vec.vec_push(ref out, t);
+            vec.vecPush(ref out, t);
         } else if (is_digit(c)) {
             let s: usize = pos;
             // Just consume digit/hex/float chars greedily; we don't need
@@ -299,35 +299,35 @@ function tokenize(src: uint8[]): Vec<CTok> propagates<disposable> {
                 }
             }
             let t: CTok = { tk: TK_NUMBER, text: bytes_to_string(src, s, pos) };
-            vec.vec_push(ref out, t);
+            vec.vecPush(ref out, t);
         } else if (c == 40) {
-            let t: CTok = { tk: TK_LPAREN, text: "(" }; vec.vec_push(ref out, t); pos = pos + 1;
+            let t: CTok = { tk: TK_LPAREN, text: "(" }; vec.vecPush(ref out, t); pos = pos + 1;
         } else if (c == 41) {
-            let t: CTok = { tk: TK_RPAREN, text: ")" }; vec.vec_push(ref out, t); pos = pos + 1;
+            let t: CTok = { tk: TK_RPAREN, text: ")" }; vec.vecPush(ref out, t); pos = pos + 1;
         } else if (c == 123) {
-            let t: CTok = { tk: TK_LBRACE, text: "{" }; vec.vec_push(ref out, t); pos = pos + 1;
+            let t: CTok = { tk: TK_LBRACE, text: "{" }; vec.vecPush(ref out, t); pos = pos + 1;
         } else if (c == 125) {
-            let t: CTok = { tk: TK_RBRACE, text: "}" }; vec.vec_push(ref out, t); pos = pos + 1;
+            let t: CTok = { tk: TK_RBRACE, text: "}" }; vec.vecPush(ref out, t); pos = pos + 1;
         } else if (c == 91) {
-            let t: CTok = { tk: TK_LBRACKET, text: "[" }; vec.vec_push(ref out, t); pos = pos + 1;
+            let t: CTok = { tk: TK_LBRACKET, text: "[" }; vec.vecPush(ref out, t); pos = pos + 1;
         } else if (c == 93) {
-            let t: CTok = { tk: TK_RBRACKET, text: "]" }; vec.vec_push(ref out, t); pos = pos + 1;
+            let t: CTok = { tk: TK_RBRACKET, text: "]" }; vec.vecPush(ref out, t); pos = pos + 1;
         } else if (c == 59) {
-            let t: CTok = { tk: TK_SEMI, text: ";" }; vec.vec_push(ref out, t); pos = pos + 1;
+            let t: CTok = { tk: TK_SEMI, text: ";" }; vec.vecPush(ref out, t); pos = pos + 1;
         } else if (c == 44) {
-            let t: CTok = { tk: TK_COMMA, text: "," }; vec.vec_push(ref out, t); pos = pos + 1;
+            let t: CTok = { tk: TK_COMMA, text: "," }; vec.vecPush(ref out, t); pos = pos + 1;
         } else if (c == 42) {
-            let t: CTok = { tk: TK_STAR, text: "*" }; vec.vec_push(ref out, t); pos = pos + 1;
+            let t: CTok = { tk: TK_STAR, text: "*" }; vec.vecPush(ref out, t); pos = pos + 1;
         } else if (c == 61) {
-            let t: CTok = { tk: TK_EQ, text: "=" }; vec.vec_push(ref out, t); pos = pos + 1;
+            let t: CTok = { tk: TK_EQ, text: "=" }; vec.vecPush(ref out, t); pos = pos + 1;
         } else if (c == 46 && pos + 2 < src.len && src[pos + 1] == 46 && src[pos + 2] == 46) {
-            let t: CTok = { tk: TK_ELLIPSIS, text: "..." }; vec.vec_push(ref out, t); pos = pos + 3;
+            let t: CTok = { tk: TK_ELLIPSIS, text: "..." }; vec.vecPush(ref out, t); pos = pos + 3;
         } else {
             // Single unknown punctuation; record verbatim, advance one byte.
             let s: usize = pos;
             pos = pos + 1;
             let t: CTok = { tk: TK_OTHER, text: bytes_to_string(src, s, pos) };
-            vec.vec_push(ref out, t);
+            vec.vecPush(ref out, t);
         }
     }
     return out;
@@ -340,23 +340,23 @@ function tokenize(src: uint8[]): Vec<CTok> propagates<disposable> {
 // `n_stars` is the number of `*` that followed.
 
 function is_type_qualifier(tok: string): bool {
-    return strings.string_eq(tok, "const")
-        || strings.string_eq(tok, "volatile")
-        || strings.string_eq(tok, "restrict")
-        || strings.string_eq(tok, "__restrict")
-        || strings.string_eq(tok, "_Atomic")
-        || strings.string_eq(tok, "register");
+    return strings.stringEq(tok, "const")
+        || strings.stringEq(tok, "volatile")
+        || strings.stringEq(tok, "restrict")
+        || strings.stringEq(tok, "__restrict")
+        || strings.stringEq(tok, "_Atomic")
+        || strings.stringEq(tok, "register");
 }
 
 function is_storage_class(tok: string): bool {
-    return strings.string_eq(tok, "extern")
-        || strings.string_eq(tok, "static")
-        || strings.string_eq(tok, "inline")
-        || strings.string_eq(tok, "__inline")
-        || strings.string_eq(tok, "__inline__")
-        || strings.string_eq(tok, "_Noreturn")
-        || strings.string_eq(tok, "auto")
-        || strings.string_eq(tok, "typedef");
+    return strings.stringEq(tok, "extern")
+        || strings.stringEq(tok, "static")
+        || strings.stringEq(tok, "inline")
+        || strings.stringEq(tok, "__inline")
+        || strings.stringEq(tok, "__inline__")
+        || strings.stringEq(tok, "_Noreturn")
+        || strings.stringEq(tok, "auto")
+        || strings.stringEq(tok, "typedef");
 }
 
 // Join word array into a space-separated key for table lookup.
@@ -364,7 +364,7 @@ function join_words(words: string[]): string {
     if (words.len == 0) { return ""; }
     if (words.len == 1) { return words[0]; }
     let parts_n: usize = words.len * 2 - 1;
-    let parts: string[] = intr.heap_alloc(parts_n);
+    let parts: string[] = intr.heapAlloc(parts_n);
     let i: usize = 0;
     let j: usize = 0;
     while (i < words.len) {
@@ -376,28 +376,28 @@ function join_words(words: string[]): string {
         }
         i = i + 1;
     }
-    return strings.string_concat_all(parts);
+    return strings.stringConcatAll(parts);
 }
 
 // Filter out qualifiers + redundant `signed` so the type-word key is
 // normalized. e.g. ["const", "unsigned", "int"] -> ["unsigned", "int"].
 function strip_qualifiers(words: string[]): string[] {
-    let disposable kept: Vec<string> = vec.vec_new(words.len);
+    let disposable kept: Vec<string> = vec.vecNew(words.len);
     let i: usize = 0;
     while (i < words.len) {
         let w: string = words[i];
-        let drop: bool = is_type_qualifier(w) || strings.string_eq(w, "signed") || strings.string_eq(w, "struct") || strings.string_eq(w, "union") || strings.string_eq(w, "enum");
+        let drop: bool = is_type_qualifier(w) || strings.stringEq(w, "signed") || strings.stringEq(w, "struct") || strings.stringEq(w, "union") || strings.stringEq(w, "enum");
         if (!drop) {
-            vec.vec_push(ref kept, w);
+            vec.vecPush(ref kept, w);
         }
         i = i + 1;
     }
     // Copy into a heap-allocated array so the result survives kept's
-    // dispose at function exit (vec_as_array returns a borrowing view).
-    let out: string[] = intr.heap_alloc(kept.len);
+    // dispose at function exit (vecAsArray returns a borrowing view).
+    let out: string[] = intr.heapAlloc(kept.len);
     let j: usize = 0;
     while (j < kept.len) {
-        out[j] = vec.vec_get(ref kept, j);
+        out[j] = vec.vecGet(ref kept, j);
         j = j + 1;
     }
     return out;
@@ -408,40 +408,40 @@ function strip_qualifiers(words: string[]): string[] {
 // passing the C name through verbatim).
 function c_primitive_to_yoop(words: string[]): string {
     let key: string = join_words(words);
-    if (strings.string_eq(key, "void"))                    { return "void"; }
-    if (strings.string_eq(key, "char"))                    { return "int8"; }
-    if (strings.string_eq(key, "unsigned char"))           { return "uint8"; }
-    if (strings.string_eq(key, "short"))                   { return "int16"; }
-    if (strings.string_eq(key, "short int"))               { return "int16"; }
-    if (strings.string_eq(key, "unsigned short"))          { return "uint16"; }
-    if (strings.string_eq(key, "unsigned short int"))      { return "uint16"; }
-    if (strings.string_eq(key, "int"))                     { return "int32"; }
-    if (strings.string_eq(key, "unsigned"))                { return "uint32"; }
-    if (strings.string_eq(key, "unsigned int"))            { return "uint32"; }
-    if (strings.string_eq(key, "long"))                    { return "int64"; }
-    if (strings.string_eq(key, "long int"))                { return "int64"; }
-    if (strings.string_eq(key, "unsigned long"))           { return "uint64"; }
-    if (strings.string_eq(key, "unsigned long int"))       { return "uint64"; }
-    if (strings.string_eq(key, "long long"))               { return "int64"; }
-    if (strings.string_eq(key, "long long int"))           { return "int64"; }
-    if (strings.string_eq(key, "unsigned long long"))      { return "uint64"; }
-    if (strings.string_eq(key, "unsigned long long int"))  { return "uint64"; }
-    if (strings.string_eq(key, "float"))                   { return "float32"; }
-    if (strings.string_eq(key, "double"))                  { return "float64"; }
-    if (strings.string_eq(key, "long double"))             { return "float64"; }
-    if (strings.string_eq(key, "_Bool"))                   { return "bool"; }
-    if (strings.string_eq(key, "bool"))                    { return "bool"; }
-    if (strings.string_eq(key, "size_t"))                  { return "usize"; }
-    if (strings.string_eq(key, "ssize_t"))                 { return "c_ssize_t"; }
-    if (strings.string_eq(key, "ptrdiff_t"))               { return "c_ssize_t"; }
-    if (strings.string_eq(key, "int8_t"))                  { return "int8"; }
-    if (strings.string_eq(key, "int16_t"))                 { return "int16"; }
-    if (strings.string_eq(key, "int32_t"))                 { return "int32"; }
-    if (strings.string_eq(key, "int64_t"))                 { return "int64"; }
-    if (strings.string_eq(key, "uint8_t"))                 { return "uint8"; }
-    if (strings.string_eq(key, "uint16_t"))                { return "uint16"; }
-    if (strings.string_eq(key, "uint32_t"))                { return "uint32"; }
-    if (strings.string_eq(key, "uint64_t"))                { return "uint64"; }
+    if (strings.stringEq(key, "void"))                    { return "void"; }
+    if (strings.stringEq(key, "char"))                    { return "int8"; }
+    if (strings.stringEq(key, "unsigned char"))           { return "uint8"; }
+    if (strings.stringEq(key, "short"))                   { return "int16"; }
+    if (strings.stringEq(key, "short int"))               { return "int16"; }
+    if (strings.stringEq(key, "unsigned short"))          { return "uint16"; }
+    if (strings.stringEq(key, "unsigned short int"))      { return "uint16"; }
+    if (strings.stringEq(key, "int"))                     { return "int32"; }
+    if (strings.stringEq(key, "unsigned"))                { return "uint32"; }
+    if (strings.stringEq(key, "unsigned int"))            { return "uint32"; }
+    if (strings.stringEq(key, "long"))                    { return "int64"; }
+    if (strings.stringEq(key, "long int"))                { return "int64"; }
+    if (strings.stringEq(key, "unsigned long"))           { return "uint64"; }
+    if (strings.stringEq(key, "unsigned long int"))       { return "uint64"; }
+    if (strings.stringEq(key, "long long"))               { return "int64"; }
+    if (strings.stringEq(key, "long long int"))           { return "int64"; }
+    if (strings.stringEq(key, "unsigned long long"))      { return "uint64"; }
+    if (strings.stringEq(key, "unsigned long long int"))  { return "uint64"; }
+    if (strings.stringEq(key, "float"))                   { return "float32"; }
+    if (strings.stringEq(key, "double"))                  { return "float64"; }
+    if (strings.stringEq(key, "long double"))             { return "float64"; }
+    if (strings.stringEq(key, "_Bool"))                   { return "bool"; }
+    if (strings.stringEq(key, "bool"))                    { return "bool"; }
+    if (strings.stringEq(key, "size_t"))                  { return "usize"; }
+    if (strings.stringEq(key, "ssize_t"))                 { return "c_ssize_t"; }
+    if (strings.stringEq(key, "ptrdiff_t"))               { return "c_ssize_t"; }
+    if (strings.stringEq(key, "int8_t"))                  { return "int8"; }
+    if (strings.stringEq(key, "int16_t"))                 { return "int16"; }
+    if (strings.stringEq(key, "int32_t"))                 { return "int32"; }
+    if (strings.stringEq(key, "int64_t"))                 { return "int64"; }
+    if (strings.stringEq(key, "uint8_t"))                 { return "uint8"; }
+    if (strings.stringEq(key, "uint16_t"))                { return "uint16"; }
+    if (strings.stringEq(key, "uint32_t"))                { return "uint32"; }
+    if (strings.stringEq(key, "uint64_t"))                { return "uint64"; }
     return "";
 }
 
@@ -457,7 +457,7 @@ function render_yoop_type(words: string[], n_stars: int32): string {
     // char* special case -> string
     if (n_stars == 1) {
         let key: string = join_words(stripped);
-        if (strings.string_eq(key, "char")) {
+        if (strings.stringEq(key, "char")) {
             return "string";
         }
     }
@@ -476,14 +476,14 @@ function render_yoop_type(words: string[], n_stars: int32): string {
         return base;
     }
     // void* -> unsafe_ptr<uint8>
-    if (strings.string_eq(base, "void")) {
+    if (strings.stringEq(base, "void")) {
         base = "uint8";
     }
 
     let s: int32 = 0;
     let inner: string = base;
     while (s < n_stars) {
-        inner = strings.string_concat_all(["unsafe_ptr<", inner, ">"]);
+        inner = strings.stringConcatAll(["unsafe_ptr<", inner, ">"]);
         s = s + 1;
     }
     return inner;
@@ -498,7 +498,7 @@ function render_yoop_type(words: string[], n_stars: int32): string {
 type DeclSlice { start: usize, end: usize }   // [start, end) indices into toks
 
 function collect_top_level_decls(toks: CTok[]): Vec<DeclSlice> propagates<disposable> {
-    let out: Vec<DeclSlice> = vec.vec_new(64);
+    let out: Vec<DeclSlice> = vec.vecNew(64);
     let i: usize = 0;
     let chunk_start: usize = 0;
     while (i < toks.len) {
@@ -506,7 +506,7 @@ function collect_top_level_decls(toks: CTok[]): Vec<DeclSlice> propagates<dispos
         if (k == TK_SEMI) {
             if (i > chunk_start) {
                 let s: DeclSlice = { start: chunk_start, end: i };
-                vec.vec_push(ref out, s);
+                vec.vecPush(ref out, s);
             }
             chunk_start = i + 1;
         } else if (k == TK_LBRACE) {
@@ -536,7 +536,7 @@ function collect_top_level_decls(toks: CTok[]): Vec<DeclSlice> propagates<dispos
 // ── parse one declaration as a function prototype ────────────────────────────
 
 // Parallel arrays for params (rather than `ParamOut[]`) -- the per-element
-// struct shape made heap_alloc'd buffers behave oddly when reused across
+// struct shape made heapAlloc'd buffers behave oddly when reused across
 // declarations, and parallel string[]s flatten that out.
 type ParsedFn {
     name:        string,
@@ -582,18 +582,18 @@ function find_param_paren(toks: CTok[], start: usize, end: usize): usize {
 // Copy a Vec<string> into a fresh heap-allocated string[] so the result
 // survives the Vec's auto-cleanup at the caller's scope exit.
 function vec_to_string_array(ref v: Vec<string>): string[] {
-    let out: string[] = intr.heap_alloc(v.len);
+    let out: string[] = intr.heapAlloc(v.len);
     let i: usize = 0;
     while (i < v.len) {
-        out[i] = vec.vec_get(ref v, i);
+        out[i] = vec.vecGet(ref v, i);
         i = i + 1;
     }
     return out;
 }
 
 function parse_params(toks: CTok[], inner_start: usize, inner_end: usize): ParsedFn {
-    let disposable pnames_v: Vec<string> = vec.vec_new(8);
-    let disposable ptypes_v: Vec<string> = vec.vec_new(8);
+    let disposable pnames_v: Vec<string> = vec.vecNew(8);
+    let disposable ptypes_v: Vec<string> = vec.vecNew(8);
     let variadic: bool = false;
 
     // Empty () means "unspecified args" in C, but in modern code is fine
@@ -606,7 +606,7 @@ function parse_params(toks: CTok[], inner_start: usize, inner_end: usize): Parse
     }
     // Special case: (void)
     if (inner_end - inner_start == 1) {
-        if (toks[inner_start].tk == TK_IDENT && strings.string_eq(toks[inner_start].text, "void")) {
+        if (toks[inner_start].tk == TK_IDENT && strings.stringEq(toks[inner_start].text, "void")) {
             let n: string[] = vec_to_string_array(ref pnames_v);
             let t: string[] = vec_to_string_array(ref ptypes_v);
             let r1: ParsedFn = { name: "", ret_type: "", param_names: n, param_types: t, variadic: false, ok: true, skip_reason: "" };
@@ -646,7 +646,7 @@ function parse_params(toks: CTok[], inner_start: usize, inner_end: usize): Parse
                         return not_a_function("function-pointer or nested-paren param not supported in v0");
                     }
                     // Split into base-type words + star count + optional name + optional [..]
-                    let disposable words_v: Vec<string> = vec.vec_new(4);
+                    let disposable words_v: Vec<string> = vec.vecNew(4);
                     let n_stars: int32 = 0;
                     let name_tok: string = "";
                     let saw_lbracket: bool = false;
@@ -654,7 +654,7 @@ function parse_params(toks: CTok[], inner_start: usize, inner_end: usize): Parse
                     while (j2 < i) {
                         let kk: int32 = toks[j2].tk;
                         if (kk == TK_IDENT) {
-                            vec.vec_push(ref words_v, toks[j2].text);
+                            vec.vecPush(ref words_v, toks[j2].text);
                         } else if (kk == TK_STAR) {
                             n_stars = n_stars + 1;
                         } else if (kk == TK_LBRACKET) {
@@ -679,19 +679,19 @@ function parse_params(toks: CTok[], inner_start: usize, inner_end: usize): Parse
                     // If the last word isn't a known type word, take it as
                     // the param name. Copy out of the disposable Vec into a
                     // fresh heap array so the slice survives words_v dispose.
-                    let words_arr: string[] = intr.heap_alloc(words_v.len);
+                    let words_arr: string[] = intr.heapAlloc(words_v.len);
                     let wi: usize = 0;
                     while (wi < words_v.len) {
-                        words_arr[wi] = vec.vec_get(ref words_v, wi);
+                        words_arr[wi] = vec.vecGet(ref words_v, wi);
                         wi = wi + 1;
                     }
                     let final_words: string[] = words_arr;
                     if (words_arr.len >= 2) {
                         let last: string = words_arr[words_arr.len - 1];
-                        let last_is_typeword: bool = is_type_qualifier(last) || strings.string_eq(last, "void") || strings.string_eq(last, "int") || strings.string_eq(last, "char") || strings.string_eq(last, "short") || strings.string_eq(last, "long") || strings.string_eq(last, "float") || strings.string_eq(last, "double") || strings.string_eq(last, "signed") || strings.string_eq(last, "unsigned") || strings.string_eq(last, "_Bool") || strings.string_eq(last, "bool") || strings.string_eq(last, "struct") || strings.string_eq(last, "union") || strings.string_eq(last, "enum");
+                        let last_is_typeword: bool = is_type_qualifier(last) || strings.stringEq(last, "void") || strings.stringEq(last, "int") || strings.stringEq(last, "char") || strings.stringEq(last, "short") || strings.stringEq(last, "long") || strings.stringEq(last, "float") || strings.stringEq(last, "double") || strings.stringEq(last, "signed") || strings.stringEq(last, "unsigned") || strings.stringEq(last, "_Bool") || strings.stringEq(last, "bool") || strings.stringEq(last, "struct") || strings.stringEq(last, "union") || strings.stringEq(last, "enum");
                         if (!last_is_typeword) {
                             name_tok = last;
-                            let nw: string[] = intr.heap_alloc(words_arr.len - 1);
+                            let nw: string[] = intr.heapAlloc(words_arr.len - 1);
                             let ix: usize = 0;
                             while (ix < words_arr.len - 1) {
                                 nw[ix] = words_arr[ix];
@@ -704,10 +704,10 @@ function parse_params(toks: CTok[], inner_start: usize, inner_end: usize): Parse
                     if (name_tok.len == 0) {
                         // Fabricate a param name so the emitted yoop extern
                         // decl always has named params (v0 plays it safe).
-                        name_tok = strings.string_concat_all(["arg", format.uint_to_string(uint64(pnames_v.len))]);
+                        name_tok = strings.stringConcatAll(["arg", format.uintToString(uint64(pnames_v.len))]);
                     }
-                    vec.vec_push(ref pnames_v, name_tok);
-                    vec.vec_push(ref ptypes_v, yt);
+                    vec.vecPush(ref pnames_v, name_tok);
+                    vec.vecPush(ref ptypes_v, yt);
                 }
             }
             seg_start = i + 1;
@@ -795,12 +795,12 @@ function parse_function_decl(toks: CTok[], start: usize, end: usize): ParsedFn {
     }
 
     // Return type: words [cur..last_ident_idx), with star counts.
-    let disposable words_v: Vec<string> = vec.vec_new(4);
+    let disposable words_v: Vec<string> = vec.vecNew(4);
     let n_stars: int32 = 0;
     let p: usize = cur;
     while (p < last_ident_idx) {
         if (toks[p].tk == TK_IDENT) {
-            vec.vec_push(ref words_v, toks[p].text);
+            vec.vecPush(ref words_v, toks[p].text);
         } else if (toks[p].tk == TK_STAR) {
             n_stars = n_stars + 1;
         }
@@ -809,10 +809,10 @@ function parse_function_decl(toks: CTok[], start: usize, end: usize): ParsedFn {
     }
     // Copy out so the view passed to render_yoop_type doesn't dangle
     // when words_v is auto-disposed.
-    let words_arr: string[] = intr.heap_alloc(words_v.len);
+    let words_arr: string[] = intr.heapAlloc(words_v.len);
     let wi: usize = 0;
     while (wi < words_v.len) {
-        words_arr[wi] = vec.vec_get(ref words_v, wi);
+        words_arr[wi] = vec.vecGet(ref words_v, wi);
         wi = wi + 1;
     }
     let ret_yoop: string = render_yoop_type(words_arr, n_stars);
@@ -871,7 +871,7 @@ function is_hex_char(c: uint8): bool {
 // almost never do. (`_Bool` etc. are reserved keywords, not API names.)
 function macro_name_keeps(name: string): bool {
     if (name.len < 1) { return false; }
-    let bs: uint8[] = intr.string_as_bytes(name);
+    let bs: uint8[] = intr.stringAsBytes(name);
     if (bs[0] == 95) {       // '_'
         if (bs.len >= 2 && bs[1] == 95) { return false; }    // __FOO
         if (bs.len >= 2 && bs[1] >= 65 && bs[1] <= 90) {
@@ -884,7 +884,7 @@ function macro_name_keeps(name: string): bool {
 // Strip C integer suffixes (U, L, UL, LU, ULL, LLU, in any case mix).
 // Returns the cleaned numeric core.
 function strip_int_suffix(s: string): string {
-    let bs: uint8[] = intr.string_as_bytes(s);
+    let bs: uint8[] = intr.stringAsBytes(s);
     let end: usize = bs.len;
     while (end > 0) {
         let c: uint8 = bs[end - 1];
@@ -892,8 +892,8 @@ function strip_int_suffix(s: string): string {
         if (!is_suf) { break; }
         end = end - 1;
     }
-    let view: uint8[] = bytes.bytes_slice(bs, 0, end);
-    return intr.string_from_bytes_unchecked(view);
+    let view: uint8[] = bytes.bytesSlice(bs, 0, end);
+    return intr.stringFromBytesUnchecked(view);
 }
 
 // Try to parse `value_str` as a numeric literal we can emit. Returns
@@ -904,7 +904,7 @@ function classify_numeric(value_str: string): NumericClass {
     if (value_str.len == 0) {
         return { yoop_type: "", value_clean: "" };
     }
-    let bs: uint8[] = intr.string_as_bytes(value_str);
+    let bs: uint8[] = intr.stringAsBytes(value_str);
     // Optional leading `-` (for decimal negatives).
     let neg: bool = bs[0] == 45;
     let start: usize = 0;
@@ -922,7 +922,7 @@ function classify_numeric(value_str: string): NumericClass {
     if (is_hex) {
         // After 0x, every char must be hex (until the suffix).
         let view_no_suf: string = strip_int_suffix(value_str);
-        let bsv: uint8[] = intr.string_as_bytes(view_no_suf);
+        let bsv: uint8[] = intr.stringAsBytes(view_no_suf);
         let i: usize = start + 2;
         if (i >= bsv.len) { return { yoop_type: "", value_clean: "" }; }
         let digit_count: usize = 0;
@@ -945,7 +945,7 @@ function classify_numeric(value_str: string): NumericClass {
 
     // Decimal: every remaining char must be a digit (after suffix strip).
     let dec_no_suf: string = strip_int_suffix(value_str);
-    let bsd: uint8[] = intr.string_as_bytes(dec_no_suf);
+    let bsd: uint8[] = intr.stringAsBytes(dec_no_suf);
     let j: usize = start;
     if (j >= bsd.len) { return { yoop_type: "", value_clean: "" }; }
     while (j < bsd.len) {
@@ -970,8 +970,8 @@ function classify_numeric(value_str: string): NumericClass {
 //     deterministic enough to scan without a real lexer
 function parse_macro_line(line: uint8[]): MacroConst {
     let empty: MacroConst = { name: "", yoop_type: "", value: "" };
-    let prefix: uint8[] = intr.string_as_bytes("#define ");
-    if (!bytes.bytes_starts_with(line, prefix)) {
+    let prefix: uint8[] = intr.stringAsBytes("#define ");
+    if (!bytes.bytesStartsWith(line, prefix)) {
         return empty;
     }
     let pos: usize = prefix.len;
@@ -984,8 +984,8 @@ function parse_macro_line(line: uint8[]): MacroConst {
         pos = pos + 1;
     }
     if (pos == name_start) { return empty; }
-    let name_bytes: uint8[] = bytes.bytes_slice(line, name_start, pos);
-    let name: string = intr.string_from_bytes_unchecked(name_bytes);
+    let name_bytes: uint8[] = bytes.bytesSlice(line, name_start, pos);
+    let name: string = intr.stringFromBytesUnchecked(name_bytes);
     // Function-like? `(` immediately after name.
     if (pos < line.len && line[pos] == 40) {     // '('
         return empty;
@@ -993,8 +993,8 @@ function parse_macro_line(line: uint8[]): MacroConst {
     // Skip exactly one space.
     if (pos < line.len && line[pos] == 32) { pos = pos + 1; }
     // VALUE runs to EOL.
-    let val_bytes: uint8[] = bytes.bytes_slice(line, pos, line.len);
-    let value: string = intr.string_from_bytes_unchecked(val_bytes);
+    let val_bytes: uint8[] = bytes.bytesSlice(line, pos, line.len);
+    let value: string = intr.stringFromBytesUnchecked(val_bytes);
     let cls: NumericClass = classify_numeric(value);
     if (cls.yoop_type.len == 0) {
         return empty;
@@ -1008,7 +1008,7 @@ function parse_macro_line(line: uint8[]): MacroConst {
 }
 
 function scan_macros(src: uint8[], prefix: string): Vec<MacroConst> propagates<disposable> {
-    let out: Vec<MacroConst> = vec.vec_new(64);
+    let out: Vec<MacroConst> = vec.vecNew(64);
     let pos: usize = 0;
     while (pos < src.len) {
         // Find end-of-line.
@@ -1016,13 +1016,13 @@ function scan_macros(src: uint8[], prefix: string): Vec<MacroConst> propagates<d
         while (line_end < src.len && src[line_end] != 10) {
             line_end = line_end + 1;
         }
-        let line: uint8[] = bytes.bytes_slice(src, pos, line_end);
+        let line: uint8[] = bytes.bytesSlice(src, pos, line_end);
         let m: MacroConst = parse_macro_line(line);
         if (m.yoop_type.len > 0) {
             if (macro_name_keeps(m.name)) {
-                let keep: bool = prefix.len == 0 || strings.string_starts_with(m.name, prefix);
+                let keep: bool = prefix.len == 0 || strings.stringStartsWith(m.name, prefix);
                 if (keep) {
-                    vec.vec_push(ref out, m);
+                    vec.vecPush(ref out, m);
                 }
             }
         }
@@ -1036,48 +1036,48 @@ function scan_macros(src: uint8[], prefix: string): Vec<MacroConst> propagates<d
 function render_function(f: ParsedFn): string {
     let n_params: usize = f.param_names.len;
     // Build "name: type, name: type, ..., ..."
-    let disposable parts: Vec<string> = vec.vec_new(n_params * 4 + 8);
-    vec.vec_push(ref parts, "    function ");
-    vec.vec_push(ref parts, f.name);
-    vec.vec_push(ref parts, "(");
+    let disposable parts: Vec<string> = vec.vecNew(n_params * 4 + 8);
+    vec.vecPush(ref parts, "    function ");
+    vec.vecPush(ref parts, f.name);
+    vec.vecPush(ref parts, "(");
     let i: usize = 0;
     while (i < n_params) {
         if (i > 0) {
-            vec.vec_push(ref parts, ", ");
+            vec.vecPush(ref parts, ", ");
         }
-        vec.vec_push(ref parts, f.param_names[i]);
-        vec.vec_push(ref parts, ": ");
-        vec.vec_push(ref parts, f.param_types[i]);
+        vec.vecPush(ref parts, f.param_names[i]);
+        vec.vecPush(ref parts, ": ");
+        vec.vecPush(ref parts, f.param_types[i]);
         i = i + 1;
     }
     if (f.variadic) {
         if (n_params > 0) {
-            vec.vec_push(ref parts, ", ");
+            vec.vecPush(ref parts, ", ");
         }
-        vec.vec_push(ref parts, "...");
+        vec.vecPush(ref parts, "...");
     }
-    vec.vec_push(ref parts, "): ");
-    vec.vec_push(ref parts, f.ret_type);
-    vec.vec_push(ref parts, ";\n");
-    return strings.string_concat_all(vec.vec_as_array(ref parts));
+    vec.vecPush(ref parts, "): ");
+    vec.vecPush(ref parts, f.ret_type);
+    vec.vecPush(ref parts, ";\n");
+    return strings.stringConcatAll(vec.vecAsArray(ref parts));
 }
 
 function emit_output(out_path: string, header: string, fns: ParsedFn[], skipped: int32, macros: MacroConst[], args: Args): void {
-    let disposable parts: Vec<string> = vec.vec_new(fns.len * 6 + macros.len * 6 + 16);
+    let disposable parts: Vec<string> = vec.vecNew(fns.len * 6 + macros.len * 6 + 16);
 
-    vec.vec_push(ref parts, "// Generated by yoopbinder from ");
-    vec.vec_push(ref parts, header);
-    vec.vec_push(ref parts, "\n");
-    vec.vec_push(ref parts, "// ");
-    vec.vec_push(ref parts, format.int_to_string(int64(fns.len)));
-    vec.vec_push(ref parts, " function(s), ");
-    vec.vec_push(ref parts, format.int_to_string(int64(macros.len)));
-    vec.vec_push(ref parts, " constant(s) emitted, ");
-    vec.vec_push(ref parts, format.int_to_string(int64(skipped)));
-    vec.vec_push(ref parts, " declaration(s) skipped.\n");
-    vec.vec_push(ref parts, "//\n");
-    vec.vec_push(ref parts, "// Unknown identifiers (struct tags, typedefs we did not\n");
-    vec.vec_push(ref parts, "// resolve, etc.) pass through verbatim -- adjust by hand.\n\n");
+    vec.vecPush(ref parts, "// Generated by yoopbinder from ");
+    vec.vecPush(ref parts, header);
+    vec.vecPush(ref parts, "\n");
+    vec.vecPush(ref parts, "// ");
+    vec.vecPush(ref parts, format.intToString(int64(fns.len)));
+    vec.vecPush(ref parts, " function(s), ");
+    vec.vecPush(ref parts, format.intToString(int64(macros.len)));
+    vec.vecPush(ref parts, " constant(s) emitted, ");
+    vec.vecPush(ref parts, format.intToString(int64(skipped)));
+    vec.vecPush(ref parts, " declaration(s) skipped.\n");
+    vec.vecPush(ref parts, "//\n");
+    vec.vecPush(ref parts, "// Unknown identifiers (struct tags, typedefs we did not\n");
+    vec.vecPush(ref parts, "// resolve, etc.) pass through verbatim -- adjust by hand.\n\n");
 
     // Constants come first so they can be referenced from the extern
     // block's function signatures (e.g. `function f(flags: uint32)` where
@@ -1085,39 +1085,39 @@ function emit_output(out_path: string, header: string, fns: ParsedFn[], skipped:
     let mi: usize = 0;
     while (mi < macros.len) {
         let m: MacroConst = macros[mi];
-        vec.vec_push(ref parts, "const ");
-        vec.vec_push(ref parts, m.name);
-        vec.vec_push(ref parts, ": ");
-        vec.vec_push(ref parts, m.yoop_type);
-        vec.vec_push(ref parts, " = ");
-        vec.vec_push(ref parts, m.value);
-        vec.vec_push(ref parts, ";\n");
+        vec.vecPush(ref parts, "const ");
+        vec.vecPush(ref parts, m.name);
+        vec.vecPush(ref parts, ": ");
+        vec.vecPush(ref parts, m.yoop_type);
+        vec.vecPush(ref parts, " = ");
+        vec.vecPush(ref parts, m.value);
+        vec.vecPush(ref parts, ";\n");
         mi = mi + 1;
     }
     if (macros.len > 0) {
-        vec.vec_push(ref parts, "\n");
+        vec.vecPush(ref parts, "\n");
     }
 
     if (args.use_library) {
-        vec.vec_push(ref parts, "extern \"C\" from library \"");
-        vec.vec_push(ref parts, args.library_name);
-        vec.vec_push(ref parts, "\" {\n");
+        vec.vecPush(ref parts, "extern \"C\" from library \"");
+        vec.vecPush(ref parts, args.library_name);
+        vec.vecPush(ref parts, "\" {\n");
     } else {
-        vec.vec_push(ref parts, "extern \"C\" from \"");
-        vec.vec_push(ref parts, args.header_label);
-        vec.vec_push(ref parts, "\" {\n");
+        vec.vecPush(ref parts, "extern \"C\" from \"");
+        vec.vecPush(ref parts, args.header_label);
+        vec.vecPush(ref parts, "\" {\n");
     }
 
     let i: usize = 0;
     while (i < fns.len) {
         let line: string = render_function(fns[i]);
-        vec.vec_push(ref parts, line);
+        vec.vecPush(ref parts, line);
         i = i + 1;
     }
 
-    vec.vec_push(ref parts, "}\n");
-    let content: string = strings.string_concat_all(vec.vec_as_array(ref parts));
-    let content_bytes: uint8[] = intr.string_as_bytes(content);
+    vec.vecPush(ref parts, "}\n");
+    let content: string = strings.stringConcatAll(vec.vecAsArray(ref parts));
+    let content_bytes: uint8[] = intr.stringAsBytes(content);
 
     if (out_path.len == 0) {
         // stdout -- template-literal printf so the yoop fat-pointer
@@ -1147,55 +1147,55 @@ function main(): int32 {
 
     printf(`yoopbinder: preprocessing ${args.header_path}\n`);
     let disposable pre: Vec<uint8> = run_clang_preprocess(args.header_path);
-    let pre_arr: uint8[] = vec.vec_as_array(ref pre);
+    let pre_arr: uint8[] = vec.vecAsArray(ref pre);
     if (pre_arr.len == 0) {
         printf("yoopbinder: empty preprocessor output -- header missing or clang error?\n");
         return 1;
     }
 
     let disposable toks_v: Vec<CTok> = tokenize(pre_arr);
-    let toks: CTok[] = vec.vec_as_array(ref toks_v);
+    let toks: CTok[] = vec.vecAsArray(ref toks_v);
     printf(`yoopbinder: ${int64(toks.len)} tokens\n`);
 
     let disposable slices_v: Vec<DeclSlice> = collect_top_level_decls(toks);
-    let slices: DeclSlice[] = vec.vec_as_array(ref slices_v);
+    let slices: DeclSlice[] = vec.vecAsArray(ref slices_v);
     printf(`yoopbinder: ${int64(slices.len)} top-level declarations\n`);
 
-    let disposable fns_v: Vec<ParsedFn> = vec.vec_new(64);
+    let disposable fns_v: Vec<ParsedFn> = vec.vecNew(64);
     let skipped: int32 = 0;
     let i: usize = 0;
     while (i < slices.len) {
         let s: DeclSlice = slices[i];
         let f: ParsedFn = parse_function_decl(toks, s.start, s.end);
         if (f.ok && f.name.len > 0 && f.ret_type.len > 0) {
-            vec.vec_push(ref fns_v, f);
+            vec.vecPush(ref fns_v, f);
         } else {
             skipped = skipped + 1;
         }
         i = i + 1;
     }
 
-    let fns: ParsedFn[] = vec.vec_as_array(ref fns_v);
+    let fns: ParsedFn[] = vec.vecAsArray(ref fns_v);
 
     // Second pass: macro extraction via `clang -E -dM`. Skipped if the
     // user passed `--no-macros` (useful when noise from system headers
     // would drown the signal and they only want function decls).
-    let disposable macros_v: Vec<MacroConst> = vec.vec_new(64);
+    let disposable macros_v: Vec<MacroConst> = vec.vecNew(64);
     if (!args.no_macros) {
         let disposable mac_src: Vec<uint8> = run_clang_macros(args.header_path);
-        let mac_arr: uint8[] = vec.vec_as_array(ref mac_src);
+        let mac_arr: uint8[] = vec.vecAsArray(ref mac_src);
         let scanned: Vec<MacroConst> = scan_macros(mac_arr, args.prefix);
         // Transfer scanned -> macros_v so a single disposable owns it.
-        let scanned_view: MacroConst[] = vec.vec_as_array(ref scanned);
+        let scanned_view: MacroConst[] = vec.vecAsArray(ref scanned);
         let mj: usize = 0;
         while (mj < scanned_view.len) {
-            vec.vec_push(ref macros_v, scanned_view[mj]);
+            vec.vecPush(ref macros_v, scanned_view[mj]);
             mj = mj + 1;
         }
         Disposable.dispose(ref scanned);
         printf(`yoopbinder: ${int64(macros_v.len)} numeric macro(s) kept\n`);
     }
-    let macros: MacroConst[] = vec.vec_as_array(ref macros_v);
+    let macros: MacroConst[] = vec.vecAsArray(ref macros_v);
 
     emit_output(args.output_path, args.header_path, fns, skipped, macros, args);
     return 0;

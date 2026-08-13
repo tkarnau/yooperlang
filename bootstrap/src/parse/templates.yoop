@@ -1,0 +1,152 @@
+module parse;
+
+/*
+  Template literals - `` `line ${n}: ${msg}` ``.
+
+  The lexer hands the whole thing over as ONE token, backticks included, and
+  makes no attempt to look inside. Splitting it is this file's job, and the
+  result is a TEMPLATE_LITERAL whose child run alternates STRING_PART and
+  EXPR_PART in source order:
+
+    `a${x}b`   ->   STRING_PART "a", EXPR_PART x, STRING_PART "b"
+    `${x}`     ->   EXPR_PART x
+    `plain`    ->   STRING_PART "plain"
+
+  The interesting decision is how an interpolation's END is found. There is no
+  brace matching here, because brace matching is exactly the thing that gets
+  `${f(Point { x: 1 })}` and `${str.stringEq(s, "}")}` wrong. Instead the
+  parser REPOSITIONS into the same source buffer at the byte after `${` and
+  parses an ordinary expression - the expression parser already knows where an
+  expression ends, so where it stops IS the closing brace. Nothing is re-lexed
+  into a scratch buffer, and every source location inside an interpolation is a
+  real offset in the real file, so a diagnostic points at the actual column.
+
+  Repositioning is safe because ParserState's whole cursor is `pos` plus the
+  one-token lookahead in `currentLex`: setting `pos` and priming with one
+  `advance` puts it anywhere. What it must NOT do is lex PAST the closing brace,
+  since the bytes after it are template text and not code - so the brace is
+  peeked and never consumed, and the parser is repositioned again for whatever
+  comes next.
+*/
+
+import { Result, Option } from "std/core/types.yoop";
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import { ASTNode, ASTNodeKind, NodeId, createASTNode } from "../ast";
+import { TokenTags, posToSourceLocation } from "../lex";
+import { ParsingError } from "../diagnostics";
+
+// The two bytes that open an interpolation.
+const INTERP_DOLLAR: uint8 = '$';
+const INTERP_OPEN: uint8 = '{';
+
+// The node is handed back UNPUSHED, like every other case in the expression
+// parser's prefix switch, so a template literal takes postfix (`` `x`.len ``)
+// through the same loop as anything else.
+export function parseTemplateLiteral(ref ps: ParserState): Result<ASTNode, ParsingError> {
+  const tok = SelfLexing.peek(ref ps);
+  let node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.TEMPLATE_LITERAL);
+
+  // Read through a local: `ps.src` is a `ref uint8[]`, and indexing a borrow
+  // directly is not supported. strings.yoop does the same.
+  const src = ps.src;
+
+  const inner: usize = tok.start + 1;                        // past the opening backtick
+  const close: usize = tok.start + usize(tok.length) - 1;    // the closing one
+
+  disposable ids: Vec<NodeId> = vec.vecNew(4);
+  let runStart: usize = inner;
+  let i: usize = inner;
+  while (i < close) {
+    // An escape covers the byte after it, which is what keeps `\${x}` a
+    // literal dollar-brace rather than an interpolation. The bytes are not
+    // decoded here - that happens per part, below - so this only has to know
+    // how WIDE an escape is.
+    if (src[i] == '\\') {
+      i += 2;
+      continue;
+    }
+    if (!opensInterpolation(ref ps, i, close)) {
+      i += 1;
+      continue;
+    }
+
+    if (i > runStart) {
+      vec.vecPush(ref ids, stringPart(ref ps, runStart, i)?);
+    }
+    const part = parseInterpolation(ref ps, i + 2)?;
+    vec.vecPush(ref ids, part.id);
+    i = part.end;
+    runStart = i;
+  }
+
+  // The trailing literal run. `` `${x}` `` has none, and emits no empty part -
+  // an empty STRING_PART would cost a concat operand that contributes nothing.
+  if (close > runStart) {
+    vec.vecPush(ref ids, stringPart(ref ps, runStart, close)?);
+  }
+
+  // Put the cursor back at the byte after the closing backtick and prime. Until
+  // this runs the parser is parked mid-template, wherever the last
+  // interpolation left it.
+  ps.pos = tok.start + usize(tok.length);
+  SelfLexing.advance(ref ps)?;
+
+  const start: usize = ps.ast.childIds.len;
+  vec.vecExtendFrom(ref ps.ast.childIds, vec.vecAsArray(ref ids));
+  node.childStart = start;
+  node.childCount = ids.len;
+  return Result.Ok { value: node };
+}
+
+function opensInterpolation(ref ps: ParserState, i: usize, close: usize): bool {
+  const src = ps.src;
+  return src[i] == INTERP_DOLLAR && i + 1 < close && src[i + 1] == INTERP_OPEN;
+}
+
+// One literal run, decoded. Its own node rather than an accumulated buffer,
+// because codegen wants each run as a separate global.
+function stringPart(ref ps: ParserState, start: usize, end: usize): Result<NodeId, ParsingError> {
+  let node = createASTNode(
+    ASTNodeKind.STRING_PART,
+    posToSourceLocation(ps.src, start, end - start)
+  );
+  node.strId = internString(ref ps, decodeStringRange(ref ps, start, end)?);
+  return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
+}
+
+// An EXPR_PART plus where its closing brace ended, so the scan above can pick
+// the literal run back up.
+type Interpolation {
+  id: NodeId,
+  end: usize,
+}
+
+// One `${expr}`. `at` is the byte after the `${`.
+function parseInterpolation(ref ps: ParserState, at: usize): Result<Interpolation, ParsingError> {
+  let node = createASTNode(
+    ASTNodeKind.EXPR_PART,
+    posToSourceLocation(ps.src, at, 1)
+  );
+
+  ps.pos = at;
+  SelfLexing.advance(ref ps)?;              // prime on the expression's first token
+  node.childA = parseExpression(ref ps, 0)?;
+
+  // Peeked, never consumed. Consuming it would lex one token of raw template
+  // text as code, and an unterminated one would be reported as a lex error in
+  // the middle of a string.
+  const closing = SelfLexing.peek(ref ps);
+  if (closing.tag != TokenTags.RCURLY) {
+    return Result.Err { error: SelfLexing.createParsingError(
+      ref ps,
+      "an interpolation must be a single expression closed by `}`",
+      peekLengthUsize(ref ps),
+    )};
+  }
+
+  return Result.Ok { value: {
+    id: SelfLexing.pushNode(ref ps, node),
+    end: closing.start + 1,
+  }};
+}

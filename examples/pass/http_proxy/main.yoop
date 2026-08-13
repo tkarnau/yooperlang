@@ -1,0 +1,206 @@
+// A reverse proxy: the program that could not be written before.
+//
+// `Handler.handle` used to be synchronous while `client.send` was async, so a
+// handler could not call the HTTP client. That one mismatch ruled out every
+// sidecar, gateway, and load balancer there is - a proxy is a handler whose
+// body is a client call. Making `handle` async is what this fixture proves.
+//
+// Three parties, all in one process:
+//
+//   origin   an ordinary std/http server that answers /hello and /echo
+//   proxy    a std/http server whose handler FORWARDS to the origin over the
+//            std/http client, then copies the reply back out
+//   client   a std/http client that only ever talks to the proxy
+//
+// The assertion is that the client sees the origin's answers - body, status,
+// and a header the origin set - without ever having connected to it.
+//
+// plans/yooperdoom-takeaways.md 3.2.
+
+import { disposable, Disposable } from "../../../std/core/kinds.yoop";
+import { Result, Option } from "../../../std/core/types.yoop";
+
+import * as intr from "std/core/intrinsics.yoop";
+import * as bytes from "std/core/bytes.yoop";
+import * as tcp, { ListenResult } from "std/net";
+import * as http, { Handler, HandleOutcome, Dispatcher } from "std/http";
+import * as types, { Request, Response, HttpError, HttpMethod } from "std/http";
+import * as client, { Client, ClientRequest, ClientResponse } from "std/http";
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+extern "C" from "yoop_runtime" {
+    function yoop_sleep_ms(ms: uint64): int32;
+    function yoop_stdout_linebuf(): void;
+}
+
+let originPort: int32 = 0;
+let proxyPort: int32 = 0;
+
+// ----- the origin ---------------------------------------------------------
+
+// Does no I/O of its own, so it declares `async` and never awaits. That is the
+// whole cost of the colour change for a handler like this: one frame
+// allocation, no suspend.
+type OriginHandler implements Handler {
+    async handle(ref self, ref req: Request, ref resp: Response): HandleOutcome {
+        if (types.methodEq(req.method, HttpMethod.Post)) {
+            types.setHeader(ref resp, "X-Served-By", "origin");
+            types.respondText(ref resp, types.ok(), `origin-echo:${types.bodyText(ref req)}`);
+            return HandleOutcome.Ok;
+        }
+        types.setHeader(ref resp, "X-Served-By", "origin");
+        types.respondText(ref resp, types.ok(), "origin-hello");
+        return HandleOutcome.Ok;
+    }
+}
+
+task originTask(): int32 {
+    let disposable lr: ListenResult = tcp.tcpListen("127.0.0.1", 0, 32);
+    if (lr.error.len > 0) {
+        printf(`origin bind err: ${lr.error}\n`);
+        return 1;
+    }
+    originPort = lr.listener.boundPort;
+    let h: OriginHandler = { };
+    let d: Dispatcher = Dispatcher.from(ref h);
+    // Two requests: the proxy forwards one GET and one POST.
+    switch (await http.serveDefault(ref lr.listener, ref d, 2)) {
+        case Result.Ok { value: _n }: { }
+        case Result.Err { error: e }: { printf(`origin err=${e}\n`); }
+    }
+    return 0;
+}
+
+// ----- the proxy ----------------------------------------------------------
+
+// The handler that needed `handle` to be async: its body is a client call.
+//
+// Deliberately minimal about what it forwards - method, path, and body - since
+// the point here is that the call is possible at all, not that this is a
+// production proxy. A real one would also forward the request headers, strip
+// the hop-by-hop ones (Connection, Transfer-Encoding, Upgrade), and add
+// X-Forwarded-For.
+type ProxyHandler implements Handler {
+    upstreamPort: int32,
+
+    async handle(ref self, ref req: Request, ref resp: Response): HandleOutcome {
+        let c: Client = client.clientNew();
+        let url: string = `http://127.0.0.1:${self.upstreamPort}${req.path}`;
+
+        disposable up: ClientRequest = client.request(req.method, url);
+        if (req.body.len > 0) {
+            client.setBody(ref up, "text/plain", req.body);
+        }
+
+        // THE LINE THIS FIXTURE EXISTS FOR. A synchronous handler cannot
+        // write it: `send` is async, and `await` is only legal inside an
+        // async function.
+        switch (await client.send(ref c, ref up)) {
+            case Result.Ok { value: r }: {
+                disposable got: ClientResponse = r;
+                // Copy the origin's answer back out, including a header, so
+                // the client can prove it came from the origin.
+                switch (client.responseHeader(ref got, "X-Served-By")) {
+                    case Option.Some { value: v }: {
+                        types.setHeader(ref resp, "X-Served-By", v);
+                    }
+                    case Option.None: { }
+                }
+                types.setHeader(ref resp, "X-Proxied", "yes");
+                // The body is COPIED out of the client response, because
+                // `got` is disposed at the end of this arm and the server
+                // writes `resp` after the handler returns. `bytesFromArray`
+                // is what makes that copy owned.
+                types.respondBytes(ref resp, got.status,
+                    headerOr(ref got, "Content-Type"),
+                    bytes.bytesFromArray(client.responseBytes(ref got)));
+                return HandleOutcome.Ok;
+            }
+            case Result.Err { error: e }: {
+                // An upstream failure is a 502, which is the whole reason a
+                // proxy is a distinct thing from a router.
+                return HandleOutcome.Err {
+                    error: types.httpError(types.status(502), `upstream: ${e}`),
+                };
+            }
+        }
+    }
+}
+
+task proxyTask(): int32 {
+    let disposable lr: ListenResult = tcp.tcpListen("127.0.0.1", 0, 32);
+    if (lr.error.len > 0) {
+        printf(`proxy bind err: ${lr.error}\n`);
+        return 1;
+    }
+    proxyPort = lr.listener.boundPort;
+    let h: ProxyHandler = { upstreamPort: originPort };
+    let d: Dispatcher = Dispatcher.from(ref h);
+    switch (await http.serveDefault(ref lr.listener, ref d, 2)) {
+        case Result.Ok { value: _n }: { }
+        case Result.Err { error: e }: { printf(`proxy err=${e}\n`); }
+    }
+    return 0;
+}
+
+// ----- the client ---------------------------------------------------------
+
+async report(ref c: Client, label: string, url: string, body: string): void {
+    disposable req: ClientRequest = client.request(HttpMethod.Get, url);
+    if (body.len > 0) {
+        disposable post: ClientRequest = client.request(HttpMethod.Post, url);
+        client.setTextBody(ref post, "text/plain", body);
+        switch (await client.send(ref c, ref post)) {
+            case Result.Ok { value: r }: {
+                disposable resp: ClientResponse = r;
+                printf(`${label} ${resp.status.code} ${client.responseText(ref resp)} via=${headerOr(ref resp, "X-Served-By")} proxied=${headerOr(ref resp, "X-Proxied")}\n`);
+            }
+            case Result.Err { error: e }: { printf(`${label} err ${e}\n`); }
+        }
+        return;
+    }
+    switch (await client.send(ref c, ref req)) {
+        case Result.Ok { value: r }: {
+            disposable resp: ClientResponse = r;
+            printf(`${label} ${resp.status.code} ${client.responseText(ref resp)} via=${headerOr(ref resp, "X-Served-By")} proxied=${headerOr(ref resp, "X-Proxied")}\n`);
+        }
+        case Result.Err { error: e }: { printf(`${label} err ${e}\n`); }
+    }
+}
+
+function headerOr(ref r: ClientResponse, name: string): string {
+    switch (client.responseHeader(ref r, name)) {
+        case Option.Some { value: v }: { return v; }
+        case Option.None: { return "-"; }
+    }
+}
+
+async exercise(): int32 {
+    let c: Client = client.clientNew();
+    let base: string = `http://127.0.0.1:${proxyPort}`;
+    await report(ref c, "get ", `${base}/hello`, "");
+    await report(ref c, "post", `${base}/echo`, "payload");
+    return 0;
+}
+
+task clientTask(): int32 {
+    return await exercise();
+}
+
+function main(): int32 {
+    yoop_stdout_linebuf();
+
+    joined origin = originTask();
+    let _s1: int32 = yoop_sleep_ms(120);
+    // The proxy has to start AFTER the origin has published its port, since
+    // it captures it into the handler at construction.
+    joined proxy = proxyTask();
+    let _s2: int32 = yoop_sleep_ms(120);
+
+    pooled cl = clientTask();
+    let _c: int32 = wait cl;
+    printf(`done\n`);
+    return 0;
+}

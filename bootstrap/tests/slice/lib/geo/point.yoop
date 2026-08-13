@@ -1,0 +1,20 @@
+module geo;
+
+export type Point {
+  x: int,
+  y: int,
+}
+
+export function origin(): Point {
+  return { x: 0, y: 0 };
+}
+
+// Not exported, and reached from area.yoop's sibling code path only through the
+// exported wrappers - a module's own files may call it, importers may not.
+function double(n: int): int {
+  return n * 2;
+}
+
+export function doubled(p: Point): Point {
+  return { x: double(p.x), y: double(p.y) };
+}

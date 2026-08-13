@@ -168,7 +168,23 @@ export function lowerLinkFlag(name) {
     return [];
   }
   if (process.platform === "win32" && WINDOWS_IMPLICIT_LIBS.has(name)) return [];
+  // OpenSSL is two libraries and naming either one always means both: libssl
+  // is the protocol, libcrypto is everything underneath it, and libssl cannot
+  // link without it. Making a user write both would be a papercut with no
+  // upside, and forgetting the second produces a wall of unresolved symbols
+  // rather than a message.
+  if (name === "ssl" || name === "crypto") {
+    return process.platform === "win32"
+      ? ["-llibssl", "-llibcrypto"]
+      : ["-lssl", "-lcrypto"];
+  }
   return [`-l${name}`];
+}
+
+// Does this program's set of link-flag names ask for TLS? Both spellings
+// count, for the same reason wantsOpenGL takes two.
+export function wantsTls(names) {
+  return names.some((n) => n === "ssl" || n === "crypto");
 }
 
 // Does this program's set of link-flag names ask for OpenGL?
@@ -226,6 +242,15 @@ export function librarySearchArgs() {
   if (process.platform === "darwin") {
     // Homebrew: /opt/homebrew on Apple Silicon, /usr/local on Intel.
     for (const prefix of ["/opt/homebrew", "/usr/local"]) addPrefix(prefix);
+    // OpenSSL is KEG-ONLY in Homebrew: `brew install openssl@3` does not
+    // symlink it into the prefixes above, because macOS ships its own
+    // (LibreSSL) and Homebrew refuses to shadow it. So the prefix that
+    // actually has the headers has to be probed by name. Harmless when
+    // absent - addPrefix skips directories that do not exist.
+    for (const v of ["openssl@3", "openssl@1.1", "openssl"]) {
+      addPrefix(`/opt/homebrew/opt/${v}`);
+      addPrefix(`/usr/local/opt/${v}`);
+    }
   } else if (process.platform === "win32") {
     const vcpkgTriplet = process.arch === "arm64" ? "arm64-windows" : "x64-windows";
     for (const root of [process.env.VCPKG_ROOT, "C:\\vcpkg", "C:\\dev\\vcpkg"]) {

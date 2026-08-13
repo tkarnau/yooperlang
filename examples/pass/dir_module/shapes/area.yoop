@@ -2,7 +2,7 @@ module shapes;
 
 import * as vec, { Vec } from "std/core/vec.yoop";
 
-export const SCRATCH_B: Vec<int32> = vec.vec_new(8);
+export const SCRATCH_B: Vec<int32> = vec.vecNew(8);
 
 // `Point` (an exported sibling type) and `doubled` (a PRIVATE sibling
 // function) both resolve with no import.

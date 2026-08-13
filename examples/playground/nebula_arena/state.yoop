@@ -73,11 +73,11 @@ export type BulletPool implements Disposable {
     vx: float32[],
     vy: float32[],
     function dispose(ref self): void {
-      intr.heap_free(self.active);
-      intr.heap_free(self.x);
-      intr.heap_free(self.y);
-      intr.heap_free(self.vx);
-      intr.heap_free(self.vy);
+      intr.heapFree(self.active);
+      intr.heapFree(self.x);
+      intr.heapFree(self.y);
+      intr.heapFree(self.vx);
+      intr.heapFree(self.vy);
     }
 }
 
@@ -88,9 +88,9 @@ export type PowerupPool implements Disposable {
     last_spawn_ms: uint32,
     spread_shots_remaining: int32,
     function dispose(ref self): void {
-      intr.heap_free(self.active);
-      intr.heap_free(self.x);
-      intr.heap_free(self.y);
+      intr.heapFree(self.active);
+      intr.heapFree(self.x);
+      intr.heapFree(self.y);
     }
 }
 
@@ -102,11 +102,11 @@ export type EnemyPool implements Disposable {
     hue: float32[],
     last_spawn_ms: uint32,
     function dispose(ref self): void {
-      intr.heap_free(self.active);
-      intr.heap_free(self.x);
-      intr.heap_free(self.y);
-      intr.heap_free(self.size);
-      intr.heap_free(self.hue);
+      intr.heapFree(self.active);
+      intr.heapFree(self.x);
+      intr.heapFree(self.y);
+      intr.heapFree(self.size);
+      intr.heapFree(self.hue);
     }
 }
 
@@ -120,14 +120,14 @@ export type ParticlePool implements Disposable {
     init_life: float32[],
     hue: float32[],
     function dispose(ref self): void {
-      intr.heap_free(self.active);
-      intr.heap_free(self.x);
-      intr.heap_free(self.y);
-      intr.heap_free(self.vx);
-      intr.heap_free(self.vy);
-      intr.heap_free(self.life);
-      intr.heap_free(self.init_life);
-      intr.heap_free(self.hue);
+      intr.heapFree(self.active);
+      intr.heapFree(self.x);
+      intr.heapFree(self.y);
+      intr.heapFree(self.vx);
+      intr.heapFree(self.vy);
+      intr.heapFree(self.life);
+      intr.heapFree(self.init_life);
+      intr.heapFree(self.hue);
     }
 }
 
@@ -155,14 +155,14 @@ export type GameState implements Disposable {
 // ── Pool init helpers ────────────────────────────────────────────────
 
 function zero_floats(n: int32): float32[] {
-    let arr: float32[] = intr.heap_alloc(usize(n));
+    let arr: float32[] = intr.heapAlloc(usize(n));
     let i: usize = 0;
     while (i < usize(n)) { arr[i] = 0.0; i = i + 1; }
     return arr;
 }
 
 function false_bools(n: int32): bool[] {
-    let arr: bool[] = intr.heap_alloc(usize(n));
+    let arr: bool[] = intr.heapAlloc(usize(n));
     let i: usize = 0;
     while (i < usize(n)) { arr[i] = false; i = i + 1; }
     return arr;

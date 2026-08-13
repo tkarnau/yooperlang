@@ -20,24 +20,24 @@ type DynArray<T> implements Disposable propagates<disposable> {
     cap: usize,
     function dispose(ref self): void {
         printf(`disposing(${self.len})\n`);
-        intr.heap_free(self.data);
+        intr.heapFree(self.data);
     }
 }
 
 function new_dynarray<T>(initial_cap: usize): DynArray<T> propagates<disposable> {
-    return { data: intr.heap_alloc(initial_cap), len: 0, cap: initial_cap };
+    return { data: intr.heapAlloc(initial_cap), len: 0, cap: initial_cap };
 }
 
 function push<T>(a: ref DynArray<T>, value: T): void {
     if (a.len >= a.cap) {
         let new_cap: usize = a.cap * 2;
-        let new_data: T[] = intr.heap_alloc(new_cap);
+        let new_data: T[] = intr.heapAlloc(new_cap);
         let i: usize = 0;
         while (i < a.len) {
             new_data[i] = a.data[i];
             i = i + 1;
         }
-        intr.heap_free(a.data);
+        intr.heapFree(a.data);
         a.data = new_data;
         a.cap = new_cap;
     }

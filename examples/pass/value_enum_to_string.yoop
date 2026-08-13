@@ -1,6 +1,6 @@
 // Phase 12: a value enum interpolated into a string-producing template
 // literal (one used as a `string`, not inside printf) routes through the
-// same `to_string` shims as its underlying primitive. The `import` forces
+// same `toString` shims as its underlying primitive. The `import` forces
 // the multi-module driver so std/core/format + strings autoload.
 
 import * as log from "std/log.yoop";
@@ -18,7 +18,7 @@ enum ColorDisplay implements Display {
   Red,
   Green,
   Blue,
-  function to_string(ref self): string {
+  function toString(ref self): string {
     switch (self) {
       case ColorDisplay.Red: {
         return "R";

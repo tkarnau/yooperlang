@@ -22,14 +22,14 @@ extern "C" from "stdio.h" {
 const PORT: int32 = 34571;
 
 function main(): int32 {
-    disposable lr: ListenResult = tcp.tcp_listen("127.0.0.1", PORT, 8);
+    disposable lr: ListenResult = tcp.tcpListen("127.0.0.1", PORT, 8);
     if (lr.error.len > 0) {
         printf("listen failed: %s\n", lr.error);
         return 1;
     }
 
     // 1. Nobody is dialing in, so a bounded accept gives up on time.
-    //    The plain tcp_accept would still be parked here.
+    //    The plain tcpAccept would still be parked here.
     switch (tcp.tcpAcceptTimeoutMs(ref lr.listener, 120)) {
         case AcceptOutcome.Accepted { stream: s0, peerHost: h0, peerPort: p0 }: {
             printf("accept: unexpected connection\n");
@@ -40,7 +40,7 @@ function main(): int32 {
     }
 
     // 2. Dial in for real, then accept with room to spare.
-    disposable cr: ConnectResult = tcp.tcp_connect("127.0.0.1", PORT);
+    disposable cr: ConnectResult = tcp.tcpConnect("127.0.0.1", PORT);
     if (cr.error.len > 0) {
         printf("connect failed: %s\n", cr.error);
         return 1;

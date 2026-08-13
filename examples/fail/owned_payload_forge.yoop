@@ -25,7 +25,7 @@ function forgeConcrete(): Slot {
 }
 
 function main(): int32 {
-    switch (str.string_slice("hello", 0, 3)) {
+    switch (str.stringSlice("hello", 0, 3)) {
         case Result.Ok { value: v }: { str.strFree(v); }
         // The Err payload is argument 1, a plain string. Not freeable.
         case Result.Err { error: e }: { str.strFree(e); }

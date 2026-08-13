@@ -1,0 +1,6 @@
+// Imports a file that is not there.
+import { nothing } from "./nope.yoop";
+
+function main(): int {
+  return nothing();
+}

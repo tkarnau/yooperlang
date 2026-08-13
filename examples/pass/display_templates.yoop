@@ -1,6 +1,6 @@
 // Phase 9.F: a type that implements `Display` is interpolatable in a
 // template literal. `${value}` rewrites at typecheck time to
-// `Display.to_string(ref value)` and uses the resulting string. Works
+// `Display.toString(ref value)` and uses the resulting string. Works
 // for both same-module types (Point below) and cross-module types
 // (SocketAddr from std/net/addr.yoop).
 
@@ -16,8 +16,8 @@ extern "C" from "stdio.h" {
 type Point implements Display {
     x: int32,
     y: int32,
-    function to_string(ref self): string {
-        // A real impl would assemble "(x, y)" via string_concat; for
+    function toString(ref self): string {
+        // A real impl would assemble "(x, y)" via stringConcat; for
         // the demo we hand back a fixed string so the test asserts the
         // *trait dispatch* worked, not the string content.
         return "Point";

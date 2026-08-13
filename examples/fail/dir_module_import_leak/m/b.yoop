@@ -2,6 +2,6 @@ module m;
 
 // No import of vec / Vec here. Both references below are rejected.
 export function capB(): usize {
-    let v: Vec<int32> = vec.vec_new(8);
+    let v: Vec<int32> = vec.vecNew(8);
     return v.cap;
 }

@@ -1,4 +1,4 @@
-// std/core/format - direct calls into the primitive `to_string`
+// std/core/format - direct calls into the primitive `toString`
 // shims, prior to the template-literal lowering picking them up.
 // Verifies digit assembly across zero, single-digit, multi-digit,
 // and negative ints; the boolean labels; and the snprintf-backed
@@ -11,18 +11,18 @@ extern "C" from "stdio.h" {
 }
 
 function main(): int32 {
-    printf(`${fmt.int_to_string(0)}\n`);
-    printf(`${fmt.int_to_string(7)}\n`);
-    printf(`${fmt.int_to_string(12345)}\n`);
-    printf(`${fmt.int_to_string(-42)}\n`);
+    printf(`${fmt.intToString(0)}\n`);
+    printf(`${fmt.intToString(7)}\n`);
+    printf(`${fmt.intToString(12345)}\n`);
+    printf(`${fmt.intToString(-42)}\n`);
 
-    printf(`${fmt.uint_to_string(0)}\n`);
-    printf(`${fmt.uint_to_string(255)}\n`);
+    printf(`${fmt.uintToString(0)}\n`);
+    printf(`${fmt.uintToString(255)}\n`);
 
-    printf(`${fmt.bool_to_string(true)}\n`);
-    printf(`${fmt.bool_to_string(false)}\n`);
+    printf(`${fmt.boolToString(true)}\n`);
+    printf(`${fmt.boolToString(false)}\n`);
 
-    printf(`${fmt.float_to_string(1.5)}\n`);
-    printf(`${fmt.float_to_string(0.0)}\n`);
+    printf(`${fmt.floatToString(1.5)}\n`);
+    printf(`${fmt.floatToString(0.0)}\n`);
     return 0;
 }

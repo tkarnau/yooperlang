@@ -236,6 +236,156 @@ function isIdentStart(code) {
   );
 }
 
+// The comment block immediately above a declaration, as documentation.
+//
+// yooperdoom-takeaways 4.1 is the reason this exists. A 15,000 line project
+// imported std/core/format.yoop in three files and hand-rolled a digit loop in
+// four others; `history.yoop` zero-padded a number by hand, which is exactly
+// `padStart(intToString(n), 4, "0")`. Nothing was missing from the library -
+// the project just never found the parts of it that existed. An index helps
+// once; showing a function's own header at the call site helps every time, and
+// it needs no new convention, because std already writes these comments.
+//
+// `offset` should point at the declaration's NAME (which is what locOfDecl
+// computes, and what goto-definition already jumps to). The scan walks UP from
+// the start of that line and takes the contiguous run of comment lines,
+// stopping at the first line that is not one. A blank line stops it too, which
+// is what keeps a file's module header from attaching itself to whatever
+// declaration happens to come first.
+//
+// Comments never reach the token stream (charEaters.js eats them), so this
+// works on raw source rather than on tokens.
+const MAX_DOC_LINES = 30;
+
+export function docCommentAt(src, offset) {
+  if (typeof src !== "string" || typeof offset !== "number") return null;
+  if (offset < 0 || offset > src.length) return null;
+
+  // Start of the line the declaration is on.
+  let lineStart = src.lastIndexOf("\n", Math.max(0, offset - 1)) + 1;
+
+  const lines = [];
+  while (lineStart > 0 && lines.length < MAX_DOC_LINES) {
+    const prevEnd = lineStart - 1;                       // the \n above us
+    const prevStart = src.lastIndexOf("\n", prevEnd - 1) + 1;
+    const raw = src.slice(prevStart, prevEnd);
+    const trimmed = raw.trim();
+
+    if (trimmed.startsWith("//")) {
+      // Strip the marker and ONE following space, so `// text` gives `text`
+      // while `//   indented` keeps its relative indent. A `///` or a divider
+      // line of slashes collapses to empty, which is fine - it renders as a
+      // blank line rather than as noise.
+      lines.unshift(trimmed.replace(/^\/+ ?/, ""));
+      lineStart = prevStart;
+      continue;
+    }
+
+    // A one-line block comment. Multi-line `/* ... */` blocks are not walked:
+    // they would need the scan to run character-wise rather than line-wise,
+    // and nothing in this tree documents a declaration that way.
+    if (trimmed.startsWith("/*") && trimmed.endsWith("*/")) {
+      lines.unshift(trimmed.slice(2, -2).trim());
+      lineStart = prevStart;
+      continue;
+    }
+
+    break;
+  }
+
+  while (lines.length > 0 && lines[0] === "") lines.shift();
+  while (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
+  if (lines.length === 0) return null;
+  return lines.join("\n");
+}
+
+// The comment block at the TOP of a file - what the module is for.
+//
+// The mirror image of docCommentAt: that one scans up from a declaration and
+// deliberately stops at a blank line so a file header cannot attach itself to
+// whatever declaration happens to come first. This one wants exactly that
+// header. Used for a namespace import, where the useful documentation for
+// `str` in `str.padStart(...)` is what std/core/strings.yoop says about
+// itself.
+//
+// Stops at the first line that is not a comment, so the header ends where the
+// code begins (an `import`, or the first decl).
+//
+// A `module <name>;` line is not code for this purpose, and its position
+// carries meaning. Every source file of a DIRECTORY module opens with one, and
+// the convention std follows is:
+//
+//     // std/http - what the MODULE is.          <- above: the module
+//     module http;
+//
+//     // std/http/server.yoop - what this FILE is.   <- below: the file
+//
+// A namespace import names the module, so the block ABOVE wins when it is
+// there. Only one file per directory carries it; every sibling falls through
+// to its own header, which is still the right answer for a single-file module
+// (where there is no module line at all). Without the below-the-line branch,
+// every directory module in the library would read as undocumented.
+const MODULE_HEADER_LINE = /^module\s+[A-Za-z_][A-Za-z0-9_]*\s*;$/;
+
+export function moduleHeaderComment(src) {
+  if (typeof src !== "string") return null;
+  const lines = src.split("\n");
+
+  const above = commentRunFrom(lines, 0);
+  // Was that run the module's? Only if a module declaration follows it.
+  let i = above.next;
+  while (i < lines.length && lines[i].trim() === "") i++;
+  if (i < lines.length && MODULE_HEADER_LINE.test(lines[i].trim())) {
+    if (above.text) return above.text;
+    return commentRunFrom(lines, i + 1).text;
+  }
+  return above.text;
+}
+
+// The contiguous comment block starting at or after `start`, skipping blank
+// lines ahead of it. Returns the joined text (null when there is none) and the
+// index just past it.
+function commentRunFrom(lines, start) {
+  const out = [];
+  let i = start;
+  while (i < lines.length && lines[i].trim() === "") i++;
+  for (; i < lines.length; i++) {
+    const trimmed = lines[i].trim();
+    if (trimmed.startsWith("//")) {
+      out.push(trimmed.replace(/^\/+ ?/, ""));
+      continue;
+    }
+    // A blank line inside the block is a paragraph break; a blank line
+    // followed by code ends it, and the trailing blanks are trimmed below.
+    if (trimmed === "" && out.length > 0) {
+      out.push("");
+      continue;
+    }
+    break;
+  }
+  while (out.length > 0 && out[out.length - 1] === "") out.pop();
+  return { text: out.length > 0 ? out.join("\n") : null, next: i };
+}
+
+// The doc comment for a DECL, given the module it lives in. The (decl, module)
+// counterpart of docCommentAt, for callers that already hold the declaration
+// rather than a cursor position - completion is the one that does.
+//
+// Goes through the same searchIdentNear correction locOfDecl uses, because
+// `sourceLoc.pos` on a decl lands one or two tokens PAST the name (the parser
+// captures its state at node construction, not the name token's offset).
+// Scanning up from the uncorrected offset can therefore start a line too low
+// and miss the comment entirely.
+export function docForDecl(decl, module) {
+  if (!decl || !module?.src) return null;
+  let pos = decl.sourceLoc?.pos ?? 0;
+  if (decl.name) {
+    const found = searchIdentNear(module.src, decl.name, pos);
+    if (found != null) pos = found;
+  }
+  return docCommentAt(module.src, pos);
+}
+
 // Human-readable hover text for a node. Returns null when there's nothing
 // useful to show (e.g. punctuation token, keyword, decl with no resolved
 // type). The result is plain text - the server wraps it in a markdown

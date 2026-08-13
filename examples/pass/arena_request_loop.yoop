@@ -19,11 +19,11 @@ extern "C" from "stdio.h" {
 // Handle one request: build a result vector from the arena and sum it. Note
 // there is NO dispose - the arena reset after the call reclaims it.
 function handle(n: int32): int32 {
-    let v: Vec<int32> = vec.vec_new(8);
+    let v: Vec<int32> = vec.vecNew(8);
     let i: int32 = 0;
     let sum: int32 = 0;
     while (i < n) {
-        vec.vec_push(ref v, i);
+        vec.vecPush(ref v, i);
         sum = sum + i;
         i = i + 1;
     }

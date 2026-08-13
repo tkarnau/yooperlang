@@ -1,0 +1,3 @@
+module alpha;
+
+export function a(): int { return 1; }

@@ -1,0 +1,62 @@
+// Intrinsics - the calls that are not calls.
+//
+// `extern "intrinsic" from "compiler" { ... }` declares operations whose
+// implementation IS the compiler. There is no symbol behind `stringAsBytes`, so
+// the call becomes instructions rather than a `call` to anything - which is why
+// pass A keeps intrinsic names out of the extern table, the one that says
+// "emit this call with its name unmangled".
+//
+// Five of the six are free or nearly so, and that is the point: a yoop string
+// is a NUL-terminated pointer and a `uint8[]` is that pointer plus a length, so
+// converting between them is arithmetic rather than copying. Only
+// `stringFromBytesUnchecked` allocates, because a byte range has no NUL and a
+// string must have one.
+//
+// Two of the eight declared intrinsics are absent here on purpose: `ctxAlloc`
+// and `ctxFree` route through the yoop runtime's allocator context, and the
+// bootstrap's link step is one clang call with no runtime on it. They are
+// refused by name rather than quietly lowered to malloc, which would compile,
+// run, and silently stop an installed arena from capturing the bytes.
+
+import * as intr from "std/core/intrinsics.yoop";
+
+function main(): int {
+  const s: string = "hello";
+
+  // No copy: the bytes ARE the string's storage, and only the length is new.
+  const b: uint8[] = intr.stringAsBytes(s);
+  printf("bytes len=%llu first=%d last=%d\n", b.len, b[0], b[4]);
+
+  // A borrowing view over those same bytes - one gep and one subtract.
+  const mid: uint8[] = intr.arraySlice(b, 1, 4);
+  printf("slice len=%llu %d %d %d\n", mid.len, mid[0], mid[1], mid[2]);
+
+  // Generic over the element type, so the byte count is a multiplication the
+  // caller never writes. The length is the ELEMENT count, not the byte count -
+  // getting that backwards is invisible until an int32[] reports 16 elements.
+  let nums: int32[] = intr.heapAlloc(4);
+  nums[0] = 11;
+  nums[1] = 22;
+  nums[3] = 44;
+  printf("alloc len=%llu %d %d %d\n", nums.len, nums[0], nums[1], nums[3]);
+  intr.heapFree(nums);
+
+  // A wider element, to prove the size really comes from the type.
+  let wide: int64[] = intr.heapAlloc(2);
+  wide[0] = 9000000000;
+  wide[1] = -9000000000;
+  printf("wide len=%llu %lld %lld\n", wide.len, wide[0], wide[1]);
+  intr.heapFree(wide);
+
+  // The one that copies: malloc, memcpy, terminate. `mid` has no NUL after it,
+  // so this cannot be a view.
+  const copied: string = intr.stringFromBytesUnchecked(mid);
+  printf("copied=%s\n", copied);
+
+  // The borrowing inverse, which can be a view because `b` came from a string
+  // and still has that string's NUL sitting at b.len.
+  const viewed: string = intr.bytesAsStringUnchecked(b);
+  printf("viewed=%s\n", viewed);
+
+  return 0;
+}

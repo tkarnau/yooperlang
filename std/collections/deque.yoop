@@ -30,17 +30,17 @@ export type Deque<T> implements Disposable propagates<disposable> {
     function dispose(ref self): void {
         if (self.cap > 0) {
             let prev: Allocator = pushAllocator(self.alloc);
-            intr.ctx_free(self.data);
+            intr.ctxFree(self.data);
             popAllocator(prev);
             self.cap = 0;
         }
     }
 }
 
-export function deque_new<T>(initial_cap: usize): Deque<T> propagates<disposable> {
+export function dequeNew<T>(initial_cap: usize): Deque<T> propagates<disposable> {
     let cap: usize = nextPow2Floor8(initial_cap);
     let a: Allocator = currentAllocator();
-    return { data: intr.ctx_alloc(cap), head: 0, len: 0, cap: cap, alloc: a };
+    return { data: intr.ctxAlloc(cap), head: 0, len: 0, cap: cap, alloc: a };
 }
 
 // Linearize into a fresh buffer at twice the capacity. The new head is
@@ -48,14 +48,14 @@ export function deque_new<T>(initial_cap: usize): Deque<T> propagates<disposable
 function grow<T>(ref d: Deque<T>): void {
     let new_cap: usize = d.cap * 2;
     let prev: Allocator = pushAllocator(d.alloc);
-    let new_data: T[] = intr.ctx_alloc(new_cap);
+    let new_data: T[] = intr.ctxAlloc(new_cap);
     let i: usize = 0;
     let mask: usize = d.cap - 1;
     while (i < d.len) {
         new_data[i] = d.data[(d.head + i) & mask];
         i = i + 1;
     }
-    intr.ctx_free(d.data);
+    intr.ctxFree(d.data);
     popAllocator(prev);
     d.data = new_data;
     d.head = 0;
@@ -63,7 +63,7 @@ function grow<T>(ref d: Deque<T>): void {
 }
 
 // Append at the back. O(1) amortized.
-export function deque_push_back<T>(ref d: Deque<T>, value: T): void {
+export function dequePushBack<T>(ref d: Deque<T>, value: T): void {
     if (d.len >= d.cap) { grow(ref d); }
     let mask: usize = d.cap - 1;
     let idx: usize = (d.head + d.len) & mask;
@@ -72,7 +72,7 @@ export function deque_push_back<T>(ref d: Deque<T>, value: T): void {
 }
 
 // Prepend at the front. O(1) amortized.
-export function deque_push_front<T>(ref d: Deque<T>, value: T): void {
+export function dequePushFront<T>(ref d: Deque<T>, value: T): void {
     if (d.len >= d.cap) { grow(ref d); }
     let mask: usize = d.cap - 1;
     // head moves backwards (modulo cap).
@@ -82,7 +82,7 @@ export function deque_push_front<T>(ref d: Deque<T>, value: T): void {
 }
 
 // Remove + return the front element. `None` when empty.
-export function deque_pop_front<T>(ref d: Deque<T>): Option<T> {
+export function dequePopFront<T>(ref d: Deque<T>): Option<T> {
     if (d.len == 0) { return Option.None; }
     let v: T = d.data[d.head];
     let mask: usize = d.cap - 1;
@@ -92,7 +92,7 @@ export function deque_pop_front<T>(ref d: Deque<T>): Option<T> {
 }
 
 // Remove + return the back element. `None` when empty.
-export function deque_pop_back<T>(ref d: Deque<T>): Option<T> {
+export function dequePopBack<T>(ref d: Deque<T>): Option<T> {
     if (d.len == 0) { return Option.None; }
     let mask: usize = d.cap - 1;
     let idx: usize = (d.head + d.len - 1) & mask;
@@ -102,17 +102,17 @@ export function deque_pop_back<T>(ref d: Deque<T>): Option<T> {
 }
 
 // Read by logical index (`0` is the front). Out-of-bounds yields `None`.
-export function deque_get<T>(ref d: Deque<T>, i: usize): Option<T> {
+export function dequeGet<T>(ref d: Deque<T>, i: usize): Option<T> {
     if (i >= d.len) { return Option.None; }
     let mask: usize = d.cap - 1;
     return Option.Some { value: d.data[(d.head + i) & mask] };
 }
 
-export function deque_len<T>(ref d: Deque<T>): usize {
+export function dequeLen<T>(ref d: Deque<T>): usize {
     return d.len;
 }
 
-export function deque_clear<T>(ref d: Deque<T>): void {
+export function dequeClear<T>(ref d: Deque<T>): void {
     d.head = 0;
     d.len  = 0;
 }

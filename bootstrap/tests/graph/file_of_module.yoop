@@ -1,0 +1,5 @@
+// Names one SOURCE FILE of a directory module. The module is the unit, so this
+// is refused rather than quietly pulling in the whole directory.
+import { a } from "./unit/one.yoop";
+
+function main(): int { return a(); }

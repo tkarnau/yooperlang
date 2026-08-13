@@ -1,0 +1,14 @@
+// Several functions, a call between them, and integer arithmetic.
+function answer(): int {
+  return 6 * 7;
+}
+
+function twice(): int {
+  return answer() + answer();
+}
+
+function main(): int {
+  printf("answer=%d\n", answer());
+  printf("twice=%d\n", twice());
+  return 0;
+}

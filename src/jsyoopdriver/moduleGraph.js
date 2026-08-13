@@ -172,7 +172,7 @@ export function loadModuleGraph(entryAbsPath, options = {}) {
 
   // Always pull std/core/format.yoop and std/core/strings.yoop into the
   // graph so codegen can lower interpolated template literals to
-  // `string_concat_all([..., int_to_string(x), ...])` without requiring
+  // `stringConcatAll([..., intToString(x), ...])` without requiring
   // user code to import them explicitly. std/core/traits.yoop rides along
   // so @derive(display) can synthesize `import { Display }` bindings for
   // deriving modules. Loading is idempotent - if the entry transitively
@@ -180,7 +180,7 @@ export function loadModuleGraph(entryAbsPath, options = {}) {
   //
   // Autoloads walk BEFORE the entry so they precede user modules in the
   // topo order. This is load-bearing for @derive: a deriving module's
-  // pass C validates its grafted to_string against Display's method table,
+  // pass C validates its grafted toString against Display's method table,
   // which is only filled once the traits module's own pass C has run.
   // std/core/kinds.yoop rides along too: it declares the concurrency core
   // (`task`, `async`, `joined`, `pooled`, `Task`), which used to be reserved

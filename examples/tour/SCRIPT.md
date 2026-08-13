@@ -139,7 +139,7 @@ method-call form '.greet()' is not supported - use the free-function form 'greet
    watch interpolation stop working. It is a trait lookup, not a hardcoded
    list of printable types. Plant this: episode 11 leans on the same idea.
 
-8. Bonus take: `@derive(display)` generates `to_string` from the field list at
+8. Bonus take: `@derive(display)` generates `toString` from the field list at
    compile time, by emitting source text and reparsing it.
 
 Be upfront about the gap: two traits declaring the same method name,

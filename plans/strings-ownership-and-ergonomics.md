@@ -6,7 +6,7 @@ Covers three concerns that turn out to be one concern:
 
 1. An `owned` kind so a `string` carries its provenance.
 2. String ergonomics closer to what a high level language offers.
-3. Routing string allocation through `ctx_alloc` (the ambient allocator)
+3. Routing string allocation through `ctxAlloc` (the ambient allocator)
    instead of raw `malloc`.
 
 They are sequenced deliberately. Doing (3) first converts a class of silent
@@ -32,7 +32,7 @@ leaks into a class of silent use-after-free, so it lands last.
   [owned_forge.yoop](../examples/fail/owned_forge.yoop),
   [owned_payload.yoop](../examples/pass/owned_payload.yoop),
   [owned_payload_forge.yoop](../examples/fail/owned_payload_forge.yoop).
-- **S4 (`ctx_alloc` routing): not started.** `Text` already allocates through
+- **S4 (`ctxAlloc` routing): not started.** `Text` already allocates through
   the context, so the arena and temp-reset payoff is available today for
   anything built on `Text`. What S4 adds is the same for bare `string`.
 - **S5 (`string ==`): not started.**
@@ -59,18 +59,18 @@ Verified against the tree, not recalled:
   rejects a non-array object) and it is not mutable.
 - `s.len` lowers to a `strlen` call ([codegen.js:1303](../src/jsyoopcodegen/codegen.js#L1303)).
   Every length read is O(n).
-- `string_as_bytes` is a zero copy view over the string's own storage
+- `stringAsBytes` is a zero copy view over the string's own storage
   ([codegen.js:5324](../src/jsyoopcodegen/codegen.js#L5324)). Writing through
   it on a literal is a SIGBUS.
-- `string_from_bytes_unchecked` emits a direct `call ptr @malloc`
+- `stringFromBytesUnchecked` emits a direct `call ptr @malloc`
   ([codegen.js:5368](../src/jsyoopcodegen/codegen.js#L5368)), NOT
   `@yoop_ctx_alloc`. Consequence: strings ignore the allocator context
   entirely, so `ephemeral arenaScope(...)` reclaims none of them, unlike
   `Vec<T>`.
 - `--track-heap` cannot see string allocations either. A thousand concats
-  under it report only the temp buffers inside `string_concat`.
+  under it report only the temp buffers inside `stringConcat`.
 - Nothing in `std/`, `examples/`, or `bootstrap/` frees a string.
-- `intr.heap_free(intr.string_as_bytes(s))` does correctly free a heap
+- `intr.heapFree(intr.stringAsBytes(s))` does correctly free a heap
   string (`free` does not need the size). On a literal it is a SIGABRT.
 - `string == string` and `string + string` are both typecheck errors.
 - Provenance is already mixed in std today. [strings.yoop:202](../std/core/strings.yoop#L202)
@@ -181,7 +181,7 @@ intrinsics that literally call the allocator, plus passthrough from S1. A
 function that tries to fabricate it gets the "declares no 'appliedBy'
 clause" error, which is the correct answer.
 
-**The mint site**: `string_from_bytes_unchecked` in
+**The mint site**: `stringFromBytesUnchecked` in
 [std/core/intrinsics.yoop](../std/core/intrinsics.yoop) is annotated
 `owned string`. Extern blocks have no body, so `runKindFlow` returns early
 and the authority check never runs on them.
@@ -211,7 +211,7 @@ release a string.
   result is no longer a coin flip. It could NOT be annotated `owned` though,
   for the reason in the next section.
 - **A plain `string` binding drops the marker, and that is correct but
-  needs saying.** Inside `string_concat` the local had to become
+  needs saying.** Inside `stringConcat` the local had to become
   `let result: owned string = ...` or the return read as forgery. Callers
   hit the same thing: `const a: string = str.padStart(...)` then
   `str.strFree(a)` is rejected. The binding's declared type is the
@@ -231,7 +231,7 @@ closed; see S2.1 below.
 The gap S2 left: a marker could not survive a fallible constructor. The owned
 value goes out inside a `Result` and only becomes reachable again after a
 `switch` destructures it, and neither half of that round trip carried
-markers. `string_slice` and `sliceFrom` were the two functions it blocked.
+markers. `stringSlice` and `sliceFrom` were the two functions it blocked.
 
 ### A marker set became a tree
 
@@ -356,10 +356,10 @@ every grow and the free.
 been allocated yet" branch.
 
 **One compiler change was required**, and only one:
-`bytes_as_string_unchecked(buf: uint8[]): string`, the borrowing inverse of
-`string_as_bytes`. Codegen projects field 0 out of the fat pointer and calls
+`bytesAsStringUnchecked(buf: uint8[]): string`, the borrowing inverse of
+`stringAsBytes`. Codegen projects field 0 out of the fat pointer and calls
 it a string: no malloc, no memcpy, no strlen. Without it `view` would have
-to go through `string_from_bytes_unchecked`, which copies, and a `view` that
+to go through `stringFromBytesUnchecked`, which copies, and a `view` that
 allocates defeats the entire point of the borrowed/owned split. The `_as_`
 prefix follows the existing naming convention (view, no allocation) and
 `_unchecked` covers its two caller obligations: valid UTF-8, and a nul at
@@ -414,8 +414,8 @@ change a string's length.
   grow.
 - Under `--track-heap`, a 200-iteration loop building two Texts per
   iteration reports net 0 bytes. Worth contrasting: a raw `string` built by
-  `string_concat` is both leaked and INVISIBLE to that counter, because it
-  mallocs directly rather than through `ctx_alloc`.
+  `stringConcat` is both leaked and INVISIBLE to that counter, because it
+  mallocs directly rather than through `ctxAlloc`.
 - A `Text` built inside `ephemeral mem.allocatorScope(ar)` draws from the
   arena and needs no dispose.
 - Full suite green (994 tests).
@@ -436,14 +436,14 @@ change a string's length.
 
 Only safe once S2 or S3 gives us a way to talk about ownership.
 
-**Change**: `string_from_bytes_unchecked` emits `@yoop_ctx_alloc(size, 8)`
-instead of `@malloc`, matching what `ctx_alloc` already does at
+**Change**: `stringFromBytesUnchecked` emits `@yoop_ctx_alloc(size, 8)`
+instead of `@malloc`, matching what `ctxAlloc` already does at
 [codegen.js:5253](../src/jsyoopcodegen/codegen.js#L5253). Same treatment for
 the array literal buffer at [codegen.js:4685](../src/jsyoopcodegen/codegen.js#L4685),
 which is malloc'd and deliberately leaked today, and for the float formatting
 buffer in [runtime/yoop_format.c](../runtime/yoop_format.c).
 
-`heap_alloc` / `heap_free` stay on raw malloc. They are the explicit escape
+`heapAlloc` / `heapFree` stay on raw malloc. They are the explicit escape
 hatch and should keep meaning exactly one thing. Coroutine frames stay on
 malloc too, since their lifetime is not scoped to anything the context knows
 about.
@@ -490,7 +490,7 @@ comments were already aiming at.
 ## Phase S5, optional: `string == string`
 
 `==` on strings is a typecheck error today, which is a sharp edge for the
-high level feel and pushes people to `string_eq` for something that reads
+high level feel and pushes people to `stringEq` for something that reads
 naturally as an operator.
 
 [CLAUDE.md](../CLAUDE.md) already anticipates the fix and its constraint:

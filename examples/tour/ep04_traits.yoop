@@ -46,7 +46,7 @@ function greet(who: string): string {
 type Point implements Display {
     x: int32,
     y: int32,
-    function to_string(ref self): string {
+    function toString(ref self): string {
         return `(${self.x},${self.y})`;
     }
 }
@@ -99,7 +99,7 @@ function main(): int32 {
 
 // BREAK IT #3 - Display is not magic
 //
-// Delete `implements Display` from `Point` along with its `to_string`, then
+// Delete `implements Display` from `Point` along with its `toString`, then
 // interpolate it:
 //
 //   template literal interpolation must be a string, bool, int, or float type,
@@ -124,8 +124,8 @@ function main(): int32 {
 
 // BONUS TAKE - @derive(display)
 //
-// Writing `to_string` by hand gets old. Delete Point's `implements Display`
-// AND its `to_string`, then put `@derive(display)` on the line above
+// Writing `toString` by hand gets old. Delete Point's `implements Display`
+// AND its `toString`, then put `@derive(display)` on the line above
 // `type Point`. It generates the method from the field list at compile time -
 // literally by emitting source text and reparsing it - and `${p}` keeps
 // working. See examples/pass/derive_display_basic.yoop.

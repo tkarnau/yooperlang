@@ -1,0 +1,284 @@
+module parse;
+
+/*
+  `trait` declarations, `implements` clauses, and the methods that satisfy them.
+
+    trait Display {
+      function toString(ref self): string;
+    }
+
+    type Point implements Display {
+      x: int,
+      function toString(ref self): string { ... }
+    }
+
+  The shape that makes all of this cheap: a METHOD IS A FUNCTION whose first
+  parameter is `ref self`. The source already writes the `ref self`; what it
+  leaves out is the annotation, because there is only one type it could be. So
+  the parser fills it in with the enclosing type's name, and from that point on
+  a method has the same slots as a FUNCTION_DECL and every later layer treats it
+  as one - including the borrow machinery, which `ref self` needs and which
+  already exists.
+
+  Only STATIC dispatch: `Display.toString(ref p)` resolves through the
+  receiver's concrete type at compile time. No vtable, no indirect call. That is
+  the form the bootstrap's own source uses almost exclusively.
+*/
+
+import { Result } from "std/core/types.yoop";
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import * as str from "std/core/strings.yoop";
+import { NodeId, ASTNodeKind, childAt, nodeAt } from "../ast";
+import { TokenTags, tagName, posToSourceLocation } from "../lex";
+import { ParsingError } from "../diagnostics";
+
+// The parameter name that means "the receiver". Not a keyword - it lexes as an
+// ordinary IDENT - so it is recognized by spelling, at the one place where a
+// parameter is allowed to have no annotation.
+export const SELF_PARAM: string = "self";
+
+// `trait Name { function m(ref self): R; ... }`
+//
+//   name              the trait's name
+//   childA            typeParams list-node (0 = none)
+//   own childIds run  the METHOD_SIG nodes
+export function parseTraitDecl(ref ps: ParserState): Result<NodeId, ParsingError> {
+  SelfLexing.expect(ref ps, TokenTags.TRAIT)?;
+  let node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.TRAIT_DECL);
+  node.name = parseIdentAsName(ref ps)?;
+  node.childA = parseTypeParamList(ref ps)?;
+
+  SelfLexing.expect(ref ps, TokenTags.LCURLY)?;
+  disposable ids: Vec<NodeId> = vec.vecNew(4);
+  while (
+    SelfLexing.peek(ref ps).tag != TokenTags.RCURLY &&
+    SelfLexing.peek(ref ps).tag != TokenTags.EOF
+  ) {
+    vec.vecPush(ref ids, parseMethodSig(ref ps, node.name, node.childA)?);
+  }
+  SelfLexing.expect(ref ps, TokenTags.RCURLY)?;
+
+  const start: usize = ps.ast.childIds.len;
+  vec.vecExtendFrom(ref ps.ast.childIds, vec.vecAsArray(ref ids));
+  node.childStart = start;
+  node.childCount = ids.len;
+
+  return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
+}
+
+// One `function m(ref self): R;` inside a trait - a signature and no body.
+//
+// `self` here annotates as the TRAIT, which is the placeholder an implementing
+// type substitutes. Nothing in the bootstrap substitutes it yet: resolution
+// goes through the receiver's concrete type rather than through the trait's
+// signature, so the trait's own `self` type is never consulted.
+function parseMethodSig(
+  ref ps: ParserState,
+  traitName: string,
+  traitTypeParams: NodeId
+): Result<NodeId, ParsingError> {
+  // `async read(ref self, ...): R;` - a kind prefix stands where `function`
+  // would, on a method exactly as on a top-level declaration. This is the one
+  // async form the bootstrap's OWN std closure needs, and it needs no codegen
+  // at all: a signature has no body to emit.
+  const prefixes = parseKindPrefixes(ref ps)?;
+  if (prefixes == 0) {
+    SelfLexing.expect(ref ps, TokenTags.FUNCTION)?;
+  }
+  let node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.METHOD_SIG);
+  node.childE = prefixes;
+  node.name = parseIdentAsName(ref ps)?;
+  // 0, not the trait's parameters: `self` in a SIGNATURE annotates as the
+  // trait itself, and nothing ever consults that type - resolution goes through
+  // the receiver's concrete type. Giving it arguments would mean resolving
+  // `Joinable<T>` as a type, which a trait name is not.
+  node.childB = parseMethodParams(ref ps, traitName, 0)?;
+  SelfLexing.expect(ref ps, TokenTags.COLON)?;
+  node.childC = parseTypeAnnotation(ref ps)?;
+  SelfLexing.expect(ref ps, TokenTags.SEMICOLON)?;
+  return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
+}
+
+// `function m(ref self): R { ... }` inside a type body - a signature AND a body.
+// The same slots a FUNCTION_DECL uses, which is what lets pass C and codegen
+// treat it as an ordinary function.
+export function parseMethodDecl(
+  ref ps: ParserState,
+  ownerName: string,
+  ownerTypeParams: NodeId
+): Result<NodeId, ParsingError> {
+  SelfLexing.expect(ref ps, TokenTags.FUNCTION)?;
+  let node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.METHOD_DECL);
+  node.name = parseIdentAsName(ref ps)?;
+  node.childB = parseMethodParams(ref ps, ownerName, ownerTypeParams)?;
+  SelfLexing.expect(ref ps, TokenTags.COLON)?;
+  node.childC = parseTypeAnnotation(ref ps)?;
+  node.childD = parseBlock(ref ps)?;
+  return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
+}
+
+// A method's parameter list, with `self`'s annotation filled in.
+//
+// `ref self` is written without a type because there is only one it could be.
+// Synthesizing the annotation here rather than special-casing `self` in four
+// later passes is the whole reason a method needs its own parameter parser.
+function parseMethodParams(
+  ref ps: ParserState,
+  ownerName: string,
+  ownerTypeParams: NodeId
+): Result<NodeId, ParsingError> {
+  SelfLexing.expect(ref ps, TokenTags.LPAREN)?;
+  const loc = posToSourceLocation(ps.src, ps.pos, 1);
+
+  disposable ids: Vec<NodeId> = vec.vecNew(4);
+  while (
+    SelfLexing.peek(ref ps).tag != TokenTags.RPAREN &&
+    SelfLexing.peek(ref ps).tag != TokenTags.EOF
+  ) {
+    vec.vecPush(ref ids, parseMethodParam(ref ps, ownerName, ownerTypeParams)?);
+    if (SelfLexing.peek(ref ps).tag == TokenTags.COMMA) {
+      SelfLexing.advance(ref ps)?;
+    }
+  }
+  SelfLexing.expect(ref ps, TokenTags.RPAREN)?;
+  return Result.Ok { value: SelfLexing.buildListNode(ref ps, ref ids, loc) };
+}
+
+function parseMethodParam(
+  ref ps: ParserState,
+  ownerName: string,
+  ownerTypeParams: NodeId
+): Result<NodeId, ParsingError> {
+  let node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.PARAM);
+  node.flagA = false;
+  if (SelfLexing.peek(ref ps).tag == TokenTags.REF) {
+    SelfLexing.advance(ref ps)?;
+    node.flagA = true;   // isRef
+  }
+  // `self` is a KEYWORD, not an identifier, so it does not come through
+  // parseIdentAsName - which is also why it can never collide with a user's
+  // parameter name.
+  if (SelfLexing.peek(ref ps).tag == TokenTags.SELF) {
+    SelfLexing.advance(ref ps)?;
+    node.name = SELF_PARAM;
+  } else {
+    node.name = parseIdentAsName(ref ps)?;
+  }
+
+  // The receiver, written bare. Its annotation is the enclosing type, made up
+  // here so the rest of the compiler sees an ordinary annotated parameter.
+  if (str.stringEq(node.name, SELF_PARAM) && SelfLexing.peek(ref ps).tag != TokenTags.COLON) {
+    let annot = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.TYPE_ANNOTATION_TYPE_NAME);
+    annot.name = ownerName;
+    // Inside a GENERIC type, `self` is `Vec<T>` and not bare `Vec` - the
+    // parameters are in scope, and a generic name without its arguments is an
+    // error everywhere else too. This is why the owner's type params travel all
+    // the way down here.
+    annot.childA = selfTypeArgs(ref ps, ownerTypeParams)?;
+    node.childA = SelfLexing.pushNode(ref ps, annot);
+    return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
+  }
+
+  SelfLexing.expect(ref ps, TokenTags.COLON)?;
+  node.childA = parseTypeAnnotation(ref ps)?;
+  return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
+}
+
+// `implements A, B` after a type name - the traits the decl claims to satisfy.
+// Returns a NODE_LIST of type annotations, or 0 when there is no clause.
+//
+// Annotations rather than bare names so a generic trait (`Into<T>`) needs
+// nothing extra here; whether the bootstrap can RESOLVE one is pass C's answer.
+// `vtable Reader for Readable { read: (ref buf: uint8[]) => Result<...>, }`
+//
+//   name              the vtable's name
+//   childA            the trait it erases, as a type annotation
+//   own childIds run  the FIELD_DECLs
+//
+// A vtable is the TYPE-ERASED shape of a trait: a struct whose fields are
+// function pointers, one per method. Callers that want to mix concrete impl
+// types behind one parameter take a `Reader` rather than a generic bound.
+//
+// It is a struct at run time and the bootstrap types it as one, which is what
+// gives it field access, literals and a layout for free - the difference is the
+// SYMBOL, which records that it erases a trait. What the bootstrap does NOT do
+// is BUILD one: `Reader.from(ref s)` fills the fields from a concrete type's
+// methods, and that is the erasure machinery, refused by name.
+export function parseVtableDecl(ref ps: ParserState): Result<NodeId, ParsingError> {
+  SelfLexing.expect(ref ps, TokenTags.VTABLE)?;
+  let node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.VTABLE_DECL);
+  node.name = parseIdentAsName(ref ps)?;
+  SelfLexing.expect(ref ps, TokenTags.FOR)?;
+  node.childA = parseTypeAnnotation(ref ps)?;
+
+  SelfLexing.expect(ref ps, TokenTags.LCURLY)?;
+  disposable ids: Vec<NodeId> = vec.vecNew(4);
+  while (
+    SelfLexing.peek(ref ps).tag != TokenTags.RCURLY &&
+    SelfLexing.peek(ref ps).tag != TokenTags.EOF
+  ) {
+    vec.vecPush(ref ids, parseFieldDecl(ref ps)?);
+    if (SelfLexing.peek(ref ps).tag == TokenTags.COMMA) {
+      SelfLexing.advance(ref ps)?;
+    }
+  }
+  SelfLexing.expect(ref ps, TokenTags.RCURLY)?;
+
+  const start: usize = ps.ast.childIds.len;
+  vec.vecExtendFrom(ref ps.ast.childIds, vec.vecAsArray(ref ids));
+  node.childStart = start;
+  node.childCount = ids.len;
+  return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
+}
+
+export function parseImplementsClause(ref ps: ParserState): Result<NodeId, ParsingError> {
+  if (SelfLexing.peek(ref ps).tag != TokenTags.IMPLEMENTS) {
+    return Result.Ok { value: 0 };
+  }
+  const loc = posToSourceLocation(ps.src, ps.pos, 1);
+  SelfLexing.advance(ref ps)?;
+
+  // `implements (A, B)` is the parenthesized form; both are one list.
+  const parenthesized = SelfLexing.peek(ref ps).tag == TokenTags.LPAREN;
+  if (parenthesized) {
+    SelfLexing.advance(ref ps)?;
+  }
+
+  disposable ids: Vec<NodeId> = vec.vecNew(2);
+  while (true) {
+    vec.vecPush(ref ids, parseTypeAnnotation(ref ps)?);
+    if (SelfLexing.peek(ref ps).tag != TokenTags.COMMA) {
+      break;
+    }
+    SelfLexing.advance(ref ps)?;
+  }
+  if (parenthesized) {
+    SelfLexing.expect(ref ps, TokenTags.RPAREN)?;
+  }
+
+  return Result.Ok { value: SelfLexing.buildListNode(ref ps, ref ids, loc) };
+}
+
+// The type-argument list for `self` inside a generic decl: one annotation per
+// declared parameter, in order, each naming that parameter.
+//
+// `type Vec<T>` gives `Vec<T>` - the arguments ARE the parameters, which is the
+// same thing a generic template's own arguments are.
+function selfTypeArgs(ref ps: ParserState, ownerTypeParams: NodeId): Result<NodeId, ParsingError> {
+  if (ownerTypeParams == 0) {
+    return Result.Ok { value: 0 };
+  }
+  const params = nodeAt(ref ps.ast, ownerTypeParams);
+  const loc = posToSourceLocation(ps.src, ps.pos, 1);
+
+  disposable ids: Vec<NodeId> = vec.vecNew(params.childCount);
+  let i: usize = 0;
+  while (i < params.childCount) {
+    let arg = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.TYPE_ANNOTATION_TYPE_NAME);
+    arg.name = nodeAt(ref ps.ast, childAt(ref ps.ast, params, i)).name;
+    vec.vecPush(ref ids, SelfLexing.pushNode(ref ps, arg));
+    i += 1;
+  }
+  return Result.Ok { value: SelfLexing.buildListNode(ref ps, ref ids, loc) };
+}

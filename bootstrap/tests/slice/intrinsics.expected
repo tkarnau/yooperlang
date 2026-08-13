@@ -1,0 +1,7 @@
+bytes len=5 first=104 last=111
+slice len=3 101 108 108
+alloc len=4 11 22 44
+wide len=2 9000000000 -9000000000
+copied=ell
+viewed=hello
+exit=0

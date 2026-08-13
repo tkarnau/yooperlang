@@ -1,6 +1,6 @@
 // Phase 10.X.2 follow-up: `Map<K, V>` keyed off int32, demonstrating
 // that the generic shape works for non-string K. Uses the pre-built
-// `map.int32_key_ops()` helper from std/collections/map.yoop.
+// `map.int32KeyOps()` helper from std/collections/map.yoop.
 
 import { disposable } from "std/core/kinds.yoop";
 import { Option } from "std/core/types.yoop";
@@ -12,15 +12,15 @@ extern "C" from "stdio.h" {
 }
 
 function main(): int32 {
-    disposable m: Map<int32, string> = map.map_new(4, map.int32_key_ops());
+    disposable m: Map<int32, string> = map.mapNew(4, map.int32KeyOps());
 
-    let _f1: bool = map.map_insert(ref m, 1, "alpha");
-    let _f2: bool = map.map_insert(ref m, 2, "beta");
-    let _f3: bool = map.map_insert(ref m, 3, "gamma");
-    printf(`len=${map.map_len(ref m)}\n`);
+    let _f1: bool = map.mapInsert(ref m, 1, "alpha");
+    let _f2: bool = map.mapInsert(ref m, 2, "beta");
+    let _f3: bool = map.mapInsert(ref m, 3, "gamma");
+    printf(`len=${map.mapLen(ref m)}\n`);
 
     // Lookup + Option<V> dispatch.
-    let r1: Option<string> = map.map_get(ref m, 2);
+    let r1: Option<string> = map.mapGet(ref m, 2);
     let r1_v: string = "";
     switch (r1) {
         case Option.Some { value: v }: { r1_v = v; }
@@ -28,7 +28,7 @@ function main(): int32 {
     }
     printf(`get 2 -> ${r1_v}\n`);
 
-    let r_miss: Option<string> = map.map_get(ref m, 99);
+    let r_miss: Option<string> = map.mapGet(ref m, 99);
     let r_miss_v: string = "";
     switch (r_miss) {
         case Option.Some { value: v }: { r_miss_v = v; }
@@ -37,11 +37,11 @@ function main(): int32 {
     printf(`get 99 -> ${r_miss_v}\n`);
 
     // Remove + re-probe through the tombstone.
-    let removed: bool = map.map_remove(ref m, 2);
+    let removed: bool = map.mapRemove(ref m, 2);
     let ri: int32 = 0; if (removed) { ri = 1; }
-    printf(`removed 2 -> ${ri} len=${map.map_len(ref m)}\n`);
+    printf(`removed 2 -> ${ri} len=${map.mapLen(ref m)}\n`);
 
-    let has_3: bool = map.map_contains_key(ref m, 3);
+    let has_3: bool = map.mapContainsKey(ref m, 3);
     let h3: int32 = 0; if (has_3) { h3 = 1; }
     printf(`contains 3 -> ${h3}\n`);
 

@@ -25,6 +25,7 @@
 
 #include "yoop_alloc.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <stddef.h>
 #include <string.h>
@@ -52,9 +53,75 @@ void yoop_set_allocator(void* src) {
 typedef void* (*yoop_alloc_fn)(void*, size_t, size_t);
 typedef void  (*yoop_free_fn)(void*, void*);
 
+// ---- allocation failure ---------------------------------------------------
+//
+// An allocator that fails must SAY SO. Before this, `ctx_alloc` handed the
+// NULL straight back, nothing on the yoop side checked it (not vec_new, not
+// vec_push, not vec_extend_from), and the first write through it was a null
+// deref. What a user saw was `signal: 'SIGSEGV'` and nothing else - and
+// because the dying process's stdout was still buffered, even the program's
+// own progress output was lost, so the last line on screen came from whatever
+// ran BEFORE the failing code. It took --keep-ir and lldb to find.
+//
+// So: print, flush both streams, and exit. Flushing stdout first is the part
+// that turns this from a mystery into a location, because it restores
+// everything the program had printed up to the failing allocation.
+//
+// `exit(1)` rather than `abort()`, matching yoop_panic in yoop_debug.c: no
+// core file, no Windows debug-CRT abort dialog (which would hang CI rather
+// than fail it), and the message is the point anyway.
+//
+// An allocator that knows WHY it ran out fills the note below just before
+// returning NULL, so the arena case can report its actual numbers instead of
+// a generic failure. See yoop_arena_alloc.
+
+static _Thread_local char yoop_alloc_fail_note[192];
+static _Thread_local int  yoop_alloc_fail_note_set = 0;
+
+// Record why the current allocator is about to return NULL. Overwritten by
+// each failure and consumed by the next abort, so a stale note can never
+// outlive the allocation it describes.
+void yoop_alloc_note_failure(const char* note) {
+  if (!note) { yoop_alloc_fail_note_set = 0; return; }
+  snprintf(yoop_alloc_fail_note, sizeof(yoop_alloc_fail_note), "%s", note);
+  yoop_alloc_fail_note_set = 1;
+}
+
+static void yoop_alloc_die(size_t size, size_t align) {
+  fflush(stdout);
+  if (yoop_alloc_fail_note_set) {
+    fprintf(stderr,
+            "yoop: allocation failed: wanted %zu bytes (align %zu) - %s\n",
+            size, align, yoop_alloc_fail_note);
+  } else {
+    fprintf(stderr,
+            "yoop: allocation failed: wanted %zu bytes (align %zu) - the "
+            "current allocator returned null\n",
+            size, align);
+  }
+  fflush(stderr);
+  exit(1);
+}
+
 // Dispatch a `size`-byte allocation through the current allocator (default
 // malloc before anything is installed). Backs the `ctx_alloc<T>` intrinsic.
+//
+// Never returns NULL: a failure exits with a message. Callers that want to
+// HANDLE exhaustion rather than die on it use yoop_ctx_alloc_try.
 void* yoop_ctx_alloc(size_t size, size_t align) {
+  void* p = yoop_ctx_alloc_try(size, align);
+  if (!p) yoop_alloc_die(size, align);
+  yoop_alloc_fail_note_set = 0;
+  return p;
+}
+
+// The non-fatal sibling: returns NULL on failure instead of exiting. This is
+// the escape hatch for code that genuinely wants to recover (probe a size,
+// fall back to a smaller buffer, report upward). Aborting is the DEFAULT
+// rather than the only option, because a silent null is what made this class
+// of bug so expensive to find, but "cannot allocate" is a legitimate thing
+// for a program to handle.
+void* yoop_ctx_alloc_try(size_t size, size_t align) {
   if (!yoop_cur_alloc_set) return malloc(size);
   yoop_alloc_fn f = (yoop_alloc_fn)yoop_cur_alloc.alloc;
   return f(yoop_cur_alloc.data, size, align);
@@ -196,11 +263,29 @@ static size_t yoop_align_up(size_t n, size_t align) {
 // Bump the cursor, honoring alignment. Returns NULL on overflow (v1 has no
 // region growth; an out-of-space alloc fails rather than mallocing behind the
 // caller's back).
+//
+// On the way out it leaves a note saying what the region actually had left,
+// which is what lets the abort in yoop_ctx_alloc report "arena exhausted:
+// capacity N, N used" rather than a bare "returned null". The arena is the
+// only allocator here that can answer that question, since yoop_ctx_alloc
+// sees the allocator as four opaque pointers.
 void* yoop_arena_alloc(void* handle, size_t size, size_t align) {
   YoopArena* ar = (YoopArena*)handle;
-  if (!ar) return NULL;
+  if (!ar) {
+    yoop_alloc_note_failure("no arena installed");
+    return NULL;
+  }
   size_t start = yoop_align_up(ar->offset, align);
-  if (start + size > ar->cap) return NULL;
+  // Checked in this order so an alignment bump that overflows size_t cannot
+  // wrap past the capacity test.
+  if (start < ar->offset || start > ar->cap || size > ar->cap - start) {
+    char note[160];
+    snprintf(note, sizeof(note),
+             "arena exhausted: capacity %zu, %zu used, %zu free after "
+             "alignment", ar->cap, ar->offset, ar->cap - (start > ar->cap ? ar->cap : start));
+    yoop_alloc_note_failure(note);
+    return NULL;
+  }
   void* p = ar->base + start;
   ar->offset = start + size;
   return p;

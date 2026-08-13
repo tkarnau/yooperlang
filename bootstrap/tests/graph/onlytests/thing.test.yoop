@@ -1,0 +1,5 @@
+// The only .yoop file in this directory, and it is excluded from a module's
+// file list - so the directory holds no source files at all.
+import.test;
+
+function unused(): int { return 0; }

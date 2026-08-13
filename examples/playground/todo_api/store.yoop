@@ -32,7 +32,7 @@ export type StoreError implements (Display, Into<HttpError>, WithContext<HttpErr
     message: string,
     status:  StatusCode,
 
-    function to_string(ref self): string {
+    function toString(ref self): string {
         return self.message;
     }
 
@@ -178,7 +178,7 @@ export function list(
 
     let cursor = sqlite.rows(ref q);
     for row in cursor {
-        vec.vec_push(ref out, readTodo(row));
+        vec.vecPush(ref out, readTodo(row));
     }
     // `Iterable.next` has no error channel, so a mid-iteration failure ends
     // the loop quietly and lands here. Checking it is the difference between

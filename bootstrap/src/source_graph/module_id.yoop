@@ -1,0 +1,74 @@
+module source_graph;
+
+// A module's ID: the name every symbol it defines is mangled against.
+//
+// It has to be unique per module and a legal LLVM identifier, and it is worth a
+// lot for it to be readable - `util_1__add` says where `add` came from when you
+// are staring at IR, which `m1__add` does not.
+//
+// So: the file's base name, sanitized, plus its POSITION in the module graph.
+// The JS reference hashes the absolute path instead, because it wants an id
+// that is stable per-path across separate compiles. Nothing here compiles
+// separately - the whole graph is loaded in one run, in a deterministic
+// (depth-first, leaves-first) order - so the position is unique for free and
+// reads better than eight hex digits.
+
+import * as fs from "std/fs.yoop";
+import * as str from "std/core/strings.yoop";
+import * as intr from "std/core/intrinsics.yoop";
+import { Text }, * as text from "std/core/text.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import { Result } from "std/core/types.yoop";
+
+export function moduleIdFor(absPath: string, index: usize): string {
+  disposable id: Text = text.make(32);
+  appendSanitizedBaseName(ref id, absPath);
+  text.pushByte(ref id, '_');
+  text.pushUint(ref id, uint64(index));
+
+  // `text.view` borrows the Text's storage, which dies at the end of this
+  // scope, and a Module holds its id for the whole compile - so this copy is
+  // the point. One owned string per module in the graph.
+  switch (str.stringFromBytes(text.bytes(ref id))) {
+    case Result.Ok { value: s }: { return s; }
+    case Result.Err { error: e }: { return "module"; }
+  }
+}
+
+// `/a/b/my-util.yoop` -> `my_util`. Everything outside [A-Za-z0-9_] becomes an
+// underscore, because the result goes straight into an LLVM symbol name.
+function appendSanitizedBaseName(ref out: Text, absPath: string): void {
+  const bytes = intr.stringAsBytes(absPath);
+  let start: usize = 0;
+  let i: usize = 0;
+  while (i < bytes.len) {
+    if (bytes[i] == '/') {
+      start = i + 1;
+    }
+    i += 1;
+  }
+
+  let end = bytes.len;
+  if (fs.hasYoopFileNameSuffix(absPath) && end >= start + 5) {
+    end -= 5;   // drop the ".yoop"
+  }
+
+  if (start >= end) {
+    text.push(ref out, "module");
+    return;
+  }
+
+  let j = start;
+  while (j < end) {
+    text.pushByte(ref out, sanitizedByte(bytes[j]));
+    j += 1;
+  }
+}
+
+function sanitizedByte(b: uint8): uint8 {
+  if (b >= 'a' && b <= 'z') { return b; }
+  if (b >= 'A' && b <= 'Z') { return b; }
+  if (b >= '0' && b <= '9') { return b; }
+  if (b == '_') { return b; }
+  return '_';
+}

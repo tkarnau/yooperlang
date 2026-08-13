@@ -1,0 +1,89 @@
+// `propagates<disposable>` - the clause that says an obligation travels.
+//
+// A function that hands back storage someone has to dispose says so in its
+// SIGNATURE rather than in a comment, and a type that carries such a value says
+// it too. `vecNew` is the canonical one: it returns a `Vec<T>` whose buffer
+// outlives the call, so every caller inherits the obligation.
+//
+// NOTHING ENFORCES IT in the bootstrap - the clause is parsed and recorded, the
+// same as every other kind surface. That is not a small thing to get right
+// anyway: the bootstrap's own source carries 48 of these across 25 files, so a
+// compiler that cannot READ the clause cannot read the compiler.
+//
+// The interesting parse problem is that `Buf propagates<tracked>` and
+// `disposable Buf` are both two identifiers in a row. One is a type followed by
+// a clause, the other a kind prefix followed by a type. `propagates` is
+// contextual - it lexes as an ordinary IDENT - so telling them apart means
+// reading the second identifier's TEXT, not its tag.
+
+kind tracked {
+  appliesTo binding;
+}
+
+trait Named {
+  function label(ref self): string;
+}
+
+// On a TYPE, after the name.
+type Buf propagates<tracked> {
+  n: int,
+}
+
+// On a VARIANT, and after `implements` when both are present - the clauses have
+// a fixed order and the parser has to take them in it.
+variant Shape implements Named propagates<tracked> {
+  Dot,
+  Box { w: int, h: int },
+  function label(ref self): string {
+    switch (self) {
+      case Shape.Dot: { return "dot"; }
+      case Shape.Box { w: w, h: h }: { return "box"; }
+    }
+  }
+}
+
+// On a FUNCTION, after the return type and before the body.
+function makeBuf(n: int): Buf propagates<tracked> {
+  return { n: n };
+}
+
+// On a GENERIC function, so the clause has to survive monomorphization - the
+// instance is emitted from the same decl node the clause hangs off.
+//
+// Indexed rather than `for x in xs` only because the JS reference crashes
+// lowering a for-in over a type parameter's array, and this fixture is asserted
+// against both compilers. The bootstrap handles either.
+function firstOr<T>(xs: T[], fallback: T): T propagates<tracked> {
+  if (xs.len > 0) {
+    return xs[0];
+  }
+  return fallback;
+}
+
+// A kind PREFIX and a propagates clause on the same declaration, which is the
+// case that pins down that the two are told apart rather than confused.
+kind tagged {
+  appliesTo function;
+  signature () => void;
+  enumerable as "tagged";
+}
+
+tagged report(): void {
+  printf("reported\n");
+}
+
+function main(): int {
+  const b: Buf = makeBuf(7);
+  printf("n=%d\n", b.n);
+
+  const dot: Shape = Shape.Dot;
+  const box: Shape = Shape.Box { w: 3, h: 4 };
+  printf("%s %s\n", Named.label(ref dot), Named.label(ref box));
+
+  const xs: int[] = [11, 22];
+  const empty: int[] = [];
+  printf("first=%d fallback=%d\n", firstOr(xs, 0), firstOr(empty, 99));
+
+  report();
+  return 0;
+}

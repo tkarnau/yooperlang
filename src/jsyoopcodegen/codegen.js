@@ -88,6 +88,8 @@ const RUNTIME_DECLARES = [
   "declare i64 @yoop_now_ns()",
   // Phase 10.F.2: external cancellation primitive.
   "declare void @yoop_task_cancel(ptr)",
+  "declare i32 @yoop_task_arm_complete(ptr)",
+  "declare i32 @yoop_task_is_done(ptr)",
   "declare ptr @yoop_task_alloc(i64)",
   "declare void @yoop_task_retain(ptr)",
   "declare void @yoop_task_release(ptr)",
@@ -114,7 +116,7 @@ const RUNTIME_DECLARES = [
   "declare void @llvm.coro.destroy(ptr)",
   "declare i1 @llvm.coro.done(ptr)",
   // Context-routed allocation (runtime/yoop_alloc.c): dispatch through the
-  // current allocator. Back the ctx_alloc/ctx_free intrinsics.
+  // current allocator. Back the ctxAlloc/ctxFree intrinsics.
   "declare ptr @yoop_ctx_alloc(i64, i64)",
   "declare void @yoop_ctx_free(ptr)",
   "declare ptr @memcpy(ptr, ptr, i64)",
@@ -246,6 +248,15 @@ function arrayElemLlvmName(elemType) {
   // scrutinees.
   if (elemType.kind === typeKinds.valueEnum) {
     return arrayElemLlvmName(elemType.underlying);
+  }
+  // A `Task<T>` value is the task HANDLE, which is a bare `ptr` at the storage
+  // layer (the result type lives in the yoop type and is recovered at the
+  // wait site), so every task array shares one key regardless of T. Without
+  // this `Task<int32>[]` - and every `Vec<Task<T>>` built on it - typechecked
+  // cleanly and then died in codegen, which is what blocked any collection of
+  // tasks and therefore any join-many combinator.
+  if (elemType.kind === typeKinds.task) {
+    return `task_${arrayElemLlvmName(elemType.resultType)}`;
   }
   throw new Error(`arrayElemLlvmName: unsupported elem type "${elemType.kind}"`);
 }
@@ -531,7 +542,62 @@ function hoistAllocasToEntry(fnLines) {
 //
 // `t0`/`t1` are the ones that actually bite: they are the natural names for
 // timing code. Reserving the pattern makes `let t0` emit `%t0.1` instead.
+// `a && b` / `a || b` evaluate the RIGHT side only when the left does not
+// already decide the answer.
+//
+// They used to lower through INT_OP_MAP, which maps `andand` onto the bitwise
+// `and` and `oror` onto `or` - so BOTH sides always ran. That is wrong in the
+// one way that matters: every guard idiom in every language is written on the
+// assumption that it is not.
+//
+//     if (p != null && p.field > 0)         // deref of null
+//     if (i < xs.len && xs[i] == want)      // read past the end
+//     if (ok && expensive())                // silently pays for it
+//
+// It is invisible until the right side is unsafe, and then it is a segfault
+// several frames from the source. Found by `tools/stdindex`, whose insertion
+// sort is the textbook shape - `while (j > 0 && less(cur, xs[j - 1]))`, where
+// `j - 1` underflows a usize the moment `j` reaches 0.
+//
+// Lowered through a stack slot rather than a phi, because a phi needs the
+// predecessor BLOCK labels and the right side may itself contain branches
+// (a nested `&&`, a `?`, an `await`), which would leave the recorded
+// predecessor stale. `hoistAllocasToEntry` lifts the slot to the entry block,
+// so this costs nothing a phi would not.
+//
+// Shared by both emitters on purpose. The single-module and multi-module
+// binary-expression paths are near-duplicates, and CLAUDE.md records two bugs
+// (printf, the for-loop counter) that came from editing one and not the other.
+function emitShortCircuitLogical(node, fnLines, emit) {
+  const isAnd = node.op === "andand";
+  const slot = emit.freshTemp();
+  const rhsLabel = emit.freshLabel(isAnd ? "and_rhs" : "or_rhs");
+  const doneLabel = emit.freshLabel(isAnd ? "and_done" : "or_done");
+
+  fnLines.push(`  ${slot} = alloca i1, align 1`);
+  const left = emit.emitExpr(node.left, fnLines);
+  // Seed with the left value: it IS the answer on the short-circuit path
+  // (false for `&&`, true for `||`).
+  fnLines.push(`  store i1 ${left.val}, ptr ${slot}, align 1`);
+  fnLines.push(
+    isAnd
+      ? `  br i1 ${left.val}, label %${rhsLabel}, label %${doneLabel}`
+      : `  br i1 ${left.val}, label %${doneLabel}, label %${rhsLabel}`,
+  );
+
+  fnLines.push(`${rhsLabel}:`);
+  const right = emit.emitExpr(node.right, fnLines);
+  fnLines.push(`  store i1 ${right.val}, ptr ${slot}, align 1`);
+  fnLines.push(`  br label %${doneLabel}`);
+
+  fnLines.push(`${doneLabel}:`);
+  const out = emit.freshTemp();
+  fnLines.push(`  ${out} = load i1, ptr ${slot}, align 1`);
+  return { val: out, yoopType: PrimType("bool") };
+}
+
 const EMITTER_LABEL_HINTS = new Set([
+  "and_done", "and_rhs", "or_done", "or_rhs",
   "else", "merge", "then",
   "for_after", "for_body", "for_cond", "for_step",
   "forin_after", "forin_body", "forin_cond", "forin_step",
@@ -1108,6 +1174,18 @@ export function codegen(ast) {
 
       case ASTNodeKind.REF_EXPRESSION: {
         if (node.operand.kind === ASTNodeKind.IDENT) {
+          // Phase 8.E: a module-level global has no local slot - its storage
+          // is `@<modid>__<name>`. Without this, `f(ref someGlobal)` emitted
+          // `%someGlobal`, which passes typecheck AND IR generation and is
+          // then rejected by clang as `use of undefined value`. Same shape as
+          // the check emitLval already had, and the same failure mode as the
+          // extern-sibling mangling bug: nothing catches it until link time.
+          if (node.operand.isModuleGlobal) {
+            return {
+              val: `@${node.operand.moduleGlobalSym}`,
+              yoopType: node.resolvedType,
+            };
+          }
           const operandType = symbols.get(node.operand.name);
           if (operandType?.kind === typeKinds.ref) {
             // ref of a ref binding (like `ref self`): forward the underlying pointer
@@ -1127,6 +1205,14 @@ export function codegen(ast) {
       }
 
       case ASTNodeKind.BINARY_EXPRESSION: {
+        // `&&` / `||` short-circuit, so they cannot go through the arithmetic
+        // path below (which would evaluate both sides). See
+        // emitShortCircuitLogical.
+        if (node.op === "andand" || node.op === "oror") {
+          return emitShortCircuitLogical(node, fnLines, {
+            emitExpr, freshTemp, freshLabel,
+          });
+        }
         // Phase 8.A: pointer arithmetic and pointer/null comparisons branch
         // off the integer/float path. Detect via operand resolvedType.
         const leftTy = node.left.resolvedType;
@@ -1477,7 +1563,7 @@ export function codegen(ast) {
       return { val: tmp, yoopType: dstType };
     }
     // Namespace call: io.greet("hello") - callee is a FIELD_ACCESS node.
-    // For generic calls (`vec.vec_new(...)`), node.genericInstantiation
+    // For generic calls (`vec.vecNew(...)`), node.genericInstantiation
     // holds the monomorphic mangled name; otherwise we mangle the bare
     // export name.
     if (node.callee && typeof node.callee === "object" && node.callee.namespaceLookup) {
@@ -2421,7 +2507,7 @@ function needsStrlen(node) {
         return;
       }
     }
-    // Phase 8.H: string_as_bytes calls strlen internally.
+    // Phase 8.H: stringAsBytes calls strlen internally.
     if (
       n.kind === ASTNodeKind.CALL_EXPRESSION &&
       n.genericInstantiation?.declId === "$builtin__string_as_bytes"
@@ -3039,6 +3125,12 @@ function structContainsTypeParam(structType) {
     if (t.kind === typeKinds.typeParam) return true;
     if (t.kind === typeKinds.ref) return hasParam(t.inner);
     if (t.kind === typeKinds.array) return hasParam(t.elem);
+    // A `Task<T>` field keeps the parameter in its RESULT type. Every task
+    // handle is a bare `ptr`, so nothing about the emitted layout gives the
+    // parameter away - which is exactly why it has to be checked here. A
+    // struct holding `Task<T>[]` would otherwise look closed and get emitted
+    // as an open shell referencing an array type that is never defined.
+    if (t.kind === typeKinds.task) return hasParam(t.resultType);
     if (t.kind === typeKinds.struct) {
       const key = (t.moduleId ? `${t.moduleId}__` : "") + t.name;
       if (seen.has(key)) return false;
@@ -3682,7 +3774,7 @@ function codegenWithModuleId(
   // instances belonging to OTHER modules (e.g. `Set<K>`'s body in
   // std/collections/set.yoop references generic functions defined in
   // std/collections/map.yoop - when Set<string> is monomorphized,
-  // map_contains_key<string, bool> lands in the map module's registry
+  // mapContainsKey<string, bool> lands in the map module's registry
   // slot, which may have already finished its own per-instance sweep).
   // The outer fixed-point in codegenProgram keeps calling each module's
   // closure until a full pass produces no new emissions.
@@ -3698,7 +3790,7 @@ function codegenWithModuleId(
         // exist in the registry as caching artifacts - the concrete instances
         // produced when the outer generic is monomorphized are what get IR.
         if (inst.argTypes.some((t) => t?.kind === typeKinds.typeParam)) continue;
-        // Builtin generic funcs (heap_alloc / heap_free) have no AST body -
+        // Builtin generic funcs (heapAlloc / heapFree) have no AST body -
         // codegen inlines them at every call site (see emitCallExpr).
         if (inst.declId?.startsWith("$builtin")) continue;
         inst.emitted = true;
@@ -4472,6 +4564,18 @@ function codegenWithModuleId(
       }
       case ASTNodeKind.REF_EXPRESSION: {
         if (node.operand.kind === ASTNodeKind.IDENT) {
+          // Phase 8.E: a module-level global has no local slot - its storage
+          // is `@<modid>__<name>`. Without this, `f(ref someGlobal)` emitted
+          // `%someGlobal`, which passes typecheck AND IR generation and is
+          // then rejected by clang as `use of undefined value`. Same shape as
+          // the check emitLval already had, and the same failure mode as the
+          // extern-sibling mangling bug: nothing catches it until link time.
+          if (node.operand.isModuleGlobal) {
+            return {
+              val: `@${node.operand.moduleGlobalSym}`,
+              yoopType: node.resolvedType,
+            };
+          }
           const operandType = symbols.get(node.operand.name);
           if (operandType?.kind === typeKinds.ref) {
             // ref of a ref binding (like `ref self`): forward the underlying pointer
@@ -4487,6 +4591,13 @@ function codegenWithModuleId(
       }
       case ASTNodeKind.CALL_EXPRESSION: return emitCallExpr(node, fnLines);
       case ASTNodeKind.BINARY_EXPRESSION: {
+        // `&&` / `||` short-circuit - same helper the single-module path
+        // uses, deliberately shared so the two cannot drift.
+        if (node.op === "andand" || node.op === "oror") {
+          return emitShortCircuitLogical(node, fnLines, {
+            emitExpr, freshTemp, freshLabel,
+          });
+        }
         // Phase 8.A: route pointer arithmetic / pointer-null comparison
         // through emitPointerBinaryMM. Same logic as single-module path.
         const leftTy = node.left.resolvedType;
@@ -5180,7 +5291,7 @@ function codegenWithModuleId(
     return { val: resVal, yoopType: resultType };
   }
 
-  // Phase 10.F + 10.F.2: `wait_until(h, deadline_ns): WaitResult<T>`
+  // Phase 10.F + 10.F.2: `waitUntil(h, deadline_ns): WaitResult<T>`
   // lowering. The runtime returns an i32 outcome - 0 done, 1 timeout, 2
   // cancelled - and we dispatch via a switch to build the matching
   // variant. The result-slot byte offset is the universal task-struct
@@ -5292,8 +5403,29 @@ function codegenWithModuleId(
     return { val: "void", yoopType: VoidType() };
   }
 
-  // Inline emission for builtin generic functions: heap_alloc / heap_free
-  // (Phase 7+) and array_slice (Phase 8.H). These have `declId` starting with
+  // `armComplete(h): int32` - thin wrapper over @yoop_task_arm_complete,
+  // stamped by the typechecker's resolveArmCompleteCall. Same shape as
+  // emitCancelCall: the arg is a Task<T> value, which lowers to the handle
+  // ptr directly.
+  function emitArmCompleteCall(node, fnLines) {
+    const handleVal = emitExpr(node.args[0], fnLines);
+    const out = freshTemp();
+    fnLines.push(
+      `  ${out} = call i32 @yoop_task_arm_complete(ptr ${handleVal.val})`,
+    );
+    return { val: out, yoopType: PrimType("int32") };
+  }
+
+  // `isDone(h): int32` - thin wrapper over @yoop_task_is_done.
+  function emitIsDoneCall(node, fnLines) {
+    const handleVal = emitExpr(node.args[0], fnLines);
+    const out = freshTemp();
+    fnLines.push(`  ${out} = call i32 @yoop_task_is_done(ptr ${handleVal.val})`);
+    return { val: out, yoopType: PrimType("int32") };
+  }
+
+  // Inline emission for builtin generic functions: heapAlloc / heapFree
+  // (Phase 7+) and arraySlice (Phase 8.H). These have `declId` starting with
   // `$builtin` and no AST body; codegen lowers each call directly.
   function emitBuiltinGenericCall(node, fnLines) {
     const inst = node.genericInstantiation;
@@ -5331,7 +5463,7 @@ function codegenWithModuleId(
       return { val: fatVal, yoopType: arrayType };
     }
     if (inst.declId === "$builtin__ctx_alloc") {
-      // Same as heap_alloc, but the byte allocation routes through the current
+      // Same as heapAlloc, but the byte allocation routes through the current
       // allocator (yoop_ctx_alloc) instead of malloc. Alignment is 8, which
       // satisfies every current Yoop scalar/struct type.
       const elemType = inst.argTypes[0];
@@ -5360,7 +5492,7 @@ function codegenWithModuleId(
       return { val: fatVal, yoopType: arrayType };
     }
     if (inst.declId === "$builtin__ctx_free") {
-      // Same as heap_free, but frees through the current allocator.
+      // Same as heapFree, but frees through the current allocator.
       const elemType = inst.argTypes[0];
       const arrayType = ArrayType(elemType);
       ensureArrayTypeDef(elemType);
@@ -5470,7 +5602,7 @@ function codegenWithModuleId(
       return { val: raw, yoopType: PrimType("string") };
     }
     if (inst.declId === "$builtin__bytes_as_string_unchecked") {
-      // Borrowing inverse of string_as_bytes: project field 0 (the data
+      // Borrowing inverse of stringAsBytes: project field 0 (the data
       // pointer) out of the fat pointer and call it a string. No malloc, no
       // memcpy, no strlen - the caller guarantees the nul terminator, which
       // is why this is `_unchecked`. `buf.len` is deliberately discarded: a
@@ -5490,7 +5622,7 @@ function codegenWithModuleId(
       return { val: dataPtr, yoopType: PrimType("string") };
     }
     if (inst.declId === "$builtin__array_slice") {
-      // Phase 8.H: array_slice<T>(xs, start, end) - borrowing view, no copy.
+      // Phase 8.H: arraySlice<T>(xs, start, end) - borrowing view, no copy.
       // Build {xs.ptr + start * sizeof(T), end - start} as a fresh fat pointer.
       const elemType = inst.argTypes[0];
       const arrayType = ArrayType(elemType);
@@ -5533,9 +5665,9 @@ function codegenWithModuleId(
 
   // Lower an interpolated template literal to a string by routing each
   // `${expr}` through the matching `<prim>_to_string` shim (or the
-  // Display.to_string call the typechecker pre-synthesized for struct
+  // Display.toString call the typechecker pre-synthesized for struct
   // operands), collecting the parts into a `string[]` fat pointer, and
-  // feeding that to `string_concat_all`. Requires the driver to have
+  // feeding that to `stringConcatAll`. Requires the driver to have
   // autoloaded std/core/format.yoop + std/core/strings.yoop.
   function emitInterpolatedTemplateLiteral(node, fnLines) {
     const fmtMod = requireAutoloadedStd(
@@ -5556,8 +5688,8 @@ function codegenWithModuleId(
       }
       const r = emitExpr(part.expr, fnLines);
       // Phase 12: a value enum shares its underlying primitive's LLVM repr,
-      // so route it through the same per-prim to_string shim (string passes
-      // through, ints go to int_to_string, etc).
+      // so route it through the same per-prim toString shim (string passes
+      // through, ints go to intToString, etc).
       const t = valueEnumUnderlying(r.yoopType);
       if (t.kind === typeKinds.prim && t.name === "string") {
         partVals.push(r.val);
@@ -5565,7 +5697,7 @@ function codegenWithModuleId(
       }
       if (t.kind === typeKinds.prim && t.name === "bool") {
         const tmp = freshTemp();
-        fnLines.push(`  ${tmp} = call ptr @${fmtMod}__bool_to_string(i1 ${r.val})`);
+        fnLines.push(`  ${tmp} = call ptr @${fmtMod}__boolToString(i1 ${r.val})`);
         partVals.push(tmp);
         continue;
       }
@@ -5578,7 +5710,7 @@ function codegenWithModuleId(
           fnLines.push(`  ${w} = ${unsigned ? "zext" : "sext"} ${llvm} ${r.val} to i64`);
           widened = w;
         }
-        const fn = unsigned ? "uint_to_string" : "int_to_string";
+        const fn = unsigned ? "uintToString" : "intToString";
         const tmp = freshTemp();
         fnLines.push(`  ${tmp} = call ptr @${fmtMod}__${fn}(i64 ${widened})`);
         partVals.push(tmp);
@@ -5593,7 +5725,7 @@ function codegenWithModuleId(
           widened = w;
         }
         const tmp = freshTemp();
-        fnLines.push(`  ${tmp} = call ptr @${fmtMod}__float_to_string(double ${widened})`);
+        fnLines.push(`  ${tmp} = call ptr @${fmtMod}__floatToString(double ${widened})`);
         partVals.push(tmp);
         continue;
       }
@@ -5606,7 +5738,7 @@ function codegenWithModuleId(
   }
 
   // Build a `string[]` fat pointer over already-emitted string values and
-  // hand it to std/core/strings.yoop's `string_concat_all`. Shared by
+  // hand it to std/core/strings.yoop's `stringConcatAll`. Shared by
   // interpolated template literals and the Phase 10.E.2 `?` context concat.
   function emitStringConcatParts(partVals, fnLines) {
     const strMod = requireAutoloadedStd("strings", "string concatenation");
@@ -5638,7 +5770,7 @@ function codegenWithModuleId(
     fnLines.push(`  ${fatVal} = load ${arrLlvm}, ptr ${fatSlot}`);
 
     const result = freshTemp();
-    fnLines.push(`  ${result} = call ptr @${strMod}__string_concat_all(${arrLlvm} ${fatVal})`);
+    fnLines.push(`  ${result} = call ptr @${strMod}__stringConcatAll(${arrLlvm} ${fatVal})`);
     return { val: result, yoopType: stringTy };
   }
 
@@ -5656,13 +5788,19 @@ function codegenWithModuleId(
   }
 
   function emitCallExpr(node, fnLines) {
-    // Phase 10.F: builtin wait_until lowering (multi-module path).
+    // Phase 10.F: builtin waitUntil lowering (multi-module path).
     if (node.builtinWaitUntil) {
       return emitWaitUntilCall(node, fnLines);
     }
     // Phase 10.F.2: builtin cancel lowering.
     if (node.builtinCancel) {
       return emitCancelCall(node, fnLines);
+    }
+    if (node.builtinArmComplete) {
+      return emitArmCompleteCall(node, fnLines);
+    }
+    if (node.builtinIsDone) {
+      return emitIsDoneCall(node, fnLines);
     }
     if (node.genericInstantiation?.declId?.startsWith("$builtin")) {
       return emitBuiltinGenericCall(node, fnLines);
@@ -5684,7 +5822,7 @@ function codegenWithModuleId(
       return { val: tmp, yoopType: dstType };
     }
     if (node.callee && typeof node.callee === "object" && node.callee.namespaceLookup) {
-      // Generic-namespace calls (`vec.vec_new(...)`) carry a
+      // Generic-namespace calls (`vec.vecNew(...)`) carry a
       // `genericInstantiation` from the typechecker - its mangled name
       // includes the type-arg suffix so we land on the concrete monomorphic
       // function rather than the (non-existent) base symbol.
@@ -7146,7 +7284,7 @@ export function compileEntry(entryAbsPath, opts = {}) {
   const { modules, autoloadedStdModuleIds } = loadModuleGraph(entryAbsPath);
   const { errors, moduleEnv, programState } = typecheckProgram(modules);
   // Thread the well-known std module ids through programState so codegen
-  // can mint mangled symbols (`<fmtModId>__int_to_string`, etc.) when
+  // can mint mangled symbols (`<fmtModId>__intToString`, etc.) when
   // lowering interpolated template literals.
   programState.autoloadedStdModuleIds = autoloadedStdModuleIds ?? {};
   // --track-heap parity with the yoopiler.js driver. Tests pass this

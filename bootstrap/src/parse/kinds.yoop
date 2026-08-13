@@ -1,0 +1,47 @@
+module parse;
+
+// The kind written after a TYPE's name (`type SockAddrIn c_layout { ... }`).
+//
+// The prefix form on a function lives in kind_decl.yoop, where it shares a file
+// with the `kind` declaration it names.
+
+import { Result } from "std/core/types.yoop";
+import { NodeId, ASTNodeKind } from "../ast";
+import { TokenTags } from "../lex";
+import { ParsingError } from "../diagnostics";
+
+// `c_layout` or `aligned(16)` sitting after a type's name.
+//
+// One identifier, optionally followed by an argument list. The arguments are
+// CONSUMED and not recorded: nothing enforces kinds, so an argument has nothing
+// to be checked against, and recording an expression nobody reads would be a
+// slot to keep correct for no benefit.
+export function consumeKindPrefixWithArgs(ref ps: ParserState): Result<NodeId, ParsingError> {
+  let node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.KIND_PREFIX);
+  node.name = parseIdentAsName(ref ps)?;
+
+  if (SelfLexing.peek(ref ps).tag != TokenTags.LPAREN) {
+    return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
+  }
+
+  // Nesting-aware, so `aligned(sizeOf(T))` closes on its own paren.
+  SelfLexing.advance(ref ps)?;
+  let depth: usize = 1;
+  while (depth > 0) {
+    const tag = SelfLexing.peek(ref ps).tag;
+    if (tag == TokenTags.EOF) {
+      return Result.Err { error: SelfLexing.createParsingError(
+        ref ps,
+        `unterminated argument list on kind "${node.name}"`,
+        peekLengthUsize(ref ps),
+      )};
+    }
+    if (tag == TokenTags.LPAREN) {
+      depth += 1;
+    } else if (tag == TokenTags.RPAREN) {
+      depth -= 1;
+    }
+    SelfLexing.advance(ref ps)?;
+  }
+  return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
+}

@@ -24,7 +24,7 @@ function forward(s: owned string): owned string {
 // annotation. A plain `let x: string` would DROP it, and the return would
 // then read as forgery.
 function buildGreeting(who: string): owned string {
-    let out: owned string = str.string_concat("hello, ", who);
+    let out: owned string = str.stringConcat("hello, ", who);
     return out;
 }
 
@@ -44,7 +44,7 @@ function main(): int32 {
     // marker constrains sinks that NAME it, nothing else. Both of these read
     // the same storage `built` points at.
     const borrowed: string = same;
-    printf("borrowed [%s] eq=%d\n", borrowed, str.string_eq(borrowed, "hello, world"));
+    printf("borrowed [%s] eq=%d\n", borrowed, str.stringEq(borrowed, "hello, world"));
 
     release(built);
 
@@ -60,10 +60,10 @@ function main(): int32 {
     // The intrinsic is the one true mint site: it is the thing that calls the
     // allocator, and being a bodyless extern it is never subject to the
     // decl-authority check.
-    let buf: uint8[] = intr.heap_alloc(2);
+    let buf: uint8[] = intr.heapAlloc(2);
     buf[0] = 'h'; buf[1] = 'i';
-    const raw: owned string = intr.string_from_bytes_unchecked(buf);
-    intr.heap_free(buf);
+    const raw: owned string = intr.stringFromBytesUnchecked(buf);
+    intr.heapFree(buf);
     printf("raw [%s]\n", raw);
     str.strFree(raw);
 

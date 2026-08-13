@@ -1,0 +1,29 @@
+// A loop inside a branch and a branch inside a loop, plus a local declared
+// inside a branch. The alloca for `bonus` is hoisted to the entry block, which
+// is what makes it dominate its use - an alloca emitted inside the arm would
+// not.
+function countEven(limit: int): int {
+  let n: int = 0;
+  let seen: int = 0;
+  while (n < limit) {
+    if (n % 2 == 0) {
+      const bonus = 1;
+      seen = seen + bonus;
+    }
+    n = n + 1;
+  }
+  return seen;
+}
+
+function main(): int {
+  if (countEven(10) == 5) {
+    let i: int = 0;
+    while (i < 3) {
+      printf("tick %d\n", i);
+      i = i + 1;
+    }
+  } else {
+    printf("unexpected\n");
+  }
+  return countEven(7);
+}

@@ -1,0 +1,78 @@
+// std/core/atomic.yoop - atomic integer counters shared across tasks.
+//
+// Yoop already lets several tasks reach the same mutable storage: a
+// module-level `let` is visible from every task, and an `unsafe_ptr<int32>`
+// can be handed to one as a parameter. What it did not have is any way to
+// UPDATE that storage safely. `n = n + 1` from two workers is a load, an add,
+// and a store, and two of those interleaved lose a count.
+//
+//     import * as atomic from "std/core/atomic.yoop";
+//
+//     let live: int32 = 0;
+//     // ...from any task, on any worker:
+//     let now: int32 = atomic.incrI32(ref live);
+//     let _left: int32 = atomic.decrI32(ref live);
+//
+// Deliberately tiny: add, load, store, and a high-water max. No
+// compare-exchange, no fences, no memory-order parameter, no atomic pointers.
+// Every operation is sequentially consistent - the ordering that needs no
+// argument about correctness, at a cost that does not matter at the rate
+// anything here is called. Widen it when something concrete needs more.
+//
+// This is NOT a general concurrency story. It makes a COUNTER correct; it does
+// nothing for a shared data structure, where the invariant spans more than one
+// word. For those, keep the state in one task and send it messages.
+//
+// First caller: `serveConcurrent` in std/http, whose accept loop increments
+// and whose connection tasks each decrement from whatever worker they land on.
+//
+// The whole surface takes `ref int32` rather than `unsafe_ptr<int32>`. A `ref`
+// parameter already lowers to a pointer, so the C side is unchanged - and it
+// means a CALLER does not need `import.unsafe;` to count something. Keeping
+// the pragma to the one module that genuinely needs raw pointers is the point
+// of having it.
+
+extern "C" from "yoop_runtime" {
+    function yoop_atomic_add_i32(ref p: int32, delta: int32): int32;
+    function yoop_atomic_load_i32(ref p: int32): int32;
+    function yoop_atomic_store_i32(ref p: int32, v: int32): void;
+    function yoop_atomic_max_i32(ref p: int32, v: int32): int32;
+}
+
+// Add `delta` to `*p` and return the NEW value.
+//
+// Returning the new value rather than the old is what lets a caller decide on
+// the result without a second, racy read:
+//
+//     if (atomic.addI32(ref live, 1) > limit) { ... }
+export function addI32(ref p: int32, delta: int32): int32 {
+    return yoop_atomic_add_i32(ref p, delta);
+}
+
+// Convenience for the two directions a counter moves.
+export function incrI32(ref p: int32): int32 {
+    return yoop_atomic_add_i32(ref p, 1);
+}
+
+export function decrI32(ref p: int32): int32 {
+    return yoop_atomic_add_i32(ref p, -1);
+}
+
+// Read it. A plain read would usually work and is still a data race; this is
+// the one that is defined.
+export function loadI32(ref p: int32): int32 {
+    return yoop_atomic_load_i32(ref p);
+}
+
+export function storeI32(ref p: int32, v: int32): void {
+    yoop_atomic_store_i32(ref p, v);
+}
+
+// Raise `*p` to `v` if `v` is larger, and report what it ended up as.
+//
+// A high-water mark is the one statistic that cannot be reconstructed after
+// the fact from counters, and it is exactly the one a naive `if (v > *p) { *p
+// = v; }` gets wrong under contention.
+export function maxI32(ref p: int32, v: int32): int32 {
+    return yoop_atomic_max_i32(ref p, v);
+}

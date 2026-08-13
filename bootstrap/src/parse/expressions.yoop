@@ -1,0 +1,411 @@
+module parse;
+
+// Expressions, by precedence climbing: parse a prefix, then keep folding in
+// binary operators while the next one binds tighter than the caller allows.
+
+import { Result } from "std/core/types.yoop";
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import { ASTNode, ASTNodeKind, NodeId, nodeAt } from "../ast";
+import { TokenTags, tagName, getTokenPrecedence, posToSourceLocation } from "../lex";
+import { ParsingError } from "../diagnostics";
+
+export function parseExpressionStatement(ref ps: ParserState): ParsingResult {
+  let node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.EXPRESSION_STATEMENT);
+  node.childA = parseExpression(ref ps, 0)?;
+  SelfLexing.expect(ref ps, TokenTags.SEMICOLON)?;
+
+  return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
+}
+
+export function parseExpression(ref ps: ParserState, minPrecedence: int): ParsingResult {
+  let node: ASTNode;
+  const peekTag = SelfLexing.peek(ref ps).tag;
+  // prefix first
+  switch (peekTag) {
+    // Prefix operators. 70 binds tighter than every binary operator, so
+    // `-a * b` is `(-a) * b` and `!a && b` is `(!a) && b`.
+    case TokenTags.MINUS, TokenTags.BANG: {
+      SelfLexing.advance(ref ps)?;
+      node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.UNARY_EXPRESSION);
+      node.operator = peekTag;
+      node.childA = parseExpression(ref ps, 70)?;
+    }
+    // A char literal IS an int literal - the lexer already decoded `'a'` to its
+    // codepoint - so it becomes the same node and pins to context the same way.
+    // That is what lets `src[i] == '\\'` compare against a uint8 and
+    // `text.pushByte(ref t, '0')` pass one, with no conversion at either site.
+    case TokenTags.INTLITERAL, TokenTags.CHARLITERAL: {
+      node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.INT_LITERAL);
+      node.intVal = SelfLexing.advance(ref ps)?.intVal;
+    }
+    case TokenTags.LBRACKET: {
+      node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.ARRAY_LITERAL);
+      node.childA = parseArrayElements(ref ps)?;
+    }
+    case TokenTags.LCURLY: {
+      // A `{` in expression position is a struct literal, never a block - a
+      // bare block is not a statement in this language.
+      node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.STRUCT_LITERAL);
+      node.childA = parseStructLiteralFields(ref ps)?;
+    }
+    case TokenTags.LPAREN: {
+      // Grouping. The inner expression is already in the arena, so this reads
+      // it back as the current node. That leaves the original copy unreferenced
+      // in the arena - harmless (nothing walks the arena linearly) and cheaper
+      // than restructuring this function to carry a NodeId instead of a node.
+      SelfLexing.advance(ref ps)?;
+      const innerId = parseExpression(ref ps, 0)?;
+      SelfLexing.expect(ref ps, TokenTags.RPAREN)?;
+      node = nodeAt(ref ps.ast, innerId);
+    }
+    // `null` - a raw null pointer. It carries no value: the TYPE is the whole
+    // content, and it pins to whatever `unsafe_ptr` the context wants.
+    case TokenTags.NULL: {
+      node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.NULL_LITERAL);
+      SelfLexing.advance(ref ps)?;
+    }
+    case TokenTags.TRUE, TokenTags.FALSE: {
+      node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.BOOL_LITERAL);
+      SelfLexing.advance(ref ps)?;
+      if (peekTag == TokenTags.TRUE) {
+        node.intVal = 1;
+      } else {
+        node.intVal = 0;
+      }
+    }
+    // `&x` - the ADDRESS of a binding, as a raw pointer. Distinct from `ref x`,
+    // which is a checked borrow: `&` exists for handing a local to C, and its
+    // result is an `unsafe_ptr` with none of a borrow's guarantees.
+    //
+    // `&` is also the binary bitwise-and operator. There is no ambiguity: this
+    // is the PREFIX position, where a binary operator cannot appear.
+    // `*p` - read THROUGH a pointer, the inverse of `&`. Also the binary
+    // multiply operator, and told apart the same way `&` is: this is the prefix
+    // position, where a binary operator cannot appear.
+    case TokenTags.MULT: {
+      node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.DEREF_EXPRESSION);
+      SelfLexing.advance(ref ps)?;
+      node.childA = parseExpression(ref ps, 70)?;
+    }
+    case TokenTags.AMP: {
+      node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.ADDRESS_OF_EXPRESSION);
+      SelfLexing.advance(ref ps)?;
+      node.childA = parseExpression(ref ps, 70)?;
+    }
+    case TokenTags.REF: {
+      // `ref x` at a call site: a BORROW, which is a distinct type from `x`.
+      // Writing it is required rather than inferred - the whole point is that
+      // the reader can see which arguments the callee may write through.
+      node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.REF_EXPRESSION);
+      SelfLexing.advance(ref ps)?;
+      node.childA = parseExpression(ref ps, 0)?;
+    }
+    case TokenTags.STRLITERAL: {
+      node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.STRING_LITERAL);
+      const tok = SelfLexing.advance(ref ps)?;
+      // The lexer hands back the literal RAW, quotes included. Decoding is the
+      // parser's job, and the decoded text goes in the arena's string pool so
+      // the node stays a fixed-size struct.
+      node.strId = internString(ref ps, decodeStringLiteral(ref ps, tok)?);
+    }
+    // `self` inside a method body. It is a keyword rather than an IDENT, but it
+    // reads as an ordinary local: the parameter list already bound the name, so
+    // everything downstream - `self.w`, `ref self` - is the usual machinery.
+    case TokenTags.SELF: {
+      node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.IDENT);
+      SelfLexing.advance(ref ps)?;
+      node.name = SELF_PARAM;
+    }
+    case TokenTags.TEMPLATELITERAL: {
+      node = parseTemplateLiteral(ref ps)?;
+    }
+    case TokenTags.IDENT: {
+      const name = parseIdentAsName(ref ps)?;
+      // handle errno stuff...
+      // handle unsafe_ptr stuff...
+      if (SelfLexing.peek(ref ps).tag == TokenTags.LPAREN) {
+        node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.CALL_EXPRESSION);
+        node.name = name;
+        node.childA = parseCallArgs(ref ps)?;
+      } else {
+        node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.IDENT);
+        node.name = name;
+      }
+    }
+    default: {
+      return Result.Err { error: SelfLexing.createParsingError(
+        ref ps,
+        `unexpected token in expression: ${tagName(peekTag)}`,
+        peekLengthUsize(ref ps),
+      )};
+    }
+  }
+
+  // Postfix, in a loop so `xs[0][1]` and `xs.len` chain.
+  while (true) {
+    const postfixTag = SelfLexing.peek(ref ps).tag;
+    if (postfixTag == TokenTags.LBRACKET) {
+      SelfLexing.advance(ref ps)?;
+      const baseId = SelfLexing.pushNode(ref ps, node);
+
+      // `xs[..2]` - a slice with no start. The `[` is followed straight by the
+      // `..`, so there is no expression to parse first.
+      if (SelfLexing.peek(ref ps).tag == TokenTags.DOTDOT) {
+        node = parseSliceRest(ref ps, baseId, 0)?;
+        continue;
+      }
+
+      const firstId = parseExpression(ref ps, 0)?;
+      // `xs[a..b]` / `xs[a..]` - a SLICE, not an index. Told apart by the `..`
+      // after the first expression, which is why the index is parsed first and
+      // reinterpreted rather than looked ahead for.
+      if (SelfLexing.peek(ref ps).tag == TokenTags.DOTDOT) {
+        node = parseSliceRest(ref ps, baseId, firstId)?;
+        continue;
+      }
+
+      let indexNode = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.INDEX_EXPRESSION);
+      indexNode.childA = baseId;
+      indexNode.childB = firstId;
+      SelfLexing.expect(ref ps, TokenTags.RBRACKET)?;
+      node = indexNode;
+      continue;
+    }
+    // A `(` HERE is a call through a value that is neither a bare name nor a
+    // field - `fns[0]("a")`, `f()()`. Both of those are handled earlier: a name
+    // in the prefix switch, a field in the DOT branch below. So reaching this
+    // means the callee is an arbitrary expression, which nothing lowers.
+    //
+    // Refused rather than left alone, because leaving it produced a SILENT
+    // miscompile: the arguments were dropped and the function pointer itself
+    // was the value. It only became reachable when function-type annotations
+    // landed and `((k: K) => V)[]` started parsing.
+    if (postfixTag == TokenTags.LPAREN) {
+      return Result.Err { error: SelfLexing.createParsingError(
+        ref ps,
+        "a function value can only be called through a name or a field so far - assign it to a local first",
+        peekLengthUsize(ref ps),
+      )};
+    }
+    if (postfixTag == TokenTags.DOT) {
+      SelfLexing.advance(ref ps)?;
+      const baseId = SelfLexing.pushNode(ref ps, node);
+      const member = parseIdentAsName(ref ps)?;
+
+      // `ns.fn(...)` is a QUALIFIED CALL, not a field read of a function value.
+      // The parser cannot tell a namespace from a struct local - that needs name
+      // resolution - so it records the shape and pass D decides: a
+      // CALL_EXPRESSION carries the member in `name` exactly like an unqualified
+      // call, plus the base it was reached through in `childB`.
+      if (SelfLexing.peek(ref ps).tag == TokenTags.LPAREN) {
+        let callNode = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.CALL_EXPRESSION);
+        callNode.name = member;
+        callNode.childB = baseId;
+        callNode.childA = parseCallArgs(ref ps)?;
+        node = callNode;
+        continue;
+      }
+
+      // `Result.Ok { value: 1 }` - a variant constructor with a payload. The
+      // braces are what make it unambiguous; a payload-less `Result.None` is
+      // the same tokens as `p.x` and stays a FIELD_ACCESS for pass D to sort
+      // out once names resolve.
+      if (SelfLexing.peek(ref ps).tag == TokenTags.LCURLY) {
+        let ctorNode = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.VARIANT_CONSTRUCTOR);
+        ctorNode.name = member;
+        ctorNode.childB = baseId;
+        ctorNode.childA = parseStructLiteralFields(ref ps)?;
+        node = ctorNode;
+        continue;
+      }
+
+      let fieldNode = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.FIELD_ACCESS);
+      fieldNode.childA = baseId;
+      fieldNode.name = member;
+      node = fieldNode;
+      continue;
+    }
+    break;
+  }
+
+  // Assignment, before the binary loop so `=` is never folded in as an
+  // operator. Right-associative, which is what `a = b = c` needs.
+  //
+  // Only at minPrecedence 0 - the TOP of an expression. Assignment binds
+  // loosest of anything, so a prefix operand must not swallow one: without this
+  // `*p = 9` parses as `*(p = 9)`, which then reports "cannot assign to const
+  // p" and points at the wrong thing entirely.
+  if (minPrecedence == 0 && SelfLexing.peek(ref ps).tag == TokenTags.EQ) {
+    SelfLexing.advance(ref ps)?;
+    let assign = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.ASSIGNMENT);
+    assign.childA = SelfLexing.pushNode(ref ps, node);
+    assign.childB = parseExpression(ref ps, 0)?;
+    return Result.Ok { value: SelfLexing.pushNode(ref ps, assign) };
+  }
+
+  // Compound assignment, desugared here into `target = target <op> value`.
+  //
+  // The JS reference keeps a dedicated COMPOUND_ASSIGNMENT node so the lvalue
+  // is addressed once - that matters for `xs[f()] += 1`, where re-reading the
+  // target would call `f` twice. Here the only assignable target is a plain
+  // name, and re-reading a name is free, so desugaring is safe. Revisit when
+  // index and field targets land.
+  const compoundOp = binaryOpOfCompound(SelfLexing.peek(ref ps).tag);
+  if (compoundOp != TokenTags.NOTOKEN) {
+    // The predicted moment: index targets exist now, so the desugaring is no
+    // longer universally safe. `xs[f()] += 1` would evaluate `f()` twice - once
+    // to read and once to write. Refuse it until COMPOUND_ASSIGNMENT lands,
+    // rather than silently miscompiling.
+    if (node.kind != ASTNodeKind.IDENT) {
+      return Result.Err { error: SelfLexing.createParsingError(
+        ref ps,
+        `compound assignment is only supported on a plain name so far - write it out as "target = target <op> value"`,
+        peekLengthUsize(ref ps),
+      )};
+    }
+    SelfLexing.advance(ref ps)?;
+    const targetId = SelfLexing.pushNode(ref ps, node);
+
+    let reread = SelfLexing.buildSourcedNode(ref ps, node.kind);
+    reread.name = node.name;
+    let combined = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.BINARY_EXPRESSION);
+    combined.operator = compoundOp;
+    combined.childA = SelfLexing.pushNode(ref ps, reread);
+    combined.childB = parseExpression(ref ps, 0)?;
+
+    let assign = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.ASSIGNMENT);
+    assign.childA = targetId;
+    assign.childB = SelfLexing.pushNode(ref ps, combined);
+    return Result.Ok { value: SelfLexing.pushNode(ref ps, assign) };
+  }
+
+  // binary ops
+  while (true) {
+    let opToken = SelfLexing.peek(ref ps);
+    const precedence = getTokenPrecedence(opToken.tag);
+    if (precedence <= minPrecedence) {
+      break;
+    }
+
+    SelfLexing.advance(ref ps)?; // consumer operator token
+    // recurse through, finding the side - actually using the precedence here
+    const right = parseExpression(ref ps, precedence)?;
+    let binNode = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.BINARY_EXPRESSION);
+    binNode.operator = opToken.tag;
+    // push the current node onto the left
+    binNode.childA = SelfLexing.pushNode(ref ps, node);
+    binNode.childB = right;
+    // set the current node to the binnode, and eventually push the final one
+    node = binNode;
+  }
+  // return
+  return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
+}
+
+// `( arg, arg )` after a callee name. Returns a NODE_LIST NodeId; an empty
+// argument list still gets one, so codegen never special-cases zero args.
+function parseCallArgs(ref ps: ParserState): Result<NodeId, ParsingError> {
+  const loc = posToSourceLocation(ps.src, ps.pos, 1);
+  SelfLexing.expect(ref ps, TokenTags.LPAREN)?;
+
+  disposable ids: Vec<NodeId> = vec.vecNew(4);
+  while (
+    SelfLexing.peek(ref ps).tag != TokenTags.RPAREN &&
+    SelfLexing.peek(ref ps).tag != TokenTags.EOF
+  ) {
+    vec.vecPush(ref ids, parseExpression(ref ps, 0)?);
+    if (SelfLexing.peek(ref ps).tag == TokenTags.COMMA) {
+      SelfLexing.advance(ref ps)?;
+    }
+  }
+  SelfLexing.expect(ref ps, TokenTags.RPAREN)?;
+
+  return Result.Ok { value: SelfLexing.buildListNode(ref ps, ref ids, loc) };
+}
+
+// The binary operator a compound assignment stands for, or NOTOKEN when the tag
+// is not one. `x += y` means `x = x + y`.
+function binaryOpOfCompound(tag: TokenTags): TokenTags {
+  switch (tag) {
+    case TokenTags.PLUSEQ: { return TokenTags.PLUS; }
+    case TokenTags.MINUSEQ: { return TokenTags.MINUS; }
+    case TokenTags.MULTEQ: { return TokenTags.MULT; }
+    case TokenTags.DIVIDEEQ: { return TokenTags.DIVIDE; }
+    case TokenTags.MODULUSEQ: { return TokenTags.MODULUS; }
+    default: { return TokenTags.NOTOKEN; }
+  }
+}
+
+// `[a, b, c]` - the elements, as a NODE_LIST. An empty literal is allowed and
+// takes its element type from context.
+function parseArrayElements(ref ps: ParserState): Result<NodeId, ParsingError> {
+  const loc = posToSourceLocation(ps.src, ps.pos, 1);
+  SelfLexing.expect(ref ps, TokenTags.LBRACKET)?;
+
+  disposable ids: Vec<NodeId> = vec.vecNew(4);
+  while (
+    SelfLexing.peek(ref ps).tag != TokenTags.RBRACKET &&
+    SelfLexing.peek(ref ps).tag != TokenTags.EOF
+  ) {
+    vec.vecPush(ref ids, parseExpression(ref ps, 0)?);
+    if (SelfLexing.peek(ref ps).tag == TokenTags.COMMA) {
+      SelfLexing.advance(ref ps)?;
+    }
+  }
+  SelfLexing.expect(ref ps, TokenTags.RBRACKET)?;
+
+  return Result.Ok { value: SelfLexing.buildListNode(ref ps, ref ids, loc) };
+}
+
+// `{ x: 1, y: 2 }` - the fields, as a NODE_LIST of STRUCT_LITERAL_FIELD.
+//
+// Each field node carries its NAME and its value in childA. Which struct this
+// is comes from context, so the parser never has to know.
+function parseStructLiteralFields(ref ps: ParserState): Result<NodeId, ParsingError> {
+  const loc = posToSourceLocation(ps.src, ps.pos, 1);
+  SelfLexing.expect(ref ps, TokenTags.LCURLY)?;
+
+  disposable ids: Vec<NodeId> = vec.vecNew(4);
+  while (
+    SelfLexing.peek(ref ps).tag != TokenTags.RCURLY &&
+    SelfLexing.peek(ref ps).tag != TokenTags.EOF
+  ) {
+    let field = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.STRUCT_LITERAL_FIELD);
+    field.name = parseIdentAsName(ref ps)?;
+    SelfLexing.expect(ref ps, TokenTags.COLON)?;
+    field.childA = parseExpression(ref ps, 0)?;
+    vec.vecPush(ref ids, SelfLexing.pushNode(ref ps, field));
+    if (SelfLexing.peek(ref ps).tag == TokenTags.COMMA) {
+      SelfLexing.advance(ref ps)?;
+    }
+  }
+  SelfLexing.expect(ref ps, TokenTags.RCURLY)?;
+
+  return Result.Ok { value: SelfLexing.buildListNode(ref ps, ref ids, loc) };
+}
+
+// The `..end]` half of a slice, with the base and start already parsed.
+//
+//   childA   the array being sliced
+//   childB   the start, or 0 for "from the beginning"
+//   childC   the end, or 0 for "to the end"
+//
+// Half-open: `xs[1..3]` is elements 1 and 2. An omitted bound is 0 rather than
+// a synthesized literal, because "to the end" is `xs.len` and codegen is the
+// only layer that has it.
+function parseSliceRest(
+  ref ps: ParserState,
+  baseId: NodeId,
+  startId: NodeId
+): Result<ASTNode, ParsingError> {
+  let node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.SLICE_EXPRESSION);
+  SelfLexing.expect(ref ps, TokenTags.DOTDOT)?;
+  node.childA = baseId;
+  node.childB = startId;
+  if (SelfLexing.peek(ref ps).tag != TokenTags.RBRACKET) {
+    node.childC = parseExpression(ref ps, 0)?;
+  }
+  SelfLexing.expect(ref ps, TokenTags.RBRACKET)?;
+  return Result.Ok { value: node };
+}

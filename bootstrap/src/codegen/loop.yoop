@@ -1,0 +1,234 @@
+module codegen;
+
+// Loops: `while`, `for` and `for ... in` lowered to labels and branches.
+//
+// All three follow the same skeleton - a condition block, a body block, and an
+// exit block - and all three push a frame onto the loop-label stack
+// (loop_stack.yoop) so `break` and `continue` inside the body know where to
+// jump. The difference is that the two `for`s add a STEP block, because
+// `continue` has to advance the counter before re-testing.
+//
+// The block discipline these obey is documented in flow.yoop.
+
+import { ASTNode, NodeId, nodeAt } from "../ast";
+import { Option } from "std/core/types.yoop";
+
+// `while (c) { body }` becomes:
+//
+//     br label %Lcond
+//   Lcond: ... br i1 %cond, label %Lbody, label %Lend
+//   Lbody: ... br label %Lcond
+//   Lend:
+//
+// The condition gets its own block because it is re-evaluated every iteration,
+// so it cannot live in the block that precedes the loop.
+export function emitWhile(ref cx: Cx, stmt: ASTNode, retTy: string): string {
+  const condLabel = freshLabel(cx.e);
+  const bodyLabel = freshLabel(cx.e);
+  const endLabel = freshLabel(cx.e);
+
+  emitBr(ref cx, condLabel);
+  emitLabel(ref cx, condLabel);
+  let cond: Operand = Operand.None;
+  const cerr = emitExpr(ref cx, stmt.childA, ref cond);
+  if (cerr.len > 0) {
+    return cerr;
+  }
+  emitCondBr(ref cx, cond, bodyLabel, endLabel);
+
+  emitLabel(ref cx, bodyLabel);
+  // `continue` re-tests the condition; `break` leaves.
+  loopPush(ref cx, condLabel, endLabel);
+  let err = "";
+  let bodyTerminated = false;
+  emitBlock(ref cx, stmt.childB, retTy, ref bodyTerminated, ref err);
+  loopPop(ref cx);
+  if (err.len > 0) {
+    return err;
+  }
+  if (!bodyTerminated) {
+    emitBr(ref cx, condLabel);
+  }
+
+  emitLabel(ref cx, endLabel);
+  return "";
+}
+
+// `for (let i = init; cond; i = step) { body }` becomes:
+//
+//     <store init>
+//     br label %Lcond
+//   Lcond: ... br i1 %cond, label %Lbody, label %Lend
+//   Lbody: ... br label %Lstep
+//   Lstep: <store step>  br label %Lcond
+//   Lend:
+//
+// The STEP gets its own block so `continue` can jump to it - skipping the rest
+// of the body while still advancing the counter. That is the one structural
+// difference from `while`, and the reason LoopLabels carries two labels.
+export function emitFor(ref cx: Cx, stmt: ASTNode, stmtId: NodeId, retTy: string): string {
+  const ty = typeOf(ref cx, stmtId);
+
+  // The counter: a fresh slot when the loop declares it, otherwise the existing
+  // one it steps.
+  const counterName = stmt.name;
+  let counterId: usize = 0;
+  let initValue: Operand = Operand.None;
+  const ierr = emitExpr(ref cx, stmt.childB, ref initValue);
+  if (ierr.len > 0) {
+    return ierr;
+  }
+  if (stmt.flagA) {
+    const slotInfo = declareLocal(ref cx, counterName, ty);
+    counterId = slotInfo.id;
+  } else {
+    switch (lookupLocal(cx.locals, counterName)) {
+      case Option.None: {
+        return internalError("no stack slot for for-loop counter", counterName);
+      }
+      case Option.Some { value: slotInfo }: { counterId = slotInfo.id; }
+    }
+  }
+  emitStore(ref cx, ty, initValue, counterName, counterId);
+
+  const condLabel = freshLabel(cx.e);
+  const bodyLabel = freshLabel(cx.e);
+  const stepLabel = freshLabel(cx.e);
+  const endLabel = freshLabel(cx.e);
+
+  emitBr(ref cx, condLabel);
+  emitLabel(ref cx, condLabel);
+  let cond: Operand = Operand.None;
+  const cerr = emitExpr(ref cx, stmt.childC, ref cond);
+  if (cerr.len > 0) {
+    return cerr;
+  }
+  emitCondBr(ref cx, cond, bodyLabel, endLabel);
+
+  emitLabel(ref cx, bodyLabel);
+  loopPush(ref cx, stepLabel, endLabel);
+  let err = "";
+  let bodyTerminated = false;
+  emitBlock(ref cx, stmt.childE, retTy, ref bodyTerminated, ref err);
+  loopPop(ref cx);
+  if (err.len > 0) {
+    return err;
+  }
+  if (!bodyTerminated) {
+    emitBr(ref cx, stepLabel);
+  }
+
+  emitLabel(ref cx, stepLabel);
+  let stepValue: Operand = Operand.None;
+  const serr = emitExpr(ref cx, stmt.childD, ref stepValue);
+  if (serr.len > 0) {
+    return serr;
+  }
+  emitStore(ref cx, ty, stepValue, counterName, counterId);
+  emitBr(ref cx, condLabel);
+
+  emitLabel(ref cx, endLabel);
+  return "";
+}
+
+// `for x in xs { body }` - walk an array, element by element.
+//
+//     %data = extractvalue { ptr, i64 } %xs, 0     ; hoisted: the descriptor is
+//     %len  = extractvalue { ptr, i64 } %xs, 1     ; evaluated ONCE
+//     store i64 0, ptr %sc.1                       ; the counter
+//     br label %Lcond
+//   Lcond: %c = load i64, ptr %sc.1
+//          %done = icmp uge i64 %c, %len
+//          br i1 %done, label %Lend, label %Lbody
+//   Lbody: %ep = getelementptr i32, ptr %data, i64 %c
+//          store i32 (load %ep), ptr %x.2          ; the loop variable
+//          ... br label %Lstep
+//   Lstep: %n = add i64 %c, 1 ... br label %Lcond
+//   Lend:
+//
+// The iterable is evaluated ONCE, before the loop. Re-evaluating it per
+// iteration would call `headersView(ref h)` on every step, and a growing array
+// would change length underneath the walk.
+//
+// The loop variable is a COPY of the element, held in its own slot, which is
+// what makes `for x in xs { x = ... }` write to the copy rather than the array.
+// That matches the JS reference, and it is why the element is loaded and stored
+// rather than the slot being pointed at the array.
+export function emitForIn(ref cx: Cx, stmt: ASTNode, stmtId: NodeId, retTy: string): string {
+  const elemTy = typeOf(ref cx, stmtId);
+
+  let iterable: Operand = Operand.None;
+  const ierr = emitExpr(ref cx, stmt.childA, ref iterable);
+  if (ierr.len > 0) {
+    return ierr;
+  }
+  const dataPtr = freshTemp(cx.e);
+  emitExtractValue(ref cx, dataPtr, ARRAY_DESCRIPTOR, iterable, 0);
+  const length = freshTemp(cx.e);
+  emitExtractValue(ref cx, length, ARRAY_DESCRIPTOR, iterable, 1);
+
+  // The counter has no name in the source, so it gets an anonymous slot rather
+  // than a local - nothing in the body can refer to it.
+  const counter = declareAnonSlot(ref cx, COUNTER_TYPE);
+  emitStore(ref cx, COUNTER_TYPE, Operand.Imm { value: 0 }, TEMP_SLOT_NAME, counter.id);
+  const loopVar = declareLocal(ref cx, stmt.name, elemTy);
+
+  const condLabel = freshLabel(cx.e);
+  const bodyLabel = freshLabel(cx.e);
+  const stepLabel = freshLabel(cx.e);
+  const endLabel = freshLabel(cx.e);
+
+  emitBr(ref cx, condLabel);
+  emitLabel(ref cx, condLabel);
+  const atCond = freshTemp(cx.e);
+  emitLoad(ref cx, atCond, COUNTER_TYPE, TEMP_SLOT_NAME, counter.id);
+  // `uge`, not `eq`: an empty array must skip the body entirely, and an
+  // equality test on a zero length would run it once and then walk off the end.
+  const done = freshTemp(cx.e);
+  emitICmp(
+    ref cx, done, "uge", COUNTER_TYPE,
+    Operand.Temp { id: atCond }, Operand.Temp { id: length }
+  );
+  emitCondBr(ref cx, Operand.Temp { id: done }, endLabel, bodyLabel);
+
+  emitLabel(ref cx, bodyLabel);
+  const elemAddr = freshTemp(cx.e);
+  emitGepElem(
+    ref cx, elemAddr, elemTy,
+    Operand.Temp { id: dataPtr },
+    COUNTER_TYPE, Operand.Temp { id: atCond }
+  );
+  const elemValue = freshTemp(cx.e);
+  emitLoadFromPtr(ref cx, elemValue, elemTy, elemAddr);
+  emitStore(ref cx, elemTy, Operand.Temp { id: elemValue }, stmt.name, loopVar.id);
+
+  // `continue` advances the counter first, exactly as in the counted form.
+  loopPush(ref cx, stepLabel, endLabel);
+  let err = "";
+  let bodyTerminated = false;
+  emitBlock(ref cx, stmt.childB, retTy, ref bodyTerminated, ref err);
+  loopPop(ref cx);
+  if (err.len > 0) {
+    return err;
+  }
+  if (!bodyTerminated) {
+    emitBr(ref cx, stepLabel);
+  }
+
+  emitLabel(ref cx, stepLabel);
+  const atStep = freshTemp(cx.e);
+  emitLoad(ref cx, atStep, COUNTER_TYPE, TEMP_SLOT_NAME, counter.id);
+  const stepped = freshTemp(cx.e);
+  emitBinOp(
+    ref cx, stepped, "add", COUNTER_TYPE,
+    Operand.Temp { id: atStep }, Operand.Imm { value: 1 }
+  );
+  emitStore(ref cx, COUNTER_TYPE, Operand.Temp { id: stepped }, TEMP_SLOT_NAME, counter.id);
+  emitBr(ref cx, condLabel);
+
+  emitLabel(ref cx, endLabel);
+  return "";
+}
+
+// The counter is i64 because an array length is, so the compare needs no cast.
+const COUNTER_TYPE: string = "i64";

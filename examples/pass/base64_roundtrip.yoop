@@ -1,0 +1,108 @@
+// std/encoding/base64 against the RFC 4648 section 10 test vectors, plus the
+// cases real input actually presents: URL-safe alphabet, missing padding,
+// line wrapping, and full-byte-range binary.
+//
+// plans/yooperdoom-takeaways.md 4.2 - "not needed here, but no API auth or
+// binary payload works without it". HTTP Basic is base64(user:pass), a JWT is
+// three base64url segments, and every JSON API carrying bytes carries them
+// this way.
+
+import { Disposable, disposable } from "std/core/kinds.yoop";
+import { Result } from "std/core/types.yoop";
+import * as vec, { Vec } from "std/core/vec.yoop";
+import * as intr from "std/core/intrinsics.yoop";
+import * as b64 from "std/encoding/base64.yoop";
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+function showEncode(s: string): void {
+    disposable out: Vec<uint8> = vec.vecNew(64);
+    b64.encode(ref out, intr.stringAsBytes(s));
+    printf(`enc ${s} -> ${intr.stringFromBytesUnchecked(vec.vecAsArray(ref out))}\n`);
+}
+
+function showDecode(s: string): void {
+    disposable out: Vec<uint8> = vec.vecNew(64);
+    switch (b64.decode(ref out, s)) {
+        case Result.Ok { value: n }: {
+            printf(`dec ${s} -> ${intr.stringFromBytesUnchecked(vec.vecAsArray(ref out))} (${n})\n`);
+        }
+        case Result.Err { error: e }: {
+            printf(`dec ${s} -> ERR ${e}\n`);
+        }
+    }
+}
+
+function main(): int32 {
+    // RFC 4648 section 10, the canonical vectors. Every tail length is here:
+    // 0, 1, and 2 bytes left over.
+    showEncode("");
+    showEncode("f");
+    showEncode("fo");
+    showEncode("foo");
+    showEncode("foob");
+    showEncode("fooba");
+    showEncode("foobar");
+
+    showDecode("Zg==");
+    showDecode("Zm9vYmE=");
+    showDecode("Zm9vYmFy");
+
+    // Padding is optional on input. Half the world omits it.
+    showDecode("Zm9vYmE");
+
+    // MIME wraps at 76 columns, and a value pasted from a config file arrives
+    // with a newline on it.
+    showDecode("Zm9v\nYmFy");
+
+    // The URL-safe alphabet: `-_` for `+/`, unpadded. `>>>???` is chosen
+    // because it encodes to bytes that differ between the two alphabets.
+    disposable u: Vec<uint8> = vec.vecNew(32);
+    b64.encodeUrl(ref u, intr.stringAsBytes(">>>???"));
+    printf(`url ->>>??? -> ${intr.stringFromBytesUnchecked(vec.vecAsArray(ref u))}\n`);
+
+    disposable s: Vec<uint8> = vec.vecNew(32);
+    b64.encode(ref s, intr.stringAsBytes(">>>???"));
+    printf(`std ->>>??? -> ${intr.stringFromBytesUnchecked(vec.vecAsArray(ref s))}\n`);
+
+    // ...and one decoder reads both, which is what lets it handle a JWT and an
+    // Authorization header without being told which is which.
+    showDecode("Pj4-Pz8_");
+    showDecode("Pj4+Pz8/");
+
+    // Errors are errors, not silently-skipped bytes: a decoder that drops what
+    // it does not understand turns a truncated download into wrong bytes.
+    showDecode("!!!!");
+    showDecode("Z");
+    showDecode("Zg==Zg==");
+
+    // Binary round-trip over the full byte range, which is the case string
+    // vectors never exercise.
+    disposable raw: Vec<uint8> = vec.vecNew(256);
+    for (let i: usize = 0; i < 256; i += 1) {
+        vec.vecPush(ref raw, uint8(i));
+    }
+    disposable encoded: Vec<uint8> = vec.vecNew(b64.encodedLen(256, true));
+    b64.encode(ref encoded, vec.vecAsArray(ref raw));
+
+    // encodedLen is exact, so the Vec never had to grow.
+    printf(`binary encoded len=${encoded.len} predicted=${b64.encodedLen(256, true)}\n`);
+
+    disposable back: Vec<uint8> = vec.vecNew(256);
+    switch (b64.decodeBytes(ref back, vec.vecAsArray(ref encoded))) {
+        case Result.Ok { value: n }: {
+            let same: bool = n == 256;
+            for (let i: usize = 0; i < 256; i += 1) {
+                if (vec.vecGet(ref back, i) != uint8(i)) { same = false; }
+            }
+            printf(`binary roundtrip ${same} (${n} bytes)\n`);
+        }
+        case Result.Err { error: e }: {
+            printf(`binary roundtrip ERR ${e}\n`);
+        }
+    }
+
+    return 0;
+}

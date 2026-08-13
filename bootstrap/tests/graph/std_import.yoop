@@ -1,0 +1,6 @@
+// The std/ import root, which the bootstrap does not resolve yet.
+import { Vec } from "std/core/vec.yoop";
+
+function main(): int {
+  return 0;
+}

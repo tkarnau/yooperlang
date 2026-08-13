@@ -1,162 +1,59 @@
+module typecheck;
+
 /*
   Author: Tom Karnau
 
-  The typecheckProgram function takes a parsed yooperlang AST
-  and produces a typechecked yooperlang AST with coercions and
-  other modifications to the original AST prior to bytecode and
-  codegen phases.
+  Layer 3. Takes the parsed, import-ordered module graph and produces the
+  whole-program Program: interned types and symbols, per-module decoration, and
+  accumulated diagnostics.
 
-  Typechecking is different than the lexing and parsing, in that
-  we want to collect all of the errors rather than bailing out
-  so we will use something different than the Result<T,E> strategy:
-  errors accumulate in Program.diagnostics and we never throw.
+  Typechecking differs from lex and parse in its error channel. Those two fail
+  fast and hand back one ParsingError; this layer never stops. Every problem it
+  finds lands in Program.diagnostics so the user sees the whole picture in one
+  compile.
+
+  Passes, mirroring the JS reference but over the interned model:
+    A - register decl shells (name -> SymbolId, shell Type) so cross-module and
+        forward references resolve.                             [pass_a.yoop]
+    B - wire imports: bind imported names into each module's `names` map.
+                                                                [pass_b.yoop]
+    C - fill the shells: struct fields, function signatures.  [pass_c.yoop]
+    D - check bodies and decorate resolvedTypes.               [pass_d.yoop]
+
+  C and D handle the subset the parser produces today and name what they do not
+  handle.
 */
 
-import * as log from "std/log.yoop";
 import { Vec }, * as vec from "std/core/vec.yoop";
-import { Map }, * as map from "std/collections/map.yoop";
-import { vecIter } from "../utils/array_utils.yoop";
-import { childAt } from "../utils/ast_utils.yoop";
 import { disposable } from "std/core/kinds.yoop";
-import { ASTNodeKind,
-  Module,
-  ModuleGraph,
-  Program,
-  Symbol,
-  SymbolId,
-  Type,
-  TypeId,
-  TypedModule,
-  kindName,
-} from "../contracts.yoop";
+import { ModuleGraph } from "../source_graph";
 
-// Layer 3 producer. Borrows the parsed, import-ordered module graph (the driver
-// retains ownership so codegen can read the ASTs afterward) and produces the
-// whole-program Program: interned types + symbols, per-module decoration, and
-// accumulated diagnostics. Never throws - errors land in Program.diagnostics.
-//
-// Passes (mirroring the JS reference, but over the interned model):
-//   A - register decl shells (names -> SymbolId, shell Types) so cross-module
-//       and forward references resolve.
-//   B - wire imports (bind imported names into each module's `names` map).
-//   C - fill shells: struct fields, function signatures, trait methods, kinds.
-//   D - check bodies + module-init inference; decorate resolvedTypes.
-
-
-/*
-
-Alright, this is where we add all the types into a vector and get a usize
-handle id to use as a reference later so that we can pattern match over
-them as-needed but only have an id as a reference. Other languages would
-build up some map of arbitrary spaces and do string comparisons or something
-but that is not how this language orients or lends itself to.
-
-We then return the "initialized" program struct back which is used for
-typechecking throughout.
-
-*/
-
-const TYPE_NONE_ID: TypeId = 0;
-const TYPE_VOID_ID: TypeId = 1;
-const TYPE_UNTYPEDINT_ID: TypeId = 2;
-
-
-
-
-function initProgram(): Program {
-  let types: Vec<Type>  = vec.vec_new(0);
-
-  // add more types to this array as-needed...
-  // insert in order
-  vec.vec_push(ref types, Type.ErrorT);
-  vec.vec_push(ref types, Type.Void);
-  vec.vec_push(ref types, Type.UntypedInt);
-
-  return {
-    types: types,
-    symbols: vec.vec_new(0),
-    modules: vec.vec_new(0),
-    diagnostics: vec.vec_new(0),
-  };
-}
-
-function initTypedModule(): TypedModule {
-  return {
-    moduleId: "none",
-    names: map.map_new(0, map.string_key_ops()),
-    exports: map.map_new(0, map.string_key_ops()),
-    resolvedTypes: vec.vec_new(0),
-    allowsUnsafe: false
-  };
-}
-
-function passA_registerShells(prog: Program, m: Module, tmIndex: usize): void {
-  const programNode = vec.vec_get(ref m.ast.nodes, m.ast.root);
-  const typedModule = vec.vec_get(ref prog.modules, tmIndex);
-  let i: usize = 0;
-  while (i < programNode.childCount) {
-    const declId = childAt(ref m.ast, programNode, i);
-    const declNode = vec.vec_get(ref m.ast.nodes, declId);
-    switch (declNode.kind) {
-      case ASTNodeKind.FUNCTION_DECL: {
-        log.info(`typechecking function decl shell ${kindName(declNode.kind)}: ${declNode.name}`);
-        // todo type params
-        // todo redeclaration check
-        // normal case
-        const shellFn = internType(
-          ref prog,
-          Type.Func {
-            params: vec.vec_new(0),
-            ret: TYPE_NONE_ID, variadic: false
-          }
-        );
-        const symbolId = internSymbol(ref prog, Symbol.Func { typeId: shellFn });
-        map.map_insert(ref typedModule.names, declNode.name, symbolId);
-      }
-      default: {
-        // skipping for now.. output a log
-        log.info(`skipping ${declNode.kind} decl typecheck pass A`);
-      }
-    }
-
-    i += 1;
-  }
-}
-
-/*
-  Intern Functions
-    Intern-ing might not be understood from non-systems folks but is similar to
-    the Symbol and other mechanisms from the TS/JS world. Making a one-time,
-    unique, value shared by the rest of the system..
-*/
-
-// program interning
-function internType(ref prog: Program, t: Type): TypeId {
-  vec.vec_push(ref prog.types, t);
-  return prog.types.len - 1;
-}
-
-function internSymbol(ref prog: Program, s: Symbol): SymbolId {
-  vec.vec_push(ref prog.symbols, s);
-  return prog.symbols.len - 1;
-}
-
-
+// The graph is BORROWED: the driver keeps it so codegen can read the ASTs after
+// typecheck returns. Everything this layer produces is keyed by NodeId back into
+// those ASTs (decision D2), never a copy of them.
 export function typecheckProgram(ref graph: ModuleGraph): Program propagates<disposable> {
-  // TODO(10.K): passes A-D. For now, return an empty program shell so the
-  // signature and Program shape are exercised end to end.
-
   let program = initProgram();
 
-  // push an empty typed module for each module in the graph
-  for m in vecIter(ref graph.modules) {
-    let tm = initTypedModule();
-    vec.vec_push(ref program.modules, tm);
-    let tmIndex = program.modules.len - 1;
-    passA_registerShells(program, m, tmIndex);
+  // Modules are already topologically ordered, so a module's imports have their
+  // shells (pass A) and their filled signatures (pass C) before it is reached -
+  // which is what lets all four passes run in one walk per module rather than
+  // four walks over the graph, and what makes pass B a lookup rather than a
+  // second fixpoint.
+  let i: usize = 0;
+  while (i < graph.modules.len) {
+    const m = vec.vecGet(ref graph.modules, i);
+    // Build the TypedModule as a LOCAL and push it once it is filled. A
+    // TypedModule pulled back out of the Vec would be a copy, and the map
+    // bookkeeping (len, and the arrays after a rehash) would be written to the
+    // copy instead of to the entry in the Vec.
+    let tm = initTypedModule(m.id);
+    passARegisterShells(ref program, ref tm, m, i, i == graph.entryIndex);
+    passBWireImports(ref program, ref tm, m);
+    passCFillShells(ref program, ref tm, m, i);
+    passDCheckBodies(ref program, ref tm, m);
+    vec.vecPush(ref program.modules, tm);
+    i += 1;
   }
-
-  // pass A - register decl shells
 
   return program;
 }

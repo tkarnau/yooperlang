@@ -29,7 +29,7 @@ since been overtaken.** What has landed since:
   `runtime/yoop_io.c`).
 - **Suspendable wait** - 9.I made `yoop_task_wait` re-entrant, so a
   blocked waiter drains queued work instead of deadlocking the pool.
-- **Deadlines** - `wait_until(h, deadline_ns)` (10.F.1).
+- **Deadlines** - `waitUntil(h, deadline_ns)` (10.F.1).
 - **Cancellation** - `cancel(h)` on a task handle (10.F.2.A), and then
   first-class cancellation tokens plus deadline-aware I/O. Those are
   documented in

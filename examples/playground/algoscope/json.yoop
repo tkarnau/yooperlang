@@ -6,10 +6,10 @@
 // bytes, accumulating children into `disposable Vec`s and freezing each into an
 // independently-owned array before the Vec's backing buffer is reclaimed.
 //
-// Ownership rule that makes this correct: `vec_as_array` is a *borrowing view*
+// Ownership rule that makes this correct: `vecAsArray` is a *borrowing view*
 // valid only until the next mutation/dispose (see std/core/vec.yoop). So every
 // list we keep in the tree is copied out via `own_items` / `own_keys` into a
-// fresh `heap_alloc` array that outlives the temporary Vec. The AST tree then
+// fresh `heapAlloc` array that outlives the temporary Vec. The AST tree then
 // lives for the whole program (a viewer loads one file and never frees it).
 
 import.unsafe;
@@ -51,11 +51,11 @@ export type Parser {
 // ---- empty-array helpers (leaf values carry zero-length keys/items) ----
 
 function empty_items(): JsonValue[] {
-    return intr.heap_alloc(usize(0));
+    return intr.heapAlloc(usize(0));
 }
 
 function empty_keys(): string[] {
-    return intr.heap_alloc(usize(0));
+    return intr.heapAlloc(usize(0));
 }
 
 // ---- JsonValue constructors ----
@@ -108,7 +108,7 @@ function skip_ws(ref p: Parser): void {
 // ---- freeze helpers: copy a Vec's populated prefix into an owned array ----
 
 function own_items(ref v: Vec<JsonValue>): JsonValue[] {
-    let out: JsonValue[] = intr.heap_alloc(v.len);
+    let out: JsonValue[] = intr.heapAlloc(v.len);
     let i: usize = usize(0);
     while (i < v.len) {
         out[i] = v.data[i];
@@ -118,7 +118,7 @@ function own_items(ref v: Vec<JsonValue>): JsonValue[] {
 }
 
 function own_keys(ref v: Vec<string>): string[] {
-    let out: string[] = intr.heap_alloc(v.len);
+    let out: string[] = intr.heapAlloc(v.len);
     let i: usize = usize(0);
     while (i < v.len) {
         out[i] = v.data[i];
@@ -141,37 +141,37 @@ function hex_val(c: uint8): int32 {
 // (source identifiers never need them).
 function push_utf8(ref sb: Vec<uint8>, cp: int32): void {
     if (cp < 0x80) {
-        vec.vec_push(ref sb, uint8(cp));
+        vec.vecPush(ref sb, uint8(cp));
     } else if (cp < 0x800) {
-        vec.vec_push(ref sb, uint8(0xC0 | (cp >> 6)));
-        vec.vec_push(ref sb, uint8(0x80 | (cp & 0x3F)));
+        vec.vecPush(ref sb, uint8(0xC0 | (cp >> 6)));
+        vec.vecPush(ref sb, uint8(0x80 | (cp & 0x3F)));
     } else {
-        vec.vec_push(ref sb, uint8(0xE0 | (cp >> 12)));
-        vec.vec_push(ref sb, uint8(0x80 | ((cp >> 6) & 0x3F)));
-        vec.vec_push(ref sb, uint8(0x80 | (cp & 0x3F)));
+        vec.vecPush(ref sb, uint8(0xE0 | (cp >> 12)));
+        vec.vecPush(ref sb, uint8(0x80 | ((cp >> 6) & 0x3F)));
+        vec.vecPush(ref sb, uint8(0x80 | (cp & 0x3F)));
     }
 }
 
 // Parse a JSON string. Assumes `cur` is the opening quote. Returns the decoded,
-// NUL-terminated string (string_from_bytes_unchecked malloc+memcpy+nul copies
+// NUL-terminated string (stringFromBytesUnchecked malloc+memcpy+nul copies
 // the view, so the temporary Vec is safe to dispose afterward).
 function parse_string(ref p: Parser): string {
     advance(ref p); // skip opening quote
-    disposable sb: Vec<uint8> = vec.vec_new(usize(16));
+    disposable sb: Vec<uint8> = vec.vecNew(usize(16));
     while (p.pos < p.bytes.len) {
         let c: uint8 = p.bytes[p.pos];
         if (c == uint8(34)) {            // closing "
             advance(ref p);
-            return intr.string_from_bytes_unchecked(vec.vec_as_array(ref sb));
+            return intr.stringFromBytesUnchecked(vec.vecAsArray(ref sb));
         }
         if (c == uint8(92)) {            // backslash escape
             advance(ref p);
             let e: uint8 = cur(ref p);
-            if (e == uint8(110)) { vec.vec_push(ref sb, uint8(10)); advance(ref p); }       // \n
-            else if (e == uint8(116)) { vec.vec_push(ref sb, uint8(9)); advance(ref p); }   // \t
-            else if (e == uint8(114)) { vec.vec_push(ref sb, uint8(13)); advance(ref p); }  // \r
-            else if (e == uint8(98)) { vec.vec_push(ref sb, uint8(8)); advance(ref p); }    // \b
-            else if (e == uint8(102)) { vec.vec_push(ref sb, uint8(12)); advance(ref p); }  // \f
+            if (e == uint8(110)) { vec.vecPush(ref sb, uint8(10)); advance(ref p); }       // \n
+            else if (e == uint8(116)) { vec.vecPush(ref sb, uint8(9)); advance(ref p); }   // \t
+            else if (e == uint8(114)) { vec.vecPush(ref sb, uint8(13)); advance(ref p); }  // \r
+            else if (e == uint8(98)) { vec.vecPush(ref sb, uint8(8)); advance(ref p); }    // \b
+            else if (e == uint8(102)) { vec.vecPush(ref sb, uint8(12)); advance(ref p); }  // \f
             else if (e == uint8(117)) {                                                     // \uXXXX
                 advance(ref p);
                 let cp: int32 = 0;
@@ -184,15 +184,15 @@ function parse_string(ref p: Parser): string {
                 push_utf8(ref sb, cp);
             } else {
                 // \" \\ \/ and any other: emit the escaped byte verbatim.
-                vec.vec_push(ref sb, e);
+                vec.vecPush(ref sb, e);
                 advance(ref p);
             }
         } else {
-            vec.vec_push(ref sb, c);
+            vec.vecPush(ref sb, c);
             advance(ref p);
         }
     }
-    return intr.string_from_bytes_unchecked(vec.vec_as_array(ref sb));
+    return intr.stringFromBytesUnchecked(vec.vecAsArray(ref sb));
 }
 
 // ---- number parsing ----
@@ -279,7 +279,7 @@ function parse_keyword(ref p: Parser): JsonValue {
 
 function parse_array(ref p: Parser): JsonValue {
     advance(ref p); // [
-    disposable items: Vec<JsonValue> = vec.vec_new(usize(4));
+    disposable items: Vec<JsonValue> = vec.vecNew(usize(4));
     skip_ws(ref p);
     if (cur(ref p) == uint8(93)) {  // ]
         advance(ref p);
@@ -287,7 +287,7 @@ function parse_array(ref p: Parser): JsonValue {
     }
     while (p.pos < p.bytes.len) {
         let v: JsonValue = parse_value(ref p);
-        vec.vec_push(ref items, v);
+        vec.vecPush(ref items, v);
         skip_ws(ref p);
         let c: uint8 = cur(ref p);
         if (c == uint8(44)) { advance(ref p); skip_ws(ref p); }   // ,
@@ -299,8 +299,8 @@ function parse_array(ref p: Parser): JsonValue {
 
 function parse_object(ref p: Parser): JsonValue {
     advance(ref p); // {
-    disposable keys: Vec<string> = vec.vec_new(usize(8));
-    disposable items: Vec<JsonValue> = vec.vec_new(usize(8));
+    disposable keys: Vec<string> = vec.vecNew(usize(8));
+    disposable items: Vec<JsonValue> = vec.vecNew(usize(8));
     skip_ws(ref p);
     if (cur(ref p) == uint8(125)) { // }
         advance(ref p);
@@ -312,8 +312,8 @@ function parse_object(ref p: Parser): JsonValue {
         skip_ws(ref p);
         if (cur(ref p) == uint8(58)) { advance(ref p); }   // :
         let v: JsonValue = parse_value(ref p);
-        vec.vec_push(ref keys, key);
-        vec.vec_push(ref items, v);
+        vec.vecPush(ref keys, key);
+        vec.vecPush(ref items, v);
         skip_ws(ref p);
         let c: uint8 = cur(ref p);
         if (c == uint8(44)) { advance(ref p); }            // ,
@@ -335,7 +335,7 @@ export function parse_value(ref p: Parser): JsonValue {
 
 // Public entry: parse a whole JSON document held in `src`.
 export function parse(src: string): JsonValue {
-    let bytes: uint8[] = intr.string_as_bytes(src);
+    let bytes: uint8[] = intr.stringAsBytes(src);
     let p: Parser = { bytes: bytes, pos: usize(0) };
     return parse_value(ref p);
 }
@@ -354,7 +354,7 @@ export function parse_bytes(bytes: uint8[]): JsonValue {
 export function obj_get(v: JsonValue, key: string): JsonValue {
     let i: usize = usize(0);
     while (i < v.keys.len) {
-        if (str.string_eq(v.keys[i], key)) {
+        if (str.stringEq(v.keys[i], key)) {
             return v.items[i];
         }
         i = i + usize(1);
@@ -365,7 +365,7 @@ export function obj_get(v: JsonValue, key: string): JsonValue {
 export function has(v: JsonValue, key: string): bool {
     let i: usize = usize(0);
     while (i < v.keys.len) {
-        if (str.string_eq(v.keys[i], key)) { return true; }
+        if (str.stringEq(v.keys[i], key)) { return true; }
         i = i + usize(1);
     }
     return false;

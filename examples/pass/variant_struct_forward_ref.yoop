@@ -3,10 +3,10 @@
 // end). Without that fix, a struct declared BEFORE the variant - and
 // referencing the variant from one of its fields - captures the empty
 // shell. `sizeOfType(Struct)` then computes a too-small layout (the
-// captured variant looks payload-less), and `heap_alloc<Struct>(n)`
+// captured variant looks payload-less), and `heapAlloc<Struct>(n)`
 // undersizes the buffer by the missing-payload bytes per element.
 // Subsequent writes scribble past the end of the allocation and
-// `intr.heap_free` traps with SIGABRT when malloc detects the corruption.
+// `intr.heapFree` traps with SIGABRT when malloc detects the corruption.
 //
 // This fixture reproduces the smallest shape that triggers the bug:
 // a struct `Member` declared first, holding a `value: V` field, where
@@ -31,7 +31,7 @@ variant V {
 }
 
 function main(): int32 {
-    let kids: Member[] = intr.heap_alloc(5);
+    let kids: Member[] = intr.heapAlloc(5);
     let i: usize = 0;
     while (i < 5) {
         kids[i] = { key: int32(i), value: V.Leaf { n: int32(i) * 10 } };
@@ -57,6 +57,6 @@ function main(): int32 {
     }
 
     printf(`total=${total} kids=${kids.len}\n`);
-    intr.heap_free(kids);
+    intr.heapFree(kids);
     return 0;
 }

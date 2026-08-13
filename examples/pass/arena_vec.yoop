@@ -17,14 +17,14 @@ extern "C" from "stdio.h" {
 function main(): int32 {
     let usedInArena: usize = 0;
     disposable reg: mem.ArenaScope = mem.arenaScope(8192) {
-        disposable v: Vec<int32> = vec.vec_new(4);
-        vec.vec_push(ref v, 10);
-        vec.vec_push(ref v, 20);
-        vec.vec_push(ref v, 30);
-        vec.vec_push(ref v, 40);
-        vec.vec_push(ref v, 50); // forces a grow - still from the arena
+        disposable v: Vec<int32> = vec.vecNew(4);
+        vec.vecPush(ref v, 10);
+        vec.vecPush(ref v, 20);
+        vec.vecPush(ref v, 30);
+        vec.vecPush(ref v, 40);
+        vec.vecPush(ref v, 50); // forces a grow - still from the arena
         usedInArena = mem.arenaUsed(reg.arena);
-        let sum: int32 = vec.vec_get(ref v, 0) + vec.vec_get(ref v, 4);
+        let sum: int32 = vec.vecGet(ref v, 0) + vec.vecGet(ref v, 4);
         printf(`sum=${sum} len=${v.len}\n`);
     }
     let arenaGotData: int32 = 0;

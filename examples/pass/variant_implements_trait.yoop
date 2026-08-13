@@ -31,14 +31,14 @@ variant Owned implements Disposable propagates<disposable> {
             case Owned.Empty: { printf(`dispose Empty\n`); }
             case Owned.Buffer { data: d }: {
                 printf(`dispose Buffer len=${d.len}\n`);
-                intr.heap_free(d);
+                intr.heapFree(d);
             }
         }
     }
 }
 
 function main(): int32 {
-    let buf: uint8[] = intr.heap_alloc(3);
+    let buf: uint8[] = intr.heapAlloc(3);
     buf[0] = 65;
     buf[1] = 66;
     buf[2] = 67;

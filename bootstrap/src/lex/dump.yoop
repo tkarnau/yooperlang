@@ -1,0 +1,62 @@
+module lex;
+
+// The other half of the Layer 1 parity target. src/dumpTokens.js documents the
+// format and what it deliberately leaves out; this must stay byte-identical to
+// it, and src/parity.test.js is what proves it.
+//
+// Built into a Text, appended piece by piece. The first version pushed a
+// template literal per token into a Vec<string> and joined - roughly four
+// mallocs per token, none of them freed.
+
+import { Text }, * as text from "std/core/text.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import { Result } from "std/core/types.yoop";
+
+export function dumpTokens(src: uint8[]): Result<Text, string> {
+  let out: Text = text.make(src.len * 2);
+
+  let pos: usize = 0;
+  let iters: usize = 0;
+  const maxIters: usize = src.len * 2 + 100;
+  while (iters < maxIters) {
+    iters += 1;
+    switch (lexNext(ref src, pos)) {
+      case Result.Err { error: e }: {
+        return Result.Err { error: e.error };
+      }
+      case Result.Ok { value: v }: {
+        pushToken(ref out, v.token);
+        if (v.token.tag == TokenTags.EOF) {
+          return Result.Ok { value: out };
+        }
+        pos = v.nextPos;
+      }
+    }
+  }
+
+  return Result.Err { error: "dumpTokens: exceeded iteration failsafe" };
+}
+
+// Number.MAX_SAFE_INTEGER, the largest integer a JS double represents exactly.
+const JS_MAX_SAFE_INT: uint64 = 9007199254740991;
+
+function pushToken(t: ref Text, tok: Token): void {
+  text.push(ref t, tagName(tok.tag));
+  text.pushByte(ref t, 32);
+  text.pushUint(ref t, uint64(tok.start));
+  text.pushByte(ref t, 32);
+  text.pushInt(ref t, int64(tok.length));
+
+  if (tok.tag == TokenTags.INTLITERAL || tok.tag == TokenTags.CHARLITERAL) {
+    text.push(ref t, " int=");
+    // Past 2^53 the JS reference's parseInt is a lossy double while this side
+    // accumulates a real uint64. Both print `unsafe` there so the dump declares
+    // the gap instead of failing parity over a known JS limitation.
+    if (tok.intVal > JS_MAX_SAFE_INT) {
+      text.push(ref t, "unsafe");
+    } else {
+      text.pushUint(ref t, tok.intVal);
+    }
+  }
+  text.pushByte(ref t, 10);
+}

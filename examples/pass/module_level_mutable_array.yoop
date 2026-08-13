@@ -6,7 +6,7 @@
 //    two same-valued mutable arrays eligible for linker merging, so writing
 //    one would have shown up in the other.
 // 2. A module-level binding initialized by a generic INTRINSIC call
-//    (`intr.heap_alloc(n)`) crashed the compiler outright: the intrinsic has
+//    (`intr.heapAlloc(n)`) crashed the compiler outright: the intrinsic has
 //    no yoop body, so the comptime folder reached `lowerFunction` with a null
 //    AST and threw a TypeError before codegen ever ran.
 //
@@ -21,7 +21,7 @@ extern "C" from "stdio.h" {
 
 let counters: int32[] = [0, 0, 0, 0];
 let alsoZeros: int32[] = [0, 0, 0, 0];   // same initial bytes: must NOT alias
-let scratch: int32[] = intr.heap_alloc(4);
+let scratch: int32[] = intr.heapAlloc(4);
 const frozen: int32[] = [7, 7, 7, 7];
 
 function main(): int32 {

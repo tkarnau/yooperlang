@@ -1,0 +1,131 @@
+module typecheck;
+
+/*
+  How big a type is in bytes, and how it wants to be aligned.
+
+  Only ONE thing needs this: a variant is `{ i32, [N x i8] }`, and N is the
+  largest payload any of its cases carries. Everywhere else LLVM computes its own
+  layout from the types, which is why nothing else here asks.
+
+  These match src/jsyoopcodegen/codegen.js `sizeOfType` / `sizeOfAlign` case for
+  case. The two compilers never link against each other, so the layouts do not
+  HAVE to agree - but a variant's payload size is the one number where a
+  disagreement would show up as a corrupted field rather than as an error, and
+  that is worth being able to diff.
+*/
+
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { disposable } from "std/core/kinds.yoop";
+
+// A pointer, and therefore also a `string`, a `ref T` and an `unsafe_ptr`.
+const POINTER_SIZE: usize = 8;
+
+// Size in bytes. Anything this does not know about is assumed pointer-sized,
+// which is what the JS reference assumes too.
+export function sizeOfType(ref prog: Program, id: TypeId): usize {
+  switch (typeAt(ref prog, id)) {
+    case Type.Prim { prim: p }: { return primSize(p); }
+    case Type.Ref { inner: i }: { return POINTER_SIZE; }
+    case Type.UnsafePtr { pointee: p }: { return POINTER_SIZE; }
+    // The array descriptor: data pointer plus length.
+    case Type.Array { elem: e }: { return POINTER_SIZE * 2; }
+    case Type.Struct { decl: d, fields: f, methods: mm, implementsTraits: it, generic: g }: {
+      return sizeOfFields(ref prog, ref f);
+    }
+    case Type.Variant { decl: d, cases: cs, methods: mm, implementsTraits: it, generic: g }: {
+      // The emitted shape: a 4-byte tag then the payload, rounded to the tag's
+      // own alignment. See variantPayloadSize.
+      return roundUp(4 + variantPayloadSize(ref prog, id), 4);
+    }
+    case Type.Void: { return 0; }
+    default: { return POINTER_SIZE; }
+  }
+}
+
+// Alignment in bytes. Same shape as sizeOfType, and the same fallback.
+export function alignOfType(ref prog: Program, id: TypeId): usize {
+  switch (typeAt(ref prog, id)) {
+    case Type.Prim { prim: p }: { return primSize(p); }
+    case Type.Ref { inner: i }: { return POINTER_SIZE; }
+    case Type.UnsafePtr { pointee: p }: { return POINTER_SIZE; }
+    case Type.Array { elem: e }: { return POINTER_SIZE; }
+    case Type.Struct { decl: d, fields: f, methods: mm, implementsTraits: it, generic: g }: {
+      return alignOfFields(ref prog, ref f);
+    }
+    case Type.Variant { decl: d, cases: cs, methods: mm, implementsTraits: it, generic: g }: {
+      return 4;
+    }
+    case Type.Void: { return 1; }
+    default: { return POINTER_SIZE; }
+  }
+}
+
+// The `[N x i8]` a variant's payload needs: the largest case, laid out as a
+// struct. Never 0 - a variant of nothing but payload-less cases still emits an
+// array, and `[0 x i8]` is legal but pointless to reason about.
+export function variantPayloadSize(ref prog: Program, variantType: TypeId): usize {
+  switch (typeAt(ref prog, variantType)) {
+    case Type.Variant { decl: d, cases: cs, methods: mm, implementsTraits: it, generic: g }: {
+      let biggest: usize = 1;
+      let i: usize = 0;
+      while (i < cs.len) {
+        let c = vec.vecGet(ref cs, i);
+        const size = sizeOfFields(ref prog, ref c.fields);
+        if (size > biggest) {
+          biggest = size;
+        }
+        i += 1;
+      }
+      return biggest;
+    }
+    default: { return 1; }
+  }
+}
+
+// A run of fields laid out end to end, each at its natural alignment, and the
+// whole rounded to the widest field's alignment. That is the C rule, and it is
+// what LLVM will do with the same field list.
+function sizeOfFields(ref prog: Program, ref fields: Vec<Field>): usize {
+  let offset: usize = 0;
+  let widest: usize = 1;
+  let i: usize = 0;
+  while (i < fields.len) {
+    const t = vec.vecGet(ref fields, i).typeId;
+    const align = alignOfType(ref prog, t);
+    if (align > widest) {
+      widest = align;
+    }
+    offset = roundUp(offset, align) + sizeOfType(ref prog, t);
+    i += 1;
+  }
+  return roundUp(offset, widest);
+}
+
+function alignOfFields(ref prog: Program, ref fields: Vec<Field>): usize {
+  let widest: usize = 1;
+  let i: usize = 0;
+  while (i < fields.len) {
+    const align = alignOfType(ref prog, vec.vecGet(ref fields, i).typeId);
+    if (align > widest) {
+      widest = align;
+    }
+    i += 1;
+  }
+  return widest;
+}
+
+function roundUp(value: usize, align: usize): usize {
+  if (align <= 1) {
+    return value;
+  }
+  return ((value + align - 1) / align) * align;
+}
+
+function primSize(p: PrimKind): usize {
+  switch (p) {
+    case PrimKind.BOOL, PrimKind.INT8, PrimKind.UINT8: { return 1; }
+    case PrimKind.INT16, PrimKind.UINT16: { return 2; }
+    case PrimKind.INT32, PrimKind.UINT32, PrimKind.FLOAT32: { return 4; }
+    default: { return 8; }   // 64-bit ints, isize/usize, float64, string
+  }
+}

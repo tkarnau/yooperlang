@@ -1,0 +1,163 @@
+module lex;
+
+// The two tables the scanner walks: punctuation/operators, and reserved words.
+//
+// They are separate because they are matched differently. TOKEN_SCAN_LIST is
+// matched by PREFIX against raw bytes, so it must be sorted longest-first or
+// `...` would scan as three `.`s. KEYWORD_LIST is matched against a whole word
+// that `scanIdentity` already delimited, so order there is irrelevant.
+
+import { Comparable, quickSort } from "../utils";
+
+export type SortedTokenDefinition implements Comparable<SortedTokenDefinition> {
+  str: string, // the value in source code that points to a tag
+  tag: TokenTags,
+  function compare(ref self, b: SortedTokenDefinition): int8 {
+    if (self.str.len < b.str.len) {
+      return 1;
+    } else if (self.str.len > b.str.len) {
+      return -1;
+    } else {
+      return 0;
+    }
+  }
+}
+
+function sortedDefs(arr: SortedTokenDefinition[]): SortedTokenDefinition[] {
+  quickSort(arr, 0, arr.len - 1);
+  return arr;
+}
+
+// needs to be sorted by largest scannable to smallest by char count
+// so that `...` is found instead of `.`, `.`, `.`
+export const TOKEN_SCAN_LIST: SortedTokenDefinition[] = sortedDefs([
+  { str: "(", tag: TokenTags.LPAREN },
+  { str: ")", tag: TokenTags.RPAREN },
+  { str: ";", tag: TokenTags.SEMICOLON },
+  { str: "=", tag: TokenTags.EQ },
+  { str: "{", tag: TokenTags.LCURLY },
+  { str: "}", tag: TokenTags.RCURLY },
+  { str: ":", tag: TokenTags.COLON },
+  { str: ",", tag: TokenTags.COMMA },
+  { str: "?", tag: TokenTags.QUESTION },
+  { str: "==", tag: TokenTags.EQEQ },
+  { str: "!=", tag: TokenTags.NEQ },
+  { str: "!", tag: TokenTags.BANG },
+  { str: "^", tag: TokenTags.CARET },
+  { str: "~", tag: TokenTags.TILDE },
+  { str: "<=", tag: TokenTags.LTE },
+  { str: ">=", tag: TokenTags.GTE },
+  { str: "<", tag: TokenTags.LT },
+  { str: ">", tag: TokenTags.GT },
+  { str: "&&", tag: TokenTags.ANDAND },
+  { str: "&", tag: TokenTags.AMP },
+  { str: "||", tag: TokenTags.OROR },
+  { str: "|", tag: TokenTags.PIPE },
+  { str: "<<", tag: TokenTags.LSHIFT },
+  { str: ">>", tag: TokenTags.RSHIFT },
+  { str: "+", tag: TokenTags.PLUS },
+  { str: "-", tag: TokenTags.MINUS },
+  { str: "*", tag: TokenTags.MULT },
+  { str: "/", tag: TokenTags.DIVIDE },
+  { str: "%", tag: TokenTags.MODULUS },
+  // Phase 9: compound-assignment two-char operators. Longest-first sort puts
+  // these before the single-char arithmetic ops above.
+  { str: "+=", tag: TokenTags.PLUSEQ },
+  { str: "-=", tag: TokenTags.MINUSEQ },
+  { str: "*=", tag: TokenTags.MULTEQ },
+  { str: "/=", tag: TokenTags.DIVIDEEQ },
+  { str: "%=", tag: TokenTags.MODULUSEQ },
+  // Phase 9.G: function value type separator. Longest-first sort puts this
+  // before `=` and before `>=` / `>`; the lexer's existing logic handles
+  // the disambiguation against `==`.
+  { str: "=>", tag: TokenTags.FATARROW },
+  { str: ".", tag: TokenTags.DOT },
+  { str: "..", tag: TokenTags.DOTDOT },
+  { str: "...", tag: TokenTags.DOTDOTDOT },
+  { str: "[", tag: TokenTags.LBRACKET },
+  { str: "]", tag: TokenTags.RBRACKET },
+  // Phase 11.A: attribute prefix `@`.
+  { str: "@", tag: TokenTags.AT },
+]);
+
+// A reserved word that `lexIdentifierOrKeyword` promotes from IDENT to its
+// dedicated tag on an exact match. Unlike `TOKEN_SCAN_LIST`, order does not
+// matter here: `scanIdentity` already gave us a whole-word boundary, so we
+// only ever compare complete tokens (no prefix ambiguity to length-sort away).
+export type KeywordDefinition {
+  str: string, // the exact lowercase source spelling
+  tag: TokenTags,
+}
+
+// Mirrors the JS lexer's `keywordTagList` exactly - src/parity.test.js fails if
+// the two drift. Two things that surprise people:
+//   * Most kind vocabulary is NOT here: `contains`, `kind`, `requires`,
+//     `propagates`, `task`, `pooled`, `io`, `field`, `layout` and friends lex
+//     as plain IDENT and the parser recognizes them CONTEXTUALLY, which is what
+//     keeps them usable as ordinary names. Use `peekIsWord` to match one.
+//   * `_` lexes to DISCARD - bare underscores are discarded.
+export const KEYWORD_LIST: KeywordDefinition[] = [
+  { str: "let",            tag: TokenTags.LET },
+  { str: "function",       tag: TokenTags.FUNCTION },
+  { str: "const",          tag: TokenTags.CONST },
+  { str: "return",         tag: TokenTags.RETURN },
+  { str: "if",             tag: TokenTags.IF },
+  { str: "else",           tag: TokenTags.ELSE },
+  { str: "while",          tag: TokenTags.WHILE },
+  { str: "for",            tag: TokenTags.FOR },
+  { str: "in",             tag: TokenTags.IN },
+  { str: "type",           tag: TokenTags.TYPE },
+  { str: "import",         tag: TokenTags.IMPORT },
+  { str: "export",         tag: TokenTags.EXPORT },
+  { str: "extern",         tag: TokenTags.EXTERN },
+  { str: "from",           tag: TokenTags.FROM },
+  { str: "as",             tag: TokenTags.AS },
+  { str: "ref",            tag: TokenTags.REF },
+  { str: "break",          tag: TokenTags.BREAK },
+  { str: "continue",       tag: TokenTags.CONTINUE },
+  { str: "true",           tag: TokenTags.TRUE },
+  { str: "false",          tag: TokenTags.FALSE },
+  { str: "trait",          tag: TokenTags.TRAIT },
+  { str: "implements",     tag: TokenTags.IMPLEMENTS },
+  { str: "self",           tag: TokenTags.SELF },
+  { str: "extends",        tag: TokenTags.EXTENDS },
+  { str: "vtable",         tag: TokenTags.VTABLE },
+  { str: "appliesTo",      tag: TokenTags.APPLIESTO },
+  { str: "mustCall",       tag: TokenTags.MUSTCALL },
+  { str: "ownsBlock",      tag: TokenTags.OWNSBLOCK },
+  { str: "beforeScopeEnd", tag: TokenTags.BEFORESCOPEEND },
+  { str: "mustNotEscape",  tag: TokenTags.MUSTNOTESCAPE },
+  { str: "mustNotShare",   tag: TokenTags.MUSTNOTSHARE },
+  { str: "forbids",        tag: TokenTags.FORBIDS },
+  { str: "acrossScopes",   tag: TokenTags.ACROSSSCOPES },
+  { str: "globalState",    tag: TokenTags.GLOBALSTATE },
+  { str: "wait",           tag: TokenTags.WAIT },
+  { str: "switch",         tag: TokenTags.SWITCH },
+  { str: "case",           tag: TokenTags.CASE },
+  { str: "default",        tag: TokenTags.DEFAULT },
+  { str: "enum",           tag: TokenTags.ENUM },
+  { str: "variant",        tag: TokenTags.VARIANT },
+  { str: "union",          tag: TokenTags.UNION },
+  { str: "null",           tag: TokenTags.NULL },
+  { str: "await",          tag: TokenTags.AWAIT },
+  { str: "_",              tag: TokenTags.DISCARD },
+];
+
+// The SOURCE spelling of a tag, for diagnostics: `+` rather than `PLUS`.
+//
+// Scans the same two tables the lexer matches against, so there is no third
+// list to keep in sync. Falls back to the enum name for tags with no spelling
+// of their own (IDENT, INTLITERAL, EOF).
+export function tagSpelling(tag: TokenTags): string {
+  for d in TOKEN_SCAN_LIST {
+    if (d.tag == tag) {
+      return d.str;
+    }
+  }
+  for k in KEYWORD_LIST {
+    if (k.tag == tag) {
+      return k.str;
+    }
+  }
+  return tagName(tag);
+}

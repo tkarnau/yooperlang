@@ -1,6 +1,6 @@
 # Phase 10.I - Networking polish
 
-> The "library Phase E" from [library-design.md §10](../library-design.md#10-what-lands-first):
+> The "library Phase E" from [library-design.md §10](../archive/library-design.md#10-what-lands-first):
 > routing, streaming-body groundwork, a client, and URL parsing. The HTTP
 > client and server libraries had clean MVPs from Library Phases B/C/D
 > but lacked the composition shapes real programs reach for. 10.I closes

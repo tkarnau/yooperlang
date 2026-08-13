@@ -1,0 +1,82 @@
+module parse;
+
+// Reading a file's `module <name>;` header WITHOUT parsing the file.
+//
+// The module graph has a chicken-and-egg problem: it cannot parse a file until
+// it knows which module owns it (every file of a directory module shares one
+// arena), and it cannot know that without reading the header. Three tokens of
+// lexing answers the question, so that is all this does - no arena, no AST, no
+// parse cache like the JS reference needs.
+//
+// `module` is a CONTEXTUAL keyword: it lexes as an ordinary IDENT so it stays
+// usable as a name, which is why this compares text rather than a tag.
+
+import { Result } from "std/core/types.yoop";
+import * as bytes from "std/core/bytes.yoop";
+import * as str from "std/core/strings.yoop";
+import { ParsingError } from "../diagnostics";
+import { TokenTags, LexedVal, createLexedVal, lexNext } from "../lex";
+
+// `module <name>;` at the very top of a file, or "" when there is none.
+//
+// The header is OPTIONAL and contextual, so this peeks rather than expects: a
+// file starting with anything else simply has no header and is its own module.
+export function parseModuleHeader(ref ps: ParserState): Result<string, ParsingError> {
+  if (!peekIsWord(ref ps, "module")) {
+    return Result.Ok { value: "" };
+  }
+  SelfLexing.advance(ref ps)?;
+  const name = parseIdentAsName(ref ps)?;
+  SelfLexing.expect(ref ps, TokenTags.SEMICOLON)?;
+  return Result.Ok { value: name };
+}
+
+// The name a `module <name>;` header declares, or "" when the file has none.
+// A malformed header also reads as "" here; the parser reports it properly when
+// the file is parsed for real.
+export function moduleHeaderName(src: uint8[]): string {
+  let cursor = src;
+
+  const first = lexAt(ref cursor, 0);
+  if (first.token.tag != TokenTags.IDENT) {
+    return "";
+  }
+  if (!str.stringEq(tokenText(ref cursor, first), "module")) {
+    return "";
+  }
+
+  const name = lexAt(ref cursor, first.nextPos);
+  if (name.token.tag != TokenTags.IDENT) {
+    return "";
+  }
+
+  const semi = lexAt(ref cursor, name.nextPos);
+  if (semi.token.tag != TokenTags.SEMICOLON) {
+    return "";
+  }
+  return tokenText(ref cursor, name);
+}
+
+// One token, or an EOF placeholder when the source will not lex. A lex error
+// here is not this function's to report - the real parse hits it too, with a
+// location and a message.
+function lexAt(ref src: uint8[], pos: usize): LexedVal {
+  switch (lexNext(src, pos)) {
+    case Result.Ok { value: lexed }: { return lexed; }
+    case Result.Err { error: e }: { return createLexedVal(); }
+  }
+}
+
+function tokenText(ref src: uint8[], lexed: LexedVal): string {
+  if (lexed.token.length <= 0) {
+    return "";
+  }
+  switch (str.stringFromBytes(bytes.bytesSlice(
+    src,
+    lexed.token.start,
+    lexed.token.start + usize(lexed.token.length)
+  ))) {
+    case Result.Ok { value: text }: { return text; }
+    case Result.Err { error: e }: { return ""; }
+  }
+}

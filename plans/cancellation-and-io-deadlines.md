@@ -10,7 +10,7 @@
 
 `yoop_io_wait_readable(fd)` / `wait_writable(fd)` park forever. There is
 no deadline, no cancel, no abandon. Every `std/net` operation goes
-through them (`ffi_accept`, `ffi_recv`, `ffi_send_all`), so a server
+through them (`ffiAccept`, `ffiRecv`, `ffiSendAll`), so a server
 parked on `accept` or a client reading from a peer that stopped talking
 hangs that thread for the life of the process. There is no timeout
 anywhere in `std/net` or `std/http`.
@@ -38,7 +38,7 @@ a server scope.
 `yoop_now_ns` reads `CLOCK_REALTIME` on both platforms (the header
 claims `CLOCK_MONOTONIC` on Linux). An NTP step moves every in-flight
 deadline. `queue_cv` uses default condattr, so it agrees with
-`now_ns` - both are wrong together.
+`nowNs` - both are wrong together.
 
 ### 5. Smaller multiplexer bugs
 

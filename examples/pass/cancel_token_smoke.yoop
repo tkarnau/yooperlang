@@ -29,7 +29,7 @@ function report(label: string, o: WaitOutcome): void {
 
 // Runs on a worker: let the main thread get parked, then cancel.
 task canceller(t: CancelToken): int32 {
-    conc.sleep_ms(40);
+    conc.sleepMs(40);
     cancel.request(ref t);
     return 0;
 }

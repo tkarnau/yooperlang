@@ -12,6 +12,7 @@ import path from "node:path";
 import { analyze } from "./analyze.js";
 import {
   collectDocumentSymbols,
+  docCommentAt,
   findDefinition,
   findNodeAt,
   getHoverInfo,
@@ -553,13 +554,13 @@ describe("nav: directory modules", () => {
         "a.yoop": `module m;
 import * as vec, { Vec } from "std/core/vec.yoop";
 export function capA(): usize {
-    let v: Vec<int32> = vec.vec_new(4);
+    let v: Vec<int32> = vec.vecNew(4);
     return v.cap;
 }
 `,
         "b.yoop": `module m;
 export function capB(): usize {
-    let v: Vec<int32> = vec.vec_new(8);
+    let v: Vec<int32> = vec.vecNew(8);
     return v.cap;
 }
 `,
@@ -575,5 +576,100 @@ export function capB(): usize {
     for (const d of leaks) {
       assert.equal(d.absPath, files["b.yoop"], `wrong file for: ${d.message}`);
     }
+  });
+});
+
+// yooperdoom-takeaways 4.1: the comment above a declaration is documentation,
+// and the editor should show it. The scan runs on raw source, because comments
+// are eaten by the lexer and never reach the token stream.
+describe("nav: docCommentAt", () => {
+  // Anchor is the declaration's NAME offset, which is what locOfDecl computes
+  // and what goto-definition already jumps to.
+  function docFor(src, name) {
+    const at = src.indexOf(name);
+    assert.notEqual(at, -1, `fixture has no "${name}"`);
+    return docCommentAt(src, at);
+  }
+
+  it("reads a single-line comment above a function", () => {
+    const src = [
+      "// Number of command line arguments, including the program name.",
+      "export function argCount(): int32 {",
+      "    return 0;",
+      "}",
+    ].join("\n");
+    assert.equal(
+      docFor(src, "argCount"),
+      "Number of command line arguments, including the program name.",
+    );
+  });
+
+  it("joins a contiguous multi-line block and keeps relative indent", () => {
+    const src = [
+      "// The value of `name`, or `fallback` when it is UNSET.",
+      "//",
+      "//     let p: string = env.get(\"PORT\");",
+      "export function getOr(name: string): string {",
+      "    return name;",
+      "}",
+    ].join("\n");
+    assert.equal(
+      docFor(src, "getOr"),
+      [
+        "The value of `name`, or `fallback` when it is UNSET.",
+        "",
+        "    let p: string = env.get(\"PORT\");",
+      ].join("\n"),
+    );
+  });
+
+  it("stops at a blank line, so a file header does not attach to the first decl", () => {
+    const src = [
+      "// std/env.yoop - the module header, which documents the MODULE.",
+      "// It must not be reported as the doc for the decl below it.",
+      "",
+      "export function argCount(): int32 {",
+      "    return 0;",
+      "}",
+    ].join("\n");
+    assert.equal(docFor(src, "argCount"), null);
+  });
+
+  it("stops at a non-comment line", () => {
+    const src = [
+      "// belongs to the import, not to f",
+      "import * as x from \"std/env.yoop\";",
+      "export function f(): int32 { return 0; }",
+    ].join("\n");
+    assert.equal(docFor(src, "f()"), null);
+  });
+
+  it("returns null when there is no comment", () => {
+    assert.equal(docCommentAt("export function f(): int32 { return 0; }", 16), null);
+  });
+
+  it("takes only the run directly above, not an earlier one", () => {
+    const src = [
+      "// an earlier comment, separated by a blank line",
+      "",
+      "// the real doc",
+      "export function f(): int32 { return 0; }",
+    ].join("\n");
+    assert.equal(docFor(src, "f()"), "the real doc");
+  });
+
+  it("handles a one-line block comment", () => {
+    const src = "/* a block-comment doc */\nexport function f(): int32 { return 0; }";
+    assert.equal(docFor(src, "f()"), "a block-comment doc");
+  });
+
+  it("survives a decl on the first line of the file", () => {
+    assert.equal(docCommentAt("export function f(): int32 { return 0; }", 0), null);
+  });
+
+  it("is defensive about out-of-range and non-string input", () => {
+    assert.equal(docCommentAt(null, 0), null);
+    assert.equal(docCommentAt("// x\nfn", -1), null);
+    assert.equal(docCommentAt("// x\nfn", 9999), null);
   });
 });

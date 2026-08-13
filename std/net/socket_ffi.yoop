@@ -127,7 +127,7 @@ extern "C" from "yoop_runtime" {
     // C (see runtime/yoop_net.c) rather than hand-mirror them in yoop.
     function yoop_net_set_reuseaddr(fd: c_int): c_int;
     // Resolve a hostname (or numeric dotted-quad) to a dotted-quad IPv4
-    // string. Returns "" on failure. Used by ffi_connect so callers can
+    // string. Returns "" on failure. Used by ffiConnect so callers can
     // dial out to hostnames without pre-resolving themselves.
     function yoop_net_resolve_ipv4(name: string): string;
 }
@@ -137,13 +137,13 @@ extern "C" from "yoop_runtime" {
 // Build a sockaddr_in for "host:port". host must be a numeric IPv4
 // dotted-quad ("127.0.0.1", "0.0.0.0"). inet_addr returns 0xFFFFFFFF on
 // failure; we surface that as `Err`.
-function build_sockaddr(host: string, port: int32): Result<SockAddrIn, string> {
+function buildSockaddr(host: string, port: int32): Result<SockAddrIn, string> {
     let ipv4: uint32 = yoop_sock_inet_addr(host);
     // inet_addr returns INADDR_NONE (0xFFFFFFFF) on bad input - except
     // "255.255.255.255" which is the broadcast address. We don't bind to
     // that, so we treat the value as the error sentinel.
     if (ipv4 == 4294967295) {
-        return Result.Err { error: "build_sockaddr: invalid IPv4 host" };
+        return Result.Err { error: "buildSockaddr: invalid IPv4 host" };
     }
     let port_be: uint16 = yoop_sock_htons(uint16(port));
     return Result.Ok {
@@ -158,7 +158,7 @@ function build_sockaddr(host: string, port: int32): Result<SockAddrIn, string> {
 
 // Allocate a TCP/IPv4 socket. Returns the raw fd in `Ok` or an errno
 // message in `Err`.
-function ffi_socket_open(): Result<c_int, string> {
+function ffiSocketOpen(): Result<c_int, string> {
     let fd: c_int = yoop_sock_socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (fd < 0) {
         return Result.Err { error: errno.message(errno.get()) };
@@ -170,8 +170,8 @@ function ffi_socket_open(): Result<c_int, string> {
 // hand it to a Socket envelope) or an `Err` on any step's failure.
 // Closes the fd on bind/listen failure so we don't leak fds across error
 // returns.
-function ffi_listen(host: string, port: int32, backlog: int32): Result<c_int, string> {
-    let open: Result<c_int, string> = ffi_socket_open();
+function ffiListen(host: string, port: int32, backlog: int32): Result<c_int, string> {
+    let open: Result<c_int, string> = ffiSocketOpen();
     let fd: c_int = 0;
     switch (open) {
         case Result.Ok { value: ok_fd }: { fd = ok_fd; }
@@ -183,7 +183,7 @@ function ffi_listen(host: string, port: int32, backlog: int32): Result<c_int, st
     // non-fatal - log and continue (errno is preserved but ignored).
     let reuse_rc: c_int = yoop_net_set_reuseaddr(fd);
 
-    let built: Result<SockAddrIn, string> = build_sockaddr(host, port);
+    let built: Result<SockAddrIn, string> = buildSockaddr(host, port);
     let addr: SockAddrIn = { sin_family: 0, sin_port: 0, sin_addr: 0, sin_zero: 0 };
     switch (built) {
         case Result.Ok { value: ok_addr }: { addr = ok_addr; }
@@ -214,9 +214,9 @@ function ffi_listen(host: string, port: int32, backlog: int32): Result<c_int, st
     return Result.Ok { value: fd };
 }
 
-// Multi-field success payload for `ffi_accept` - bundles the new client
+// Multi-field success payload for `ffiAccept` - bundles the new client
 // fd with the peer's address. Named so it can ride inside Result.Ok.
-type AcceptedFd { fd: c_int, peer_host: uint32, peer_port: uint16 }
+type AcceptedFd { fd: c_int, peerHost: uint32, peerPort: uint16 }
 
 // Block until the next connection arrives, then take it. Returns the new
 // client fd, or `Err`.
@@ -231,7 +231,7 @@ type AcceptedFd { fd: c_int, peer_host: uint32, peer_port: uint16 }
 // LISTENING socket as readable, so the two-step shape does not exist on
 // Windows. See ffiAcceptAsync for the full note, including why the peer
 // address is no longer reported.
-function ffi_accept(fd: c_int): Result<AcceptedFd, string> {
+function ffiAccept(fd: c_int): Result<AcceptedFd, string> {
     let code: int32 = IO_READY;
     let nullCt: RawCancel = { p: null };
     let cfd: c_ssize_t = yoop_iop_accept_wait(fd, nullCt.p, 0, &code);
@@ -239,7 +239,7 @@ function ffi_accept(fd: c_int): Result<AcceptedFd, string> {
         return Result.Err { error: errno.message(errno.get()) };
     }
     return Result.Ok {
-        value: { fd: c_int(cfd), peer_host: 0, peer_port: 0 },
+        value: { fd: c_int(cfd), peerHost: 0, peerPort: 0 },
     };
 }
 
@@ -250,7 +250,7 @@ variant ConnectOutcome {
     Err { error: string },
 }
 
-function ffi_connect(fd: c_int, host: string, port: int32): ConnectOutcome {
+function ffiConnect(fd: c_int, host: string, port: int32): ConnectOutcome {
     // inet_addr only handles dotted-quad. If that fails, fall back to a
     // DNS lookup via the runtime helper. Numeric hosts skip the resolve
     // and dial directly.
@@ -259,11 +259,11 @@ function ffi_connect(fd: c_int, host: string, port: int32): ConnectOutcome {
     if (probe == 4294967295) {
         let resolved: string = yoop_net_resolve_ipv4(host);
         if (resolved.len == 0) {
-            return ConnectOutcome.Err { error: "ffi_connect: DNS resolution failed" };
+            return ConnectOutcome.Err { error: "ffiConnect: DNS resolution failed" };
         }
         dial_host = resolved;
     }
-    let built: Result<SockAddrIn, string> = build_sockaddr(dial_host, port);
+    let built: Result<SockAddrIn, string> = buildSockaddr(dial_host, port);
     let addr: SockAddrIn = { sin_family: 0, sin_port: 0, sin_addr: 0, sin_zero: 0 };
     switch (built) {
         case Result.Ok { value: ok_addr }: { addr = ok_addr; }
@@ -279,7 +279,7 @@ function ffi_connect(fd: c_int, host: string, port: int32): ConnectOutcome {
 // Read once into `buf`, blocking until bytes arrive. uint8[] is a fat pointer;
 // passing by value copies the (ptr,len) header but the bytes are still the
 // caller's storage. Returns bytes read in `Ok` (0 = EOF), or `Err`.
-function ffi_recv(fd: c_int, buf: uint8[]): Result<c_ssize_t, string> {
+function ffiRecv(fd: c_int, buf: uint8[]): Result<c_ssize_t, string> {
     let code: int32 = IO_READY;
     let nullCt: RawCancel = { p: null };
     let n: c_ssize_t = yoop_iop_wait(fd, buf.ptr, buf.len, OP_RECV, nullCt.p, 0, &code);
@@ -295,11 +295,11 @@ function ffi_recv(fd: c_int, buf: uint8[]): Result<c_ssize_t, string> {
 // An operation per chunk rather than "wait for writability, then send": a
 // completion port cannot answer the writability question at all, so the send
 // itself is what pends. See ffiSendAllAsync for the full note.
-function ffi_send_all(fd: c_int, buf: uint8[]): Result<c_ssize_t, string> {
+function ffiSendAll(fd: c_int, buf: uint8[]): Result<c_ssize_t, string> {
     let total: usize = 0;
     let nullCt: RawCancel = { p: null };
     while (total < buf.len) {
-        let chunk: uint8[] = intr.array_slice(buf, total, buf.len);
+        let chunk: uint8[] = intr.arraySlice(buf, total, buf.len);
         let code: int32 = IO_READY;
         let n: c_ssize_t = yoop_iop_wait(fd, chunk.ptr, chunk.len, OP_SEND, nullCt.p, 0, &code);
         if (n < 0) {
@@ -313,7 +313,7 @@ function ffi_send_all(fd: c_int, buf: uint8[]): Result<c_ssize_t, string> {
 // Thin close wrapper exported for the Socket disposer. Returns the libc
 // rc as-is so the caller can log + continue (a failed close almost never
 // matters for a server).
-function ffi_close(fd: c_int): c_int {
+function ffiClose(fd: c_int): c_int {
     return yoop_sock_close(fd);
 }
 
@@ -344,7 +344,7 @@ function ffiBoundPort(fd: c_int): c_int {
 
 // Put a socket into non-blocking mode. Every fd that reaches the async
 // helpers must go through this first; std/net does it in `newStream` and
-// in `ffi_listen`, so callers never have to remember.
+// in `ffiListen`, so callers never have to remember.
 function ffiSetNonblocking(fd: c_int): c_int {
     return yoop_io_set_nonblocking(fd);
 }
@@ -414,7 +414,7 @@ export async ffiRecvAsync(fd: c_int, buf: uint8[]): IoResult {
 export async ffiSendAllAsync(fd: c_int, buf: uint8[]): IoResult {
     let total: usize = 0;
     while (total < buf.len) {
-        let chunk: uint8[] = intr.array_slice(buf, total, buf.len);
+        let chunk: uint8[] = intr.arraySlice(buf, total, buf.len);
         let n: c_ssize_t = yoop_iop_send_begin(fd, chunk.ptr, chunk.len);
         if (n == IOP_PENDING) {
             await conc.suspendNow();
@@ -508,7 +508,7 @@ function ffiAcceptCt(fd: c_int, ct: RawCancel, deadlineNs: uint64): AcceptCtResu
 }
 
 // Read once into `buf` under `ct`. `n == 0` with `code == IO_READY` is EOF,
-// exactly as for ffi_recv.
+// exactly as for ffiRecv.
 function ffiRecvCt(fd: c_int, buf: uint8[], ct: RawCancel, deadlineNs: uint64): IoResult {
     let code: int32 = IO_READY;
     let n: c_ssize_t = yoop_iop_wait(fd, buf.ptr, buf.len, OP_RECV, ct.p, deadlineNs, &code);
@@ -525,7 +525,7 @@ function ffiRecvCt(fd: c_int, buf: uint8[], ct: RawCancel, deadlineNs: uint64): 
 function ffiSendAllCt(fd: c_int, buf: uint8[], ct: RawCancel, deadlineNs: uint64): IoResult {
     let total: usize = 0;
     while (total < buf.len) {
-        let chunk: uint8[] = intr.array_slice(buf, total, buf.len);
+        let chunk: uint8[] = intr.arraySlice(buf, total, buf.len);
         let code: int32 = IO_READY;
         let n: c_ssize_t = yoop_iop_wait(fd, chunk.ptr, chunk.len, OP_SEND, ct.p, deadlineNs, &code);
         if (code != IO_READY) {

@@ -1,0 +1,17 @@
+// A trait and one implementer, in a module of their own, so traits.yoop can
+// prove a method still resolves to ONE symbol when the call crosses a module
+// boundary. The mangled name carries the type's home module, not the caller's.
+
+export trait Shape {
+  function area(ref self): int;
+  function scaledArea(ref self, k: int): int;
+}
+
+export type Rect implements Shape {
+  w: int,
+  h: int,
+  function area(ref self): int { return self.w * self.h; }
+  // A method calling another method ON ITSELF. `ref self` is already a borrow,
+  // so it is passed straight through rather than re-borrowed.
+  function scaledArea(ref self, k: int): int { return Shape.area(ref self) * k; }
+}

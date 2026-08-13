@@ -21,4 +21,4 @@ export function stretched(p: Point): Point {
 // really does go through a runtime module-init. area.yoop has one too, which is
 // what makes this fixture cover the per-source-file init symbol: one
 // `@<moduleId>__module_init` for both files would be an LLVM redefinition.
-export const SCRATCH_A: Vec<int32> = vec.vec_new(4);
+export const SCRATCH_A: Vec<int32> = vec.vecNew(4);

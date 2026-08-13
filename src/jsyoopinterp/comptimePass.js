@@ -146,12 +146,12 @@ function makeResolvers(modules, currentMod, fnCache, programState) {
       fnCache.set(inst, null);
       return null;
     }
-    // A compiler intrinsic (`heap_alloc<T>`, `string_as_bytes`, ...) is a
+    // A compiler intrinsic (`heapAlloc<T>`, `stringAsBytes`, ...) is a
     // registry instance with no yoop body - its implementation IS codegen.
     // There is nothing to lower, so the fold declines and the decl falls
     // back to the runtime-init path. Without this the null AST reached
     // `lowerFunction` and crashed the whole compile on a module-level
-    // `let xs: T[] = intr.heap_alloc(n);`.
+    // `let xs: T[] = intr.heapAlloc(n);`.
     if (!inst.ast) {
       fnCache.set(inst, null);
       return null;
@@ -238,7 +238,7 @@ function makeResolvers(modules, currentMod, fnCache, programState) {
 
   // Also pass `traitMethodResolver` to user-fn lowering so a regular
   // function body that itself contains trait calls (very common -
-  // e.g. `Display.to_string(ref x)`) resolves correctly. The
+  // e.g. `Display.toString(ref x)`) resolves correctly. The
   // `fnResolver` closure references it via lexical scope.
   return {
     fnResolver,

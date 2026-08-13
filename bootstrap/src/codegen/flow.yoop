@@ -1,0 +1,141 @@
+module codegen;
+
+// Branching: `if` / `else if` / `else` lowered to labels and branches.
+//
+// Loops live in loop.yoop; the block discipline both of them follow is stated
+// here because this is the simpler case to read it in. Two rules:
+//
+//   1. LLVM allows exactly ONE terminator per block and rejects a second, so
+//      nothing emits a `br` after a path that already terminated. That is what
+//      the `terminated` out-parameter is for.
+//   2. A block that nothing can reach is not emitted at all - hence the `if`
+//      whose both arms return producing no join block.
+//
+// Getting either wrong produces IR clang refuses, not a wrong answer, which is
+// the good failure mode.
+
+import { ASTNode, ASTNodeKind, NodeId, nodeAt } from "../ast";
+import { TokenTags } from "../lex";
+import { Option } from "std/core/types.yoop";
+
+// `if (c) { a } else { b }` becomes three labels and two branches:
+//
+//     br i1 %cond, label %Lthen, label %Lelse
+//   Lthen:  ...  br label %Lend
+//   Lelse:  ...  br label %Lend
+//   Lend:
+//
+// A branch that already terminated needs no `br` to the join - LLVM allows one
+// terminator per block and rejects a second. When BOTH branches return, the
+// join block is unreachable and is not emitted at all, which is what lets the
+// caller treat the whole `if` as returning.
+export function emitIf(ref cx: Cx, stmt: ASTNode, retTy: string, ref terminated: bool): string {
+  terminated = false;
+  let cond: Operand = Operand.None;
+  const cerr = emitExpr(ref cx, stmt.childA, ref cond);
+  if (cerr.len > 0) {
+    return cerr;
+  }
+
+  const hasElse = stmt.childC != 0;
+  const thenLabel = freshLabel(cx.e);
+  const elseLabel = freshLabel(cx.e);
+  const endLabel = freshLabel(cx.e);
+
+  if (hasElse) {
+    emitCondBr(ref cx, cond, thenLabel, elseLabel);
+  } else {
+    emitCondBr(ref cx, cond, thenLabel, endLabel);
+  }
+
+  emitLabel(ref cx, thenLabel);
+  let err = "";
+  let thenTerminated = false;
+  emitBlock(ref cx, stmt.childB, retTy, ref thenTerminated, ref err);
+  if (err.len > 0) {
+    return err;
+  }
+  if (!thenTerminated) {
+    emitBr(ref cx, endLabel);
+  }
+
+  let elseTerminated = false;
+  if (hasElse) {
+    emitLabel(ref cx, elseLabel);
+    // `else if` is a nested IF_STATEMENT; anything else is a BLOCK. Either way
+    // it reports whether it terminated, so no `br` is added on top of one.
+    if (nodeAt(cx.ast, stmt.childC).kind == ASTNodeKind.IF_STATEMENT) {
+      err = emitStatement(ref cx, stmt.childC, retTy, ref elseTerminated);
+    } else {
+      emitBlock(ref cx, stmt.childC, retTy, ref elseTerminated, ref err);
+    }
+    if (err.len > 0) {
+      return err;
+    }
+    if (!elseTerminated) {
+      emitBr(ref cx, endLabel);
+    }
+  }
+
+  // The whole `if` terminates only when there IS an else and both sides did.
+  // Otherwise control reaches the join, so the join has to exist.
+  if (hasElse && thenTerminated && elseTerminated) {
+    terminated = true;
+    return "";
+  }
+  emitLabel(ref cx, endLabel);
+  return "";
+}
+
+// `a && b` and `a || b`, which must not evaluate `b` when `a` already decides
+// the answer:
+//
+//     <a>
+//     store i1 %a, ptr %sc.1.addr
+//     br i1 %a, label %Lrhs, label %Lend    ; `&&`: only test b when a is true
+//   Lrhs:
+//     <b>
+//     store i1 %b, ptr %sc.1.addr
+//     br label %Lend
+//   Lend:
+//     %t = load i1, ptr %sc.1.addr
+//
+// `||` is the same with the branch targets swapped: b is only evaluated when a
+// is FALSE.
+//
+// The result goes through a stack slot rather than a phi node, which is the same
+// choice locals make - it keeps codegen free of SSA construction, and mem2reg
+// turns it into a phi anyway.
+export function emitShortCircuit(ref cx: Cx, expr: ASTNode, ref out: Operand): string {
+  const slotInfo = declareAnonSlot(ref cx, "i1");
+
+  let lhs: Operand = Operand.None;
+  const lerr = emitExpr(ref cx, expr.childA, ref lhs);
+  if (lerr.len > 0) {
+    return lerr;
+  }
+  emitStore(ref cx, "i1", lhs, TEMP_SLOT_NAME, slotInfo.id);
+
+  const rhsLabel = freshLabel(cx.e);
+  const endLabel = freshLabel(cx.e);
+  if (expr.operator == TokenTags.ANDAND) {
+    emitCondBr(ref cx, lhs, rhsLabel, endLabel);
+  } else {
+    emitCondBr(ref cx, lhs, endLabel, rhsLabel);
+  }
+
+  emitLabel(ref cx, rhsLabel);
+  let rhs: Operand = Operand.None;
+  const rerr = emitExpr(ref cx, expr.childB, ref rhs);
+  if (rerr.len > 0) {
+    return rerr;
+  }
+  emitStore(ref cx, "i1", rhs, TEMP_SLOT_NAME, slotInfo.id);
+  emitBr(ref cx, endLabel);
+
+  emitLabel(ref cx, endLabel);
+  const dest = freshTemp(cx.e);
+  emitLoad(ref cx, dest, "i1", TEMP_SLOT_NAME, slotInfo.id);
+  out = Operand.Temp { id: dest };
+  return "";
+}

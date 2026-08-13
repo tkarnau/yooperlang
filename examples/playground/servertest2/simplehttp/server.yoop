@@ -11,7 +11,7 @@ const DB_PATH: string = "names.db";
 
 type FetchHandler implements Handler {
   greeting: string,
-  function handle(ref self, ref req: http.Request, ref resp: http.Response): HandleOutcome {
+  async handle(ref self, ref req: http.Request, ref resp: http.Response): HandleOutcome {
     // One call sets the status, the Content-Type, and the body.
     http.respondText(ref resp, http.ok(), self.greeting);
     return HandleOutcome.Ok;
@@ -21,7 +21,7 @@ type FetchHandler implements Handler {
 type SaveHandler implements Handler {
   name: string,
   description: string,
-  function handle(ref self, ref req: http.Request, ref resp: http.Response): HandleOutcome {
+  async handle(ref self, ref req: http.Request, ref resp: http.Response): HandleOutcome {
     // save 
     return HandleOutcome.Ok;
   }
@@ -48,7 +48,7 @@ export async run(): Result<int32, HttpError> {
   // host, port, backlog
   // backlog is the maximum pending-connection queue length
   // backlog is passed directly to C function -> "listen" call in sys/socket.h
-  let disposable lr: tcp.ListenResult = tcp.tcp_listen("127.0.0.1", 18080, 128) {
+  let disposable lr: tcp.ListenResult = tcp.tcpListen("127.0.0.1", 18080, 128) {
     // there is no try/catch in this language.
     // explicitly inspect the `error` field on the disposable result.
     if (lr.error.len > 0) {

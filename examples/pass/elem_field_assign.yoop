@@ -26,7 +26,7 @@ function raise(ref w: World, i: usize, amount: int32): void {
 }
 
 function main(): int32 {
-    let sectors: Sector[] = intr.heap_alloc(2);
+    let sectors: Sector[] = intr.heapAlloc(2);
     sectors[0] = { floorHeight: 0, ceiling: 0 };
     sectors[1] = { floorHeight: 0, ceiling: 0 };
 

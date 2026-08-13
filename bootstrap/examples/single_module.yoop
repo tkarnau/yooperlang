@@ -1,5 +1,11 @@
-// A minimal bootstrap-parseable module: top-level functions only, no imports.
-// Used by main.yoop to smoke-test the Layer 0 module-graph loader end to end.
+// A minimal bootstrap-parseable module: a struct and top-level functions, no
+// imports. Used by main.yoop to smoke-test lex -> parse -> typecheck pass A end
+// to end, so keep it inside what the bootstrap parser actually handles today.
+
+type Point {
+  x: int,
+  y: int,
+}
 
 function add(a: int, b: int): int {
   return a + b;

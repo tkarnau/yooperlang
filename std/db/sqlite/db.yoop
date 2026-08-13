@@ -1,6 +1,9 @@
+// std/db/sqlite - SQLite bindings: connections, prepared statements, and a
+// `transaction` kind that commits or rolls back at the end of its block.
+// One module across two files; import the DIRECTORY.
 module sqlite;
 
-// std/db/sqlite.yoop - safe SQLite bindings.
+// std/db/sqlite/db.yoop - safe SQLite bindings.
 //
 // The public face of std/db. Compiles without `import.unsafe;` and never names
 // a pointer type: every handle rides inside the `RawDb` / `RawStmt` envelopes
@@ -413,7 +416,7 @@ export function columnCount(row: Row): int32 {
 
 // The declared name of a column. Copied out of sqlite's storage.
 export function columnName(row: Row, col: int32): string {
-    return str.string_concat(rawColumnName(row.raw, col), "");
+    return str.stringConcat(rawColumnName(row.raw, col), "");
 }
 
 export function columnIsNull(row: Row, col: int32): bool {
@@ -435,7 +438,7 @@ export function columnDouble(row: Row, col: int32): float64 {
 // Copies. sqlite's own pointer dies at the next step, so handing it straight
 // back would be a dangling read the moment the caller advanced the cursor.
 export function columnText(row: Row, col: int32): string {
-    return str.string_concat(rawColumnText(row.raw, col), "");
+    return str.stringConcat(rawColumnText(row.raw, col), "");
 }
 
 // ----- iteration -----------------------------------------------------------
@@ -487,5 +490,5 @@ export function lastInsertRowid(ref db: Db): int64 {
 // The linked libsqlite3's version, e.g. "3.43.2". Handy for confirming which
 // sqlite the binary actually picked up.
 export function libVersion(): string {
-    return str.string_concat(rawLibVersion(), "");
+    return str.stringConcat(rawLibVersion(), "");
 }

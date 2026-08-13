@@ -1,0 +1,62 @@
+// Address-of, dereference, and the bitwise operators.
+//
+// `&x` and `*p` are the C-interop pair: `&` hands a local's address to a
+// foreign function, `*` reads back through it. They are NOT `ref x`, which is a
+// checked borrow - `&` produces an `unsafe_ptr` with none of a borrow's
+// guarantees, which is why both are gated on `import.unsafe;`.
+//
+// Both tokens are also binary operators (`a & b`, `a * b`). There is no
+// ambiguity and no lookahead: `&x` and `*p` appear in PREFIX position, where a
+// binary operator cannot.
+//
+// The bitwise set is where `map.yoop` masks a hash down to a bucket index
+// (`hash & (cap - 1)`), which is the reason it exists at all.
+
+import.unsafe;
+
+function main(): int {
+  // ----- bitwise -----
+  //
+  // `and`, `or` and `xor` are bit-for-bit and read their operands the same way
+  // whether signed or unsigned. Shifts and division do not, which is why the
+  // opcode is chosen from the operand's signedness.
+  const a: usize = 12;         // 1100
+  const b: usize = 10;         // 1010
+  printf("and=%llu or=%llu xor=%llu\n", a & b, a | b, a ^ b);
+  printf("shl=%llu shr=%llu\n", a << 2, a >> 2);
+
+  // The masking idiom the map uses: a power-of-two capacity minus one is a
+  // bucket mask.
+  const cap: usize = 8;
+  const h: usize = 1234;
+  printf("bucket=%llu\n", h & (cap - 1));
+
+  // An arithmetic shift keeps the sign bit; a logical one does not. Same
+  // operator, different instruction, decided by the operand type.
+  const neg: int64 = -16;
+  printf("ashr=%lld\n", neg >> 2);
+
+  // ----- address-of and dereference -----
+  let n: int32 = 42;
+  const p: unsafe_ptr<int32> = &n;
+  printf("read=%d\n", *p);
+
+  // Writing THROUGH the pointer changes the local it points at - which is the
+  // assertion that `&` yields a real address rather than a copy.
+  *p = 9;
+  printf("after store n=%d via=%d\n", n, *p);
+
+  // `*p = *p * 3` exercises the parse rule that assignment binds loosest: the
+  // prefix `*` must not swallow the `=`, or this becomes `*(p = ...)`.
+  let big: int64 = 5;
+  const q: unsafe_ptr<int64> = &big;
+  *q = *q * 3;
+  printf("through=%lld\n", big);
+
+  // A typed pointer widens to the opaque one, which is what an extern taking
+  // `unsafe_ptr` accepts.
+  const opaque: unsafe_ptr = &n;
+  printf("opaque null=%d\n", opaque == null);
+
+  return 0;
+}

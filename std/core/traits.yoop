@@ -77,7 +77,7 @@ export vtable Writer for Writable {
 // literals special-case int/float/bool/string; lifting Display into the
 // template path is a separate typechecker change.
 export trait Display {
-    function to_string(ref self): string;
+    function toString(ref self): string;
 }
 
 // ----- Iterable ----------------------------------------------------------

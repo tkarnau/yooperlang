@@ -1,0 +1,46 @@
+// Char literals - `'a'`, and the escapes.
+//
+// A char literal IS an int literal. The lexer decodes `'a'` to its codepoint
+// and stores it in the token, so the parser builds the same INT_LITERAL node an
+// ordinary number would, and it pins to context exactly the same way. That is
+// what lets `src[i] == '\\'` compare against a uint8 with no conversion, and
+// `classify('0')` pass one to a uint8 parameter.
+//
+// Nothing about this is a character TYPE. Yoop has no char, and adding one to
+// support the literal would have been the wrong shape - a byte comparison in a
+// lexer is what these are for, and a byte is what they are.
+
+function isDigit(b: uint8): bool {
+  return b >= '0' && b <= '9';
+}
+
+function isAlpha(b: uint8): bool {
+  return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z');
+}
+
+// In a switch PATTERN too, which is the readable spelling of a digit test and
+// is how std writes them.
+function classify(b: uint8): int {
+  switch (b) {
+    case '0', '1', '2': { return 1; }
+    case 'a', 'b': { return 2; }
+    default: { return 0; }
+  }
+}
+
+function main(): int {
+  printf("digit %d %d\n", isDigit('5'), isDigit('x'));
+  printf("alpha %d %d %d\n", isAlpha('q'), isAlpha('Q'), isAlpha('7'));
+  printf("classify %d %d %d\n", classify('1'), classify('b'), classify('z'));
+
+  // The escapes the string decoder already knew, reaching the same table.
+  printf("nl=%d tab=%d cr=%d nul=%d\n", '\n', '\t', '\r', '\0');
+  printf("quote=%d backslash=%d\n", '\'', '\\');
+
+  // Pins to whatever the context wants, like any untyped int literal.
+  const wide: int64 = 'A';
+  const narrow: uint8 = 'A';
+  printf("wide=%d narrow=%d\n", wide, narrow);
+
+  return 0;
+}

@@ -1,0 +1,5 @@
+sumOdds(10)=25
+firstMultiple(7,20)=21
+countdown(100)=4
+nested()=10
+exit=0

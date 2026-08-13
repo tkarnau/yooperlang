@@ -1,0 +1,7 @@
+// A local reaching the process exit code, so the value is checked without
+// going through printf formatting.
+function main(): int {
+  const base = 20;
+  let bonus: int = 2;
+  return base + bonus;
+}

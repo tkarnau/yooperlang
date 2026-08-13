@@ -26,7 +26,7 @@ extern "C" from "stdio.h" {
 // Occupies the single worker with a BLOCKING sleep, so no worker is free to
 // pick up `scratch` and main has to run it itself.
 task hog(): int32 {
-    conc.sleep_ms(250);
+    conc.sleepMs(250);
     return 0;
 }
 
@@ -46,7 +46,7 @@ task scratch(): int32 {
 
 function main(): int32 {
     pooled h = hog();
-    conc.sleep_ms(60);              // make sure the worker is inside the sleep
+    conc.sleepMs(60);              // make sure the worker is inside the sleep
 
     let ta: mem.Allocator = mem.tempAllocator();
     let ar: mem.Arena = { handle: ta.data };

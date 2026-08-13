@@ -34,7 +34,7 @@ export function node_id(n: json.JsonValue): int32 {
 }
 
 export function kind_is(n: json.JsonValue, k: string): bool {
-    return str.string_eq(node_kind(n), k);
+    return str.stringEq(node_kind(n), k);
 }
 
 // Direct children array (includes GROUP wrappers).
@@ -72,17 +72,17 @@ export function field_type_name(n: json.JsonValue, key: string): string {
 // a bare `name` or the kind tag for anything else.
 export function type_display(ta: json.JsonValue): string {
     let k: string = json.as_str(json.obj_get(ta, "kind"));
-    if (str.string_eq(k, "arrayType")) {
+    if (str.stringEq(k, "arrayType")) {
         return `${type_display(json.obj_get(ta, "elem"))}[]`;
     }
-    if (str.string_eq(k, "refType")) {
+    if (str.stringEq(k, "refType")) {
         return `ref ${type_display(json.obj_get(ta, "elem"))}`;
     }
-    if (str.string_eq(k, "typeName")) {
+    if (str.stringEq(k, "typeName")) {
         return json.as_str(json.obj_get(ta, "name"));
     }
     let nm: string = json.as_str(json.obj_get(ta, "name"));
-    if (!str.string_eq(nm, "")) { return nm; }
+    if (!str.stringEq(nm, "")) { return nm; }
     return k;
 }
 
@@ -98,7 +98,7 @@ export function child_by_label(n: json.JsonValue, label: string): json.JsonValue
     let kids: json.JsonValue[] = node_children(n);
     let i: usize = usize(0);
     while (i < kids.len) {
-        if (str.string_eq(node_label(kids[i]), label)) {
+        if (str.stringEq(node_label(kids[i]), label)) {
             return kids[i];
         }
         i = i + usize(1);
@@ -117,12 +117,12 @@ export function group_items(n: json.JsonValue, label: string): json.JsonValue[] 
     let i: usize = usize(0);
     while (i < kids.len) {
         let c: json.JsonValue = kids[i];
-        if (kind_is(c, "GROUP") && str.string_eq(node_label(c), label)) {
+        if (kind_is(c, "GROUP") && str.stringEq(node_label(c), label)) {
             return json.obj_get(c, "children").items;
         }
         i = i + usize(1);
     }
-    return intr.heap_alloc(usize(0));
+    return intr.heapAlloc(usize(0));
 }
 
 // Statements of a BLOCK node (its body GROUP).
@@ -136,24 +136,24 @@ export function block_stmts(block: json.JsonValue): json.JsonValue[] {
 // EXPORT_DECL wrappers (an `export function` parses as EXPORT_DECL with a single
 // child labeled "decl"). Returned as an independently-owned array.
 export function top_functions(program: json.JsonValue): json.JsonValue[] {
-    disposable fns: Vec<json.JsonValue> = vec.vec_new(usize(16));
+    disposable fns: Vec<json.JsonValue> = vec.vecNew(usize(16));
     let decls: json.JsonValue[] = group_items(program, "body");
     let i: usize = usize(0);
     while (i < decls.len) {
         let d: json.JsonValue = decls[i];
         if (kind_is(d, "FUNCTION_DECL")) {
-            vec.vec_push(ref fns, d);
+            vec.vecPush(ref fns, d);
         } else if (kind_is(d, "EXPORT_DECL")) {
             let inner: json.JsonValue = child_by_label(d, "decl");
             if (kind_is(inner, "FUNCTION_DECL")) {
-                vec.vec_push(ref fns, inner);
+                vec.vecPush(ref fns, inner);
             }
         }
         i = i + usize(1);
     }
     // Copy out of the temporary Vec into an owned array (the Vec's view would
     // dangle once it is disposed at scope exit).
-    let out: json.JsonValue[] = intr.heap_alloc(fns.len);
+    let out: json.JsonValue[] = intr.heapAlloc(fns.len);
     let j: usize = usize(0);
     while (j < fns.len) {
         out[j] = fns.data[j];

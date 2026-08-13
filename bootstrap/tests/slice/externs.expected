@@ -1,0 +1,4 @@
+a line straight from libc
+abs=7 8
+labs=900000
+exit=0

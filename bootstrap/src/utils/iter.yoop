@@ -1,0 +1,28 @@
+module utils;
+
+// `for x in vecIter(ref v)` over a std Vec.
+//
+// std/core/vec.yoop has its own iterator; this one exists because the bootstrap
+// wants to walk a Vec it only holds by reference, and it keeps the borrow
+// explicit at the call site.
+
+import { Iterable, IterStep } from "std/core/traits.yoop";
+import { Vec } from "std/core/vec.yoop";
+
+export type IterableVec<T> implements Iterable<T> {
+  data: T[],
+  cur: usize,
+  end: usize,
+  function next(ref self): IterStep<T> {
+    if (self.cur >= self.end) {
+      return IterStep.Done;
+    }
+    let v = self.data[self.cur];
+    self.cur += 1;
+    return IterStep.Yield { value: v };
+  }
+}
+
+export function vecIter<T>(v: ref Vec<T>): IterableVec<T> {
+  return { data: v.data, cur: 0, end: v.len };
+}

@@ -1,0 +1,58 @@
+// `for` loops with `break` and `continue`, including nesting.
+//
+// The `continue` in sumOdds is the interesting one: it jumps to the STEP block,
+// not the condition, so the counter still advances and the loop terminates. A
+// `continue` wired to the condition instead would spin forever.
+function sumOdds(limit: int): int {
+  let total: int = 0;
+  for (let i = 0; i < limit; i = i + 1) {
+    if (i % 2 == 0) {
+      continue;
+    }
+    total = total + i;
+  }
+  return total;
+}
+
+function firstMultiple(of: int, above: int): int {
+  for (let n = above; n < 1000; n = n + 1) {
+    if (n % of == 0) {
+      return n;
+    }
+  }
+  return 0 - 1;
+}
+
+function countdown(start: int): int {
+  let steps: int = 0;
+  let n: int = start;
+  while (n > 0) {
+    if (steps > 3) {
+      break;
+    }
+    steps = steps + 1;
+    n = n - 1;
+  }
+  return steps;
+}
+
+function nested(): int {
+  let hits: int = 0;
+  for (let a = 0; a < 4; a = a + 1) {
+    for (let b = 0; b < 4; b = b + 1) {
+      if (b > a) {
+        break;
+      }
+      hits = hits + 1;
+    }
+  }
+  return hits;
+}
+
+function main(): int {
+  printf("sumOdds(10)=%d\n", sumOdds(10));
+  printf("firstMultiple(7,20)=%d\n", firstMultiple(7, 20));
+  printf("countdown(100)=%d\n", countdown(100));
+  printf("nested()=%d\n", nested());
+  return 0;
+}

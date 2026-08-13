@@ -1,0 +1,3 @@
+// No `module mixed;` header, in a directory that has opted in. Half a module is
+// not a state worth supporting, so loading this directory is an error.
+export function b(): int { return 2; }

@@ -1,0 +1,96 @@
+// Generic types: declarations with type parameters, applied with explicit
+// arguments and monomorphized on demand.
+//
+// What each piece is for:
+//   Box<int> / Box<string>   two instantiations of ONE decl, which must become
+//                            two distinct LLVM types
+//   Wrapper                  a generic whose field is ANOTHER generic, so
+//                            substitution has to recurse and re-instantiate
+//   Result<T, E>             two parameters, and a generic VARIANT - the payload
+//                            of each case substitutes independently
+//   Pair / Maybe             declared in ./lib/generic.yoop and applied here,
+//                            which is the cross-module case
+//   `Box<int>` twice         the registry deduplicates, so both annotations are
+//                            the same type and a value passes between them
+
+import { Pair, Maybe, pairSum, makePair, firstOf } from "./lib/generic.yoop";
+
+type Box<T> {
+  value: T,
+}
+
+type Wrapper<T> {
+  inner: Box<T>,
+  tag: int,
+}
+
+variant Result<T, E> {
+  Ok { value: T },
+  Err { error: E },
+}
+
+function unwrapOr(r: Result<int, int>, fallback: int): int {
+  switch (r) {
+    case Result.Ok { value: v }: { return v; }
+    case Result.Err { error: e }: { return fallback; }
+  }
+}
+
+// Takes the SAME instantiation the caller built, which only works if the
+// registry handed both of them one type.
+function openBox(b: Box<int>): int {
+  return b.value;
+}
+
+// Generic FUNCTIONS declared here. `identity` is instantiated at two different
+// types, so two bodies are emitted; `boxUp` mentions T only in its RETURN type,
+// so the only thing that can determine it is the expected type at the call.
+function identity<T>(x: T): T {
+  return x;
+}
+
+function boxUp<T>(v: T): Box<T> {
+  return { value: v };
+}
+
+function maybeOr(m: Maybe<int>, fallback: int): int {
+  switch (m) {
+    case Maybe.Some { value: v }: { return v; }
+    case Maybe.Nothing: { return fallback; }
+  }
+}
+
+function main(): int {
+  const bi: Box<int> = { value: 7 };
+  const bs: Box<string> = { value: "hello" };
+  printf("box=%d %s\n", openBox(bi), bs.value);
+
+  const w: Wrapper<int> = { inner: { value: 5 }, tag: 1 };
+  printf("wrapper=%d %d\n", w.inner.value, w.tag);
+
+  const ok: Result<int, int> = Result.Ok { value: 42 };
+  const bad: Result<int, int> = Result.Err { error: 9 };
+  printf("result=%d %d\n", unwrapOr(ok, -1), unwrapOr(bad, -1));
+
+  const p: Pair<int, int> = { first: 3, second: 4 };
+  printf("pair=%d\n", pairSum(p));
+
+  const some: Maybe<int> = Maybe.Some { value: 11 };
+  const none: Maybe<int> = Maybe.Nothing;
+  printf("maybe=%d %d\n", maybeOr(some, -1), maybeOr(none, -1));
+
+  // Generic functions. `identity` at two types emits two bodies; `boxUp`
+  // mentions T only in its return, so the annotation is the only thing that can
+  // say what it is.
+  const n: int = 6;
+  const label: string = "six";
+  printf("identity=%d %s\n", identity(n), identity(label));
+
+  const boxed: Box<int> = boxUp(n);
+  printf("boxUp=%d\n", openBox(boxed));
+
+  // A generic function declared in ANOTHER module, instantiated from here.
+  const made: Pair<int, int> = makePair(n, n);
+  printf("makePair=%d %d\n", pairSum(made), firstOf(made));
+  return 0;
+}

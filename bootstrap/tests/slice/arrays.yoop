@@ -1,0 +1,40 @@
+// Arrays: literals, `.len`, indexed reads and writes, and passing one to a
+// function.
+//
+// `for (let i = 0; i < xs.len; i += 1)` is the load-bearing shape. `i` has no
+// annotation, so its type comes from the CONDITION - it becomes usize to match
+// `xs.len`. Defaulting the literal to int32 instead makes every loop like this
+// a width mismatch.
+function sum(xs: int[]): int {
+  let total: int = 0;
+  for (let i = 0; i < xs.len; i += 1) {
+    total += xs[i];
+  }
+  return total;
+}
+
+function maxOf(xs: int[]): int {
+  if (xs.len == 0) {
+    return 0;
+  }
+  let best: int = xs[0];
+  for (let i = 1; i < xs.len; i += 1) {
+    if (xs[i] > best) {
+      best = xs[i];
+    }
+  }
+  return best;
+}
+
+function main(): int {
+  const primes: int[] = [2, 3, 5, 7, 11];
+  printf("len=%d sum=%d max=%d\n", primes.len, sum(primes), maxOf(primes));
+  printf("first=%d last=%d\n", primes[0], primes[primes.len - 1]);
+
+  let scratch: int[] = [0, 0, 0];
+  scratch[0] = 10;
+  scratch[1] = scratch[0] * 2;
+  scratch[2] = scratch[0] + scratch[1];
+  printf("scratch=%d %d %d\n", scratch[0], scratch[1], scratch[2]);
+  return 0;
+}

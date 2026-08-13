@@ -13,6 +13,12 @@ References: JS reference impl under src/; bootstrap under bootstrap/src/.
 Companion: plans/ownership-and-typestate-redesign.md (the advisory ownership
 model the bootstrap should follow).
 
+Where the shapes LIVE changed on 2026-08-12: this doc used to point at one
+bootstrap/src/contracts.yoop for every type named below. That file is gone. Each
+layer's vocabulary now sits in the layer's own directory module - see
+bootstrap/README.md for the map. The shapes themselves are unchanged; only their
+addresses are.
+
 ---
 
 ## The pipeline
@@ -164,8 +170,9 @@ reference, current bootstrap status.
   mangling (`<id>__<symbol>`).
 - Error channel: Result (import cycle, file IO, parse failure of a member).
 - JS ref: src/jsyoopdriver/moduleGraph.js, moduleId.js.
-- Bootstrap status: STARTED - bootstrap/src/source_graph/module_graph.yoop
-  has Module + loadModule (returns a Result-shaped LoadResult).
+- Bootstrap status: STARTED - bootstrap/src/source_graph/ (graph.yoop holds
+  Module / ImportEdge / ModuleGraph, load.yoop builds a one-module graph,
+  resolve.yoop is the dormant import-path resolver). No import edges yet.
 
 ### Layer 1: Lex
 
@@ -190,8 +197,9 @@ reference, current bootstrap status.
   throws on first error; bootstrap returns it. Boundary shape identical.
 - JS ref: src/jsyooplexer/lexer.js (Token: { tag, start, length, intVal?,
   floatVal? }).
-- Bootstrap status: IN PROGRESS - lexer.yoop, Token + TokenTags defined;
-  tokenScanList/keywordList in contracts.yoop mirror the JS tables.
+- Bootstrap status: WORKING - bootstrap/src/lex/ (tokens.yoop, scan_tables.yoop,
+  chars.yoop, lexer.yoop). TOKEN_SCAN_LIST / KEYWORD_LIST mirror the JS tables.
+  Covered by lex/lex.test.yoop and tests/lexer_tests/.
 
 ### Layer 2: Parse
 
@@ -209,9 +217,11 @@ reference, current bootstrap status.
   may do the same (boundary still output-or-diagnostics).
 - JS ref: src/contracts.js (ASTNodeKind + ASTNode), src/jsyooparser/parser.js
   (PROGRAM root: { kind, sourceLoc, body, allowsUnsafe }).
-- Bootstrap status: NOT STARTED - ASTNodeKind enum + ASTNode/SourceLocation
-  shells exist in contracts.yoop; the arena (D1) and parser are the next
-  build.
+- Bootstrap status: IN PROGRESS - the arena is bootstrap/src/ast/ and the
+  descent is bootstrap/src/parse/. Top-level `type` and `function` decls,
+  blocks, let/const, return, and precedence-climbing expressions parse today.
+  Imports, traits, variants, enums, unions and the decl clauses each refuse by
+  name rather than mis-parsing.
 
 ### Layer 3: Typecheck
 
@@ -227,7 +237,8 @@ reference, current bootstrap status.
   diagnostics: Vec<Diagnostic>,
   }
   The `Type` and `Symbol` variants are DEFINED CONCRETELY in
-  bootstrap/src/contracts.yoop - read those, not a sketch here. Two design
+  bootstrap/src/typecheck/types.yoop and symbols.yoop - read those, not a sketch
+  here. Two design
   moves diverge from the JS impl internally (sanctioned - only this BOUNDARY
   shape is a contract, per the deviation policy below):
 
@@ -267,7 +278,10 @@ reference, current bootstrap status.
 - JS ref: src/jsyooptypecheck/typecheck.js (passes A/B/C/D), types.js,
   instantiate.js. typecheckProgram returns { modules, errors, moduleEnv,
   programState: { registry, ... } }.
-- Bootstrap status: NOT STARTED.
+- Bootstrap status: IN PROGRESS - bootstrap/src/typecheck/. ids.yoop,
+  types.yoop, symbols.yoop and program.yoop hold the model; pass_a.yoop
+  registers shells for function and type decls and reports redeclarations.
+  Passes B, C and D are not built. Covered by typecheck/typecheck.test.yoop.
 
 ### Layer 4: IR / bytecode (OPTIONAL - the main planned deviation point)
 
@@ -306,7 +320,10 @@ reference, current bootstrap status.
   input (mirrors JS - codegen assumes a clean AST).
 - JS ref: src/jsyoopcodegen/codegen.js (compileEntry, codegenProgram); returns
   { ir, linkFlags }.
-- Bootstrap status: NOT STARTED.
+- Bootstrap status: IN PROGRESS - bootstrap/src/codegen/ (emit.yoop holds the
+  two-buffer IR writer and the TypeId -> LLVM type map, strings.yoop interns
+  string constants, codegen.yoop walks the typed AST). Returns the IR text; no
+  linkFlags yet, because nothing in the subset needs a library.
 
 ### Layer 6: Link
 
@@ -317,6 +334,11 @@ reference, current bootstrap status.
   runtime from runtimeBuild.js and the accumulated `-l` flags. This layer does
   not deviate.
 - JS ref: src/yoopiler.js clang invocation, src/runtimeBuild.js.
+- Bootstrap status: WORKING - bootstrap/src/link/clang.yoop. yoop has no process
+  API, so it calls libc `system` directly (the file is `import.unsafe`). It does
+  NOT link the runtime yet: a program in the current subset only touches libc,
+  so one clang invocation is the whole line. That changes with the first emitted
+  construct that needs the runtime.
 
 ---
 
@@ -351,15 +373,24 @@ vice versa), so you can swap one layer at a time and cross-check.
 Self-hosting is safest when each layer is verified against the JS reference at
 its boundary BEFORE moving up:
 
-1. Give every boundary a deterministic, serializable dump (token dump, AST
-   dump - the JS side already has AST dumping per the git history; mirror its
-   format in yoop).
+1. Give every boundary a deterministic, serializable dump. Layer 1 is BUILT:
+   src/dumpTokens.js and bootstrap/src/lex/dump.yoop emit the same
+   line-per-token format, src/parity.test.js diffs them, and `npm run
+   test:parity` runs it. Note the JS side's existing --dump-ast is an HTML/JSON
+   VIEWER, not a diff target; layer 2 needs a normalized tree dump because the
+   two ASTs are genuinely different shapes.
 2. For the same input source, assert `yoop_layer_dump == js_layer_dump`:
-   - lex: identical token streams (tag, span, literal values);
+   - lex: identical token streams (tag, span, literal values) - DONE, and it
+     immediately paid for itself: an octal base bug, 14 over-promoted keywords,
+     and a missing `await`;
    - parse: identical AST dumps;
    - typecheck: identical resolved-type annotations + diagnostics;
    - codegen: identical (or behaviorally equivalent) .ll, then identical
-     program output.
+     program output - the BEHAVIOURAL half is DONE for the slice subset
+     (src/slice.test.js runs both compilers over bootstrap/tests/slice/ and
+     compares stdout + exit code). The .ll itself is deliberately not compared:
+     the JS driver autoloads std into every graph, so its IR for
+     `return 42` is 226KB against the bootstrap's 6 lines.
 3. Only once a layer matches do you build the next on top of it.
 
 This turns "rewrite a compiler in itself" into a sequence of small, checkable
@@ -371,12 +402,14 @@ diffs, and it is the concrete payoff of pinning these contracts.
 
 Bottom-up, cross-checking against JS at each boundary:
 
-1. Lock D1/D2/D3 (arena, side-table decoration, Result+Diagnostic). Write the
-   `Ast` arena + `AstNode` fat-node shape into contracts.yoop.
-2. Finish the lexer (Layer 1) and diff its token stream against the JS lexer.
-3. Build the parser (Layer 2) onto the arena; diff AST dumps.
-4. Build typecheck (Layer 3): the Type interning model + ModuleEnv + registry;
-   diff resolved types + diagnostics. This is the largest layer.
+1. DONE - D1/D2/D3 locked (arena in ast/, side-table decoration on
+   TypedModule, Result for lex/parse + accumulated Diagnostics for typecheck).
+2. DONE - the lexer works. Still owed: a deterministic token dump to diff
+   against the JS lexer.
+3. IN PROGRESS - grow the parser toward the constructs the bootstrap itself
+   uses; diff AST dumps.
+4. IN PROGRESS - typecheck (Layer 3). Pass A is built; pass C (fill the shells)
+   is next, then pass D. This is the largest layer.
 5. Codegen (Layer 5) straight from the TypedAst (skip Layer 4 initially, as JS
    does); diff the .ll and run the binary.
 6. Only then consider an IR/bytecode layer (Layer 4) if a pass or an

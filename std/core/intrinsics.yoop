@@ -7,32 +7,32 @@
 // must use the namespace form:
 //
 //     import * as intr from "std/core/intrinsics.yoop";
-//     let buf: int32[] = intr.heap_alloc(8);
-//     intr.heap_free(buf);
+//     let buf: int32[] = intr.heapAlloc(8);
+//     intr.heapFree(buf);
 
 import { owned } from "./kinds.yoop";
 
 extern "intrinsic" from "compiler" {
-    function heap_alloc<T>(n: usize): T[];
-    function heap_free<T>(a: T[]): void;
-    // Context-routed allocation: like heap_alloc/heap_free but the bytes come
+    function heapAlloc<T>(n: usize): T[];
+    function heapFree<T>(a: T[]): void;
+    // Context-routed allocation: like heapAlloc/heapFree but the bytes come
     // from (and return to) the current allocator (std/core/alloc.yoop), so an
     // installed arena captures them. std containers use these.
-    function ctx_alloc<T>(n: usize): T[];
-    function ctx_free<T>(a: T[]): void;
-    function string_as_bytes(s: string): uint8[];
+    function ctxAlloc<T>(n: usize): T[];
+    function ctxFree<T>(a: T[]): void;
+    function stringAsBytes(s: string): uint8[];
     // Returns `owned string` because this is where a string's storage comes
     // from: it mallocs buf.len + 1 and copies. That annotation is the ONLY
     // source of the `owned` marker in the language - a bodyless extern is
     // never subject to the decl-authority check, so the allocating intrinsic
     // is the authority, and everything else reaches `owned` by passthrough.
-    function string_from_bytes_unchecked(buf: uint8[]): owned string;
-    // The borrowing inverse of string_as_bytes: no copy, no allocation. The
+    function stringFromBytesUnchecked(buf: uint8[]): owned string;
+    // The borrowing inverse of stringAsBytes: no copy, no allocation. The
     // caller guarantees `buf` holds valid UTF-8 AND that a nul byte sits at
     // buf.data[buf.len] - a string's length comes from strlen, not from the
     // fat pointer. The result borrows buf's storage and is invalidated by
     // anything that reallocates it. std/core/text.yoop's `Text` maintains
     // both invariants by construction; prefer `Text.view` to calling this.
-    function bytes_as_string_unchecked(buf: uint8[]): string;
-    function array_slice<T>(xs: T[], start: usize, end: usize): T[];
+    function bytesAsStringUnchecked(buf: uint8[]): string;
+    function arraySlice<T>(xs: T[], start: usize, end: usize): T[];
 }

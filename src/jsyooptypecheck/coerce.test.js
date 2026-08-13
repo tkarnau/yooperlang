@@ -93,6 +93,37 @@ describe("unifyArith", () => {
   it("logical 'andand' on non-bools yields null", () => {
     assert.equal(unifyArith(PrimType("int32"), PrimType("int32"), "andand"), null);
   });
+
+  // yooperdoom-takeaways 2.1: `!=` on two bools used to be rejected, forcing
+  // the long-form `(a && !b) || (!a && b)` at every call site.
+  it("'==' on two bools yields bool", () => {
+    assert.deepEqual(
+      unifyArith(PrimType("bool"), PrimType("bool"), "eqeq"),
+      PrimType("bool"),
+    );
+  });
+  it("'!=' on two bools yields bool", () => {
+    assert.deepEqual(
+      unifyArith(PrimType("bool"), PrimType("bool"), "neq"),
+      PrimType("bool"),
+    );
+  });
+  it("ordered comparison on two bools stays rejected", () => {
+    for (const op of ["lt", "gt", "lte", "gte"]) {
+      assert.equal(
+        unifyArith(PrimType("bool"), PrimType("bool"), op),
+        null,
+        `expected "${op}" on two bools to be rejected`,
+      );
+    }
+  });
+  it("'==' with only one bool side yields null", () => {
+    assert.equal(unifyArith(PrimType("bool"), PrimType("int32"), "eqeq"), null);
+    assert.equal(unifyArith(PrimType("int32"), PrimType("bool"), "neq"), null);
+  });
+  it("arithmetic on two bools stays rejected", () => {
+    assert.equal(unifyArith(PrimType("bool"), PrimType("bool"), "plus"), null);
+  });
   it("error on either side yields ErrorType (suppress cascades)", () => {
     assert.deepEqual(
       unifyArith(ErrorType(), PrimType("int32"), "plus"),

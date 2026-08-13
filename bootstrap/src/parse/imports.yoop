@@ -1,0 +1,159 @@
+module parse;
+
+// `import` and `export` declarations.
+//
+// Three forms, matching the JS reference:
+//
+//   import { a, b as c } from "./util.yoop";     named
+//   import * as ns from "./util.yoop";           namespace
+//   import { A }, * as ns from "./util.yoop";    combined (both clauses)
+//
+// The side-effect form (`import "./init.yoop";`) lexes fine and is refused BY
+// NAME, because a silently dropped import resurfaces much later as "unknown
+// function" and points at the wrong file.
+//
+// An IMPORT_DECL's own childIds run holds its IMPORT_SPECIFIERs, `name` holds
+// the namespace local name (empty when there is no `* as` clause), and the
+// source path is decoded and interned into the arena's string pool (`strId`) so
+// the module graph reads a real path rather than re-slicing the source bytes.
+
+import { Result, Option } from "std/core/types.yoop";
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import { NodeId, ASTNodeKind } from "../ast";
+import { TokenTags, tagName } from "../lex";
+import { ParsingError } from "../diagnostics";
+
+export function parseImportDecl(ref ps: ParserState): Result<NodeId, ParsingError> {
+  let node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.IMPORT_DECL);
+  SelfLexing.expect(ref ps, TokenTags.IMPORT)?;
+
+  const afterImport = SelfLexing.peek(ref ps).tag;
+  if (afterImport == TokenTags.STRLITERAL) {
+    return Result.Err { error: SelfLexing.createParsingError(
+      ref ps,
+      "side-effect imports (`import \"./x.yoop\";`) are not supported by the bootstrap parser yet",
+      peekLengthUsize(ref ps),
+    )};
+  }
+
+  // Either clause may come first, and either may appear alone. The combined
+  // form is just both of them with a comma between, which is why this reads as
+  // two independent optional clauses rather than three separate shapes.
+  disposable specifiers: Vec<NodeId> = vec.vecNew(4);
+  if (afterImport == TokenTags.MULT) {
+    node.name = parseNamespaceClause(ref ps)?;
+    if (SelfLexing.peek(ref ps).tag == TokenTags.COMMA) {
+      SelfLexing.advance(ref ps)?;
+      parseNamedClause(ref ps, ref specifiers)?;
+    }
+  } else {
+    parseNamedClause(ref ps, ref specifiers)?;
+    if (SelfLexing.peek(ref ps).tag == TokenTags.COMMA) {
+      SelfLexing.advance(ref ps)?;
+      node.name = parseNamespaceClause(ref ps)?;
+    }
+  }
+
+  SelfLexing.expect(ref ps, TokenTags.FROM)?;
+  const pathTok = SelfLexing.expect(ref ps, TokenTags.STRLITERAL)?;
+  node.strId = internString(ref ps, decodeStringLiteral(ref ps, pathTok)?);
+  SelfLexing.expect(ref ps, TokenTags.SEMICOLON)?;
+
+  // The specifiers are this node's OWN run, spliced after every child is built
+  // (a child parse can append runs of its own, so a partial splice interleaves).
+  const start: usize = ps.ast.childIds.len;
+  vec.vecExtendFrom(ref ps.ast.childIds, vec.vecAsArray(ref specifiers));
+  node.childStart = start;
+  node.childCount = specifiers.len;
+
+  return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
+}
+
+// `* as ns`, returning the local name the namespace binds to. The `*` has not
+// been consumed yet.
+function parseNamespaceClause(ref ps: ParserState): Result<string, ParsingError> {
+  SelfLexing.expect(ref ps, TokenTags.MULT)?;
+  SelfLexing.expect(ref ps, TokenTags.AS)?;
+  return Result.Ok { value: parseIdentAsName(ref ps)? };
+}
+
+// `{ a, b as c }`. The `{` has not been consumed yet.
+function parseNamedClause(ref ps: ParserState, ref out: Vec<NodeId>): Result<usize, ParsingError> {
+  SelfLexing.expect(ref ps, TokenTags.LCURLY)?;
+  while (SelfLexing.peek(ref ps).tag == TokenTags.IDENT) {
+    vec.vecPush(ref out, parseImportSpecifier(ref ps)?);
+    if (SelfLexing.peek(ref ps).tag == TokenTags.COMMA) {
+      SelfLexing.advance(ref ps)?;
+    }
+  }
+  SelfLexing.expect(ref ps, TokenTags.RCURLY)?;
+  return Result.Ok { value: out.len };
+}
+
+// `a` or `a as b`. `name` is the LOCAL name (what this module binds) and the
+// export name is interned - see astNodeStrIdName in ast/slots.yoop for why the
+// pair splits that way round.
+function parseImportSpecifier(ref ps: ParserState): Result<NodeId, ParsingError> {
+  let node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.IMPORT_SPECIFIER);
+  const exportName = parseIdentAsName(ref ps)?;
+  let localName = exportName;
+  if (SelfLexing.peek(ref ps).tag == TokenTags.AS) {
+    SelfLexing.advance(ref ps)?;
+    localName = parseIdentAsName(ref ps)?;
+  }
+  node.name = localName;
+  node.strId = internString(ref ps, exportName);
+  return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
+}
+
+// `export function f() {}` / `export type T { ... }`.
+//
+// A WRAPPER node rather than a flag on the decl, matching the JS reference's
+// shape. `declOf` in the ast module is what keeps the four top-level walks from
+// each having to know about it.
+export function parseExportDecl(ref ps: ParserState): Result<NodeId, ParsingError> {
+  let node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.EXPORT_DECL);
+  SelfLexing.expect(ref ps, TokenTags.EXPORT)?;
+
+  const declTag = SelfLexing.peek(ref ps).tag;
+  switch (declTag) {
+    case TokenTags.FUNCTION: {
+      node.childA = parseFunctionDecl(ref ps)?;
+    }
+    case TokenTags.TYPE: {
+      node.childA = parseTypeDecl(ref ps)?;
+    }
+    case TokenTags.VARIANT: {
+      node.childA = parseVariantDecl(ref ps)?;
+    }
+    case TokenTags.CONST: {
+      node.childA = parseVarDecl(ref ps)?;
+    }
+    case TokenTags.TRAIT: {
+      node.childA = parseTraitDecl(ref ps)?;
+    }
+    case TokenTags.VTABLE: {
+      node.childA = parseVtableDecl(ref ps)?;
+    }
+    default: {
+      // `export kind async { ... }` and `export async fetch(...)`. Both open
+      // with an IDENT, so they are told apart the same way the top level does.
+      if (atKindDecl(ref ps)) {
+        node.childA = parseKindDecl(ref ps)?;
+        return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
+      }
+      if (atKindPrefixedDecl(ref ps)) {
+        node.childA = parseKindPrefixedDecl(ref ps)?;
+        return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
+      }
+      return Result.Err { error: SelfLexing.createParsingError(
+        ref ps,
+        `only \`export function\`, \`export type\`, \`export variant\`, \`export const\`, \`export trait\` and \`export kind\` are supported by the bootstrap parser yet, got ${tagName(declTag)}`,
+        peekLengthUsize(ref ps),
+      )};
+    }
+  }
+
+  return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
+}

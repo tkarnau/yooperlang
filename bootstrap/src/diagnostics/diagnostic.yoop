@@ -1,0 +1,40 @@
+module diagnostics;
+
+// The accumulating error channel (decision D3 in
+// plans/bootstrap-pipeline-contracts.md).
+//
+// Lex and parse fail fast and hand back a ParsingError; typecheck instead
+// COLLECTS Diagnostics and never stops, so the user sees every error in one
+// run. Both shapes point into the original source through a SourceLocation,
+// which is the part the contract actually pins.
+
+export enum Severity { ERROR, WARNING }
+
+// `filePath` is which file the location is IN, and it stopped being optional
+// the moment a program could hold more than one file: a bare "12:5" is a real
+// location in every file at once. It may be "" for a diagnostic raised before
+// any file is being walked.
+@derive(display)
+export type Diagnostic {
+  message: string,
+  filePath: string,
+  sourceLoc: SourceLocation,
+  severity: Severity,
+}
+
+export function errorAt(message: string, sourceLoc: SourceLocation): Diagnostic {
+  return { message: message, filePath: "", sourceLoc: sourceLoc, severity: Severity.ERROR };
+}
+
+export function warningAt(message: string, sourceLoc: SourceLocation): Diagnostic {
+  return { message: message, filePath: "", sourceLoc: sourceLoc, severity: Severity.WARNING };
+}
+
+// How a diagnostic's location reads: `path:line:column`, or `line:column` when
+// there is no path. Lines are 1-based for the reader; columns already are.
+export function formatLocation(ref d: Diagnostic): string {
+  if (d.filePath.len == 0) {
+    return `${d.sourceLoc.line + 1}:${d.sourceLoc.column}`;
+  }
+  return `${d.filePath}:${d.sourceLoc.line + 1}:${d.sourceLoc.column}`;
+}
