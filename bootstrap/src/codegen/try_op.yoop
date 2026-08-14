@@ -176,7 +176,7 @@ function emitErrReturn(
   // disposals - innermost first, exactly as `return` does. The value is built
   // BEFORE the unwind for the same reason `return`'s is: it may read a binding
   // that is about to go.
-  const uerr = emitUnwindTo(ref cx, 0);
+  const uerr = emitUnwindTo(ref cx, 0, exprId);
   if (uerr.len > 0) {
     return uerr;
   }

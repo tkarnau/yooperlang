@@ -1,0 +1,4 @@
+// An entry BESIDE a modules root: the walk starts at the importing file's own
+// directory, so `modules/` right here answers.
+import { whichRoot } from "modules/lib";
+function main(): int32 { return whichRoot(); }

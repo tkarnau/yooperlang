@@ -1,0 +1,103 @@
+// `union` - C's overlapping-memory aggregate. Every field starts at byte 0 and
+// the whole thing is as wide as the widest one.
+//
+// Every check below writes through ONE field and reads back through ANOTHER,
+// because that is the only thing a union does that a struct does not. A fixture
+// whose fields never alias would pass just as happily against a compiler that
+// laid the union out as an ordinary struct, and would prove nothing.
+//
+// The byte ORDER in the expected output is little-endian. That is a property of
+// the target rather than of the language - 0xAABBCCDD written as a uint32 and
+// read back as four bytes gives DD CC BB AA - and both compilers build for the
+// same machine, so both agree on it.
+
+extern "C" from "stdio.h" {
+  function printf(fmt: string, ...): int32;
+}
+
+type Bytes4 {
+  b0: uint8,
+  b1: uint8,
+  b2: uint8,
+  b3: uint8,
+}
+
+// MIXED WIDTHS on purpose. This union is eight bytes because `wide` is, not
+// four because `word` came first, and `guard` below is what notices if it is
+// not.
+union Word {
+  word: uint32,
+  wide: uint64,
+  bytes: Bytes4,
+}
+
+// A union sitting INSIDE a struct: its address is a gep on the struct's slot
+// rather than a slot of its own, and `guard` is the byte range a union sized
+// from the wrong field would stomp.
+type Frame {
+  payload: Word,
+  guard: int32,
+}
+
+// A union crosses a function boundary by VALUE, which is what a `{ [N x i8] }`
+// being an ordinary LLVM value buys.
+function packed(v: uint32): Word {
+  return { word: v };
+}
+
+// And by BORROW, where there is no slot under the access at all - just the
+// incoming pointer.
+function lowByte(ref w: Word): uint8 {
+  return w.bytes.b0;
+}
+
+// The by-value twin, which reads out of the callee's OWN copy rather than the
+// caller's storage - so the address the read starts from is a parameter spill.
+function highByte(w: Word): uint8 {
+  return w.bytes.b3;
+}
+
+// The uninitialized form, filled through one view and handed back whole.
+function fromBytes(a: uint8, b: uint8, c: uint8, d: uint8): Word {
+  let w: Word;
+  w.bytes.b0 = a;
+  w.bytes.b1 = b;
+  w.bytes.b2 = c;
+  w.bytes.b3 = d;
+  return w;
+}
+
+function main(): int32 {
+  // Written as a uint32, read back as four separate bytes.
+  let w: Word = { word: 0xAABBCCDD };
+  printf("bytes %d %d %d %d\n",
+    int32(w.bytes.b0), int32(w.bytes.b1), int32(w.bytes.b2), int32(w.bytes.b3));
+
+  // Written as ONE byte, read back as the whole word. Only b0 moves, so the
+  // other three bytes have to survive - a store spelled at the union's own
+  // width instead of the field's would flatten them.
+  w.bytes.b0 = 0x11;
+  printf("after b0 %d %d\n", int32(w.bytes.b0), int32(w.bytes.b3));
+
+  // The other direction: four bytes in, one word out.
+  let built: Word = fromBytes(1, 2, 3, 4);
+  printf("built %d\n", int32(built.word));
+
+  // Through a borrow, and through a by-value copy.
+  printf("borrowed %d\n", int32(lowByte(ref w)));
+  printf("byvalue %d\n", int32(highByte(w)));
+
+  // Through a return value, and then through a copy of it - a union assigns
+  // like any other value.
+  let copied: Word = packed(258);
+  printf("copied %d %d\n", int32(copied.bytes.b0), int32(copied.bytes.b1));
+
+  // Inside a struct. The eight-byte store must not reach `guard`, which sits
+  // immediately after the union.
+  let f: Frame = { payload: { word: 7 }, guard: 99 };
+  printf("nested %d %d\n", int32(f.payload.word), f.guard);
+  f.payload.wide = 4294967338;
+  printf("wide %d %d\n", int32(f.payload.word), f.guard);
+
+  return 0;
+}

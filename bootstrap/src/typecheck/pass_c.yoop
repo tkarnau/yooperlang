@@ -138,6 +138,9 @@ function fillFileShells(
       case ASTNodeKind.ENUM_DECL: {
         fillEnumCases(ref prog, ref tm, ref m.ast, declNode, moduleId);
       }
+      case ASTNodeKind.UNION_DECL: {
+        fillUnionFields(ref prog, ref tm, ref m.ast, declNode, moduleId);
+      }
       case ASTNodeKind.TRAIT_DECL: {
         fillTraitMethods(ref prog, ref tm, ref m.ast, declNode, moduleId);
       }
@@ -390,6 +393,7 @@ function fillStructFields(
     vec.vecPush(ref fields, {
       name: fieldNode.name,
       typeId: resolveTypeAnnotation(ref prog, ref tm, ref ast, fieldNode.childA),
+      carriedKind: carriedKindNameOf(ref ast, fieldNode.childA),
     });
     f += 1;
   }
@@ -465,6 +469,7 @@ function fillVariantCases(
       vec.vecPush(ref fields, {
         name: fieldNode.name,
         typeId: resolveTypeAnnotation(ref prog, ref tm, ref ast, fieldNode.childA),
+        carriedKind: carriedKindNameOf(ref ast, fieldNode.childA),
       });
       f += 1;
     }
@@ -555,13 +560,17 @@ function fillModuleConst(
 //
 // The same shape a const fills, with one difference that matters: the value is
 // the global's INITIALIZER rather than something inlined at each use. So the
-// annotation is required for the same reason (there is nothing to infer from at
-// module level) and the initializer has to be compile-time, because an LLVM
-// global's initializer is.
+// annotation is required for the same reason - there is nothing to infer from
+// at module level.
 //
-// The reference accepts more here - it constant-FOLDS through function calls,
-// and drops their side effects doing it. The bootstrap takes a literal and
-// refuses the rest by name rather than inheriting that.
+// An INTEGER literal is BAKED: the value rides in the symbol and becomes the
+// LLVM global's own initializer, so the common case costs no code at all.
+// Anything else - a call, an array literal, a struct literal - is a RUN-TIME
+// initializer: the global starts zeroed and its real value is stored by the
+// module's init function, which `main` calls in the graph's topological order
+// before any user code. `moduleGlobalIsBaked` below is the one place the split
+// is decided, and both pass D (which has to decorate an initializer that is
+// going to be emitted) and codegen read it from there.
 function fillModuleGlobal(
   ref prog: Program,
   ref tm: TypedModule,
@@ -583,24 +592,36 @@ function fillModuleGlobal(
   const declared = resolveTypeAnnotation(ref prog, ref tm, ref ast, declNode.childA);
 
   let value: int64 = 0;
-  if (!constIntValue(ref ast, declNode.childB, ref value)) {
-    reportError(
-      ref prog,
-      `module-level "let ${declNode.name}" needs an integer literal initializer - a global's initializer is fixed at compile time`,
-      declNode.sourceLoc
-    );
-    return;
+  if (moduleGlobalIsBaked(ref prog, ref ast, declNode.childB, declared)) {
+    constIntValue(ref ast, declNode.childB, ref value);
   }
-  if (!isIntPrimType(ref prog, declared)) {
-    reportError(
-      ref prog,
-      `module-level "let ${declNode.name}" is ${formatType(ref prog, declared)}; only integer globals are supported yet`,
-      declNode.sourceLoc
-    );
-    return;
-  }
-
   setSymbol(ref prog, symId, Symbol.Global { typeId: declared, intVal: value });
+}
+
+// Whether a module-level `let`'s value is BAKED into the LLVM global rather
+// than stored at run time by the module's init function.
+//
+// Exported because three passes have to agree on it and only one of them can
+// own the answer: pass C fills the symbol from it, pass D decorates an
+// initializer only when it is going to be EMITTED, and codegen picks the
+// global's LLVM initializer and decides whether an init function is owed.
+//
+// An integer needs both halves to be true. `constIntValue` says the initializer
+// is a literal, and `isIntPrimType` says there is an integer field in the symbol
+// for it to ride in - `let p: Point = 0` is not an integer global however the
+// initializer reads. No initializer at all is baked too, and as zero, which is
+// what an LLVM global with no value already is.
+export function moduleGlobalIsBaked(
+  ref prog: Program,
+  ref ast: AST,
+  initId: NodeId,
+  declared: TypeId
+): bool {
+  if (initId == 0) {
+    return true;
+  }
+  let value: int64 = 0;
+  return constIntValue(ref ast, initId, ref value) && isIntPrimType(ref prog, declared);
 }
 
 // An integer literal, with or without a leading `-`. True when it read one.
@@ -781,11 +802,15 @@ function fillVtable(
   while (i < declNode.childCount) {
     const fieldNode = nodeAt(ref ast, childAt(ref ast, declNode, i));
     const declared = resolveTypeAnnotation(ref prog, ref tm, ref ast, fieldNode.childA);
+    // A vtable slot is a function pointer, so it never carries a kind - but the
+    // slot has to be filled, and filling it from the annotation costs nothing
+    // and stays right if that ever changes.
     vec.vecPush(ref fields, {
       name: fieldNode.name,
       typeId: vtableSlotType(
         ref prog, declNode.name, traitId, traitAnnot.name, fieldNode, declared
       ),
+      carriedKind: carriedKindNameOf(ref ast, fieldNode.childA),
     });
     vec.vecPush(ref methodOrder, fieldNode.name);
     i += 1;

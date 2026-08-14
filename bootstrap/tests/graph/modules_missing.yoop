@@ -1,0 +1,5 @@
+// A name that is not in the root that answered. The diagnostic has to say WHICH
+// root it searched: there may be several on the path and only one was consulted,
+// so a bare "not found" hides whether the walk stopped where the reader thinks.
+import { nope } from "modules/not_installed";
+function main(): int32 { return nope(); }

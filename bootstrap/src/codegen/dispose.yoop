@@ -22,7 +22,7 @@ import { ASTNode, NodeId, childAt, nodeAt } from "../ast";
 import * as str from "std/core/strings.yoop";
 import { lookupKind, KindInfo, nominalModuleOf, methodSymbolName, moduleIdOf,
   lookupMethod, TypeId, TYPE_ERROR_ID, PropagatedField, propagatesMustCall,
-  propagatedFieldsOf, propagatedDisposeProblem } from "../typecheck";
+  propagatedFieldsOf, propagatedDisposeProblem, isDischargedAt } from "../typecheck";
 
 // Record a binding that owes a disposal, if its kind asks for one.
 //
@@ -43,7 +43,7 @@ export function noteDisposable(
     return "";
   }
 
-  return recordDisposal(ref cx, declNode.name, slot, resolvedTypeAt(ref cx, declId), method);
+  return recordDisposal(ref cx, declNode.name, slot, declId, resolvedTypeAt(ref cx, declId), method);
 }
 
 // Push whatever `<kind> x: T` owes onto the current dispose scope: one call on
@@ -53,10 +53,13 @@ export function noteDisposable(
 // Both call sites go through here - an ordinary binding and a kind region -
 // because the question "what does this owe" is about the TYPE and neither of
 // them should have to know that propagation exists.
+// `declNode` is the declaration a manual call could have discharged, or 0 for
+// an anonymous region - there is no name to write, so nothing can.
 export function recordDisposal(
   ref cx: Cx,
   name: string,
   slot: usize,
+  declNode: NodeId,
   ownerType: TypeId,
   method: string
 ): string {
@@ -64,6 +67,7 @@ export function recordDisposal(
     disposeRecord(cx.disposes, {
       name: name,
       slot: slot,
+      declNode: declNode,
       ownerType: ownerType,
       method: method,
       viaField: false,
@@ -92,6 +96,7 @@ export function recordDisposal(
     disposeRecord(cx.disposes, {
       name: name,
       slot: slot,
+      declNode: declNode,
       ownerType: field.fieldType,
       method: method,
       viaField: true,
@@ -134,7 +139,12 @@ export function disposeMethodOf(ref cx: Cx, declNode: ASTNode): string {
 //
 // Reverse because a later binding may hold a borrow of an earlier one: a `Text`
 // built into an arena has to go before the arena does.
-export function emitScopeDisposals(ref cx: Cx, depth: usize): string {
+//
+// `exitSite` is the node the unwind is happening AT - the block whose brace this
+// is, the `return` that is leaving, the `?` that is propagating. It is what pass
+// D's discharge table is keyed by, because "already disposed by hand" is a
+// property of the path reaching this point rather than of the binding.
+export function emitScopeDisposals(ref cx: Cx, depth: usize, exitSite: NodeId): string {
   if (depth >= disposeScopeDepth(cx.disposes)) {
     return "";
   }
@@ -146,7 +156,13 @@ export function emitScopeDisposals(ref cx: Cx, depth: usize): string {
   let i: usize = pending.len;
   while (i > 0) {
     i -= 1;
-    const err = emitOneDisposal(ref cx, vec.vecGet(ref pending, i));
+    const entry = vec.vecGet(ref pending, i);
+    // Already disposed by hand, everywhere that reaches here. Emitting the call
+    // anyway is a double free rather than a duplicate line of output.
+    if (isDischargedAt(cx.tm, exitSite, entry.declNode)) {
+      continue;
+    }
+    const err = emitOneDisposal(ref cx, entry);
     if (err.len > 0) {
       return err;
     }
@@ -156,11 +172,11 @@ export function emitScopeDisposals(ref cx: Cx, depth: usize): string {
 
 // Every scope from the innermost down to `target`, innermost first. What
 // `return` (target 0) and `break` (target = the loop's depth) unwind.
-export function emitUnwindTo(ref cx: Cx, target: usize): string {
+export function emitUnwindTo(ref cx: Cx, target: usize, exitSite: NodeId): string {
   let depth: usize = disposeScopeDepth(cx.disposes);
   while (depth > target) {
     depth -= 1;
-    const err = emitScopeDisposals(ref cx, depth);
+    const err = emitScopeDisposals(ref cx, depth, exitSite);
     if (err.len > 0) {
       return err;
     }

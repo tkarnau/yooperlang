@@ -1,0 +1,4 @@
+module lib;
+// The OUTER modules root, at bootstrap/tests/graph/modules/.
+// `whichRoot` is how a test tells the two roots apart.
+export function whichRoot(): int32 { return 1; }

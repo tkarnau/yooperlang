@@ -87,6 +87,9 @@ function registerFileShells(
       case ASTNodeKind.ENUM_DECL: {
         registerEnumShell(ref prog, ref tm, declNode, moduleId, exported);
       }
+      case ASTNodeKind.UNION_DECL: {
+        registerUnionShell(ref prog, ref tm, declNode, moduleId, exported);
+      }
       case ASTNodeKind.EXTERN_BLOCK: {
         // Each declared signature is an ordinary function NAME. What is
         // extraordinary is its symbol, and the ABI decides which way:

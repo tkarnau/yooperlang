@@ -91,16 +91,21 @@ function emitExprInner(ref cx: Cx, exprId: NodeId, ref out: Operand): string {
       return emitIndexRead(ref cx, expr, exprId, ref out);
     }
     case ASTNodeKind.STRUCT_LITERAL: {
+      // A union literal is the same NODE - pass D decided which by the target
+      // type. It fills one field at offset 0 rather than one gep per field.
+      if (isUnionAt(ref cx, exprId)) {
+        return emitUnionLiteral(ref cx, expr, exprId, ref out);
+      }
       return emitStructLiteral(ref cx, expr, exprId, ref out);
     }
     case ASTNodeKind.VARIANT_CONSTRUCTOR: {
       return emitVariantConstructor(ref cx, expr, exprId, ref out);
     }
     case ASTNodeKind.FIELD_ACCESS: {
-      // Five things wear this shape, and pass D already decided which: an ENUM
+      // Six things wear this shape, and pass D already decided which: an ENUM
       // CASE (`Color.Red`), a payload-less variant constructor (`Shape.Empty`,
-      // typed as the VARIANT), a struct field, a STRING's `.len`, or an array's
-      // `.len`.
+      // typed as the VARIANT), a struct field, a UNION field, a STRING's `.len`,
+      // or an array's `.len`.
       //
       // The enum test is on the BASE and not on the whole expression, because
       // `p.c` on a struct with a `Color` field resolves to the same enum type.
@@ -110,13 +115,21 @@ function emitExprInner(ref cx: Cx, exprId: NodeId, ref out: Operand): string {
         out = enumCaseOperand(ref cx, expr.childA, exprId);
         return "";
       }
-      // The STRUCT test comes first, and it has to. A field whose own type is a
-      // variant - `CallArg { ty: string, value: Operand }` - makes `a.value` an
-      // expression of variant type, which is exactly what a payload-less
-      // constructor looks like from here. The base is what tells them apart:
-      // `Shape.Empty`'s base is a TYPE NAME and was never checked as a value,
-      // so it carries no resolved type at all, while `a.value`'s base is a
-      // struct. Reading the whole expression instead compiled `a.value` as
+      // A UNION base, and the two aggregate answers have nothing in common: a
+      // struct read is an extractvalue on the loaded aggregate, a union read is
+      // a load at the union's own ADDRESS spelled at the field's type, because
+      // a union's loaded value is a byte buffer with nothing to extract. See
+      // union.yoop.
+      if (isUnionAt(ref cx, expr.childA)) {
+        return emitUnionFieldRead(ref cx, expr, exprId, ref out);
+      }
+      // The STRUCT test comes before the variant one, and it has to. A field
+      // whose own type is a variant - `CallArg { ty: string, value: Operand }` -
+      // makes `a.value` an expression of variant type, which is exactly what a
+      // payload-less constructor looks like from here. The base is what tells
+      // them apart: `Shape.Empty`'s base is a TYPE NAME and was never checked as
+      // a value, so it carries no resolved type at all, while `a.value`'s base
+      // is a struct. Reading the whole expression instead compiled `a.value` as
       // `Operand.<case 0>` - a fresh tag and an unwritten payload - which is a
       // SILENT miscompile, not an error. It cost the self-compile its third
       // stage; see `field_variant.yoop` in the slice fixtures.

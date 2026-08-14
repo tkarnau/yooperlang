@@ -146,14 +146,8 @@ export function parseExportDecl(ref ps: ParserState): Result<NodeId, ParsingErro
     case TokenTags.VTABLE: {
       node.childA = parseVtableDecl(ref ps)?;
     }
-    // The same refusal the bare form gets in parser.yoop, because the missing
-    // piece is `union` and not `export`.
     case TokenTags.UNION: {
-      return Result.Err { error: SelfLexing.createParsingError(
-        ref ps,
-        "`union` declarations are not supported by the bootstrap yet - a union overlays every field at offset 0, which needs its own layout and field access rather than the struct path",
-        peekLengthUsize(ref ps),
-      )};
+      node.childA = parseUnionDecl(ref ps)?;
     }
     // `export "C" function f(...) { ... }` - a definition whose SYMBOL keeps
     // its exact spelling so C can call it. The wrapper gets its OWN kind rather

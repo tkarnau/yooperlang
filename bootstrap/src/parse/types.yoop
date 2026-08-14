@@ -286,11 +286,16 @@ export function parseTypeDecl(ref ps: ParserState): Result<NodeId, ParsingError>
   return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
 }
 
-// One `name: Type` inside a struct body. A `function` here is a METHOD and was
-// dispatched by the caller before reaching this.
+// One `name: Type` inside a struct body, or inside a variant case's payload. A
+// `function` here is a METHOD and was dispatched by the caller before reaching
+// this.
+//
+// The name may be a RESERVED WORD (`type: int32`). A field name is metadata - a
+// keyword's grammar role does not reach a position where the next token is
+// always a `:` - and a struct mirroring a C ABI has no say in its own spelling.
 function parseFieldDecl(ref ps: ParserState): Result<NodeId, ParsingError> {
   let node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.FIELD_DECL);
-  node.name = parseIdentAsName(ref ps)?;
+  node.name = parseIdentOrKeywordAsName(ref ps)?;
   SelfLexing.expect(ref ps, TokenTags.COLON)?;
   node.childA = parseTypeAnnotation(ref ps)?;
 

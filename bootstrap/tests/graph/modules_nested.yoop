@@ -1,0 +1,4 @@
+// Reaches a module that carries its own `modules/` directory. Refused by name:
+// two copies of one module link fine and then mismatch as `Value` vs `Value`.
+import { hosted } from "modules/nestedhost";
+function main(): int32 { return hosted(); }

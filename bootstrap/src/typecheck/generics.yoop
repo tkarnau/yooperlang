@@ -277,9 +277,13 @@ function fillInstance(ref prog: Program, ref inst: Instance): void {
       let i: usize = 0;
       while (i < f.len) {
         const field = vec.vecGet(ref f, i);
+        // `carriedKind` survives substitution unchanged. It is a property of how
+        // the field was WRITTEN, not of the type the parameter resolved to, so
+        // `handle: disposable T` still carries it at `T = FileHandle`.
         vec.vecPush(ref fields, {
           name: field.name,
           typeId: substitute(ref prog, field.typeId, ref info.params, ref inst.args),
+          carriedKind: field.carriedKind,
         });
         i += 1;
       }
@@ -306,6 +310,7 @@ function fillInstance(ref prog: Program, ref inst: Instance): void {
           vec.vecPush(ref fields, {
             name: field.name,
             typeId: substitute(ref prog, field.typeId, ref info.params, ref inst.args),
+            carriedKind: field.carriedKind,
           });
           i += 1;
         }

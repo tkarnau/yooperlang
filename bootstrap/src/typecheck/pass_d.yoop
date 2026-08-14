@@ -37,6 +37,12 @@ export function passDCheckBodies(ref prog: Program, ref tm: TypedModule, m: Modu
     checkFileBodies(ref prog, ref tm, m, file.root);
     f += 1;
   }
+
+  // Which scope-end calls the bodies above already made BY HAND. A separate
+  // walk rather than something threaded through the checks, because the answer
+  // is a merge over paths and the checks run in source order - see
+  // discharge.yoop.
+  computeDischarges(ref prog, ref tm, m);
 }
 
 function checkFileBodies(ref prog: Program, ref tm: TypedModule, m: Module, root: NodeId): void {
@@ -55,7 +61,46 @@ function checkFileBodies(ref prog: Program, ref tm: TypedModule, m: Module, root
         declNode.kind == ASTNodeKind.ENUM_DECL) {
       checkMethodBodies(ref prog, ref tm, ref m.ast, declNode);
     }
+    // A module-level `let` whose value is not BAKED into its LLVM global is
+    // emitted as a store in the module's init function - so its initializer is
+    // an ordinary expression that codegen will walk, and it needs checking and
+    // decorating exactly like one in a body. See fillModuleGlobal in
+    // pass_c.yoop for the split, and codegen/module_init.yoop for the store.
+    if (declNode.kind == ASTNodeKind.LET_DECL) {
+      checkModuleGlobalInit(ref prog, ref tm, ref m.ast, declNode);
+    }
     i += 1;
+  }
+}
+
+// The initializer of a module-level `let` that runs at RUN TIME.
+//
+// It is not a body: there are no parameters, no locals in scope, and no
+// enclosing function for `?` or `await` to belong to - so the scope it is
+// checked in is empty and the ambient return type is void, which is what makes
+// a `?` written here refuse itself rather than propagate into nothing.
+function checkModuleGlobalInit(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  declNode: ASTNode
+): void {
+  const declared = moduleGlobalType(ref prog, ref tm, declNode.name);
+  if (declared == TYPE_ERROR_ID) {
+    return;
+  }
+  if (moduleGlobalIsBaked(ref prog, ref ast, declNode.childB, declared)) {
+    return;
+  }
+  beginFunction(ref prog, declNode.name, TYPE_VOID_ID, false, false);
+  disposable scope: LocalScope = scopeNew();
+  const got = checkExpr(ref prog, ref tm, ref ast, declNode.childB, declared, ref scope);
+  if (got != TYPE_ERROR_ID && !typeAccepts(ref prog, declared, got)) {
+    reportError(
+      ref prog,
+      `module-level "let ${declNode.name}" is ${formatType(ref prog, declared)}, but its initializer is ${formatType(ref prog, got)}`,
+      declNode.sourceLoc
+    );
   }
 }
 
@@ -2077,6 +2122,18 @@ function checkFieldAccess(
       }
       return found.typeId;
     }
+    // A union field read is a REINTERPRETATION rather than a projection: it
+    // says "read the bytes at the union's address as this field's type", and
+    // nothing here or in codegen checks that those are the bytes the last write
+    // put there. C makes the same bargain.
+    case Type.Union { decl: d, fields: f }: {
+      const found = lookupUnionField(ref prog, derefType(ref prog, baseType), expr.name);
+      if (!found.found) {
+        reportError(ref prog, `union "${d.name}" has no field "${expr.name}"`, expr.sourceLoc);
+        return TYPE_ERROR_ID;
+      }
+      return found.typeId;
+    }
     // `s.len` - the string's BYTE length, which is what `strlen` returns and
     // what `stringAsBytes(s).len` would give. Not a character count: yoop has
     // no character type, and the byte length is the one every caller here
@@ -2516,6 +2573,12 @@ function checkStructLiteral(
   expected: TypeId,
   ref scope: LocalScope
 ): TypeId {
+  // A union literal is the same TOKENS as a struct literal, so which one this
+  // is comes entirely from the target type. Checked first, because a union
+  // fails the struct test below and would report as an untypeable literal.
+  if (expected != TYPE_ERROR_ID && isUnionType(ref prog, expected)) {
+    return checkUnionLiteral(ref prog, ref tm, ref ast, expr, expected, ref scope);
+  }
   if (expected == TYPE_ERROR_ID || !isStructType(ref prog, expected)) {
     reportError(
       ref prog,

@@ -1,0 +1,2 @@
+// Not a test file. Discovery is by NAME, and this name does not match.
+function notATest(): void { }

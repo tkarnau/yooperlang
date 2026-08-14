@@ -1,0 +1,57 @@
+// A module-level `let` whose initializer is NOT fixed at compile time, and the
+// ORDER the initializers run in.
+//
+// An LLVM global's initializer has to be a constant, so a `let` initialized by
+// a call, by an array literal or by a struct literal cannot have one. Each such
+// global starts zeroed and is written at run time by a function synthesized for
+// the file that declared it, and `main` calls every one of those in the module
+// graph's TOPOLOGICAL order before a line of user code.
+//
+// Order is what this fixture is for, and it is written so a wrong one is
+// VISIBLE rather than merely different: `derived` is computed from
+// `seeded`, which is itself a run-time initializer in an IMPORTED module.
+// Run the entry's initializers first and `seeded` is still 0, so
+// `derived` prints 1 instead of 41 - a wrong answer, not a wrong instruction
+// order. `pair` then reads `derived`, which pins the order WITHIN one file too.
+
+// The names are imported one by one rather than through a namespace, because a
+// cross-module read of a `let` names the DECLARING module's symbol and the
+// import table is what says which module that is.
+import { Pair, seed, bump, seeded, span } from "./lib/seedbank.yoop";
+
+extern "C" from "stdio.h" {
+  function printf(fmt: string, ...): int32;
+}
+
+// Reads an imported global that is itself run-time initialized.
+let derived: int32 = bump(seeded);
+// Reads a global declared ABOVE it in this same file.
+let pair: Pair = { lo: derived, hi: 7 };
+// An array literal's payload is a module DATUM rather than a stack slot, so the
+// descriptor stored here does not dangle once the init function returns. Two
+// arrays with the same bytes must not share one payload, which is what the
+// second write below proves.
+let table: int32[] = [3, 4, 5];
+let twin: int32[] = [3, 4, 5];
+// The ordinary literal case still costs no code at all: this is baked into the
+// LLVM global and no store is emitted for it.
+let plain: int32 = 9;
+
+function main(): int {
+  printf("seeded=%d\n", seeded);
+  printf("span=%d,%d\n", span.lo, span.hi);
+  printf("derived=%d\n", derived);
+  printf("pair=%d,%d\n", pair.lo, pair.hi);
+  printf("table=%d,%d,%d\n", table[0], table[1], table[2]);
+
+  // Writable storage, and not shared with the same-valued neighbour.
+  table[1] = 44;
+  printf("table=%d,%d,%d twin=%d,%d,%d\n",
+    table[0], table[1], table[2], twin[0], twin[1], twin[2]);
+
+  // A run-time initialized global is an ordinary mutable global afterwards.
+  derived = derived + 1;
+  plain = plain + 1;
+  printf("derived=%d plain=%d\n", derived, plain);
+  return 0;
+}

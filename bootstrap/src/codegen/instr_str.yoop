@@ -32,6 +32,23 @@ export function emitGlobalVariable(ref e: Emitter, home: string, name: string, t
   text.push(ref e.globals, ", align 8\n");
 }
 
+//   @m__state = internal global %struct.m__ServeState zeroinitializer, align 8
+//
+// The same global with no value to write into it yet. A module-level `let`
+// whose initializer is not a literal starts zeroed and is filled at run time by
+// the module's init function - see module_init.yoop. Also the only legal form
+// for a global of a type that has no immediate at all: a struct, a variant, an
+// array descriptor.
+export function emitGlobalZeroed(ref e: Emitter, home: string, name: string, ty: string): void {
+  text.push(ref e.globals, "@");
+  text.push(ref e.globals, home);
+  text.push(ref e.globals, SYMBOL_MODULE_SEPARATOR);
+  text.push(ref e.globals, name);
+  text.push(ref e.globals, " = internal global ");
+  text.push(ref e.globals, ty);
+  text.push(ref e.globals, " zeroinitializer, align 8\n");
+}
+
 //   %t2 = load i32, ptr @m__COUNT
 export function emitLoadGlobal(ref cx: Cx, dest: usize, ty: string, home: string, name: string): void {
   startInstr(ref cx);

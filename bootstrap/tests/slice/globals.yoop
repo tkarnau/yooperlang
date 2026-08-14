@@ -6,10 +6,10 @@
 // visible in another. That difference is the whole feature, and it is why the
 // two get different symbols rather than a shared one with a flag.
 //
-// A global's initializer becomes the LLVM global's initializer, which is fixed
-// at compile time - so the bootstrap takes a literal and refuses the rest by
-// name. The reference accepts more: it constant-FOLDS through function calls,
-// and drops their side effects doing it.
+// An INTEGER literal initializer becomes the LLVM global's own initializer, so
+// the shape below costs no code at all. Anything else is a run-time
+// initializer with a defined order - see module_init_order.yoop, which is where
+// that half is tested.
 //
 // The second half is what `std/test.yoop` needed: `const runSuite = suites[i];
 // runSuite();` - a function value in a LOCAL, called through its name. It is

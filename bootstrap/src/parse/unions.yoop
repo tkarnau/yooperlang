@@ -1,0 +1,92 @@
+module parse;
+
+// `union` declarations - C's overlapping-memory aggregate.
+//
+//   union Color { rgba: uint32, channels: Channels }
+//
+// The BODY parses exactly like a struct's, and produces a UNION_DECL whose own
+// childIds run holds the FIELD_DECLs. What differs is everything a union may
+// NOT carry, and all three are refused by name here because all three are the
+// reference's rules:
+//
+//   type parameters   a generic union would need a template and instances, and
+//                     the reference defers it too
+//   implements        a union has no methods to satisfy a trait with
+//   methods           the same, from the other side - a `function` in the body
+//
+// A union with no fields is refused as well. `[0 x i8]` is legal LLVM and
+// completely useless, and the reference says so explicitly.
+
+import { Result } from "std/core/types.yoop";
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import { NodeId, ASTNodeKind } from "../ast";
+import { TokenTags } from "../lex";
+import { ParsingError } from "../diagnostics";
+
+// `union Name { field: T, ... }`
+//
+//   name                    the union's name
+//   own childIds run        the FIELD_DECL nodes, in declaration order
+//
+// Declaration order is NOT ABI here the way a variant's case order is - every
+// field starts at byte 0 - but it is what the diagnostics list, so it is kept.
+export function parseUnionDecl(ref ps: ParserState): Result<NodeId, ParsingError> {
+  SelfLexing.expect(ref ps, TokenTags.UNION)?;
+  let node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.UNION_DECL);
+  node.name = parseIdentAsName(ref ps)?;
+
+  if (SelfLexing.peek(ref ps).tag == TokenTags.LT) {
+    return Result.Err { error: SelfLexing.createParsingError(
+      ref ps,
+      `generic unions are not supported - "${node.name}" may not take type parameters`,
+      peekLengthUsize(ref ps),
+    )};
+  }
+  if (SelfLexing.peek(ref ps).tag == TokenTags.IMPLEMENTS) {
+    return Result.Err { error: SelfLexing.createParsingError(
+      ref ps,
+      `a union cannot implement a trait - "${node.name}" has no methods to satisfy one with`,
+      peekLengthUsize(ref ps),
+    )};
+  }
+
+  SelfLexing.expect(ref ps, TokenTags.LCURLY)?;
+  disposable fieldIds: Vec<NodeId> = vec.vecNew(4);
+  while (
+    SelfLexing.peek(ref ps).tag != TokenTags.RCURLY &&
+    SelfLexing.peek(ref ps).tag != TokenTags.EOF
+  ) {
+    // Named rather than left to parseFieldDecl, which would report a missing
+    // `:` after the word `function` and say nothing about unions.
+    if (SelfLexing.peek(ref ps).tag == TokenTags.FUNCTION) {
+      return Result.Err { error: SelfLexing.createParsingError(
+        ref ps,
+        `a union cannot declare methods - "${node.name}" is storage, not a type with behaviour`,
+        peekLengthUsize(ref ps),
+      )};
+    }
+    vec.vecPush(ref fieldIds, parseFieldDecl(ref ps)?);
+    // A trailing comma after the last field is allowed, so consume the
+    // separator whenever there is one and let the loop condition decide.
+    if (SelfLexing.peek(ref ps).tag == TokenTags.COMMA) {
+      SelfLexing.advance(ref ps)?;
+    }
+  }
+  SelfLexing.expect(ref ps, TokenTags.RCURLY)?;
+
+  if (fieldIds.len == 0) {
+    return Result.Err { error: SelfLexing.createParsingError(
+      ref ps,
+      `union "${node.name}" must declare at least one field - there is nothing to overlay`,
+      peekLengthUsize(ref ps),
+    )};
+  }
+
+  const start: usize = ps.ast.childIds.len;
+  vec.vecExtendFrom(ref ps.ast.childIds, vec.vecAsArray(ref fieldIds));
+  node.childStart = start;
+  node.childCount = fieldIds.len;
+
+  return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
+}

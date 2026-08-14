@@ -38,6 +38,22 @@ export function emitRetVoid(ref cx: Cx): void {
   endInstr(ref cx);
 }
 
+//   ret i32 0
+//
+// The exit status of a `main` declared `void`, which is emitted as
+// `define i32 @main()` - see Cx.voidMain. C says a missing `return` in `main`
+// means 0, so this is what both the fall-out-the-bottom and a bare `return;`
+// lower to. Its own emitter rather than `emitRet` with an immediate, because
+// nothing here is a choice the caller made: the type and the value are both
+// fixed by C's entry-point ABI.
+export function emitRetMainZero(ref cx: Cx): void {
+  startInstr(ref cx);
+  part(ref cx, "ret ");
+  part(ref cx, MAIN_EXIT_TYPE);
+  part(ref cx, " 0");
+  endInstr(ref cx);
+}
+
 // ----- memory --------------------------------------------------------------
 
 //   %count.1.addr = alloca i32
@@ -299,6 +315,23 @@ export function emitFunctionOpen(
     i += 1;
   }
   headerPart(ref cx, ") {");
+  headerEnd(ref cx);
+  headerPart(ref cx, "entry:");
+  headerEnd(ref cx);
+}
+
+//   define internal void @main_0__module_init0() {
+//   entry:
+//
+// A parameter-free, result-free definition, which is what a module's init
+// function is. `internal` because nothing outside the emitted program calls it:
+// `main` does, once, before any user code. The symbol arrives already spelled
+// out, module prefix and all, because the plan walk built it before any of
+// these were emitted - see module_init.yoop.
+export function emitInternalVoidFunctionOpen(ref cx: Cx, symbol: string): void {
+  headerPart(ref cx, "define internal void @");
+  headerPart(ref cx, symbol);
+  headerPart(ref cx, "() {");
   headerEnd(ref cx);
   headerPart(ref cx, "entry:");
   headerEnd(ref cx);

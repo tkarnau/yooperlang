@@ -1,0 +1,5 @@
+// Below a subdirectory, to pin that the walk recurses.
+import.test;
+import { suite, test, Case } from "std/test.yoop";
+
+suite function betaBehaves(): void { }

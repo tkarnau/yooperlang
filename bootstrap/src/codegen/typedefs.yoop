@@ -14,7 +14,7 @@ import { disposable } from "std/core/kinds.yoop";
 import { AST, ASTNode, ASTNodeKind, childAt, declOf, nodeAt } from "../ast";
 import { Module, ModuleGraph } from "../source_graph";
 import { Program, TypedModule, Type, TypeId, Field, VariantCase, Symbol, moduleIdOf, symbolAt,
-  typeAt, variantPayloadSize, isOpenInstance } from "../typecheck";
+  typeAt, variantPayloadSize, unionPayloadSize, isOpenInstance } from "../typecheck";
 
 // `%struct.Point = type { i32, i32 }` for every struct the program declared.
 //
@@ -45,6 +45,14 @@ function emitStructTypeDefs(ref e: Emitter, ref prog: Program): void {
       case Type.VTable { decl: d, forTrait: ft, fields: f, methodOrder: mo }: {
         if (d.populated) {
           emitVtableTypeDef(ref e, moduleIdOf(ref prog, d.module), d.name, f.len);
+        }
+      }
+      // A union carries no field list at all - one byte buffer as wide as its
+      // widest field, which is what `unionPayloadSize` measures.
+      case Type.Union { decl: d, fields: f }: {
+        if (d.populated) {
+          emitUnionTypeDef(ref e, moduleIdOf(ref prog, d.module), d.name,
+            unionPayloadSize(ref prog, id));
         }
       }
       default: { }

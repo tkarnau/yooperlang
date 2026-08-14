@@ -29,6 +29,7 @@ module codegen;
 
 import { Vec }, * as vec from "std/core/vec.yoop";
 import { disposable, Disposable } from "std/core/kinds.yoop";
+import { NodeId } from "../ast";
 import { TypeId } from "../typecheck";
 
 // One binding, or one FIELD of one binding, waiting to be disposed.
@@ -49,6 +50,13 @@ import { TypeId } from "../typecheck";
 export type PendingDispose {
   name: string,       // the local's name, for its slot
   slot: usize,        // its slot id
+  // The DECLARATION this entry came from, and the only thing that can be
+  // discharged by hand. Pass D answers "was this binding's method already
+  // called on every path reaching this exit" against exactly this node - see
+  // typecheck/discharge.yoop - and 0 means "nothing can discharge it": an
+  // anonymous region has no name to write, and a task handle owes the scheduler
+  // rather than a method call.
+  declNode: NodeId,
   ownerType: TypeId,  // what the method is mangled against
   method: string,     // the `mustCall` method - `dispose`, `close`, ...
   viaField: bool,     // gep into a field of the binding first

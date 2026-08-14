@@ -1485,6 +1485,25 @@ Two invariants control flow introduced, both easy to break:
   the LSP - never touches the filesystem probing in `std_root.yoop`. The
   discovery rule honours `YOOP_STD_ROOT`, which is what the JS reference honours
   too, so one variable retargets both compilers at the same tree.
+- **The `modules/` root is the opposite shape, and deliberately so.** `std/`
+  belongs to the COMPILER and is found once beside the executable; `modules/`
+  belongs to whoever is being compiled and is answered per IMPORT, by walking UP
+  from the importing file's own directory. `source_graph/modules_root.yoop` owns
+  it. The FIRST root the walk meets wins whether or not it holds the requested
+  name - that is a safety property, not an optimization, since continuing past it
+  would let a stray `modules/` in a home directory answer for a program's own.
+  The point of the whole thing is relocatability: a library and the consumer that
+  vendors it write the same import line and each resolves it against its own root.
+- **A module under a modules root may NOT carry a root of its own, and that is
+  enforced.** Two copies of one module at two paths get distinct mangled symbols
+  and LINK FINE, then fail on the first value passed between them as "Value is
+  not assignable to Value". The bootstrap walks UP from the target to the root
+  where the reference walks DOWN; same directories, no path split needed, but the
+  target directory ITSELF has to be checked first, since `modules/math` resolving
+  to `<root>/math` makes `<root>/math/modules` the exact case this catches. A
+  DIVERGENCE where the bootstrap is better: the reference throws an uncaught
+  JavaScript `Error` for this, so its user gets a stack trace. One case not
+  built: a `modules` directory at the FILESYSTEM ROOT is not consulted.
 - **A borrow costs no instructions.** Every local already lives in an alloca, so
   `ref x` is the ADDRESS of storage that exists; and a `ref` parameter arrives
   as that pointer, so it gets no alloca and no spill - the incoming pointer IS
@@ -1714,6 +1733,76 @@ Two invariants control flow introduced, both easy to break:
 - **Disposing on `break` is a DELIBERATE divergence.** The JS reference leaks
   there. `dispose_break.yoop` asserts the bootstrap alone, via a
   `<stem>.bootonly` marker that skips the parity bonus and carries the reason.
+- **A scope-end call already made BY HAND is not made again.**
+  `Disposable.dispose(ref c)` on a `disposable` binding answers the obligation and
+  the closing brace emits nothing, which is what the reference does too. The
+  answer is per EXIT SITE rather than per binding, because a `return` placed
+  before the manual call still owes it while the brace past it does not. The
+  satisfied-set is a `uint64` bitmask in `typecheck/discharge.yoop`, snapshotted
+  at a branch and INTERSECTED at the join; codegen only skips.
+- **An ASSIGNMENT REARMS that obligation - a DELIBERATE divergence.**
+  `Disposable.dispose(ref s); s = next;` is what std/core/kinds.yoop documents as
+  the informed opt-in for a mutable kinded binding, and the reference never clears
+  its satisfied flag, so it emits no scope-end call there at all and never
+  disposes the value the binding ends up holding. Reproducing a leak on the
+  language's own recommended idiom is not parity worth having.
+  `tests/slice/dispose_rebind.yoop` is `.bootonly` for that reason.
+- **An ARRAY of unions works here and is an internal error in the reference**
+  (`arrayElemLlvmName: unsupported elem type "union"`). Representational: the
+  reference names one `%yoop_array.T` per element type and has no spelling for a
+  union, while the bootstrap uses one anonymous `{ ptr, i64 }` descriptor for
+  every element type. The slice fixture avoids the shape so its `.expected` stays
+  assertable against both.
+- **A union is addressed, never extracted.** Structs here are SSA aggregates, so a
+  read is a load plus `extractvalue` and there is nothing to reinterpret one as. A
+  union field read is the union's own ADDRESS loaded at the field's type - the
+  variant-payload shape. The whole change to the shared read path is two early
+  returns guarded on `isUnionAt`, which answers false for every pre-union type, so
+  non-union IR is unchanged by construction. Do not add a `Type.Union` case to
+  `lookupField`: it returns a field POSITION, and a position is the one thing a
+  union does not have.
+- **A `void` main is emitted as `define i32 @main()` with `ret i32 0`.** Both
+  compilers used to emit `define void @main()`, which is ABI-illegal for C's entry
+  point - nothing writes the return register, so the exit status was whatever the
+  last call left behind. Fixed on BOTH sides. The two `ret` sites move together:
+  `ret void` inside a function returning `i32` does not verify.
+- **A module-level `let` with a non-literal initializer gets `zeroinitializer`
+  plus a run-time store** from `@<mod>__module_init<N>()`, one per source file
+  that owes one, called from `main` in the module graph's TOPOLOGICAL order. Only
+  a bare integer literal is baked into the global. An array literal's payload goes
+  in a module DATUM rather than an alloca, because the init function's frame is
+  gone the moment it returns; a non-literal ELEMENT is refused by name rather than
+  lowered into a dangling pointer.
+- **`_` is not a reserved word here.** The JS lexer's keyword table maps `_` to
+  `discard`, so the reference reports `let _ = 1;` as `"_" is a reserved word`
+  and accepts `_` as a struct-literal or pattern FIELD name. The bootstrap leaves
+  `_` out of the reserved set: it reports the pre-existing `expected IDENT, got
+  DISCARD` for a binding, and still refuses `{ _: 1 }` and `case Ev.type { _ }`.
+  `_` is punctuation the lexer happens to spell as a word, and nothing that
+  wanted a C name ever wanted it.
+- **A member spelled `function` is still a METHOD.** In a struct, variant or enum
+  body the bootstrap dispatches on the `function` keyword alone; the reference
+  disambiguates a struct FIELD from a method by the trailing colon, so
+  `type T { function: int32 }` compiles there and is refused here. Every other
+  reserved word works in those positions, and an extern parameter named
+  `function` is fine, since nothing there is ambiguous.
+- **A field supplies a propagated kind by EITHER spelling: its own type
+  propagates the kind, or its annotation carries the kind by PREFIX**
+  (`handle: disposable FileHandle`). `Type.Field.carriedKind` holds the second,
+  filled in pass C where the annotation node and its KIND_PREFIX list are both in
+  hand. Codegen sees no difference - a propagated disposal already records
+  `ownerType: field.fieldType`, so both spellings emit the same call. Only a
+  plain type name carries one; a prefix on an array or a `ref` is not read,
+  because the call would then be on the WRAPPER.
+- **`appliesTo` is NOT enforced on a field prefix, and the reference's version of
+  that check is broken anyway.** The bootstrap records a kind's clauses by their
+  leading word and never reads the site list, so any declared kind may prefix a
+  field. The reference requires `appliesTo field` - but it only populates that
+  set for an IMPORTED kind, so a kind declared in the same module as the field
+  that carries it reads back as `appliesTo: (none)` and the field is refused.
+  That is why `examples/pass/propagates_full/io.yoop` declares its own
+  `disposable` in a second file, and why `tests/slice/lib/carried.yoop` exists.
+  The bootstrap is a superset here, so nothing the reference accepts breaks.
 - **A returned VALUE is computed before anything is disposed.** It may read a
   binding that is about to go.
 - **`?` IS a return, so it unwinds like one.** Its error path calls the same

@@ -160,6 +160,11 @@ export function astNodeChildBName(v: ASTNodeKind): string {
     }
     // `f()? "loading config"` - the note prefixed onto the Err on the way out.
     // 0 for a plain `f()?`.
+    // `disposable FileHandle`: the NODE_LIST of KIND_PREFIX nodes before the
+    // type name, 0 when there is none. Read by pass C into `Field.carriedKind`.
+    case ASTNodeKind.TYPE_ANNOTATION_TYPE_NAME: {
+      return "kindPrefixList";
+    }
     case ASTNodeKind.TRY_OP: {
       return "contextString";
     }

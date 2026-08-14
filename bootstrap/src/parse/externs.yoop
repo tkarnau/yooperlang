@@ -185,7 +185,7 @@ function parseExternFunction(ref ps: ParserState): Result<NodeId, ParsingError> 
       }
       break;
     }
-    vec.vecPush(ref ids, parseFunctionParam(ref ps)?);
+    vec.vecPush(ref ids, parseExternFunctionParam(ref ps)?);
     if (SelfLexing.peek(ref ps).tag == TokenTags.COMMA) {
       SelfLexing.advance(ref ps)?;
     }

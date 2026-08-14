@@ -76,16 +76,51 @@ trap 'rm -rf "$WORK"' EXIT
 # Exits 124 on the limit, and 128+signal when the child is killed, so a
 # segfault reads as 139 on both sides rather than being flattened into a
 # generic failure.
+#
+# It kills a process TREE, not a pid. Half the commands this wraps are
+# compilers, and a compiler shells out to clang: `kill 9, $pid` reached the
+# compiler and left the clang running with nobody waiting on its output. Over a
+# day of probe runs that is how a machine loses its cores. Descendants go first
+# and the child last, because killing the child first reparents its children to
+# pid 1 and loses the only handle on them.
+#
+# What this does NOT do is `setpgrp` the child into its own group, even though
+# that would make the kill a one-liner. A child in its own group SURVIVES a
+# group-directed kill of the probe - measured, and it is exactly how a
+# Ctrl-C'd or tool-killed run would leak. Staying in the probe's group is the
+# property worth keeping; the tree walk replaces what the group kill would
+# have done.
+#
+# Worth knowing: because the alarm lives in this supervisor rather than in the
+# caller, the limit still holds if the probe ITSELF is killed by anything short
+# of a group SIGKILL. An orphaned limit_run reaps its child on schedule and
+# exits.
 limit_run() {
   perl -e '
+    sub descend {
+      my @out; my @q = @_;
+      while (@q) {
+        my $p = shift @q;
+        my @k = grep { /^\d+$/ } split /\s+/, (`pgrep -P $p 2>/dev/null` || "");
+        push @out, @k; push @q, @k;
+      }
+      return @out;
+    }
     my $t = shift @ARGV;
     my $pid = fork();
     exit 125 if !defined $pid;
     if ($pid == 0) { exec @ARGV; exit 127; }
-    $SIG{ALRM} = sub { kill 9, $pid; waitpid($pid, 0); exit 124; };
+    my $reap = sub {
+      for (1 .. 2) { my @d = descend($pid); last unless @d; kill(9, @d); }
+      kill(9, $pid);
+    };
+    $SIG{ALRM} = sub { $reap->(); waitpid($pid, 0); exit 124; };
+    $SIG{INT}  = sub { $reap->(); exit 130; };
+    $SIG{TERM} = sub { $reap->(); exit 143; };
     alarm $t;
     waitpid($pid, 0);
     my $st = $?;
+    alarm 0;
     exit(($st & 127) ? 128 + ($st & 127) : ($st >> 8));
   ' "$@"
 }

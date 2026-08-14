@@ -134,6 +134,13 @@ export type TypedModule propagates<disposable> {
   // silent miscompile whenever the shapes happen to line up.
   intrinsicNames: Map<string, bool>,
   resolvedTypes: Vec<TypeId>,     // dense decoration, indexed by NodeId (0 = none / infer-later)
+  // (exit site, binding) pairs saying "this binding's scope-end call was
+  // already made by hand on every path reaching that exit". Codegen skips the
+  // matching pending disposal, which is what keeps a hand-written
+  // `Disposable.dispose(ref c)` from being followed by a second one at the
+  // closing brace. See discharge.yoop; a LIST rather than a map because the
+  // answer is empty for whole modules at a time.
+  discharges: Vec<Discharge>,
   // Which monomorphized function a CALL node resolved to, when the callee was
   // generic. Sparse, because most calls are not - the shape program.yoop's
   // header describes for exactly this kind of decoration.
@@ -401,6 +408,7 @@ export function initTypedModule(moduleId: string): TypedModule propagates<dispos
     calleeInstance: calleeInstance,
     calleeReceiver: calleeReceiver,
     resolvedTypes: vec.vecNew(0),
+    discharges: vec.vecNew(0),
     allowsUnsafe: false,
   };
 }

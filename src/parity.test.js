@@ -14,9 +14,9 @@ import assert from "node:assert";
 import fs from "fs";
 import path from "path";
 import os from "os";
-import { execFileSync } from "child_process";
 
 import { dumpTokens } from "./dumpTokens.js";
+import { runProcOrThrow } from "./testProc.js";
 
 const REPO = path.resolve(import.meta.dirname, "..");
 const CORPUS = path.join(REPO, "bootstrap/tests/parity");
@@ -30,26 +30,39 @@ const inputs = fs
 describe("parity: layer 1 (lex) - bootstrap token stream matches the JS lexer", () => {
   let dumper;
 
-  before(() => {
+  before(async () => {
     // One compile for the whole suite; the binary is the bootstrap's lexer
     // wrapped in a main that prints the dump.
     const outDir = fs.mkdtempSync(path.join(os.tmpdir(), "yoop-parity-"));
     dumper = path.join(outDir, "dump_tokens");
-    execFileSync("node", [path.join(REPO, "src/yoopiler.js"), DUMPER_SRC, "-o", dumper], {
-      cwd: REPO,
-      stdio: "pipe",
-    });
+    await runProcOrThrow(
+      "node",
+      [path.join(REPO, "src/yoopiler.js"), DUMPER_SRC, "-o", dumper],
+      { cwd: REPO, timeout: 120000 },
+    );
   });
 
   it("has a corpus", () => {
     assert.ok(inputs.length > 0, `no .yoop inputs in ${CORPUS}`);
   });
 
+  // The dumper is the bootstrap's own lexer, which is under active development,
+  // and a lexer that fails to advance is an infinite loop that pins a core.
+  // execFileSync had no deadline, so one bad file used to mean a spinning
+  // process for as long as the machine was up. This is the deadline that turns
+  // that into a test failure.
+  const DUMP_TIMEOUT_MS = Number(process.env.YOOP_PARITY_DUMP_TIMEOUT_MS) || 30000;
+
+  async function dump(file) {
+    const r = await runProcOrThrow(dumper, [file], { timeout: DUMP_TIMEOUT_MS });
+    return r.stdout;
+  }
+
   for (const name of inputs) {
-    it(`${name}: identical token dumps`, () => {
+    it(`${name}: identical token dumps`, async () => {
       const file = path.join(CORPUS, name);
       const expected = dumpTokens(fs.readFileSync(file, "utf8"));
-      const actual = execFileSync(dumper, [file], { encoding: "utf8" });
+      const actual = await dump(file);
       assert.equal(actual, expected, firstDivergence(name, expected, actual));
     });
   }
@@ -57,7 +70,7 @@ describe("parity: layer 1 (lex) - bootstrap token stream matches the JS lexer", 
   // The hand-written corpus above targets specific constructs; this sweeps
   // every real source file in the tree. It is the check that catches a
   // divergence nobody thought to write a case for.
-  it("every .yoop file in std/, bootstrap/ and examples/ lexes identically", () => {
+  it("every .yoop file in std/, bootstrap/ and examples/ lexes identically", async () => {
     const files = [
       ...collectYoop(path.join(REPO, "std")),
       ...collectYoop(path.join(REPO, "bootstrap")),
@@ -84,7 +97,7 @@ describe("parity: layer 1 (lex) - bootstrap token stream matches the JS lexer", 
         skipped.push(`${rel} (js lexer rejects it)`);
         continue;
       }
-      const actual = execFileSync(dumper, [file], { encoding: "utf8" });
+      const actual = await dump(file);
       if (actual !== expected) failures.push(firstDivergence(rel, expected, actual));
     }
 

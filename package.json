@@ -32,6 +32,7 @@
     "runtime",
     "SPEC.md",
     "!src/**/*.test.js",
+    "!src/testProc.js",
     "!runtime/tests"
   ],
   "scripts": {
