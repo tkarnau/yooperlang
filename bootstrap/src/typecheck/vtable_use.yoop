@@ -1,0 +1,287 @@
+module typecheck;
+
+// The three spellings that BUILD or USE a vtable value, checked.
+//
+// vtable.yoop holds the queries every one of them asks - which trait, which
+// slot, how many - and dispatches to these three. They are split off because
+// each is a different question about a different argument shape: `from` cares
+// that its one argument is a BORROW of something implementing the trait,
+// `fromFn` that it has one NAMED FUNCTION per slot, and a dispatch that its
+// first argument is the vtable and the rest line up one place to the left.
+
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { Map }, * as map from "std/collections/map.yoop";
+import { Option } from "std/core/types.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import { AST, ASTNode, ASTNodeKind, NodeId, childAt, nodeAt } from "../ast";
+
+// `Reader.from(ref s)` - erase a concrete value.
+//
+// The receiver has to arrive as a BORROW, because the vtable stores its
+// ADDRESS: a by-value argument would have the vtable pointing at a temporary
+// that is gone by the next statement. The reference makes the same demand, and
+// for the same reason.
+function checkVtableFrom(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  expr: ASTNode,
+  exprId: NodeId,
+  base: ASTNode,
+  vtableType: TypeId,
+  ref scope: LocalScope
+): TypeId {
+  const traitId = vtableTraitOf(ref prog, vtableType);
+  let given: usize = 0;
+  let argId: NodeId = 0;
+  if (expr.childA != 0) {
+    const args = nodeAt(ref ast, expr.childA);
+    given = args.childCount;
+    if (given > 0) {
+      argId = childAt(ref ast, args, 0);
+    }
+  }
+  if (given != 1) {
+    checkCallArgs(ref prog, ref tm, ref ast, expr, ref scope);
+    reportError(
+      ref prog,
+      `\`${base.name}.from(ref x)\` takes exactly one \`ref\` argument, got ${given}`,
+      expr.sourceLoc
+    );
+    return vtableType;
+  }
+  const argNode = nodeAt(ref ast, argId);
+  const got = checkExpr(ref prog, ref tm, ref ast, argId, TYPE_ERROR_ID, ref scope);
+  if (argNode.kind != ASTNodeKind.REF_EXPRESSION) {
+    reportError(
+      ref prog,
+      `\`${base.name}.from(ref x)\` needs a \`ref\` argument - the vtable stores the receiver's ADDRESS, so it has to outlive the vtable`,
+      expr.sourceLoc
+    );
+    return vtableType;
+  }
+  const implType = derefType(ref prog, got);
+  if (implType == TYPE_ERROR_ID) {
+    return vtableType;
+  }
+  if (!typeImplementsTrait(ref prog, implType, traitId)) {
+    reportError(
+      ref prog,
+      `"${formatType(ref prog, implType)}" does not implement "${formatType(ref prog, traitId)}", which vtable "${base.name}" erases`,
+      expr.sourceLoc
+    );
+    return vtableType;
+  }
+  // Every slot's symbol has to EXIST. A type may claim the trait and inherit a
+  // method through a parent trait the vtable does not name; the builder emits
+  // `@Type__method` regardless, so a missing one is a link error rather than a
+  // diagnostic unless it is caught here.
+  const slots = vtableSlotCount(ref prog, vtableType);
+  let i: usize = 0;
+  while (i < slots) {
+    const slotName = vtableSlotNameAt(ref prog, vtableType, i);
+    if (lookupMethod(ref prog, implType, slotName) == TYPE_ERROR_ID) {
+      reportError(
+        ref prog,
+        `"${formatType(ref prog, implType)}" has no method "${slotName}", which vtable "${base.name}" needs a pointer to`,
+        expr.sourceLoc
+      );
+      return vtableType;
+    }
+    i += 1;
+  }
+  map.mapInsert(ref tm.vtableBuilds, uint64(exprId), implType);
+  return vtableType;
+}
+
+// `PredVT.fromFn(f, g)` - erase a set of NAMED FUNCTIONS, one per slot, in slot
+// order. ctx is null; codegen wraps each in a shim that drops it.
+function checkVtableFromFn(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  expr: ASTNode,
+  exprId: NodeId,
+  base: ASTNode,
+  vtableType: TypeId,
+  ref scope: LocalScope
+): TypeId {
+  const slots = vtableSlotCount(ref prog, vtableType);
+  let given: usize = 0;
+  if (expr.childA != 0) {
+    given = nodeAt(ref ast, expr.childA).childCount;
+  }
+  if (given != slots) {
+    checkCallArgs(ref prog, ref tm, ref ast, expr, ref scope);
+    reportError(
+      ref prog,
+      `\`${base.name}.fromFn(...)\` takes ${slots} function argument(s), one per slot, got ${given}`,
+      expr.sourceLoc
+    );
+    return vtableType;
+  }
+  const args = nodeAt(ref ast, expr.childA);
+  let i: usize = 0;
+  while (i < slots) {
+    const argId = childAt(ref ast, args, i);
+    const slot = vtableSlotNamed(ref prog, vtableType, vtableSlotNameAt(ref prog, vtableType, i));
+    const got = checkExpr(ref prog, ref tm, ref ast, argId, slot.slotType, ref scope);
+    if (got != TYPE_ERROR_ID && !typeAccepts(ref prog, slot.slotType, got)) {
+      reportError(
+        ref prog,
+        `argument ${i + 1} of \`${base.name}.fromFn(...)\` is ${formatType(ref prog, got)}, and slot "${vtableSlotNameAt(ref prog, vtableType, i)}" is ${formatType(ref prog, slot.slotType)}`,
+        nodeAt(ref ast, argId).sourceLoc
+      );
+      return vtableType;
+    }
+    // The shim forwards to a SYMBOL, so the argument has to name a FUNCTION.
+    // A function-typed local holds a pointer the shim has no way to reach, and
+    // emitting one anyway would forward to whatever `@name` happened to exist -
+    // a link error at best and the wrong function at worst.
+    if (!namesAFunction(ref prog, ref tm, ref ast, argId, ref scope)) {
+      reportError(
+        ref prog,
+        `argument ${i + 1} of \`${base.name}.fromFn(...)\` has to be a named function - a slot holds a symbol's address, and there is nothing to take the address OF here`,
+        nodeAt(ref ast, argId).sourceLoc
+      );
+      return vtableType;
+    }
+    i += 1;
+  }
+  map.mapInsert(ref tm.vtableFromFns, uint64(exprId), true);
+  return vtableType;
+}
+
+// `Reader.read(ref r, ref buf)` - the INDIRECT dispatch.
+//
+// The receiver is written `ref vt` and is the vtable itself, so the first
+// argument is checked against the vtable type and the rest against the slot's
+// parameters. That off-by-one is the whole difference from an ordinary call,
+// and it is why this does not go through checkArgsAgainstFunc.
+// `Dispatcher.handle(ref d, 10)` - dispatch THROUGH a vtable value.
+//
+// Reached by two spellings and they mean the same call: the VTABLE's own name,
+// and the TRAIT's when the receiver is a vtable erasing it
+// (`Readable.read(ref r, buf)`). The second is what a caller writes when it
+// never learns which vtable it was handed, and it is the reference's spelling
+// too. The vtable NAME is read off the type rather than off the base node, so
+// the diagnostics say the same thing either way round.
+export function checkVtableDispatch(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  expr: ASTNode,
+  exprId: NodeId,
+  base: ASTNode,
+  vtableType: TypeId,
+  ref scope: LocalScope
+): TypeId {
+  const slot = vtableSlotNamed(ref prog, vtableType, expr.name);
+  if (!slot.found) {
+    checkCallArgs(ref prog, ref tm, ref ast, expr, ref scope);
+    reportError(
+      ref prog,
+      `vtable "${formatType(ref prog, vtableType)}" has no slot "${expr.name}" - a vtable's members are its slots plus \`from\` and \`fromFn\``,
+      expr.sourceLoc
+    );
+    return TYPE_ERROR_ID;
+  }
+
+  let params: Vec<TypeId> = vec.vecNew(0);
+  let ret: TypeId = TYPE_ERROR_ID;
+  switch (typeAt(ref prog, slot.slotType)) {
+    case Type.Func { params: p, ret: r, variadic: v, isAsync: a }: {
+      params = p;
+      ret = r;
+    }
+    default: {
+      checkCallArgs(ref prog, ref tm, ref ast, expr, ref scope);
+      return TYPE_ERROR_ID;
+    }
+  }
+
+  // Coloring, before the arguments are checked, so `prog.callWasAwaited` still
+  // describes THIS call. An async slot is a coroutine reached through a
+  // pointer, and rule 3 applies to it exactly as to a named callee.
+  checkCallColoring(
+    ref prog, ref tm, expr, exprId, slot.slotType, expr.name, prog.callWasAwaited
+  );
+
+  let given: usize = 0;
+  if (expr.childA != 0) {
+    const args = nodeAt(ref ast, expr.childA);
+    given = args.childCount;
+    let a: usize = 0;
+    while (a < args.childCount) {
+      const argId = childAt(ref ast, args, a);
+      // Argument 0 is the vtable receiver, and the rest line up with the slot's
+      // own parameters one place to the left.
+      let want: TypeId = TYPE_ERROR_ID;
+      if (a == 0) {
+        want = internRef(ref prog, vtableType);
+      } else if (a - 1 < params.len) {
+        want = vec.vecGet(ref params, a - 1);
+      }
+      const got = checkExpr(ref prog, ref tm, ref ast, argId, want, ref scope);
+      if (want != TYPE_ERROR_ID && got != TYPE_ERROR_ID && !typeAccepts(ref prog, want, got)) {
+        reportError(
+          ref prog,
+          `argument ${a + 1} of "${base.name}.${expr.name}" is ${formatType(ref prog, want)}, not ${formatType(ref prog, got)}`,
+          nodeAt(ref ast, argId).sourceLoc
+        );
+      }
+      a += 1;
+    }
+  }
+  if (given != params.len + 1) {
+    reportError(
+      ref prog,
+      `"${base.name}.${expr.name}" takes ${params.len + 1} argument(s) - the vtable receiver plus ${params.len} - got ${given}`,
+      expr.sourceLoc
+    );
+    return ret;
+  }
+
+  map.mapInsert(ref tm.vtableSlots, uint64(exprId), slot.index);
+  return ret;
+}
+
+// Whether an argument names a module-level FUNCTION rather than anything else
+// holding a function value. A LOCAL is checked first, because a local shadows a
+// module function of the same name and the shim would forward to the wrong one.
+function namesAFunction(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  argId: NodeId,
+  ref scope: LocalScope
+): bool {
+  const arg = nodeAt(ref ast, argId);
+  if (arg.kind != ASTNodeKind.IDENT) {
+    return false;
+  }
+  switch (scopeLookup(ref scope, arg.name)) {
+    case Option.Some { value: localType }: { return false; }
+    case Option.None: { }
+  }
+  const symId = lookupOwnName(ref tm, arg.name);
+  if (symId == SYMBOL_NONE_ID) {
+    return false;
+  }
+  switch (symbolAt(ref prog, symId)) {
+    case Symbol.Func { typeId: t }: { return true; }
+    default: { return false; }
+  }
+}
+
+// Whether a concrete type claims the trait a vtable erases.
+//
+// `typeSatisfiesBound` rather than an id compare, so a type reaching the trait
+// through an APPLICATION (`implements Comparable<Token>`) or through a parent
+// answers the same way a generic bound already does. One question, one place.
+function typeImplementsTrait(ref prog: Program, implType: TypeId, traitId: TypeId): bool {
+  if (traitId == TYPE_ERROR_ID) {
+    return false;
+  }
+  return typeSatisfiesBound(ref prog, implType, traitId);
+}

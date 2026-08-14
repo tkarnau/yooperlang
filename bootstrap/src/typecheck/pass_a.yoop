@@ -16,8 +16,9 @@ import { Vec }, * as vec from "std/core/vec.yoop";
 import { Map }, * as map from "std/collections/map.yoop";
 import { disposable } from "std/core/kinds.yoop";
 import * as str from "std/core/strings.yoop";
-import { AST, ASTNode, ASTNodeKind, NodeId, childAt, declOf, isExportDecl, nodeAt, kindName } from "../ast";
+import { AST, ASTNode, ASTNodeKind, NodeId, childAt, declOf, isExportDecl, isCExportDecl, nodeAt, kindName } from "../ast";
 import { Module } from "../source_graph";
+import { COMPOSE_CLAUSE } from "../parse";
 
 export function passARegisterShells(
   ref prog: Program,
@@ -65,6 +66,17 @@ function registerFileShells(
     switch (declNode.kind) {
       case ASTNodeKind.FUNCTION_DECL: {
         registerFunctionShell(ref prog, ref tm, declNode, exported, isEntry, moduleId, ref m.ast);
+        // `export "C" function` keeps its bare spelling, which is the same
+        // question an `extern` asks and gets the same answer: the name goes in
+        // `externNames`, so both the DEFINITION and every call from this module
+        // land on the unmangled symbol. The table is per MODULE, so a sibling
+        // file of a directory module reaches it and an importing module does
+        // not - the reference has that limitation too (a cross-module call
+        // there emits the mangled name and fails to link), so the bootstrap
+        // does not paper over it.
+        if (isCExportDecl(ref m.ast, childId)) {
+          map.mapInsert(ref tm.externNames, declNode.name, true);
+        }
       }
       case ASTNodeKind.TYPE_DECL: {
         registerTypeShell(ref prog, ref tm, declNode, moduleId, exported, ref m.ast);
@@ -89,6 +101,15 @@ function registerFileShells(
         let x: usize = 0;
         while (x < declNode.childCount) {
           const externNode = nodeAt(ref m.ast, childAt(ref m.ast, declNode, x));
+          // `type FILE;` - an OPAQUE type, registered as a struct with no
+          // fields. It is a TYPE rather than a signature, so it takes the same
+          // shell an ordinary `type` decl does and none of the extern rules
+          // below apply to it.
+          if (externNode.kind == ASTNodeKind.EXTERN_TYPE_DECL) {
+            registerTypeShell(ref prog, ref tm, externNode, moduleId, exported, ref m.ast);
+            x += 1;
+            continue;
+          }
           if (isIntrinsic && !isKnownIntrinsic(externNode.name)) {
             // User code cannot fabricate an intrinsic: the name IS the
             // lowering, so one codegen does not know would typecheck and then
@@ -143,6 +164,10 @@ function registerFileShells(
             map.mapInsert(ref tm.externNames, externNode.name, true);
           } else {
             registerIntrinsic(ref prog, externNode.name);
+            // And per-module, which is what an UNQUALIFIED call site is judged
+            // against - see TypedModule.intrinsicNames for the miscompile the
+            // program-level list alone allows.
+            map.mapInsert(ref tm.intrinsicNames, externNode.name, true);
           }
           x += 1;
         }
@@ -161,16 +186,19 @@ function registerFileShells(
         bindName(ref prog, ref tm, declNode, Symbol.Trait { typeId: traitShell }, exported);
       }
       case ASTNodeKind.VTABLE_DECL: {
-        // A vtable IS a struct - of function pointers, one per trait method -
-        // so it gets a struct shell and pass C fills it like any other. The
-        // SYMBOL is what records that it erases a trait.
-        const vtableShell = internType(ref prog, Type.Struct {
+        // A vtable is LAID OUT like a struct of function pointers and is not
+        // one. Two things a struct cannot carry are exactly what building a
+        // value needs: which TRAIT it erases, and in what ORDER its slots sit.
+        // A third is invisible in the declaration - the leading `ctx` pointer,
+        // which no field declares and every dispatch passes as the receiver.
+        //
+        // So it gets its own shell, which pass C fills. See fillVtable.
+        const vtableShell = internType(ref prog, Type.VTable {
           decl: { name: declNode.name, module: moduleId, populated: false,
                   propagatesKind: "" },
+          forTrait: TYPE_ERROR_ID,
           fields: vec.vecNew(0),
-          methods: map.mapNew(0, map.stringKeyOps()),
-          implementsTraits: vec.vecNew(0),
-          generic: { origin: 0, args: vec.vecNew(0) },
+          methodOrder: vec.vecNew(0),
         });
         bindName(ref prog, ref tm, declNode, Symbol.Vtable { typeId: vtableShell }, exported);
       }
@@ -180,14 +208,16 @@ function registerFileShells(
         // to bind, because `import { disposable } from "std/core/kinds.yoop"`
         // is how every file in the tree reaches one, and an unbound name there
         // would fail the import rather than the enforcement.
-        registerKind(ref prog, {
+        let info: KindInfo = {
           name: declNode.name,
           pausable: hasClause(ref m.ast, declNode, PAUSABLE_CLAUSE),
           providesTask: clauseArgumentIs(ref m.ast, declNode, PROVIDES_CLAUSE, TASK_SUBJECT),
           disposeMethod: clauseArgument(ref m.ast, declNode, MUST_CALL_CLAUSE),
           refcounted: hasClause(ref m.ast, declNode, REFCOUNTED_CLAUSE),
           appliesToRegion: clauseArgumentIs(ref m.ast, declNode, APPLIES_TO_CLAUSE, REGION_SUBJECT),
-        });
+        };
+        mergeComposedKinds(ref prog, ref m.ast, declNode, ref info);
+        registerKind(ref prog, info);
         bindName(ref prog, ref tm, declNode, Symbol.Kind { kindId: 0 }, exported);
       }
       case ASTNodeKind.CONST_DECL: {
@@ -464,6 +494,59 @@ const TASK_SUBJECT: string = "Task";
 // `refcounted retain release;` on `kind pooled`. See KindInfo.refcounted.
 const REFCOUNTED_CLAUSE: string = "refcounted";
 
+// `kind scoped_alt = disposable_base & noescape;` - fold each NAMED operand's
+// already-registered clauses into the composed kind.
+//
+// A composed kind is every operand's clauses at once, so the merge is a union:
+// each boolean ORs in, and `disposeMethod` takes the first operand that names
+// one. An inline `{ ... }` operand needs nothing here - its clauses were parsed
+// straight into this decl's own run, so they were already read above.
+//
+// Order is DECLARATION order, which is what makes the lookup work at all: a
+// composition names operands declared before it, in this file or in an imported
+// module, and both are registered by the time this runs. An operand that is not
+// is refused BY NAME rather than silently contributing nothing - the whole
+// reason this function exists is that dropping a `mustCall` compiles a promised
+// cleanup to no call at all.
+function mergeComposedKinds(
+  ref prog: Program,
+  ref ast: AST,
+  declNode: ASTNode,
+  ref info: KindInfo
+): void {
+  let i: usize = 0;
+  while (i < declNode.childCount) {
+    const clause = nodeAt(ref ast, childAt(ref ast, declNode, i));
+    if (!str.stringEq(clause.name, COMPOSE_CLAUSE)) {
+      i += 1;
+      continue;
+    }
+    let operandName = "";
+    if (clause.strId < ast.strings.len) {
+      operandName = vec.vecGet(ref ast.strings, clause.strId);
+    }
+    switch (lookupKind(ref prog, operandName)) {
+      case Option.None: {
+        reportError(
+          ref prog,
+          `kind "${declNode.name}" composes "${operandName}", which no kind declares - an operand has to be declared before the composition that names it`,
+          clause.sourceLoc
+        );
+      }
+      case Option.Some { value: operand }: {
+        info.pausable = info.pausable || operand.pausable;
+        info.providesTask = info.providesTask || operand.providesTask;
+        info.refcounted = info.refcounted || operand.refcounted;
+        info.appliesToRegion = info.appliesToRegion || operand.appliesToRegion;
+        if (info.disposeMethod.len == 0) {
+          info.disposeMethod = operand.disposeMethod;
+        }
+      }
+    }
+    i += 1;
+  }
+}
+
 // The FIRST word after a clause's leading one: the `dispose` in
 // `mustCall dispose beforeScopeEnd;`, the `region` in `appliesTo region;`.
 // "" when the clause is absent or carries nothing.
@@ -515,5 +598,14 @@ function isKnownIntrinsic(name: string): bool {
     // intrinsic because it lowers to a bare `llvm.coro.suspend` and there is no
     // symbol a call could reach. Everything above it in std - awaitReadable,
     // awaitWritable - is ordinary yoop built on this one line.
-    str.stringEq(name, "suspendNow");
+    str.stringEq(name, "suspendNow") ||
+    // The four `Task<T>` intrinsics from std/core/concurrency.yoop. They are
+    // intrinsics rather than externs for one reason: each takes a `Task<T>`,
+    // and an `extern "C"` signature has no way to spell one - the handle would
+    // have to be a raw pointer, which throws away the result type `waitUntil`
+    // needs to build its answer out of.
+    str.stringEq(name, "waitUntil") ||
+    str.stringEq(name, "cancel") ||
+    str.stringEq(name, "armComplete") ||
+    str.stringEq(name, "isDone");
 }

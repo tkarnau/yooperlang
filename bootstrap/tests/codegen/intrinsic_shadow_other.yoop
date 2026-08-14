@@ -1,0 +1,9 @@
+// The allocator intrinsics, declared where std/core/alloc.yoop declares them.
+// Reached from intrinsic_shadow.yoop through a NAMESPACE, which is the only way
+// a value from std may be imported and the reason the qualified call there is
+// unambiguous.
+
+extern "intrinsic" from "compiler" {
+    function ctxAlloc<T>(n: usize): T[];
+    function ctxFree<T>(a: T[]): void;
+}

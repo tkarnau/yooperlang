@@ -1,0 +1,11 @@
+plain happy: ok 5
+plain sad: err "reading count: negative input"
+template happy: ok 5
+  (building context 9)
+template sad: err "reading field 9: negative input"
+nested sad: err "loading config: reading count: negative input"
+same ok 6
+same err "field -1: not a number" line=12
+cross ok 7
+cross err "loading header (io 5)" code=5
+exit=0

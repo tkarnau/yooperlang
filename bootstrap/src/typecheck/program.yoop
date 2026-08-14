@@ -78,6 +78,16 @@ export type TypedModule propagates<disposable> {
   // would look for a symbol named after the field and emit `call @hash`.
   // Sparse and keyed by `uint64(nodeId)`, like the other call decorations.
   indirectCalls: Map<uint64, bool>,
+  // The three VTABLE decorations, all keyed by the CALL node and all recording
+  // something only pass D could establish. `vtableBuilds` is which CONCRETE
+  // type a `VT.from(ref x)` erases, so codegen knows whose method symbols to
+  // store; `vtableFromFns` marks the shim form, whose slots hold generated
+  // ctx-dropping wrappers around named functions; `vtableSlots` is the SLOT
+  // INDEX of a dispatch, which is a property of the vtable's declaration order
+  // and not of the call. See typecheck/vtable.yoop.
+  vtableBuilds: Map<uint64, TypeId>,
+  vtableFromFns: Map<uint64, bool>,
+  vtableSlots: Map<uint64, usize>,
   // Expression nodes whose `ref T` value is consumed as a plain `T` - a borrow
   // OPENED because the position wanted the thing rather than the borrow. Pass D
   // is the only layer that can say so, because the answer is "what did the
@@ -103,6 +113,26 @@ export type TypedModule propagates<disposable> {
   // conversion exists" are different facts and only pass D established the
   // second. Sparse and keyed by `uint64(nodeId)`.
   tryIntoUses: Map<uint64, bool>,
+  // TRY_OP nodes carrying a context string (`f()? "loading config"`) whose two
+  // Err payloads are both `string`, so the note is CONCATENATED rather than
+  // handed to a `WithContext` impl. Presence of the context expression is on
+  // the node; this map is only which of the two shapes pass D picked, and it is
+  // recorded for the same reason `tryIntoUses` is - codegen could compare the
+  // types itself, but "both are strings" and "both are strings and that is why
+  // no impl was looked for" are different facts. Sparse, keyed by
+  // `uint64(nodeId)`.
+  tryContextConcat: Map<uint64, bool>,
+  // The intrinsic names THIS module declared, as opposed to `Program.intrinsics`
+  // which is every one in the graph. Both are needed and they answer different
+  // questions: the program-level one says "this name IS an intrinsic somewhere",
+  // and this one says "an unqualified call to it here means that intrinsic".
+  //
+  // Without the second, a module declaring an ordinary function that happens to
+  // share a name with one has its own calls lowered as the intrinsic -
+  // std/tls/ffi.yoop declares `ctxFree(ref c: TlsCtx)` and got the allocator's
+  // `ctxFree<T>(a: T[])` emitted for it, which is invalid IR at best and a
+  // silent miscompile whenever the shapes happen to line up.
+  intrinsicNames: Map<string, bool>,
   resolvedTypes: Vec<TypeId>,     // dense decoration, indexed by NodeId (0 = none / infer-later)
   // Which monomorphized function a CALL node resolved to, when the callee was
   // generic. Sparse, because most calls are not - the shape program.yoop's
@@ -338,9 +368,14 @@ export function initTypedModule(moduleId: string): TypedModule propagates<dispos
   let taskMethods: Map<uint64, bool> = map.mapNew(0, map.uint64KeyOps());
   let asyncCalls: Map<uint64, bool> = map.mapNew(0, map.uint64KeyOps());
   let indirectCalls: Map<uint64, bool> = map.mapNew(0, map.uint64KeyOps());
+  let vtableBuilds: Map<uint64, TypeId> = map.mapNew(0, map.uint64KeyOps());
+  let vtableFromFns: Map<uint64, bool> = map.mapNew(0, map.uint64KeyOps());
+  let vtableSlots: Map<uint64, usize> = map.mapNew(0, map.uint64KeyOps());
   let derefUses: Map<uint64, bool> = map.mapNew(0, map.uint64KeyOps());
   let reborrowUses: Map<uint64, bool> = map.mapNew(0, map.uint64KeyOps());
   let tryIntoUses: Map<uint64, bool> = map.mapNew(0, map.uint64KeyOps());
+  let tryContextConcat: Map<uint64, bool> = map.mapNew(0, map.uint64KeyOps());
+  let intrinsicNames: Map<string, bool> = map.mapNew(0, map.stringKeyOps());
   let calleeReceiver: Map<uint64, TypeId> = map.mapNew(0, map.uint64KeyOps());
   return {
     moduleId: moduleId,
@@ -355,9 +390,14 @@ export function initTypedModule(moduleId: string): TypedModule propagates<dispos
     taskMethods: taskMethods,
     asyncCalls: asyncCalls,
     indirectCalls: indirectCalls,
+    vtableBuilds: vtableBuilds,
+    vtableFromFns: vtableFromFns,
+    vtableSlots: vtableSlots,
     derefUses: derefUses,
     reborrowUses: reborrowUses,
     tryIntoUses: tryIntoUses,
+    tryContextConcat: tryContextConcat,
+    intrinsicNames: intrinsicNames,
     calleeInstance: calleeInstance,
     calleeReceiver: calleeReceiver,
     resolvedTypes: vec.vecNew(0),

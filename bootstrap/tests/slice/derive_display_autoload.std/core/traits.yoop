@@ -1,0 +1,10 @@
+// The Display half of std/core/traits.yoop, and nothing else.
+//
+// A STUB, on purpose: the real file needs Result, Iterable and the async kind,
+// and what this fixture is about is `@derive(display)` REACHING the trait
+// without the deriving file naming it. The declaration is copied SHAPE for
+// shape from std/core/traits.yoop.
+
+export trait Display {
+    function toString(ref self): string;
+}

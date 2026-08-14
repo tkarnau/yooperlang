@@ -1,0 +1,5 @@
+percent=a%20b%2Fc%3Fd%3De
+a%20b%2Fc%3Fd%3De
+literal 42%
+via n=7 raw=a%20b%2Fc%3Fd%3De
+exit=0

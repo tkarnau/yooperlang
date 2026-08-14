@@ -1,0 +1,36 @@
+// `@derive(display)` reaching `Display` with nothing importing it.
+//
+// The other half of the feature, split into its own fixture because it cannot
+// be asserted against the JS reference (see the .bootonly note): this file
+// imports nothing and declares no trait, so the ONLY route to `Display` is the
+// autoloaded std/core/traits.yoop and the symbol bind in typecheck/derive.yoop.
+//
+// `Manual` leans on the same binding for a HAND-written impl, which is what
+// says the name is bound for the MODULE rather than only for the generated
+// method.
+
+@derive(display)
+type Point {
+  x: int32,
+  y: int32,
+}
+
+type Manual implements Display {
+  code: int32,
+  function toString(ref self): string {
+    return `manual(${self.code})`;
+  }
+}
+
+@derive(display)
+type Wrapper {
+  p: Point,
+  hand: Manual,
+}
+
+function main(): int32 {
+  const w: Wrapper = { p: { x: 1, y: 2 }, hand: { code: 9 } };
+  printf("%s\n", `${w}`);
+  printf("%s\n", Display.toString(ref w));
+  return 0;
+}

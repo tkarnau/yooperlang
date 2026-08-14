@@ -54,6 +54,40 @@ function pairSum(p: Pair): int {
   }
 }
 
+// SHORTHAND pattern fields: `{ r }` is `{ r: r }`, and the two spellings mix
+// inside one pattern beside a `_` discard. Worth running rather than only
+// parsing, because a shorthand that bound the wrong slot would still typecheck
+// whenever the field and the binding happen to share a type.
+function areaShort(s: Shape): int {
+  switch (s) {
+    case Shape.Circle { r }: { return 3 * r * r; }
+    case Shape.Rect { w, h: tall }: { return w * tall; }
+    case Shape.Empty: { return 0; }
+  }
+}
+
+// `==` and `!=` on two variants compare TAGS and nothing else. Two `Circle`s
+// with different radii are equal; a structural comparison is what `switch` is
+// for. Worth running because the wrong lowering is an `icmp` on the aggregate,
+// which is INVALID IR rather than a wrong answer - the compile succeeds and
+// clang refuses what it produced.
+function tagEq(a: Shape, b: Shape): int {
+  if (a == b) { return 1; }
+  return 0;
+}
+
+function tagNe(a: Shape, b: Shape): int {
+  if (a != b) { return 1; }
+  return 0;
+}
+
+function labelOf(p: Pair): int {
+  switch (p) {
+    case Pair.Origin: { return 0; }
+    case Pair.At { p: _, label }: { return label; }
+  }
+}
+
 function main(): int {
   const c: Shape = Shape.Circle { r: 2 };
   const r: Shape = Shape.Rect { h: 3, w: 4 };
@@ -70,5 +104,12 @@ function main(): int {
   const origin: Pair = Pair.Origin;
   const at: Pair = Pair.At { p: { x: 3, y: 4 }, label: 10 };
   printf("pair=%d %d\n", pairSum(origin), pairSum(at));
+  printf("short=%d %d %d\n", areaShort(c), areaShort(r), areaShort(e));
+  printf("label=%d %d\n", labelOf(origin), labelOf(at));
+
+  const c2: Shape = Shape.Circle { r: 2 };
+  const c9: Shape = Shape.Circle { r: 9 };
+  printf("tagEq=%d %d %d\n", tagEq(c2, c9), tagEq(c2, r), tagEq(e, e));
+  printf("tagNe=%d %d\n", tagNe(c2, c9), tagNe(c2, r));
   return 0;
 }

@@ -40,6 +40,11 @@ export function sizeOfType(ref prog: Program, rawId: TypeId): usize {
       // own alignment. See variantPayloadSize.
       return roundUp(4 + variantPayloadSize(ref prog, id), 4);
     }
+    // A vtable is all pointers: the erased receiver, then one per slot. The
+    // ctx slot is not a declared field, which is why this is not sizeOfFields.
+    case Type.VTable { decl: d, forTrait: ft, fields: f, methodOrder: mo }: {
+      return POINTER_SIZE * (1 + f.len);
+    }
     case Type.Void: { return 0; }
     default: { return POINTER_SIZE; }
   }
@@ -58,6 +63,9 @@ export function alignOfType(ref prog: Program, rawId: TypeId): usize {
     }
     case Type.Variant { decl: d, cases: cs, methods: mm, implementsTraits: it, generic: g }: {
       return 4;
+    }
+    case Type.VTable { decl: d, forTrait: ft, fields: f, methodOrder: mo }: {
+      return POINTER_SIZE;
     }
     case Type.Void: { return 1; }
     default: { return POINTER_SIZE; }

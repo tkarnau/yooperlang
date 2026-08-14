@@ -57,12 +57,24 @@ export type Emitter propagates<disposable> {
   // making every hello-world compile fourteen C files to install a worker pool
   // it never uses is a real cost for no observable difference.
   hasTasks: bool,
+  // Set by the first `cancel` / `isDone` / `armComplete` / `waitUntil` this
+  // program lowers. A separate flag from `hasTasks` because the two are not the
+  // same question: a module holding a handle it was HANDED may cancel or poll
+  // it without declaring a `task` of its own, and `std/core/concurrency.yoop`'s
+  // `awaitTask` is exactly that.
+  usesTaskIntrinsics: bool,
+  // The ctx-dropping shims `VT.fromFn(...)` has already emitted, by symbol. One
+  // LLVM module holds the whole graph, so two `fromFn` calls naming the same
+  // function have to share one define - a second is an invalid redefinition
+  // rather than a duplicate. See instr_vtable.yoop.
+  fromFnShims: Map<string, bool>,
 }
 
 export function emitterNew(): Emitter propagates<disposable> {
   // Annotated rather than inline: `V` is not inferable from uint64KeyOps alone
   // and there is no turbofish.
   let constOps: Map<uint64, Operand> = map.mapNew(0, map.uint64KeyOps());
+  let fromFnShims: Map<string, bool> = map.mapNew(0, map.stringKeyOps());
   return {
     globals: text.make(1024),
     body: text.make(8192),
@@ -78,6 +90,8 @@ export function emitterNew(): Emitter propagates<disposable> {
     usesStringBuilder: false,
     usesRuntime: false,
     hasTasks: false,
+    usesTaskIntrinsics: false,
+    fromFnShims: fromFnShims,
   };
 }
 
@@ -186,6 +200,11 @@ export function llvmType(ref prog: Program, rawId: TypeId): string {
     case Type.Variant { decl: d, cases: cs, methods: mm, implementsTraits: it, generic: g }: {
       return variantLlvmName(moduleIdOf(ref prog, d.module), d.name);
     }
+    // A vtable value is `{ ptr ctx, ptr m0, ... }` - the erased receiver first,
+    // then one function pointer per slot. Named for the same reason a struct is.
+    case Type.VTable { decl: d, forTrait: ft, fields: f, methodOrder: mo }: {
+      return vtableLlvmName(moduleIdOf(ref prog, d.module), d.name);
+    }
     default: { return "ptr"; }
   }
 }
@@ -224,6 +243,13 @@ export function structLlvmName(moduleId: string, name: string): string {
 // The whole variant value: `%variant.mathx_1__Result`.
 export function variantLlvmName(moduleId: string, name: string): string {
   return `%variant.${moduleId}${SYMBOL_MODULE_SEPARATOR}${name}`;
+}
+
+// The whole vtable value: `%vtable.traits_1__Reader`. Its own namespace rather
+// than `%struct.` because a vtable is not a struct - it carries a ctx slot no
+// field declares, and telling the two apart in a dump is worth the prefix.
+export function vtableLlvmName(moduleId: string, name: string): string {
+  return `%vtable.${moduleId}${SYMBOL_MODULE_SEPARATOR}${name}`;
 }
 
 // ONE case's payload, as a struct of its fields:

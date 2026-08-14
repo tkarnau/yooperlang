@@ -1,0 +1,120 @@
+// Shadowing a name in a NESTED block, and what happens when the block closes.
+//
+// Two questions that look like one and are not. Redeclaring a name in the SAME
+// block is a contradiction and stays refused ("redeclaration of v"); declaring
+// one in a NESTED block is an ordinary new binding that hides the outer one for
+// the extent of that block and no longer.
+//
+// It is worth an executable fixture rather than a unit test because the failure
+// mode is a WRONG ANSWER rather than a diagnostic: the inner binding gets its
+// own alloca either way, so a compiler that forgets to put the outer name back
+// still emits valid IR - it just reads the inner slot forever after.
+
+// The plainest form: an `if` arm shadows, and the outer value snaps back.
+function nestedIf(c: bool): int32 {
+  let v: int32 = 7;
+  let total: int32 = 0;
+  if (c) {
+    let v: int32 = 99;
+    total = total + v;
+  }
+  total = total + v;
+  return total;
+}
+
+// Three deep, each level a different value, unwinding one level at a time.
+function threeDeep(): int32 {
+  let n: int32 = 1;
+  let out: int32 = n;
+  if (true) {
+    let n: int32 = 2;
+    out = out * 10 + n;
+    if (true) {
+      let n: int32 = 3;
+      out = out * 10 + n;
+    }
+    out = out * 10 + n;
+  }
+  return out * 10 + n;
+}
+
+// A shadow whose TYPE differs from the outer binding's is NOT here on purpose.
+// `let x: int32 = 5; if (true) { let x: string = "s"; } return x;` makes the JS
+// reference emit `ret i32 %t4` on a `ptr` - it restores the NAME and not the
+// type. The bootstrap gets it right; a fixture asserted against both compilers
+// has to stay inside the intersection, so the divergence is written up in
+// plans/bootstrap-completion.md instead.
+
+// A loop counter shadows an enclosing binding, and the loop's own scope is what
+// ends the shadow - there is no block around the head to do it.
+function counterShadow(): int32 {
+  let i: int32 = 99;
+  for (let i = 0; i < 3; i += 1) {
+    printf("counterShadow inner: %d\n", i);
+  }
+  return i;
+}
+
+// The same for a `for ... in` variable, whose binding also lives in the head.
+function forInShadow(): int32 {
+  let e: int32 = 42;
+  const xs: int32[] = [1, 2];
+  for e in xs {
+    printf("forInShadow inner: %d\n", e);
+  }
+  return e;
+}
+
+// A while body shadows on every iteration. The outer name has to survive all
+// three passes, not just the first.
+function loopBody(): int32 {
+  let k: int32 = 100;
+  let i: int32 = 0;
+  let acc: int32 = 0;
+  while (i < 3) {
+    let k: int32 = i * 2;
+    acc = acc + k;
+    i = i + 1;
+  }
+  return acc + k;
+}
+
+// A shadow inside a SWITCH arm. Arms are blocks, so each arm's binding is its
+// own and the outer one is intact after the switch.
+function armShadow(c: int32): int32 {
+  let m: int32 = 1000;
+  let out: int32 = 0;
+  switch (c) {
+    case 1: {
+      let m: int32 = 11;
+      out = m;
+    }
+    default: {
+      let m: int32 = 22;
+      out = m;
+    }
+  }
+  return out + m;
+}
+
+// A PARAMETER shadowed by a local in a nested block. A parameter is a local
+// slot like any other, so the restore has to reach it too.
+function paramShadow(p: int32): int32 {
+  let out: int32 = 0;
+  if (true) {
+    let p: int32 = 500;
+    out = out + p;
+  }
+  return out + p;
+}
+
+function main(): int32 {
+  printf("nestedIf: %d %d\n", nestedIf(true), nestedIf(false));
+  printf("threeDeep: %d\n", threeDeep());
+  printf("counterShadow: %d\n", counterShadow());
+  printf("forInShadow: %d\n", forInShadow());
+  printf("loopBody: %d\n", loopBody());
+  printf("armShadow: %d %d\n", armShadow(1), armShadow(2));
+  printf("paramShadow: %d\n", paramShadow(3));
+  return 0;
+}

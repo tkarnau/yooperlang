@@ -36,6 +36,13 @@ function emitCallExpr(ref cx: Cx, expr: ASTNode, exprId: NodeId, ref out: Operan
   if (expr.childB == 0 && isPrimTypeName(expr.name)) {
     return emitCast(ref cx, expr, exprId, ref out);
   }
+  // `Dispatcher.from(ref h)`, `PredVT.fromFn(f)` and `Reader.read(ref r, buf)`
+  // are all `Name.member(...)` and NONE of them names a symbol - two build a
+  // value and the third calls through a slot. Pass D said which; see
+  // codegen/vtable.yoop.
+  if (isVtableCall(ref cx, exprId)) {
+    return emitVtableCall(ref cx, expr, exprId, ref out);
+  }
   // A `task` call is a SPAWN, not a call, and the spawn lowering lives on the
   // BINDING - it has to know where the handle goes and what the scope owes it.
   // Reaching here means the spawn appeared somewhere no binding covers
@@ -89,6 +96,12 @@ function emitCallExpr(ref cx: Cx, expr: ASTNode, exprId: NodeId, ref out: Operan
     if (perr.len > 0) {
       return perr;
     }
+    // `printf(<a runtime string>)` becomes `printf("%s", <it>)`. Every `%` in a
+    // string the program BUILT would otherwise be read as a conversion with no
+    // vararg behind it. See printf_format.yoop - it runs after promotion
+    // because a promoted operand is still the same operand kind, and before the
+    // call line because that is what reads `args`.
+    guardRuntimeFormat(ref cx, ref args, expr.name, fixedTys.len);
   }
 
   const isVoid = text.equals(retTy, "void");

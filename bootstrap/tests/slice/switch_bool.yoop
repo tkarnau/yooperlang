@@ -1,0 +1,99 @@
+// `switch` over a BOOL.
+//
+// A bool is its own scrutinee kind rather than a one-bit integer, and the
+// reason is exhaustiveness: it has exactly two values, so `case true` beside
+// `case false` covers everything and needs no default. That makes it the only
+// non-variant switch that may end with no default arm, which in the emitted IR
+// means a jump table whose default block is `unreachable`.
+//
+// The spellings do not mix in either direction: `case 1:` against a bool and
+// `case true:` against an int32 are both refused, which is what the two
+// `refuses` unit tests beside this cover.
+
+// Exhaustive with no default. Every arm returns, so nothing reaches the join
+// and the trailing `return -1` is dead - which is the shape that breaks if the
+// default block is left out of the table.
+function label(b: bool): int32 {
+  switch (b) {
+    case true: { return 1; }
+    case false: { return 0; }
+  }
+  return -1;
+}
+
+// One arm, plus a default. The default is what makes it exhaustive here.
+function onlyTrue(b: bool): int32 {
+  switch (b) {
+    case true: { return 10; }
+    default: { return 20; }
+  }
+}
+
+// Both cases AND a default. Allowed, unlike the variant rule - the reference
+// accepts it, and a bool has too few values for a redundant default to be
+// worth a diagnostic.
+function bothAndDefault(b: bool): int32 {
+  switch (b) {
+    case true: { return 30; }
+    case false: { return 31; }
+    default: { return 99; }
+  }
+}
+
+// Two values sharing one arm, which is the same multi-pattern arm an integer
+// switch has.
+function shared(b: bool): int32 {
+  switch (b) {
+    case true, false: { return 7; }
+  }
+}
+
+// The scrutinee is an EXPRESSION rather than a name, so the comparison's result
+// feeds the table directly.
+function overExpr(n: int32): int32 {
+  switch (n > 3) {
+    case true: { return 100 + n; }
+    case false: { return n; }
+  }
+}
+
+// A bool switch is a BREAKABLE scope like any other, and `break` in an arm
+// lands after it rather than leaving the function.
+function withBreak(b: bool): int32 {
+  let out: int32 = 0;
+  switch (b) {
+    case true: {
+      out = 1;
+      break;
+    }
+    case false: {
+      out = 2;
+    }
+  }
+  return out + 1000;
+}
+
+// Nested inside a loop, with `continue` looking straight past the switch to the
+// loop the way it does for every other scrutinee.
+function counted(): int32 {
+  let total: int32 = 0;
+  for (let i = 0; i < 6; i += 1) {
+    switch (i % 2 == 0) {
+      case true: { continue; }
+      case false: { }
+    }
+    total = total + i;
+  }
+  return total;
+}
+
+function main(): int32 {
+  printf("label: %d %d\n", label(true), label(false));
+  printf("onlyTrue: %d %d\n", onlyTrue(true), onlyTrue(false));
+  printf("bothAndDefault: %d %d\n", bothAndDefault(true), bothAndDefault(false));
+  printf("shared: %d %d\n", shared(true), shared(false));
+  printf("overExpr: %d %d\n", overExpr(5), overExpr(2));
+  printf("withBreak: %d %d\n", withBreak(true), withBreak(false));
+  printf("counted: %d\n", counted());
+  return 0;
+}

@@ -148,12 +148,26 @@ function parseAST(ref ps: ParserState): Result<NodeId, ParsingError> {
     peekTag = SelfLexing.peek(ref ps).tag;
   }
 
+  // A file that wrote `a..b` gets a synthesized namespace import of
+  // std/core/range.yoop, FIRST in the decl run - every consumer reads the
+  // leading run of imports and stops at the first other declaration. See
+  // range.yoop for the whole lowering.
+  let extra: usize = 0;
+  let rangeImportId: NodeId = 0;
+  if (ps.usedRange) {
+    rangeImportId = buildRangeImport(ref ps);
+    extra = 1;
+  }
+
   const start: usize = ps.ast.childIds.len;
+  if (extra == 1) {
+    vec.vecPush(ref ps.ast.childIds, rangeImportId);
+  }
   // copy the dynamic body into the childIds so we can destroy
   // the scratch buffer (body: Vec<NodeId>)
   vec.vecExtendFrom(ref ps.ast.childIds, vec.vecAsArray(ref body));
   program.childStart = start;
-  program.childCount = body.len;
+  program.childCount = body.len + extra;
   ps.ast.root = SelfLexing.pushNode(ref ps, program);
 
   return Result.Ok { value: ps.ast.root };
@@ -188,6 +202,8 @@ export function parseInto(ast: AST, src: uint8[]): Result<ParsedFile, ParsingErr
     src: ref src,
     tables: ref tables,
     pendingGt: false,
+    usedRange: false,
+    inForInIterExpr: false,
   };
 
   SelfLexing.advance(ref pState)?; // prime: load the first real token into currentLex

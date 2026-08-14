@@ -140,6 +140,16 @@ export function checkTryOp(
     return TYPE_ERROR_ID;
   }
 
+  // `expr? e { ... }` HANDLES the failure right here, so none of the
+  // propagation machinery below applies - there is no Err payload to make fit,
+  // and in particular no requirement that the enclosing function return a
+  // fallible variant. That last part is the point of the form: it works in
+  // `main`, or in anything else returning a plain value, where bare `?` is
+  // refused outright.
+  if (expr.childC != 0) {
+    return checkTryHandler(ref prog, ref tm, ref ast, exprId, expr, ref got, ref scope);
+  }
+
   const want = fallibleShapeOf(ref prog, prog.currentReturn);
   if (!want.isFallible) {
     reportError(
@@ -148,6 +158,19 @@ export function checkTryOp(
       expr.sourceLoc
     );
     return TYPE_ERROR_ID;
+  }
+
+  // `expr? "loading config"` prefixes a NOTE onto the error on the way out. It
+  // SUBSUMES the `Into` conversion below rather than composing with it: a
+  // `WithContext<TargetErr>` impl produces the outer Err payload directly, so
+  // one clause covers the same-shape and cross-shape cases together, and
+  // `tryIntoUses` is deliberately not consulted when a context is present.
+  if (expr.childB != 0) {
+    checkExpr(ref prog, ref tm, ref ast, expr.childB, TYPE_ERROR_ID, ref scope);
+    if (!checkTryContext(ref prog, ref tm, ref ast, exprId, expr, ref got, ref want)) {
+      return TYPE_ERROR_ID;
+    }
+    return got.okType;
   }
 
   // The Err payload has to FIT the one the enclosing Err carries, or CONVERT
@@ -176,25 +199,38 @@ export function checkTryOp(
 // Does `source` promise `Into<target>`, with an `into` method to back it?
 //
 // Matched by trait NAME plus its single argument rather than by resolving
-// `Into` as a symbol. The trait lives in std/core/traits.yoop, which the
-// reference AUTOLOADS into every graph and the bootstrap does not - so the
-// module writing the `?` may never have heard of `Into`, while the module that
-// declared the error type certainly has. Going through the name keeps the check
-// where the evidence is.
+// `Into` as a symbol. The trait lives in std/core/traits.yoop, which IS
+// autoloaded into every graph now - but the module writing the `?` still need
+// never have imported it, while the module that declared the error type
+// certainly did. Going through the name keeps the check where the evidence is.
 //
 // The METHOD is checked too, not just the claim. `checkTraitsSatisfied` already
 // refuses a type that claims a trait without supplying its methods, so this is
 // belt and braces - but codegen is about to emit a call to that symbol, and an
 // unfilled shell here would emit a call to nothing.
 function errorConvertsInto(ref prog: Program, source: TypeId, target: TypeId): bool {
-  if (lookupMethod(ref prog, source, INTO_METHOD) == TYPE_ERROR_ID) {
+  return claimsAppliedTrait(ref prog, source, INTO_TRAIT, INTO_METHOD, target);
+}
+
+// The shared shape behind `Into<T>` and `WithContext<T>`: does `source` claim
+// `<trait><target>` and supply `<method>`? Both traits are one-parameter, one-
+// method and matched by name for the same reason, so they are one check with
+// two sets of names rather than two checks.
+function claimsAppliedTrait(
+  ref prog: Program,
+  source: TypeId,
+  traitName: string,
+  methodName: string,
+  target: TypeId
+): bool {
+  if (lookupMethod(ref prog, source, methodName) == TYPE_ERROR_ID) {
     return false;
   }
   disposable claimed: Vec<TypeId> = claimedTraitsOf(ref prog, source);
   let i: usize = 0;
   while (i < claimed.len) {
     const t = vec.vecGet(ref claimed, i);
-    if (str.stringEq(nominalNameOf(ref prog, t), INTO_TRAIT)) {
+    if (str.stringEq(nominalNameOf(ref prog, t), traitName)) {
       disposable args: Vec<TypeId> = traitArgsOf(ref prog, t);
       if (args.len == 1 && vec.vecGet(ref args, 0) == target) {
         return true;

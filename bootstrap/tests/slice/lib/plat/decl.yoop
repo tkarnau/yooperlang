@@ -1,0 +1,20 @@
+module plat;
+
+// The extern block and the `export "C"` definition both live HERE. Calls from
+// this same file always emitted the unmangled symbol; the interesting half is
+// use.yoop beside it.
+extern "C" from "stdio.h" {
+  function puts(s: string): int32;
+}
+
+// A definition whose SYMBOL keeps its bare spelling, so a C caller can name it.
+// It is exported in the ordinary Yoop sense too, which is what lets main.yoop
+// import it.
+export "C" function plat_note(n: int32): int32 {
+  _ = puts("plat_note ran");
+  return n + 1;
+}
+
+export function sayHere(): int32 {
+  return puts("from the declaring file");
+}

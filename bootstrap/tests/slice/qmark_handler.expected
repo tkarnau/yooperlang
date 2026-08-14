@@ -1,0 +1,9 @@
+handled(2)=20
+  handler saw: odd index
+handled(3)=-1
+  skipping 1 (odd index)
+  skipping 3 (odd index)
+summed=60
+viaIf(1)=-2
+viaIf(4)=40
+exit=0

@@ -125,6 +125,12 @@ export function codegenProgram(ref prog: Program, ref graph: ModuleGraph): Resul
   // program that has a task in it. The trampolines are DEFINITIONS rather than
   // declares - they wrap LLVM intrinsics the C runtime cannot name - and they
   // go in last so their `declare` lines are already there.
+  if (e.usesTaskIntrinsics) {
+    const err = emitTaskIntrinsicDeclarations(ref e);
+    if (err.len > 0) {
+      return Result.Err { error: err };
+    }
+  }
   if (e.hasTasks) {
     const derr = emitTaskRuntimeDeclarations(ref e);
     if (derr.len > 0) {

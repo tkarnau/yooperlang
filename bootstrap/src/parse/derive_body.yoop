@@ -1,0 +1,161 @@
+module parse;
+
+// The BODY of a generated `toString`, and the reparse unit it is wrapped in.
+//
+// derive_text.yoop classifies one field and renders its fragment; this puts the
+// fragments together - a struct is one template over all of them, a variant is
+// an arm per case - and wraps the result in the host type the parser needs.
+
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { Text }, * as txt from "std/core/text.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import { AST, ASTNode, ASTNodeKind, NodeId, childAt, nodeAt } from "../ast";
+
+// The struct body: setup for every container field, then one template naming
+// them all.
+function emitStructBody(ref ast: AST, declNode: ASTNode, ref out: Text): void {
+  disposable setup: Text = txt.make(256);
+  disposable parts: Text = txt.make(256);
+  let n: usize = 0;
+  let i: usize = 0;
+  while (i < declNode.childCount) {
+    const member = nodeAt(ref ast, childAt(ref ast, declNode, i));
+    i += 1;
+    // The member run holds METHOD_DECLs too. Only fields print.
+    if (member.kind != ASTNodeKind.FIELD_DECL) {
+      continue;
+    }
+    if (n > 0) {
+      txt.push(ref parts, ", ");
+    }
+    disposable access: Text = txt.make(32);
+    txt.push(ref access, "self.");
+    txt.push(ref access, member.name);
+    disposable slot: Text = txt.make(8);
+    txt.pushUint(ref slot, uint64(n));
+    emitFieldFragment(
+      ref ast, member, txt.view(ref access), txt.view(ref slot), ref setup, ref parts
+    );
+    n += 1;
+  }
+  if (n == 0) {
+    txt.push(ref out, "return \"");
+    txt.push(ref out, declNode.name);
+    txt.push(ref out, " { }\";\n");
+    return;
+  }
+  txt.pushText(ref out, ref setup);
+  txt.push(ref out, "return `");
+  txt.push(ref out, declNode.name);
+  txt.push(ref out, " { ");
+  txt.pushText(ref out, ref parts);
+  txt.push(ref out, " }`;\n");
+}
+
+// The variant body: an arm per case, over `self`.
+//
+// Payload fields bind to GENERATED locals rather than to their own names, since
+// a user field called `s` would otherwise collide with a temporary. The output
+// mirrors the constructor syntax - `Shape.Circle { r: 5 }` / `Shape.Dot` - so a
+// dump reads back as the source that would rebuild it.
+//
+// The switch covers every declared case, so it needs no default and the body
+// needs no trailing return.
+function emitVariantBody(ref ast: AST, declNode: ASTNode, ref out: Text): void {
+  txt.push(ref out, "switch (self) {\n");
+  let ci: usize = 0;
+  let i: usize = 0;
+  while (i < declNode.childCount) {
+    const member = nodeAt(ref ast, childAt(ref ast, declNode, i));
+    i += 1;
+    if (member.kind != ASTNodeKind.VARIANT_CASE) {
+      continue;
+    }
+    emitVariantArm(ref ast, declNode.name, member, ci, ref out);
+    ci += 1;
+  }
+  txt.push(ref out, "}\n");
+}
+
+function emitVariantArm(
+  ref ast: AST,
+  ownerName: string,
+  caseNode: ASTNode,
+  ci: usize,
+  ref out: Text
+): void {
+  disposable qualified: Text = txt.make(32);
+  txt.push(ref qualified, ownerName);
+  txt.pushByte(ref qualified, '.');
+  txt.push(ref qualified, caseNode.name);
+
+  if (caseNode.childCount == 0) {
+    txt.push(ref out, "  case ");
+    txt.pushText(ref out, ref qualified);
+    txt.push(ref out, ": {\n    return \"");
+    txt.pushText(ref out, ref qualified);
+    txt.push(ref out, "\";\n  }\n");
+    return;
+  }
+
+  disposable bindings: Text = txt.make(64);
+  disposable setup: Text = txt.make(128);
+  disposable parts: Text = txt.make(128);
+  let fi: usize = 0;
+  while (fi < caseNode.childCount) {
+    const field = nodeAt(ref ast, childAt(ref ast, caseNode, fi));
+    disposable slot: Text = txt.make(8);
+    txt.pushUint(ref slot, uint64(ci));
+    txt.pushByte(ref slot, '_');
+    txt.pushUint(ref slot, uint64(fi));
+    disposable access: Text = txt.make(24);
+    txt.push(ref access, "_deriveP");
+    txt.push(ref access, txt.view(ref slot));
+
+    if (fi > 0) {
+      txt.push(ref bindings, ", ");
+      txt.push(ref parts, ", ");
+    }
+    txt.push(ref bindings, field.name);
+    txt.push(ref bindings, ": ");
+    txt.push(ref bindings, txt.view(ref access));
+    emitFieldFragment(
+      ref ast, field, txt.view(ref access), txt.view(ref slot), ref setup, ref parts
+    );
+    fi += 1;
+  }
+
+  txt.push(ref out, "  case ");
+  txt.pushText(ref out, ref qualified);
+  txt.push(ref out, " { ");
+  txt.pushText(ref out, ref bindings);
+  txt.push(ref out, " }: {\n");
+  txt.pushText(ref out, ref setup);
+  txt.push(ref out, "    return `");
+  txt.pushText(ref out, ref qualified);
+  txt.push(ref out, " { ");
+  txt.pushText(ref out, ref parts);
+  txt.push(ref out, " }`;\n  }\n");
+}
+
+// The whole reparse unit: a host type carrying the generated method.
+//
+// The host is named after the REAL declaration rather than after a dummy, which
+// the reference can afford because its method parser does not bake the owner
+// in. The bootstrap's does - `parseMethodDecl` synthesizes `ref self`'s
+// annotation from the owner's name - so a dummy host would give `self` the
+// wrong type. `implements Display` is there because the parser refuses a method
+// on a type with no implements clause, and it is also the clause derive.yoop
+// lifts back out and merges into the real declaration.
+export function deriveDisplaySource(ref ast: AST, declNode: ASTNode, ref out: Text): void {
+  txt.push(ref out, "type ");
+  txt.push(ref out, declNode.name);
+  txt.push(ref out, " implements Display {\n");
+  txt.push(ref out, "function toString(ref self): string {\n");
+  if (declNode.kind == ASTNodeKind.VARIANT_DECL) {
+    emitVariantBody(ref ast, declNode, ref out);
+  } else {
+    emitStructBody(ref ast, declNode, ref out);
+  }
+  txt.push(ref out, "}\n}\n");
+}

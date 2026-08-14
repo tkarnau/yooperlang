@@ -260,7 +260,14 @@ function parseForInLoop(ref ps: ParserState): ParsingResult {
   let node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.FOR_IN_LOOP);
   node.name = parseIdentAsName(ref ps)?;
   SelfLexing.expect(ref ps, TokenTags.IN)?;
-  node.childA = parseExpression(ref ps, 0)?;
+  // The iterable runs right up to the body's `{`, so a trailing `a.b` path
+  // must not take that brace for a variant payload. See ParserState's
+  // inForInIterExpr.
+  const savedForIn = ps.inForInIterExpr;
+  ps.inForInIterExpr = true;
+  const iterableId = parseExpression(ref ps, 0)?;
+  ps.inForInIterExpr = savedForIn;
+  node.childA = iterableId;
   node.childB = parseBlock(ref ps)?;
   return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
 }
@@ -347,9 +354,23 @@ function parseSwitchArm(ref ps: ParserState): ParsingResult {
 // Integer literals, and char literals - which ARE integer literals, already
 // decoded to their codepoint by the lexer. `case '0', '1':` is the readable
 // spelling of a digit test and appears throughout std.
+//
+// `true` and `false` come here too, as 1 and 0. What makes them different from
+// `case 1:` is recorded in `operator`, which holds the TOKEN the pattern was
+// written as: pass D refuses a bool pattern against an integer scrutinee and an
+// integer pattern against a bool one, and the value alone cannot tell them
+// apart. Nothing else on a LITERAL_PATTERN uses that slot.
 function parseLiteralPattern(ref ps: ParserState): ParsingResult {
   let node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.LITERAL_PATTERN);
   let negate = false;
+  if (SelfLexing.peek(ref ps).tag == TokenTags.TRUE || SelfLexing.peek(ref ps).tag == TokenTags.FALSE) {
+    const boolTok = SelfLexing.advance(ref ps)?;
+    node.operator = boolTok.tag;
+    if (boolTok.tag == TokenTags.TRUE) {
+      node.intVal = 1;
+    }
+    return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
+  }
   if (SelfLexing.peek(ref ps).tag == TokenTags.MINUS) {
     SelfLexing.advance(ref ps)?;
     negate = true;
@@ -428,19 +449,30 @@ function atKindPrefixedBlock(ref ps: ParserState): bool {
   }
 }
 
-// `ephemeral arenaScope(N) { ... }`
+// `ephemeral arenaScope(N) { ... }` and `ephemeral makeGuard(1);`
 //
 //   childC   the kind prefix list, the same slot a prefixed binding uses
 //   childA   the subject expression
-//   childB   the block
+//   childB   the block, or 0 for the IMPLICIT form
 //
 // The subject is anonymous on purpose: a region is held for the block's
 // duration and nothing inside names it. A kind that wants a name declares
 // `appliesTo binding` instead.
+//
+// Two spellings and one difference between them: with braces the region owns
+// the block and its scope-end call fires at the closing `}`; with a `;` it
+// owns the REST OF THE ENCLOSING SCOPE and the call fires where that ends, in
+// the ordinary reverse-declaration order beside every other disposal there.
+// The `;` form is what `ephemeral makeGuard(1); ephemeral makeGuard(2);` needs
+// to pop 2 before 1.
 function parseKindRegion(ref ps: ParserState): ParsingResult {
   let node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.KIND_REGION);
   node.childC = parseKindPrefixes(ref ps)?;
   node.childA = parseExpression(ref ps, 0)?;
+  if (SelfLexing.peek(ref ps).tag == TokenTags.SEMICOLON) {
+    SelfLexing.advance(ref ps)?;
+    return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
+  }
   node.childB = parseBlock(ref ps)?;
   return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
 }

@@ -34,8 +34,32 @@ import * as str from "std/core/strings.yoop";
 import { Type, typeAt, sizeOfType, isIntrinsicName } from "../typecheck";
 
 // True when this call names an intrinsic rather than a function.
+//
+// Being an intrinsic SOMEWHERE in the graph is not enough, because the name is
+// an ordinary identifier and nothing stops a module from using it for something
+// else: std/tls/ffi.yoop declares `ctxFree(ref c: TlsCtx)` beside the
+// allocator's `ctxFree<T>(a: T[])`, and lowering its calls as the intrinsic
+// emitted an `extractvalue` on a struct pointer. So the question is whether the
+// intrinsic is in scope HERE, and it is asked the way the reference asks it -
+// per module, off what that module declared or reached.
+//
+//   QUALIFIED    `intr.stringAsBytes(s)` names the namespace it came through,
+//                and a namespace member is whatever that module exported.
+//                Nothing local can shadow it.
+//   UNQUALIFIED  only when THIS module wrote the `extern "intrinsic"` block. A
+//                module that reached one any other way and then called it
+//                unqualified gets a call to a symbol nothing defines, which is
+//                a link error rather than a wrong answer - and no file in std,
+//                examples or bootstrap does it, because a std value import has
+//                to come through a namespace.
 export function isIntrinsicCall(ref cx: Cx, expr: ASTNode): bool {
-  return isIntrinsicName(cx.prog, expr.name);
+  if (!isIntrinsicName(cx.prog, expr.name)) {
+    return false;
+  }
+  if (expr.childB != 0) {
+    return true;
+  }
+  return map.mapContainsKey(ref cx.tm.intrinsicNames, expr.name);
 }
 
 // Lower one intrinsic call. Returns "" on success, else the error that stopped
@@ -76,6 +100,23 @@ export function emitIntrinsicCall(
   if (str.stringEq(expr.name, "ctxFree")) {
     return emitCtxFreeCall(ref cx, expr, ref out);
   }
+  // The four `Task<T>` ones. They live in task_intr.yoop rather than here
+  // because all four are calls into the scheduler and none of them is a
+  // representation trick, which is what everything above this line is.
+  if (str.stringEq(expr.name, "cancel")) {
+    return emitCancelIntrinsic(ref cx, expr, ref out);
+  }
+  if (str.stringEq(expr.name, "isDone")) {
+    return emitIsDoneIntrinsic(ref cx, expr, ref out);
+  }
+  if (str.stringEq(expr.name, "armComplete")) {
+    return emitArmCompleteIntrinsic(ref cx, expr, ref out);
+  }
+  if (str.stringEq(expr.name, "waitUntil")) {
+    return emitWaitUntilIntrinsic(ref cx, expr, exprId, ref out);
+  }
+  // `suspendNow` never reaches here: it is a SUSPEND rather than a call, so
+  // `await` intercepts it before an ordinary call lowering is reached.
   return internalError("no lowering for intrinsic", expr.name);
 }
 

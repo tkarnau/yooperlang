@@ -73,8 +73,23 @@ export function linkExecutable(
       text.push(ref cmd, ` "${vec.vecGet(ref sources, i)}"`);
       i += 1;
     }
+
+    // The glue sources a program gets for what it LINKS rather than for
+    // touching the runtime at all - `yoop_tls.c` for an OpenSSL program. See
+    // runtime_root.yoop. Inside the `needsRuntime` branch because that is
+    // where the runtime root is discovered, and because TLS is built on the
+    // runtime's I/O: a program that reaches std/tls has already reached it.
+    disposable glue: Vec<string> = glueSources(runtimeRoot, ref linkLibraries);
+    let g: usize = 0;
+    while (g < glue.len) {
+      text.push(ref cmd, ` "${vec.vecGet(ref glue, g)}"`);
+      g += 1;
+    }
   }
 
+  // `-L` and `-I` BEFORE the `-l` names: clang resolves a library against the
+  // search path in effect, and a `-l` ahead of its `-L` finds nothing.
+  pushSearchPaths(ref cmd);
   pushLinkLibraries(ref cmd, ref linkLibraries);
 
   const rc = system(text.view(ref cmd));
@@ -99,11 +114,10 @@ export function linkExecutable(
 //     unresolved symbols rather than a message.
 //   * everything else is `-lNAME`.
 //
-// Not here, and the reason it is not: the reference also probes conventional
-// install prefixes for `-L` / `-I` (Homebrew, vcpkg, YOOP_LIB_PATH). That is
-// toolchain policy rather than compilation, and nothing in the corpus needs it
-// to link - `m` is in libSystem on macOS and the rest are libraries with no
-// `main`, which never reach a link at all.
+// Where clang LOOKS for those libraries is search_paths.yoop, which is a
+// separate question and a separate file. It used to be missing on the grounds
+// that nothing in the corpus needed it; the program probe found
+// `examples/pass/https_client/main.yoop`, which does.
 function pushLinkLibraries(ref cmd: Text, ref libs: Vec<string>): void {
   let i: usize = 0;
   while (i < libs.len) {

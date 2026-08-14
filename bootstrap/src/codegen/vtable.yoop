@@ -1,0 +1,172 @@
+module codegen;
+
+// BUILDING a vtable value - the erasure. Calling through one is
+// vtable_call.yoop.
+//
+// The layout is `{ ptr ctx, ptr m0, ptr m1, ... }` - the erased receiver first,
+// then one function pointer per slot in the vtable's declared order. That
+// leading ctx is the whole trick and the reason a vtable is not a struct: a
+// method already takes `ptr self` as its first parameter, so the CONCRETE
+// method symbol is directly usable as the erased one and there is no thunk to
+// emit. Dispatch loads ctx out of slot 0 and passes it where `self` goes.
+//
+// Three shapes, and pass D said which is which (typecheck/vtable.yoop):
+//
+//     %t1 = alloca %vtable.m__Dispatcher            VT.from(ref x)
+//     %t2 = getelementptr ... ptr %t1, i32 0, i32 0
+//     store ptr %c.2.addr, ptr %t2                  ctx = the receiver
+//     %t3 = getelementptr ... ptr %t1, i32 0, i32 1
+//     store ptr @m__Const__handle, ptr %t3          slot 0 = its own method
+//     %t4 = load %vtable.m__Dispatcher, ptr %t1
+//
+// `fromFn` is the same value with a null ctx and a generated shim per slot, and
+// a dispatch is a load of both plus one indirect call (vtable_call.yoop). The
+// ASYNC dispatch is a third file, await_op.yoop, beside the drive loop it feeds:
+// what differs there is only the call's shape - a trailing result slot, a
+// coroutine handle back - and separating the slot load from it would put half a
+// call in each file.
+
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { Map }, * as map from "std/collections/map.yoop";
+import { Option } from "std/core/types.yoop";
+import { Text }, * as text from "std/core/text.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import { ASTNode, NodeId, childAt, nodeAt } from "../ast";
+import { Type, TypeId, moduleIdOf, typeAt, methodSymbolName, nominalModuleOf,
+  vtableSlotCount, vtableSlotNameAt, vtableSlotNamed } from "../typecheck";
+
+// Whether a CALL node is one of the three vtable shapes. Asked before anything
+// looks for a symbol, because none of the three has one.
+export function isVtableCall(ref cx: Cx, exprId: NodeId): bool {
+  return map.mapContainsKey(ref cx.tm.vtableBuilds, uint64(exprId))
+    || map.mapContainsKey(ref cx.tm.vtableFromFns, uint64(exprId))
+    || map.mapContainsKey(ref cx.tm.vtableSlots, uint64(exprId));
+}
+
+export function emitVtableCall(
+  ref cx: Cx,
+  expr: ASTNode,
+  exprId: NodeId,
+  ref out: Operand
+): string {
+  switch (map.mapGet(ref cx.tm.vtableBuilds, uint64(exprId))) {
+    case Option.Some { value: implType }: {
+      return emitVtableFrom(ref cx, expr, exprId, implType, ref out);
+    }
+    case Option.None: { }
+  }
+  if (map.mapContainsKey(ref cx.tm.vtableFromFns, uint64(exprId))) {
+    return emitVtableFromFn(ref cx, expr, exprId, ref out);
+  }
+  switch (map.mapGet(ref cx.tm.vtableSlots, uint64(exprId))) {
+    case Option.Some { value: slotIndex }: {
+      return emitVtableDispatch(ref cx, expr, exprId, slotIndex, ref out);
+    }
+    case Option.None: { }
+  }
+  return internalError("a vtable call reached codegen with no decoration", expr.name);
+}
+
+// `Dispatcher.from(ref c)` - the erasure.
+//
+// ctx is the receiver's ADDRESS, which the `ref` argument already evaluates to,
+// so there is nothing to spill: `emitExpr` on a REF_EXPRESSION hands back the
+// slot address itself.
+function emitVtableFrom(
+  ref cx: Cx,
+  expr: ASTNode,
+  exprId: NodeId,
+  implType: TypeId,
+  ref out: Operand
+): string {
+  const vtableType = resolvedTypeAt(ref cx, exprId);
+  const vtLlvm = llvmType(cx.prog, vtableType);
+
+  let ctx: Operand = Operand.None;
+  const err = emitVtableReceiver(ref cx, expr, ref ctx);
+  if (err.len > 0) {
+    return err;
+  }
+
+  const slot = declareAnonSlot(ref cx, vtLlvm);
+  const ctxGep = freshTemp(cx.e);
+  emitGepField(ref cx, ctxGep, vtLlvm, TEMP_SLOT_NAME, slot.id, VTABLE_CTX_INDEX);
+  emitStoreToPtr(ref cx, "ptr", ctx, ctxGep);
+
+  const home = moduleIdOf(cx.prog, nominalModuleOf(cx.prog, implType));
+  const count = vtableSlotCount(cx.prog, vtableType);
+  let i: usize = 0;
+  while (i < count) {
+    const methodName = vtableSlotNameAt(cx.prog, vtableType, i);
+    const gep = freshTemp(cx.e);
+    emitGepField(ref cx, gep, vtLlvm, TEMP_SLOT_NAME, slot.id, i + VTABLE_FIRST_SLOT);
+    emitStoreToPtr(
+      ref cx,
+      "ptr",
+      Operand.FuncRef {
+        home: home,
+        name: methodSymbolName(cx.prog, implType, methodName),
+      },
+      gep
+    );
+    i += 1;
+  }
+
+  const loaded = freshTemp(cx.e);
+  emitLoad(ref cx, loaded, vtLlvm, TEMP_SLOT_NAME, slot.id);
+  out = Operand.Temp { id: loaded };
+  return "";
+}
+
+// `PredVT.fromFn(isDigit)` - the same value with a NULL ctx and one shim per
+// slot. A named function has no receiver, so the shim is what makes it callable
+// through a convention that always passes one.
+function emitVtableFromFn(
+  ref cx: Cx,
+  expr: ASTNode,
+  exprId: NodeId,
+  ref out: Operand
+): string {
+  const vtableType = resolvedTypeAt(ref cx, exprId);
+  const vtLlvm = llvmType(cx.prog, vtableType);
+
+  const slot = declareAnonSlot(ref cx, vtLlvm);
+  const ctxGep = freshTemp(cx.e);
+  emitGepField(ref cx, ctxGep, vtLlvm, TEMP_SLOT_NAME, slot.id, VTABLE_CTX_INDEX);
+  emitStoreToPtr(ref cx, "ptr", Operand.Null, ctxGep);
+
+  const args = nodeAt(cx.ast, expr.childA);
+  const count = vtableSlotCount(cx.prog, vtableType);
+  let i: usize = 0;
+  while (i < count) {
+    if (i >= args.childCount) {
+      return internalError("a fromFn reached codegen short an argument", expr.name);
+    }
+    const argId = childAt(cx.ast, args, i);
+    const target = calleeSymbol(ref cx, nodeAt(cx.ast, argId), argId);
+    const slotType = vtableSlotNamed(
+      cx.prog, vtableType, vtableSlotNameAt(cx.prog, vtableType, i)
+    ).slotType;
+    disposable params: Vec<string> = vec.vecNew(2);
+    const retTy = slotSignature(ref cx, slotType, ref params);
+    const shim = emitFromFnShim(
+      cx.e, cx.tm.moduleId, target.home, target.name, retTy, ref params
+    );
+    const gep = freshTemp(cx.e);
+    emitGepField(ref cx, gep, vtLlvm, TEMP_SLOT_NAME, slot.id, i + VTABLE_FIRST_SLOT);
+    emitStoreToPtr(ref cx, "ptr", Operand.FuncRef { home: "", name: shim }, gep);
+    i += 1;
+  }
+
+  const loaded = freshTemp(cx.e);
+  emitLoad(ref cx, loaded, vtLlvm, TEMP_SLOT_NAME, slot.id);
+  out = Operand.Temp { id: loaded };
+  return "";
+}
+
+// Slot 0 is the erased receiver, so a declared slot `i` sits at `i + 1`. Named
+// rather than written as a `+ 1`, because getting it wrong is a call through
+// the wrong pointer rather than anything a verifier would catch.
+export const VTABLE_CTX_INDEX: usize = 0;
+export const VTABLE_FIRST_SLOT: usize = 1;
+

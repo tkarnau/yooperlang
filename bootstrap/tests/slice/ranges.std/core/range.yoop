@@ -1,0 +1,51 @@
+// std/core/range.yoop - the `a..b` integer range.
+//
+// `Range` is an ordinary userland type implementing `Iterable<usize>`, not a
+// compiler-baked loop form. The `..` operator is sugar for `exclusive(a, b)`:
+// the compiler rewrites `a..b` into that call and adds the import for it, so
+// a range is a VALUE with no special status.
+//
+//     for i in 0..xs.len { ... }        // the common case
+//     const rows = 0..grid.len;         // ...but it is just a value
+//     paintEvery(rows);                 // store it, pass it, return it
+//
+// Iterating walks a COPY (the `for ... in` lowering owns its iterator), so the
+// same Range can be walked more than once.
+//
+// The element type is `usize`, matching every length and index in the
+// language, so `0..xs.len` needs no casts. For a counter of some other numeric
+// type, use the annotated C-style head instead:
+// `for (let i: int32 = 0; i < n; i += 1)`.
+
+import { Iterable, IterStep } from "./traits.yoop";
+
+// Half-open ascending range: yields `cur`, `cur + 1`, ... `end - 1`. Empty
+// (yields nothing) when `end <= cur`, so a zero-length collection loops zero
+// times instead of wrapping around.
+export type Range implements Iterable<usize> {
+    cur: usize,
+    end: usize,
+
+    function next(ref self): IterStep<usize> {
+        if (self.cur >= self.end) {
+            return IterStep.Done;
+        }
+        let v: usize = self.cur;
+        self.cur = self.cur + 1;
+        return IterStep.Yield { value: v };
+    }
+}
+
+// `start..end`. This is what the `..` operator lowers to; calling it by name
+// is equivalent.
+export function exclusive(start: usize, end: usize): Range {
+    return { cur: start, end: end };
+}
+
+// How many values the range has left to yield. Zero for an empty range.
+export function count(r: ref Range): usize {
+    if (r.cur >= r.end) {
+        return 0;
+    }
+    return r.end - r.cur;
+}

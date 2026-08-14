@@ -49,6 +49,10 @@ export function passBWireImports(
     }
     f += 1;
   }
+  // A module that DERIVES Display needs the name whether or not it imported it.
+  // Last thing in the pass, so a real import of the same name wins. See
+  // derive.yoop.
+  bindDerivedDisplayTrait(ref prog, ref tm, m);
 }
 
 // The source module's TypedModule is read out of `prog.modules` by the index

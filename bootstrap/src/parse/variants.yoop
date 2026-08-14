@@ -142,6 +142,13 @@ export function parseVariantPattern(ref ps: ParserState): Result<NodeId, Parsing
 // `_` binds nothing. It says "this case carries a field and I do not want it",
 // which is the difference between ignoring a payload and forgetting it - pass D
 // still requires every field to be named.
+//
+// SHORTHAND: `{ radius }` is `{ radius: radius }`. The field name and the
+// binding name are the same the great majority of the time, so the reference
+// lets the second be left off, and a pattern is the one place it can be read
+// off the punctuation with no ambiguity - what follows a field name is a `:` or
+// it is the end of that field. Same shape either way in the arena, so nothing
+// downstream knows which was written.
 function parsePatternFields(ref ps: ParserState): Result<NodeId, ParsingError> {
   const loc = posToSourceLocation(ps.src, ps.pos, 1);
   SelfLexing.expect(ref ps, TokenTags.LCURLY)?;
@@ -153,14 +160,18 @@ function parsePatternFields(ref ps: ParserState): Result<NodeId, ParsingError> {
   ) {
     let field = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.STRUCT_LITERAL_FIELD);
     field.name = parseIdentAsName(ref ps)?;
-    SelfLexing.expect(ref ps, TokenTags.COLON)?;
 
     let binding = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.IDENT);
-    if (SelfLexing.peek(ref ps).tag == TokenTags.DISCARD) {
+    if (SelfLexing.peek(ref ps).tag == TokenTags.COLON) {
       SelfLexing.advance(ref ps)?;
-      binding.name = DISCARD_BINDING;
+      if (SelfLexing.peek(ref ps).tag == TokenTags.DISCARD) {
+        SelfLexing.advance(ref ps)?;
+        binding.name = DISCARD_BINDING;
+      } else {
+        binding.name = parseIdentAsName(ref ps)?;
+      }
     } else {
-      binding.name = parseIdentAsName(ref ps)?;
+      binding.name = field.name;
     }
     field.childA = SelfLexing.pushNode(ref ps, binding);
 

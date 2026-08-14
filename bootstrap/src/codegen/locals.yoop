@@ -34,51 +34,76 @@ export type LocalSlot {
 // A slot id that names the incoming argument pointer rather than an alloca.
 export const ARG_PTR_SLOT: usize = 0;
 
+// One name a block declared, and whatever that name meant just before it did.
+// A block that SHADOWS an outer binding has to put the outer one back on the
+// way out, not merely stop resolving its own - `let v = 7; if (c) { let v = 99;
+// } total += v;` reads the outer slot after the branch, and a plain remove
+// would leave `v` resolving to nothing at all.
+type DeclaredName {
+  name: string,
+  // False when the name was free before this block declared it, in which case
+  // leaving the block removes it outright.
+  hadPrev: bool,
+  prev: LocalSlot,
+}
+
 export type FnLocals propagates<disposable> {
   slots: Map<string, LocalSlot>,
   nextSlot: usize,
-  // The names declared in each open block, so leaving one can take them back
-  // out of `slots`.
+  // The names declared in each open block, so leaving one can undo them.
   //
   // The ALLOCAS stay - they are hoisted into `entry:` and a slot id is never
-  // reused - but the NAME has to stop resolving, or a binding that shadowed
-  // something in an inner block goes on shadowing it forever. That is only
-  // observable when the outer name is a module-level global: pass D refuses an
-  // out-of-scope read of a local, so nothing else ever asks.
-  blockNames: Vec<Vec<string>>,
+  // reused - but the NAME has to go back to what it meant, or a binding that
+  // shadowed something in an inner block goes on shadowing it forever.
+  blockNames: Vec<Vec<DeclaredName>>,
 }
 
 export function localsNew(): FnLocals propagates<disposable> {
-  let blocks: Vec<Vec<string>> = vec.vecNew(4);
+  let blocks: Vec<Vec<DeclaredName>> = vec.vecNew(4);
   return { slots: map.mapNew(0, map.stringKeyOps()), nextSlot: 0, blockNames: blocks };
 }
 
 export function localsPushBlock(ref l: FnLocals): void {
-  let fresh: Vec<string> = vec.vecNew(2);
+  let fresh: Vec<DeclaredName> = vec.vecNew(2);
   vec.vecPush(ref l.blockNames, fresh);
 }
 
-// Drop the names the innermost block declared. Their slots survive.
+// Undo the innermost block's declarations, innermost-last first so a name
+// declared twice in one block unwinds to the right one. Their slots survive.
 export function localsPopBlock(ref l: FnLocals): void {
   if (l.blockNames.len == 0) {
     return;
   }
   let names = vec.vecGet(ref l.blockNames, l.blockNames.len - 1);
-  let i: usize = 0;
-  while (i < names.len) {
-    map.mapRemove(ref l.slots, vec.vecGet(ref names, i));
-    i += 1;
+  let i: usize = names.len;
+  while (i > 0) {
+    i -= 1;
+    const d: DeclaredName = vec.vecGet(ref names, i);
+    if (d.hadPrev) {
+      map.mapInsert(ref l.slots, d.name, d.prev);
+    } else {
+      map.mapRemove(ref l.slots, d.name);
+    }
   }
   Disposable.dispose(ref names);
   l.blockNames.len -= 1;
 }
 
+// Called BEFORE the new slot is inserted, so `mapGet` still answers with what
+// the name meant on the way in.
 function localsNoteName(ref l: FnLocals, name: string): void {
   if (l.blockNames.len == 0) {
     return;
   }
   let top = vec.vecGet(ref l.blockNames, l.blockNames.len - 1);
-  vec.vecPush(ref top, name);
+  switch (map.mapGet(ref l.slots, name)) {
+    case Option.Some { value: old }: {
+      vec.vecPush(ref top, { name: name, hadPrev: true, prev: old });
+    }
+    case Option.None: {
+      vec.vecPush(ref top, { name: name, hadPrev: false, prev: { ty: "", id: 0 } });
+    }
+  }
   vec.vecSet(ref l.blockNames, l.blockNames.len - 1, top);
 }
 
@@ -87,8 +112,8 @@ export function declareLocal(ref cx: Cx, name: string, ty: string): LocalSlot {
   cx.locals.nextSlot += 1;
   const info: LocalSlot = { ty: ty, id: cx.locals.nextSlot };
   emitAlloca(ref cx, name, info.id, ty);
-  map.mapInsert(ref cx.locals.slots, name, info);
   localsNoteName(cx.locals, name);
+  map.mapInsert(ref cx.locals.slots, name, info);
   return info;
 }
 
@@ -97,8 +122,8 @@ export function declareLocal(ref cx: Cx, name: string, ty: string): LocalSlot {
 // that is what every load and store through the slot moves.
 export function declareRefParam(ref cx: Cx, name: string, pointeeTy: string): LocalSlot {
   const info: LocalSlot = { ty: pointeeTy, id: ARG_PTR_SLOT };
-  map.mapInsert(ref cx.locals.slots, name, info);
   localsNoteName(cx.locals, name);
+  map.mapInsert(ref cx.locals.slots, name, info);
   return info;
 }
 

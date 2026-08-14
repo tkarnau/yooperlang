@@ -50,7 +50,8 @@ export function astNodeChildAName(v: ASTNodeKind): string {
       return "exportedDecl";
     }
     case ASTNodeKind.UNARY_EXPRESSION,
-         ASTNodeKind.REF_EXPRESSION: {
+         ASTNodeKind.REF_EXPRESSION,
+         ASTNodeKind.TRY_OP: {
       return "operand";
     }
     case ASTNodeKind.INDEX_EXPRESSION,
@@ -157,6 +158,11 @@ export function astNodeChildBName(v: ASTNodeKind): string {
     case ASTNodeKind.SWITCH_ARM: {
       return "armBlock";
     }
+    // `f()? "loading config"` - the note prefixed onto the Err on the way out.
+    // 0 for a plain `f()?`.
+    case ASTNodeKind.TRY_OP: {
+      return "contextString";
+    }
     case ASTNodeKind.FOR_LOOP: {
       return "initExpr";
     }
@@ -194,6 +200,11 @@ export function astNodeChildCName(v: ASTNodeKind): string {
     }
     case ASTNodeKind.FOR_LOOP: {
       return "condition";
+    }
+    // `f()? e { ... }` - the block that HANDLES the failure instead of
+    // returning it. 0 for a plain `f()?`; the binding `e` is in `name`.
+    case ASTNodeKind.TRY_OP: {
+      return "handlerBlock";
     }
     default: {
       return "undefined";

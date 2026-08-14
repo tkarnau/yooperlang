@@ -128,6 +128,148 @@ source file:
     0     fail to LINK a runtime symbol
     206   stop earlier, at a named parse or typecheck refusal
 
+**Re-probed after the whole of PHASE 5 - the long tail, twelve items in one
+pass. The corpus is now 453 files, five additions, all of them these items'
+(`parse/range.yoop`, `parse/unsafe_ptr.yoop`, `typecheck/unsafe_ptr_ops.yoop`,
+`codegen/unsafe_ptr_ops.yoop`, `codegen/instr_ptr.yoop`):**
+
+    222   compile all the way to an executable
+    205   reach clang and fail ONLY for having no `main`, so 427 files are done
+    0     reaches clang and produces invalid IR - the bad-ir bucket is EMPTY
+    0     fail to LINK a runtime symbol
+    26    stop earlier, at a named parse or typecheck refusal
+
+22 distinct refusal sites, down from 42, and 27 more files are done. Seventeen
+of the 22 are DELIBERATE - `@precompile`, comptime consts, `pooled` fields - so
+what is actually open is `union` (2 sites, 4 files), a module-level `let` with a
+non-literal initializer (2 sites, 2 files) and reserved words as names (1 site,
+1 file). Full write-up in phase 5 below.
+
+**The same probe run with STAGE 3 produces a byte-identical report.** stage2 and
+stage3 are byte-identical as binaries and as emitted `.ll`, and the whole slice
+suite runs through stage3.
+
+Re-probed after 4.3, which is the one entry in this section where the numbers
+holding still IS the result. The corpus is now 456 files - three additions, all
+of them 4.3's own (`parse/kind_prefix.yoop`, `link/search_paths.yoop`,
+`codegen/printf_format.yoop`):
+
+    222   compile all the way to an executable      (unchanged)
+    208   reach clang and fail ONLY for having no `main`, so 430 are done
+    0     reaches clang and produces invalid IR
+    26    stop earlier, at a named refusal          (unchanged)
+    22    distinct refusal sites                    (unchanged)
+
+Same 222, same 26, same 22 sites; the whole of the movement is the three new
+files landing in `no-main`, which is what a library with no `main` should
+report. 4.3 was measured by a SECOND probe over a different set - the example
+PROGRAMS, run rather than compiled - and a change to these numbers would have
+meant the new probe had broken the old one. See item 4.3 for what that second
+probe found: 218 of 279 example programs build under both compilers, run, and
+agree exactly.
+
+**The previous probe, kept for the chain. Re-probed after 3.1 and 3.4 - the
+derive expansion and the vtable erasure.
+The corpus is now 448 files, eight additions, all of them these two items'
+(`parse/derive.yoop`, `parse/derive_text.yoop`, `parse/derive_body.yoop`,
+`typecheck/vtable.yoop`, `typecheck/vtable_use.yoop`, `codegen/vtable.yoop`,
+`codegen/vtable_call.yoop`, `codegen/instr_vtable.yoop`):**
+
+    202   compile all the way to an executable
+    198   reach clang and fail ONLY for having no `main`, so 400 files are done
+    1     reaches clang and produces invalid IR - still `enum_eq.yoop`
+    0     fail to LINK a runtime symbol
+    47    stop earlier, at a named parse or typecheck refusal
+
+42 distinct refusal sites, down from 61, and 36 more files are done. **The
+largest single move the plan has recorded**, and unlike most of them the two
+counts moved TOGETHER again: the whole `std/http` and `std/https` stack sat
+behind one feature, and finishing it finished all of it at once.
+
+The vtable erasure is gone from the list ENTIRELY - 14 sites and 23 files - and
+so is `@derive(display)`, at 5 and 5. What is left at the top is `@precompile`,
+which is out of this plan's scope by design.
+
+Measured before and after:
+
+    sites  files   before                          after
+       14     23   `X.from(ref v)` (3.4)           0 sites, 0 files
+        5      5   `@derive(display)` (3.1)        0 sites, 0 files
+        2      2   `ref xs[i].y` (a named refusal) 0 sites, 0 files
+
+That third row was not a plan item. It became the critical path the moment the
+erasure landed - `std/http/router.yoop:121` is
+`await Dispatcher.handle(ref entries[i].dispatcher, ...)` - and it turned out to
+be fifteen lines: an element HAS an address, so the field walk needed one
+different first step and nothing else. Fixed rather than deferred because it
+blocked the item in front of it, which is the rule.
+
+The remaining refusal distribution, as DISTINCT SITES - 42 of them:
+
+    12     `@precompile` (out of scope, refused by name). 13 files
+    4      `union` decls (refused by name, sized, deferred)
+    4      `export "C" function` (refused by name)
+    3      module const/let needing comptime
+    2      a compound assignment on an INDEX (refused by name)
+    2      `case true:` - a switch over a BOOL (see the follow-ups)
+    2      `..` in a pattern
+    2      module-level `let` with a non-integer initializer
+    11     a long tail of one-file parse and typecheck refusals
+
+**The same probe run with STAGE 3 produces a byte-identical report.** stage2 and
+stage3 are byte-identical as binaries.
+
+**The previous probe, kept for the chain. Re-probed after 2.13, 3.6 and 3.7. The
+corpus was 440 files - five additions (`source_graph/autoload.yoop`,
+`typecheck/diverge.yoop`, `typecheck/try_forms.yoop`, `codegen/task_intr.yoop`,
+`codegen/try_forms.yoop`):**
+
+    182   compile all the way to an executable
+    182   reach clang and fail ONLY for having no `main`, so 364 files are done
+    1     reaches clang and produces invalid IR - still `enum_eq.yoop`
+    0     fail to LINK a runtime symbol
+    75    stop earlier, at a named parse or typecheck refusal
+
+61 distinct refusal sites, down from 68, and 32 more files are done - the second
+largest single move the plan has recorded, behind only 3.2. Unlike most of the
+passes before it, the two counts moved TOGETHER: three separate one-line gates
+came off at once and what was behind each of them was already built.
+
+The three, measured before and after:
+
+    sites  files   before                        after
+        1     21   `unknown intrinsic "X"`       0 sites, 0 files
+        4     13   `expr? "context"`             0 sites, 0 files
+        1      1   `expr? e { ... }`             0 sites, 0 files
+        5      5   `unknown kind "task"/"async"` 0 sites, 0 files
+
+Every one of the 21 files behind `std/core/concurrency.yoop:32` produces IR now,
+and five of them run: `wait_until_smoke`, `cancel_smoke`, `task_await_join`,
+`io_timeout_smoke` and `io_cancel_smoke` each print exactly what their own
+"expected output" comment has always claimed.
+
+Where the rest went, and this is the usual shape: 10 of the 13 `? "context"`
+files landed on `std/http/client.yoop:229`, which is 3.4's vtable erasure, and
+that item's file count went 13 -> 23. The whole http stack is now one item deep.
+
+The remaining refusal distribution, as DISTINCT SITES - 61 of them:
+
+    14     `X.from(ref v)` - building a vtable VALUE (3.4). 23 files
+    12     `@precompile` (out of scope, refused by name). 12 files
+    5      `@derive(display)` expansion (3.1). 5 files
+    2      `union` decls (refused by name, sized, deferred)
+    2      `export "C" function` (refused by name)
+    2      a compound assignment on an INDEX (refused by name)
+    2      `case true:` - a switch over a BOOL (see the follow-ups)
+    2      `..` in a pattern
+    3      module const/let needing comptime
+    17     a long tail of one-file parse and typecheck refusals
+
+**The same probe run with STAGE 3 produces a byte-identical report**: same 182,
+same 182, same 61 sites, same messages in the same order. The whole slice suite
+runs through stage3 too, and stage2 and stage3 are byte-identical as binaries
+and as emitted `.ll`.
+
 **Re-probed after 3.5, the TASK HALF. The corpus is now 435 files - six
 additions, all of them this item's (`typecheck/task.yoop`, `codegen/task.yoop`,
 `codegen/task_spawn.yoop`, `codegen/task_thunk.yoop`, `codegen/task_wait.yoop`,
@@ -496,11 +638,11 @@ is down from 6 sites to 3 - one struct-literal initializer and two calls.
 Subsystem sizes, as a rough completeness gauge (non-comment lines):
 
     lexer       1097 JS ->  1278 boot    done, and at parity
-    parser      5542 JS ->  3936 boot
+    parser      5542 JS ->  3936 boot      plus derive*.yoop, below
     typecheck  13226 JS ->  7690 boot
     codegen     6801 JS ->  4227 boot
     driver       825 JS ->   148 boot (link/) plus main.yoop
-    derive       571 JS ->     0 boot (parsed, not expanded)
+    derive       571 JS ->   380 boot (parse/derive*.yoop; expanded)
     interp      3147 JS ->     - out of scope, see above
 
 The blocker counts below are DISTINCT SITES, deduped by file and line. That
@@ -2015,24 +2157,118 @@ plain field skipped, a propagated binding interleaved with two direct ones, and
 an early `return` unwinding it), four typecheck assertions and three codegen IR
 assertions.
 
+**2.13 std AUTOLOADS - DONE 2026-08-13, 5 sites, 4 files.** Two std modules
+join every module graph whether or not anything imported them. The reference has
+done this since `task` / `async` / `joined` / `pooled` stopped being reserved
+WORDS and became ordinary `kind` decls in std source: they used to be always in
+scope, and the autoload is what keeps that true.
+
+WHAT IS AUTOLOADED, and it is a list because the ORDER matters:
+
+    std/core/kinds.yoop    `async`, `task`, `joined`, `pooled`, `disposable`,
+                           `ephemeral`, `owned`
+    std/core/traits.yoop   `Display`, `Into`, `WithContext`, `Iterable`,
+                           `Readable`, `Writable`
+
+kinds first, because traits.yoop writes `async read(ref self, ...)` and `async`
+is a kind kinds.yoop declares. Both walk BEFORE the entry, so they sit early in
+the topological order and every user module reads declarations that are already
+filled - which is the reference's reason too, and is what item 3.1 will need
+when it checks a generated `toString` against `Display`'s method table.
+
+A kind needs no import at all once its declaration is in the graph: kinds are
+reached by NAME from a graph-wide registry (`Program.kinds`, filled in pass A),
+so merely BEING there is the whole requirement. That is why four files that
+never mention `std/core/kinds.yoop` now compile.
+
+ONE DIVERGENCE, deliberate: the reference autoloads two MORE modules,
+`std/core/format.yoop` and `std/core/strings.yoop`, because its codegen lowers
+an interpolated template literal into a call to `stringConcatAll`. The bootstrap
+emits its own string builder inline and calls libc, so it would be paying for
+two modules nothing reads. Invisible either way - no program can tell whether a
+module it never named was loaded.
+
+A missing file is SKIPPED rather than reported. Every source_graph and codegen
+test passes `""` as the std root and has no std to autoload; turning that into
+an error would have made the autoload a new way for a compile to fail.
+
+What this UNBLOCKS, said plainly for whoever picks up 3.1: `Display` is now
+guaranteed to be somewhere in the graph, which was prerequisite 2 of the two
+`typecheck/derive.yoop` records. It does NOT change how `Into` and `WithContext`
+are matched - both are still matched by NAME plus their one argument, because
+the module WRITING a `?` need never have imported either, while the module that
+declared the error type certainly did.
+
+Tests: five source_graph assertions over `bootstrap/tests/graph/autoload.std`
+(three modules where the entry imports none, kinds before traits before the
+entry, both recorded by base name, and an empty root autoloading nothing), plus
+`bootstrap/tests/slice/task_intrinsics.yoop`, which declares a `task` and
+imports no kinds at all.
+
+---
+
 ---
 
 ## Phase 3 - the semantic features
 
-**3.1 `@derive(display)` expansion.** The attribute parses and unwraps today
-(and every diagnostic matches the reference). Prerequisite 1 - Display dispatch
-in template interpolation - LANDED 2026-08-13. Two left:
+**3.1 `@derive(display)` expansion - DONE 2026-08-13, 5 sites, 7 corpus files.**
+Built exactly to the sizing above: generate the method as Yoop SOURCE TEXT,
+reparse it with `parseInto`, splice it into the decl's member run, merge the
+implements clause, restamp the locations. The rendering follows
+src/jsyoopderive/expand.js field for field, and a slice fixture is asserted
+against both compilers to keep it that way.
 
-  - reaching `Display`: it lives in std/core/traits.yoop, which the reference
-    AUTOLOADS into every graph. The bootstrap has no autoload. Either build
-    autoloads or have the expander bind the symbol directly.
-  - the graft: generate the method as Yoop SOURCE TEXT, reparse it with
-    `parseInto` (which already appends to an existing arena - that is how a
-    directory module's files share one), splice it into the decl's member run,
-    merge the implements clause, restamp source locations onto the decl.
+**The one design decision that is NOT the reference's is WHERE it runs.** There,
+expansion is the first step of typechecking. Here it runs at LOAD time, right
+after a file is parsed, and the reason is mechanical rather than aesthetic:
+`typecheckProgram` BORROWS the graph and reads a `Module` by value, so a method
+grafted there lands in a copy of the arena header and codegen never sees it. In
+`addFile` the module is a `ref` and the arena is a thing to write to. Nothing
+depends on the ordering - the expansion is syntactic, so there is nothing for it
+to learn from a later pass - and the cost is that the four guard-rail refusals
+are LOAD errors rather than accumulated diagnostics. Same wording, different
+channel.
 
-  The rendering spec is in src/jsyoopderive/expand.js and is worth matching
-  exactly, since a slice fixture is asserted against both compilers.
+Reaching `Display` also diverges, for the same kind of reason. The reference
+unshifts a synthesized `import { Display } from "std/core/traits.yoop"` onto the
+module body; the bootstrap wires imports from EDGES the module graph recorded
+rather than from the AST, so a synthesized import node would bind nothing. Pass
+B binds the SYMBOL directly instead, at the end of the pass and only for a
+module that actually derives - making `Display` resolve everywhere would be a
+name appearing out of nowhere. A graph with no `Display` in it at all is refused
+by name, which is the reference's own guard rail.
+
+**One deliberate DIVERGENCE in the rendering, and it is a reference BUG.** Its
+`classify` for a `Map<K, V>` field reads
+
+    classify(annot.typeArgs[0]) === "inline" && classify(annot.typeArgs[1] === "inline")
+
+- the second call classifies a BOOLEAN, whose answer is the truthy string
+`"<unknown>"`, so the VALUE type never gates the expansion. A map whose values
+are not printable therefore generates `${value}` on a type with no `toString`,
+which is a diagnostic pointing into source the user never wrote. The bootstrap
+checks both arguments and prints `<map>` when either fails. Strictly safer, and
+a slice fixture cannot cover a map anyway - see the next paragraph.
+
+**A finding worth carrying: the two compilers disagree about MAP ITERATION
+ORDER, and the bootstrap is right.** `std/core/strings.yoop`'s `stringHash` is
+FNV-1a, whose offset basis is 14695981039346656037 - above int64 max, and the JS
+reference loses precision on it, so every hash it computes is wrong. Measured:
+FNV-1a of "t" is 12638201494206808739, which is what the bootstrap produces; the
+reference says 12637105281113482372. This is the "an integer literal above
+int64 WRAPS silently" reference bug already in the follow-ups, showing up
+somewhere observable for the first time. No fixture may depend on map order.
+
+Tests: `bootstrap/tests/slice/derive_display.yoop` (both compilers - struct,
+empty struct, nested derived, a hand-written Display field, an array loop, two
+placeholder shapes, and a variant with payload and payload-less cases) plus
+`derive_display_autoload.yoop` (bootstrap only, with a stub std, for the
+Display BINDING - the reference cannot compile an interpolated template without
+its own std/core/format.yoop autoloaded, and a stub cannot supply that without
+dragging most of std into the test tree). Ten parse assertions on the GRAFT -
+the member run, the location restamp, the implements merge in all three of its
+states, a variant's cases surviving the splice, and the three refusals - and
+nine typecheck assertions on what the later passes then see.
 
 **3.2 Generic TRAIT instantiation - DONE 2026-08-13, 78 files, 5 sites.**
 `Iterable<T>` in a `for ... in`. It was the critical path and the last thing
@@ -2275,50 +2511,90 @@ parser, naming the same), and an INDIRECT async call through a function value or
 a vtable slot. The first two of those were replaced by item 3.5 below; a `task`
 METHOD and the indirect call are still refused.
 
-**3.4 Building a vtable VALUE - the erasure machinery. SIZED 2026-08-13, 10
-files, 10 sites.** `Reader.from(ref s)`, and its sibling `PredVT.fromFn(f0,
-f1)`. This arrived in a brief as part of "the small parse tail", on the reading
-that `vtable ... from ...` was a declaration form the parser did not know. It is
-not: the 10 sites are every one of them a CALL, and the only reason the parser
-was involved is that `from` is a keyword token, so `X.from` lexed as
-`IDENT DOT FROM` and reported "expected IDENT, got FROM" about a line that is
-perfectly well formed. Measured, not inferred - all 10 lines were read.
+**3.4 Building a vtable VALUE - the erasure machinery. DONE 2026-08-13, 14
+sites, 23 files.** `Reader.from(ref s)`, `PredVT.fromFn(f0, f1)`, and
+`Reader.read(ref r, buf)`. The largest item the plan had left, and the critical
+path: the whole of `std/http` and `std/https` sat behind one line of
+`std/http/client.yoop`.
 
-What it actually is, established by compiling `examples/pass/vtable_handlers.yoop`
-with the reference and reading the IR it emits:
+**Built to the sizing, and the sizing was right.** The three things it named all
+had to move, and nothing else did:
 
-  - a vtable VALUE is `{ ptr ctx, ptr m0, ptr m1, ... }` - a context pointer
-    followed by one function pointer per trait method, in declaration order.
-  - `Dispatcher.from(ref c)` stores `%c` into slot 0 and the address of the
-    CONCRETE type's method (`@mod__Const__Handler__handle`) into slot 1. No
-    thunk: a method already takes `ptr self` as its first parameter, so the
-    concrete symbol is directly usable as the erased one.
-  - dispatch (`Dispatcher.handle(ref d, req)`) loads the method slot and calls
-    it indirectly, passing slot 0 as the receiver.
+  - **the LAYOUT gained a ctx slot.** A vtable value is `{ ptr ctx, ptr m0,
+    ... }` - the erased receiver, then one function pointer per slot. That
+    leading pointer is the whole trick: a method already takes `ptr self` first,
+    so the CONCRETE method symbol is directly usable as the erased one and
+    `from` emits no thunk at all. Dispatch loads ctx out of slot 0 and passes it
+    where `self` goes.
+  - **`Type.VTable` is used.** It was declared and never constructed; a vtable
+    registered as an ordinary `Type.Struct`, so nothing recorded which trait it
+    erased or in what order. Pass A registers the VTable shell now and pass C
+    fills it with the trait, the slot types and the slot ORDER.
+  - **the INDIRECT path exists**, beside the static one. Every corpus site
+    spells it `VTableName.method(ref vt, ...)` rather than
+    `Trait.method(ref vt, ...)`, so the dispatch forks in `checkQualifiedCall`
+    alongside the trait and namespace cases rather than inside `checkTraitCall`.
 
-Which makes it a FEATURE and not a parse gap, and three things have to move:
+What the sizing did NOT have, and it is the half that mattered most: **the
+ASYNC dispatch.** `Readable.read` and `Handler.handle` are both `async`, so
+every real use in std is `await Reader.read(ref r, ref buf)` - an indirect call
+to a coroutine. Building only the sync half would have finished zero files.
+It cost less than it looks: the drive loop is unchanged, and `emitAsyncCall`
+takes the same two slot loads and swaps `emitCall` for `emitCallIndirect`.
 
-  - the LAYOUT gains a ctx slot. The bootstrap lays a vtable out as the struct
-    of function pointers it declares and nothing else, so the two compilers
-    already disagree - unobservably, since nothing can build one.
-  - `Type.VTable` is declared in types.yoop and never used: pass A registers a
-    vtable as an ordinary `Type.Struct`, so nothing records which trait it
-    erases or in what method order. Both are needed to fill the slots.
-  - `Trait.method(ref x, ...)` needs an INDIRECT path beside the static one it
-    resolves today by the receiver's concrete type.
+Asyncness rides on the SLOT, stamped from the trait in pass C. A `=>`
+annotation is never written `async` - the reference has the same rule and states
+it for vtables - so the trait has to be the authority or the two sides drift
+into a call through a mismatched calling convention.
 
-Sequenced after 3.3 rather than before it, because 7 of the 10 sites are the
-http and server examples, and every one of those needs `await` as well - so
-building erasure first finishes zero files. The other three are
-`vtable_handlers.yoop`, `vtable_fromfn.yoop` and `at_precompile_vtable.yoop`,
-and the last of those is `@precompile` and is out of scope anyway.
+**One DIVERGENCE, and it is unobservable.** The slot ORDER is the vtable's own
+declaration order; the reference uses the TRAIT's, which it can do because a JS
+Map iterates in insertion order. The bootstrap's `Map` is a hash table with no
+order to read, and the vtable's AST is the one place an order is written down
+that both the builder and the dispatch can agree on. A vtable value never leaves
+the program that built it, so two compilers laying one out differently is not
+something a program can tell - and every corpus vtable declares its slots in
+trait order anyway.
 
-Both spellings are refused BY NAME in the meantime, and they are refused in two
-different layers because they fail in two different ones: `X.from(ref v)` in the
-parser, since `from` is a keyword and cannot be a member name; `X.fromFn(...)`
-in pass D, since `fromFn` is an ordinary IDENT that parses fine and would
-otherwise report "is not an imported namespace" - a true statement about the
-wrong thing.
+Refused BY NAME, and each at the DECLARATION rather than at a use, because a
+wrong slot is a call through a mismatched signature rather than anything a
+verifier catches: a missing slot, a slot the trait does not declare, a wrong
+parameter count (the trait's minus `ref self`, so it is off by one on purpose),
+and a wrong return type. At the USE: a by-value receiver (`VT.from(x)` - the
+vtable stores an ADDRESS, so the receiver has to outlive it), a receiver whose
+type does not implement the trait, a receiver missing a method some slot needs
+a pointer to, a member that is not a slot, the wrong dispatch arity, and a
+`fromFn` argument that is not a named function.
+
+Where the machinery went, following the codegen readability rules:
+`typecheck/vtable.yoop` (the queries every shape asks - which trait, which slot,
+how many), `typecheck/vtable_use.yoop` (the three checks),
+`codegen/vtable.yoop` (`from` and `fromFn`), `codegen/vtable_call.yoop` (the two
+slot loads and the sync call), `codegen/instr_vtable.yoop` (the `fromFn` shim
+and its dedupe). The async call is in `await_op.yoop`, beside the drive loop it
+feeds; separating the slot load from the call shape would have put half a call
+in each file.
+
+**The critical path moved rather than ended, for the eighth time**, and the
+distance was fifteen lines. With the erasure built, all 23 files landed on
+`std/http/router.yoop:121` -
+`await Dispatcher.handle(ref entries[i].dispatcher, ...)` - which is
+`ref xs[i].y`, a field path bottoming out in an array ELEMENT. That had been
+refused by name since 1.0 on the reading that "an element address is a different
+gep and the field walk does not build one". True, and the different gep already
+existed: `emitElementAddress` has been there since arrays landed. One extra
+branch in `emitFieldAddress`, one extra kind in each of the two pass-D
+predicates, and reading and writing both work. Fixed rather than deferred
+because it blocked the item in front of it.
+
+Tests: `bootstrap/tests/slice/vtable.yoop` (both compilers - three concrete
+types behind one `Dispatcher[]`, a dispatch through the array and through a
+local, a WRITE through the original observed via the erased view, `fromFn` over
+two slots, and a second `fromFn` on the same functions to pin the shim dedupe).
+Six codegen IR assertions on the layout, the two stores, the absence of a thunk,
+the indirect call, the null ctx and the one-shim rule. Twelve typecheck
+assertions on the three uses and the four declaration checks. Plus the element
+path in `ref_fields.yoop` and its two typecheck assertions.
 
 **3.5 The TASK half - `task`, `wait`, and the spawn. DONE 2026-08-13.** Split
 out of 3.3, sized there, and built exactly to that sizing - all six pieces, in
@@ -2458,6 +2734,151 @@ a worker, joins, and prints `viaTask=14`. That number is in a comment at the
 bottom of the file, written years before any of this, and the bootstrap now
 produces it.
 
+**3.6 The four `Task<T>` intrinsics - DONE 2026-08-13, 1 site, 21 files.**
+`waitUntil`, `cancel`, `armComplete` and `isDone`, declared in
+`std/core/concurrency.yoop` and refused there by pass A as unknown intrinsics.
+ONE line, and the whole net / tls / http stack imports the file it is in - the
+critical path by a wide margin after 3.5.
+
+The refusal was right and the fix was never to widen it: the intrinsic list and
+codegen's dispatch are two halves of one table, and a name in the first with no
+lowering in the second typechecks and then fails much later with nothing to say.
+So this item is four lowerings.
+
+**TYPECHECK NEEDED NO SPECIAL CASE AT ALL, and that is the finding worth
+carrying forward.** The reference has a hand-written resolver per intrinsic -
+`resolveWaitUntilCall`, `resolveCancelCall`, `resolveArmCompleteCall`,
+`resolveIsDoneCall`, about 150 lines between them, each re-deriving the arity,
+the `Task<T>` test and the result type. The bootstrap needed none of it: the
+declared signatures
+
+    function waitUntil<T>(h: Task<T>, deadline_ns: uint64): WaitResult<T>;
+    function cancel<T>(h: Task<T>): void;
+    function armComplete<T>(h: Task<T>): c_int;
+    function isDone<T>(h: Task<T>): c_int;
+
+go through the same generic-intrinsic path `heapAlloc<T>` uses, so `T` is
+inferred from the handle, arity and argument types are checked by the ordinary
+call checker, and `WaitResult<T>` instantiates like any other generic variant.
+
+ONE thing was missing and it is general rather than about these four:
+`inferTypeArgs` had a case for `T[]` and for `ref T` and none for `Task<T>`.
+`Task` is a builtin generic NAME rather than a declared one, so it has no origin
+for the applied-instance case to match on and needs its own line, exactly as the
+other two do. Six lines, and it is the whole typecheck half of this item.
+
+Three of the four lowerings are a call and nothing else. `waitUntil` is the one
+with shape: the runtime answers with an i32 - 0 done, 1 timed out, 2 cancelled -
+and the language hands back a three-case variant, so the lowering is a jump table
+over the outcome with one arm per case and only the `Done` arm reading the task's
+result. Out of BYTE 48 of the handle, always, exactly as `wait` reads it: the
+prefix layout is universal and this site can no more name the task function the
+handle came from than a `wait` can.
+
+The DEFAULT arm lands on `Cancelled` rather than on an unreachable block, which
+is the reference's choice and its reason: the runtime's outcome is an int it may
+one day widen, and reading an unknown one as "this task is not going to produce a
+value" is the safe reading of any extension.
+
+The four `declare` lines ride on their OWN emitter flag rather than on
+`hasTasks`. The two are different questions: a module that only ever holds a
+handle somebody else spawned still polls and cancels it, and
+`std/core/concurrency.yoop`'s `awaitTask` is exactly that module.
+
+ONE LATENT BUG had to be fixed because the fix EXPOSED it, and it is a
+miscompile class rather than a missing feature. `Program.intrinsics` is keyed by
+NAME and graph-wide, so `isIntrinsicCall` answered yes for any call spelling one
+- and `std/tls/ffi.yoop` exports an ordinary `ctxFree(ref c: TlsCtx)` beside the
+allocator's `ctxFree<T>(a: T[])`. Its own calls were lowered as the intrinsic,
+emitting an `extractvalue` on a struct pointer. Invalid IR here, which is loud;
+a silent wrong answer wherever the two shapes happened to line up, which is not.
+Those two files were refused at the `waitUntil` line before this item, so
+nothing had ever reached it. The rule now matches the reference's - an intrinsic
+is in scope where it was DECLARED or reached through a NAMESPACE, judged per
+module - and a module reaching one any other way and calling it unqualified gets
+a link error rather than a wrong answer.
+
+Tests: `bootstrap/tests/slice/task_intrinsics.yoop` with a hand-written
+`.expected` (a bounded wait that completes, one that times out, `isDone` after a
+join, `armComplete` off a worker, and a cancel observed by a later `waitUntil`),
+five codegen assertions pinning the four runtime SYMBOL names and their argument
+types (a contract with C that nothing else in the tree would notice being
+wrong), a codegen assertion that a task program calling none of them declares
+none of them, and two more over `bootstrap/tests/codegen/intrinsic_shadow.yoop`
+for the shadowing fix.
+
+**3.7 The other two `?` surfaces - DONE 2026-08-13, 5 sites, 14 files.**
+`expr? "context"` and `expr? e { ... }`, both refused BY NAME by the parser
+since 1.3. Neither needed new machinery: `?` itself is 1.3 and the `Into`
+conversion is 2.10, and both of these extend the failure branch those built.
+
+WHAT THE REFERENCE DOES with the context form, established by compiling probe
+programs rather than by reading its source. The note is PREFIXED, not appended
+and not wrapping, and the separator is `": "`:
+
+  - both Err payloads `string`: the compiler concatenates `"<context>: <err>"`
+    itself. Every `Result<T, string>` in std is this one.
+  - anything else: the operand's Err type must promise
+    `WithContext<TargetErr>`, and the failure branch calls
+    `withContext(ref err, context)`. That ONE call also does the CONVERSION, so
+    a `?` between two different Err types needs no separate `Into` when a
+    context is written - which is why the context clause SUBSUMES `tryConvert`
+    rather than composing with it.
+  - contexts STACK outward: an outer `?` prefixes an already-prefixed string.
+  - the context expression is evaluated in the FAILURE BRANCH and nowhere else,
+    so an interpolated one (`f()? \`field ${expensive()}\``) costs the success
+    path nothing at all. The slice fixture asserts that as an output LINE rather
+    than as a claim: its context calls a function that prints.
+  - only the two LITERAL token forms may follow the `?`, which is deliberate on
+    the reference's side and copied here: a general expression would make
+    `f()? -x` ambiguous with a subtraction, while a string can never continue an
+    expression, so this stays a zero-lookahead decision.
+
+And the handler form:
+
+  - `e` names the Err payload for the block's extent, as a const.
+  - the enclosing function need NOT return a fallible variant. That is the whole
+    point of the form: it works in `main`, or in anything returning a plain
+    value, where bare `?` is refused outright.
+  - the block must LEAVE on every path. It runs INSTEAD of producing a value, so
+    falling out of the bottom would leave the binding it feeds holding nothing
+    and the Ok payload read after it would read an Err.
+  - `break` and `continue` count as leaving, which is what makes a handler
+    usable to skip a loop iteration.
+  - the binding is REQUIRED. A bare `? { ... }` would be indistinguishable from
+    a `for x in items()? { ... }` body.
+  - pending disposals are deliberately NOT fired around the block: whichever
+    terminator it uses fires the ones appropriate to ITS exit, and firing them
+    here as well would be a double free.
+
+`typecheck/diverge.yoop` is the "does control flow always leave this statement"
+answer, written for the handler form and deliberately CONSERVATIVE: return,
+break, continue, a block where any statement diverges, an if/else where both
+halves do, and a switch where every arm does. Anything else answers false. The
+asymmetry is the point - a false negative costs the user an explicit `return`
+and a diagnostic that says so, while a false positive would let codegen fall
+through into the Ok path with no value in hand. It is asked AFTER the block is
+checked, which is what lets the switch case be one line: pass D has already
+refused a switch that is neither exhaustive nor defaulted.
+
+Both forms hang off the same TRY_OP node - the context in `childB`, the handler
+block in `childC` with its binding in `name` - so a reader of the arena can see
+which form was written without consulting a side table.
+
+ONE file did NOT finish, and its blocker is unrelated:
+`examples/pass/qmark_handler_block.yoop` proves divergence through
+`switch (e.len > 0) { case true: ... }`, and a switch over a BOOL does not parse
+here ("expected INTLITERAL, got TRUE"). Written up in the follow-ups; the slice
+fixture uses an if/else for the same property.
+
+Tests: `bootstrap/tests/slice/qmark_context.yoop` and
+`bootstrap/tests/slice/qmark_handler.yoop`, both with hand-written `.expected`
+files asserting the resulting TEXT (`"loading config: reading count: negative
+input"` is the stacked case), four parse assertions over the two node slots, six
+typecheck assertions on the context form and seven on the handler.
+
+---
+
 ---
 
 ## Phase 4 - parity and the self-compile milestone
@@ -2528,10 +2949,277 @@ the one class of bug no unit test can reach - a miscompile that only shows up in
 the compiler the compiler built. The case against was runtime, and 16 seconds on
 a 71-second suite is not a case.
 
-**4.3 The complex tests and playground programs.** `examples/testing/`, the
-larger `examples/pass/` programs, and the playground items - run them through the
-self-hosted compiler and fix what falls out. Two playground programs are known
-stale for unrelated reasons (an async conversion), noted in plans/README.md.
+**4.3 The complex tests and the playground programs - DONE 2026-08-13.**
+
+The first item in this plan measured over code the surface probe has never
+touched. Everything before it was steered by `std/`, `examples/pass/` and the
+bootstrap's own source, compiled with `--emit-ir` and never RUN - so the probe
+could say "codegen produced valid IR" and nothing at all about whether the
+program WORKS. This one takes the ENTRY POINTS, links them, runs them, and diffs
+the two compilers against each other.
+
+### The tool
+
+`scripts/probe_programs.sh`, a SIBLING of `scripts/probe_surface.sh` rather than
+a flag on it. The surface numbers are what this plan has been steered by for its
+whole life, so a probe that moved them would be a broken probe; the two ask
+different questions over different sets and their totals should never be added
+together.
+
+    scripts/probe_programs.sh [compiler] [jobs] [filter]
+
+An ENTRY is a file that DECLARES a `main` - a top-level `.yoop` or a `main.yoop`
+inside a program directory - under `examples/pass`, `examples/intro`,
+`examples/tour`, `examples/modules_demo` and `examples/playground`. Each is built
+with BOTH compilers to separate output directories, then both binaries are run
+with the entry's own directory as cwd, stdin closed, stdout and stderr merged,
+and a wall-clock limit. Five categories, and each is a finding about something
+different:
+
+    OK        both built it, both ran it, same stdout and same exit code
+    DIFFER    both built and ran it and the two disagree - the most interesting
+              result there is
+    BOOTGAP   the reference built it and the bootstrap did not. A BOOTSTRAP bug
+    REFGAP    the bootstrap built it and the reference did not
+    STALE     neither built it. A finding about the PROGRAM, not about either
+              compiler
+
+`examples/fail/` is excluded: those are compile-error fixtures, so "does it
+build" is the wrong question. `*.test.yoop` is excluded too - a test module has
+no `main` by design, and its driver mode is item 4.5 below.
+
+Two things worth knowing before adding to it. macOS ships no `timeout`, so the
+limit is a small `perl` fork-and-alarm wrapper that reports 124 on the limit and
+128+signal on a kill, which is what keeps a segfault reading as 139 on both
+sides instead of collapsing into a generic failure. And the two compilers do not
+agree on a diagnostic FORMAT - the bootstrap prefixes `[error]`, the reference
+renders a caret block under a `path:line:col:` header - so the one-line summary
+tries both spellings rather than grepping for one and reporting the other's
+trailing caret.
+
+### Where it lands, measured
+
+279 programs, run through stage1 and again through stage3:
+
+    218   OK        both compilers build it, run it, and agree exactly
+     26   DIFFER    both run it and the two disagree
+     29   BOOTGAP   the reference builds it and the bootstrap does not
+      0   REFGAP
+      6   STALE     neither builds it
+
+Per group, because they answer different questions and `examples/playground/` is
+explicitly not a test surface:
+
+    group          total    ok differ bootgap refgap  stale
+    pass             243   201     20      22      0      0
+    intro              4     4      0       0      0      0
+    tour              11     8      2       1      0      0
+    modules_demo       1     0      0       1      0      0
+    playground        20     5      4       5      0      6
+
+**The same probe run with STAGE 3 produces a byte-identical report** - same 279
+lines, same categories, same messages - and stage2 and stage3 remain
+byte-identical as binaries and as emitted `.ll`.
+
+### Group 1: `examples/testing/`
+
+The answer is "no, and here is exactly how much is missing".
+
+**`yoopiler --test` is a DRIVER mode and the bootstrap does not have it.** The
+flag is refused by name (`unknown option --test`). That was checked rather than
+assumed, and it is the honest headline for this group.
+
+What the reference's mode does (`src/jsyoopdriver/test_mode.js`, 205 lines, plus
+its wiring in `src/yoopiler.js`): glob `**/*.test.yoop` under a path, parse each
+and require `import.test;`, collect every kind-prefixed top-level function,
+generate an entry module SOURCE holding a `main` that hands the table to
+`std/test.yoop`, register that entry in the graph through a `readFile` overlay,
+wrap each collected suite in an `export` after the graph loads, and after
+typecheck reject any whose kind does not enumerate into `"suites"`.
+
+**Everything BELOW the driver works, and that was measured rather than assumed.**
+One parse gap was in the way and is fixed (below); after it, both test modules in
+`examples/testing/` compile under the bootstrap. Writing out by hand the entry
+module the reference GENERATES, and compiling that with each compiler, produces
+byte-identical TAP output and the same exit code on both the passing suite
+(`3 passed, 0 failed`, exit 0) and the failing one (`1 passed, 2 failed`, exit 2
+- the exit code IS the failure count). So the language side of the harness -
+the `suite` kind, the `test` binding that owns a block, `mustCall recordOutcome
+beforeScopeEnd`, the `(() => void)[]` table, `std/test.yoop` itself - is
+complete in the bootstrap today. Sized and written up as item 4.5.
+
+### Group 2: `examples/pass/`, `intro/`, `tour/`, `modules_demo/`
+
+259 programs, 213 of them OK - built by both compilers, run, and producing
+identical output and exit codes. Nothing in this group is STALE: every one of
+the 259 builds under the reference.
+
+The 22 DIFFERs and 24 BOOTGAPs are enumerated below; the short version is that
+**24 of the 26 DIFFERs across the whole probe are two already-documented
+reference bugs where the bootstrap is the one that is right**, and 24 of the 29
+BOOTGAPs are refusals this plan already tracks by name.
+
+### Group 3: `examples/playground/` - the point of the exercise
+
+20 real user-shaped programs. 5 OK, 4 DIFFER, 5 BOOTGAP, and **6 STALE - which
+is a finding about those six programs and not about either compiler.** All six
+fail under the JS reference too, for four separate reasons:
+
+    3   `async function must be awaited` on `serve` / `serveDefault` - the known
+        async conversion, and it is THREE rather than the two plans/README.md
+        records: todo_api, yoopstore, and sun_moon
+    1   `imports of value "tcpListen" from "std/net" must use the namespace
+        form` - chat_agent, which predates the std value-import rule
+    1   the reference CRASHES with `RangeError: Maximum call stack size
+        exceeded` in `findScopedIdentInExpr` - algoscope
+    1   the reference emits INVALID IR, `floating point constant invalid for
+        type` - sdl_demo
+
+The last two are reference bugs found by pointing this probe at a corpus nothing
+had pointed a compiler at in a while, and neither is the bootstrap's to fix.
+
+### What was fixed, and why each one qualified
+
+Three, each small and each clearly a bootstrap gap that a corpus program hit.
+
+**1. A kind prefix BESIDE the `function` keyword at top level.**
+`suite function addsNumbers(): void { }` was "unexpected token at top level:
+IDENT" - on a declaration that is perfectly well formed, and the spelling every
+`*.test.yoop` in the tree uses. The two spellings had drifted apart: a METHOD
+went through a prefix run that consumes the keyword when it is there, and a
+top-level declaration went through `parseKindPrefixes`, which STOPS on
+IDENT-then-FUNCTION because in an ANNOTATION position (`owned string`) a
+following `function` means the annotation ended. Both go through one function
+now. The run parser moved out of `traits.yoop` into a new
+`parse/kind_prefix.yoop`, which also took the "declarations that CARRY a kind"
+half of `kind_decl.yoop` - that file was 370 lines and the two halves are two
+ideas. Tests: seven parse assertions and the `kind_prefixes` slice fixture,
+which now carries both spellings at top level as well as on a method.
+
+**2. `-L` / `-I` search paths, and the TLS glue source.** The whole reason
+`examples/pass/https_client/main.yoop` was a BOOTGAP: it compiled, emitted valid
+IR, named `ssl`, and died at `ld: library 'ssl' not found`. Two separate things
+were missing, and both are in `link/`:
+
+  - `link/search_paths.yoop` (new): the `-L` and `-I` half of the line. OpenSSL
+    is KEG-ONLY in Homebrew - macOS ships LibreSSL and Homebrew refuses to
+    shadow it - so the directory holding libssl has to be probed BY NAME.
+  - `glueSources` in `link/runtime_root.yoop`: `yoop_tls.c` is excluded from the
+    set every program gets, because it includes `<openssl/ssl.h>` and putting it
+    in would make OpenSSL a build requirement for hello world. It has to come
+    BACK for a program that named OpenSSL, or the link finds libssl and then
+    fails on `yoop_tls_connect`.
+
+The reference branches on `process.platform` and `process.arch` here; the
+bootstrap has neither, so every candidate from every platform is offered and
+`fs.exists` decides. That lands in the same place on a real machine and needs no
+platform check to extend. Tests: nine assertions in a new
+`bootstrap/src/link/link.test.yoop`, asserting the ORDER of the candidate list
+rather than a command line - which is the only way to pin it without a machine
+that has every one of those directories.
+
+**3. `printf(<a runtime string>)` was UNDEFINED BEHAVIOUR.** The sharpest finding
+in the whole item, and the one the surface probe could never have reached. C
+reads printf's first argument as a FORMAT, so a string the program BUILT has
+every `%` in its DATA read as a conversion pulling a vararg nobody pushed.
+Measured on `examples/pass/http_url_smoke`: `encode=a%20b%2Fc%3Fd%3De` printed as
+`encode=a                   b0.000000c0.000000d8776975808e`, and that last
+number is a stack address. `codegen/printf_format.yoop` (new) splices `"%s"` in
+front of a printf that has NO varargs and whose format is not a compile-time
+constant. The test is the lowered OPERAND rather than anything syntactic:
+`Operand.StrRef` IS "a module-level string constant", which is what a string
+literal and a template with no interpolation both lower to. A call WITH varargs
+is never rewritten - that is the author using it as a format. Tests: the
+`printf_runtime_format` slice fixture, four shapes.
+
+The reference never needed this because it turns a template into a format string
+at COMPILE time (`${x}` becomes a literal `%d` and `x` becomes a vararg), so
+runtime halves always arrive through `%s`. That same design is why it renders an
+interpolated float as `3.140000` and an interpolated bool as `1`, which is the
+known divergence in the follow-ups. This file is what makes both compilers safe
+in the same place without giving that up.
+
+Together the three took the probe from 215 OK to 218 and removed one whole
+DIFFER shape.
+
+### The 26 DIFFERs, classified
+
+**24 of 26 are a reference bug where the bootstrap is right**, and both were
+already in the follow-ups. This item is the first thing to measure how far each
+one reaches.
+
+    23   a template literal handed DIRECTLY to printf as its format. The
+         reference re-renders through C, so an interpolated float is
+         `3.140000` and an interpolated bool is `1`; the bootstrap builds the
+         string with the language's own rules and says `3.14` and `true`.
+         base64_roundtrip, bool_array, bool_eq, casts,
+         codegen_name_and_literal_papercuts, enum_array, extern_library,
+         float_literal, generics_overview, heap_alloc_struct,
+         http_parse_smoke, kind_compose_inline, layout_compose,
+         runtime_introspect, sha256_hmac, short_circuit, time_calendar,
+         traits_multi_impl, type_inference, larger_example, pkgdemo, yooparse,
+         ep02_values_and_loops
+     1   MAP ITERATION ORDER, from the reference's broken `stringHash`. Measured
+         directly this time: FNV-1a of "t" is 12638201494206808739 and the
+         bootstrap says so, the reference says 12637105281113482372.
+         derive_display_array_vec
+
+A side finding worth acting on later: several of those files carry an in-file
+`// expected output:` comment spelling the REFERENCE's rendering
+(`casts.yoop:15`, `float_literal.yoop:10`, `heap_alloc_struct.yoop:19`,
+`runtime_introspect.yoop:67`, `traits_multi_impl/main.yoop:38`,
+`ep02_values_and_loops.yoop:63`, `time_calendar.yoop`). Under "the bootstrap is
+right" those comments are stale. Left alone here - editing example expectations
+is its own change with its own reviewer.
+
+**The other two are bootstrap bugs, both new, both written up as items:**
+
+     1   `examples/playground/sqlite_demo/main.yoop` - stdout is byte-identical
+         and the EXIT CODE differs, 6 against 0. Item 5.17.
+     1   `examples/tour/ep08_kinds.yoop` - a DOUBLE DISPOSE. Item 5.16.
+
+### The 29 BOOTGAPs, classified
+
+24 are refusals this plan already names, and seventeen of those are deliberate:
+
+    14   `@precompile` (out of scope by design). 13 in examples/pass, plus
+         playground/twinstick
+     4   a module const needing comptime (out of scope): comptime_enum_fold,
+         dir_module, module_init_folded, playground/shader_demo
+     2   module-level `let` with a non-literal initializer (5.14):
+         http_concurrent, module_level_mutable_array
+     2   `union` (5.13): union_rgba, dir_module_shell_order
+     1   reserved words as NAMES (5.15): keyword_field_names
+     1   `from` as an ordinary identifier (a follow-up): tour/ep03_structs
+
+The other five are what this item found, and each is written up below or in the
+follow-ups:
+
+     1   `examples/pass/propagates_full/main.yoop` - a field carrying the kind
+         through an explicit PREFIX in its annotation
+         (`handle: disposable FileHandle`) rather than through its own type's
+         `propagates` clause. Already in the follow-ups as unbuilt; this is the
+         first corpus file that wants it. Sized as item 5.18.
+     1   `examples/modules_demo/main.yoop` - the `modules/` import root, the
+         program-owned package directory. Refused by name already. Item 5.19.
+     1   `examples/playground/diskscope/main.yoop` - `sdl.EVT_QUIT`, a module
+         `const` reached through a NAMESPACE. Same gap `ns.Variant.Case` has and
+         already in the follow-ups; what is new is that the message is
+         `unknown name "sdl"`, which names neither the feature nor the fix.
+     1   `examples/playground/nebula_arena/main.yoop` - passing a value `enum`
+         where its UNDERLYING primitive is declared (`SDL_Init(flags)` against
+         `function SDL_Init(flags: uint32)`). The reference coerces; the
+         bootstrap refuses by name. A measured DIVERGENCE - bootstrap/README.md
+         claimed "no implicit conversion in either direction" on both sides and
+         that claim was wrong about the reference. Corrected there, recorded in
+         the follow-ups, and left refused because refusing is the safe
+         direction.
+     1   `examples/playground/servertest2/main.yoop` - `implements (Into<E>
+         WithContext<E>)` with NO COMMA between the two traits. SPEC.md says
+         the list is comma-separated (`implements (Disposable,
+         Iterable<Message>)`), so the PROGRAM is malformed and the reference is
+         being lenient. Not a bootstrap gap; the papercut is that the message,
+         `expected RPAREN, got IDENT`, does not say "you are missing a comma".
 
 **4.4 The edit-verify loop - DONE 2026-08-13. 271 seconds to 161.** Not a
 language feature; it is the thing every other item pays for many times over, so
@@ -2613,6 +3301,439 @@ default 12 workers, 6 at 4 and 6 at 28 - each reporting 140 pass / 0 fail /
 Ordering varies, which is what concurrency means; membership and outcome do
 not.
 
+**4.5 `yoopiler --test` in the bootstrap driver - OPEN, sized.** Found by 4.3,
+which is what makes it an item rather than a guess: the flag is refused by name
+(`unknown option --test`) and the bootstrap has no test mode at all.
+
+**Everything BELOW the driver already works**, and that was measured rather than
+assumed. Writing out by hand the entry module the reference GENERATES, and
+compiling it with each compiler, produces byte-identical TAP output and the same
+exit code on both `examples/testing/pass` (`3 passed, 0 failed`, exit 0) and
+`examples/testing/fail` (`1 passed, 2 failed`, exit 2 - the exit code IS the
+failure count). So the `suite` kind, the `test` binding that owns a block,
+`mustCall recordOutcome beforeScopeEnd`, the `(() => void)[]` table and
+`std/test.yoop` itself are all complete here.
+
+What is missing is five pieces of DRIVER, all of them in
+`src/jsyoopdriver/test_mode.js` (205 lines) and its wiring in `src/yoopiler.js`:
+
+  - **discovery** - glob `**/*.test.yoop` under a path, sorted so a run is
+    reproducible, skipping dot-directories and `node_modules`. Also the
+    single-file shorthand, where `yoopiler foo.test.yoop` with no flag enters
+    test mode because the file declares `import.test;`
+  - **syntactic collection** - parse each file and take every kind-prefixed
+    top-level function. It has to be syntactic: resolving `enumerable as`
+    needs typecheck, typecheck needs the entry module, and the entry module
+    needs the collected names, so the cycle is broken here and the wrong kind
+    is rejected after typecheck instead
+  - **entry synthesis** - generate a module SOURCE holding
+    `const fns: (() => void)[] = [...]`, a parallel `string[]` of labels, and
+    `return harness.runAll(fns, names)`
+  - **a `readFile` OVERLAY on the module graph**, so that generated source can
+    be a module without ever being written to disk. This is the piece with no
+    equivalent in the bootstrap today: `source_graph/load.yoop` reads every
+    file from the filesystem, and it needs a "this path answers from memory"
+    hook. The reference already has one, for the LSP's unsaved buffers
+  - **the `export` wrapper** - a suite is written `suite function foo()` with
+    no `export`, and the generated entry imports it by name, so the driver adds
+    the wrapper to the AST between the graph load and typecheck. That is an AST
+    MUTATION after parse, which the bootstrap does elsewhere (the derive
+    expansion) but not at this point in the pipeline
+
+Roughly 250 to 350 lines of Yoop across two or three files under a new
+`src/test_mode/`, plus the overlay hook in `source_graph`. It is the last thing
+the reference driver does that the bootstrap cannot, so it is on the critical
+path to retiring `src/`.
+
+---
+
+## Phase 5 - the long tail
+
+By the time phase 4 closed there was no critical path left worth the name: the
+biggest remaining group was four files and most were one or two. What follows is
+that tail, cleared cheapest-first over one pass on 2026-08-13. Every one of them
+is small; what they have in common is that each was the LAST thing between some
+corpus file and an executable, so the "done" count and the site count moved
+together for the first time since 3.1.
+
+**5.1 Shadowing in a nested block - DONE, 2 files.** `let v = 7; if (c) { let v
+= 99; } total += v;` was "v is already declared in this function". The scope
+stack refused any name it could SEE, which conflated two questions: a nested
+block declaring a name is an ordinary new binding, and the SAME block declaring
+one twice is a scope contradicting itself. The declare test now reads the TOP
+block only; the lookup still walks the whole stack, and the reference agrees on
+both halves (a redeclaration beside itself is still "redeclaration of v").
+
+Codegen owed the other half, and it was the part that could have been a silent
+wrong answer rather than a diagnostic: the inner binding gets its own alloca
+either way, so a compiler that forgets to put the OUTER name back still emits
+valid IR and simply reads the inner slot forever after. `localsPopBlock` now
+restores what each name meant on the way in instead of removing it. The two
+`for` heads also open a locals block of their own, because a counter is scoped
+to its loop and there is no block around the head to do it.
+
+One DIVERGENCE, and it is a reference bug: shadowing with a DIFFERENT TYPE
+(`let x: int32 = 5; if (c) { let x: string = "s"; } return x;`) makes the
+reference emit `ret i32 %t4` on a `ptr` - it restores the name and not the type.
+The bootstrap gets it right, and `shadowing.yoop` says so in a comment rather
+than asserting it, since a slice fixture has to stay inside the intersection.
+
+**5.2 Shorthand pattern fields - DONE, 2 files.** `case Shape.Circle { radius }:`
+is `{ radius: radius }`. A pattern is the one place the second half can be read
+off the punctuation with no ambiguity - what follows a field name is a `:` or it
+is the end of that field - and the two spellings land in the arena identically,
+so nothing downstream knows which was written. Ten lines.
+
+**5.3 `switch` over a BOOL - DONE, 2 files.** `case true:` / `case false:`.
+Exhaustiveness is the whole reason a bool is its own scrutinee kind rather than
+a one-bit integer: two values means `true` beside `false` covers everything, so
+the default arm becomes optional and the jump table's default block becomes
+`unreachable`. That is the variant rule rather than the integer one, and it is
+the only non-variant switch that has it.
+
+What the reference does, established by probing: not exhaustive is refused by
+name ("switch over bool is not exhaustive - add 'default' or list both true and
+false"); a default BESIDE both cases is allowed, unlike a variant switch; a
+duplicate `case true` is refused; and the two spellings do not mix in either
+direction - `case 1:` against a bool and `case true:` against an int32 are both
+refused, even though `true` and `1` land on the same table value. All five are
+matched word for word.
+
+The pattern node records which TOKEN it was written as in its `operator` slot,
+which nothing else on a LITERAL_PATTERN uses. The value alone cannot tell `1`
+from `true`, and that is exactly what the two refusals need to know.
+
+**5.4 `type FILE;` in an extern block, and the RE-BORROW behind it - DONE, 2
+files.** An OPAQUE type: a struct with an EMPTY field list, which is what the
+reference makes of it and is not a placeholder - a type with no fields is
+precisely a type nothing can read a field out of.
+
+The item behind it was the interesting one. `fopen` returns `ref FILE`, so the
+local holding it is ALREADY a borrow, and `fclose(ref fp)` is `ref` on something
+that is one. That used to be `ref ref FILE`, which is not a type. It is a
+RE-borrow: pass D hands back the operand's own type unchanged, and codegen loads
+the slot (which holds the borrowed address) instead of taking the slot's
+address. Confirmed against the reference, which accepts `ref r` and a bare `r`
+into the same `ref P` parameter and writes through to the same object either
+way. A `ref` PARAMETER does not come here, because the body already sees its
+type unwrapped to `T`.
+
+**5.5 Compound assignment on an ELEMENT - DONE, 2 files.** `xs[1] += 100` and
+`w.sectors[i].ceiling += 2`. The compound forms desugar to `target = target <op>
+value`, which names the target TWICE, so the rule is about what is free to read
+twice rather than about what is assignable: a name, a path of fields reaching
+one, and now an element whose SUBSCRIPT is itself a name or an integer literal.
+
+A NARROWER rule than the reference's, deliberately: it keeps a dedicated
+COMPOUND_ASSIGNMENT node and addresses the lvalue once, so it admits any
+subscript. `xs[g()] += 1` therefore stays refused BY NAME here, which is the
+safe direction - a program the bootstrap accepts means the same thing on both
+sides. Every subscript in the corpus is a literal or a name.
+
+**5.6 `export "C" function` - DONE, 4 files.** A definition emitted under its
+bare C name. It asks the mangler the same question an `extern "C"` does, from
+the opposite direction - "this symbol is defined HERE under exactly this
+spelling" - so it gets the same answer: the name goes in the module's
+`externNames`, and both the definition and every call from that module land
+unmangled. `externNames` is per MODULE, so a SIBLING file of a directory module
+reaches it, which is what `extern_sibling_call` is about.
+
+The wrapper gets its own node kind (`EXPORT_C_FUNCTION_DECL`, already in the
+lockstep list) rather than a flag, because that is what tells pass A to record
+the name. `export "intrinsic" function` is refused by name - an intrinsic has no
+body for `export` to do anything with.
+
+NOT built, and it is not a bootstrap gap: a cross-module call to a C-exported
+function. The reference emits the MANGLED name there and fails to link
+(`use of undefined value '@lib_64c31bc6__add_one'`), established by probing, so
+there is nothing to be compatible with. Written up in the follow-ups.
+
+**5.7 The four `unsafe_ptr` operations, and pointer ARITHMETIC - DONE, 3
+files.** `cast<T>(p)`, `toInt(p)`, `fromInt<T>(n)`, `toArray<T>(p, n)`.
+`unsafe_ptr` is a TYPE NAME rather than a namespace, so the whole form is
+recognized by TEXT - there is nothing to resolve the left side against - and an
+`unsafe_ptr` followed by any other member falls back to an ordinary identifier.
+Same place and same reason as the reference.
+
+Three of the four cost between zero and one instruction, because LLVM's pointers
+are OPAQUE: `cast` is a change of TYPE and pass D already made it. `toArray` is
+the one with substance, and it builds the same `{ ptr, i64 }` descriptor a slice
+does - so what comes out is an ordinary `T[]` and indexing, `.len` and `.ptr`
+all work with nothing new behind them. `uintptr` joins the LP64 alias list
+beside `c_size_t`.
+
+Pointer arithmetic came with them, because `unsafe_ptr_arithmetic.yoop` needs
+both. C's rules, which are the reference's: `p + n` steps by ELEMENTS (which is
+what `getelementptr` already means, so there is no size to compute), `p - q` is
+the element COUNT (which does need the size, so it is a ptrtoint pair, a sub and
+an sdiv), and the OPAQUE pointer is refused throughout - it has no element width
+and "advance by 2" has no answer. The right operand of a `p + n` gets NO
+expectation, which is the one thing that needed care: handing it the pointer
+type pins the literal to a pointer and reports a mismatch about a line that is
+perfectly well formed.
+
+**5.8 `a..b` ranges - DONE, 2 files.** SUGAR, not a loop form: `a..b` lowers to
+`$range.exclusive(a, b)` from std/core/range.yoop, so `Range` stays an ordinary
+userland type implementing `Iterable<usize>` and neither the typechecker nor
+codegen learns a rule. Same design as the reference's
+`src/jsyoopdriver/lower_range.js`, moved INTO the parser here because the
+bootstrap's arena is built as it parses - there is no second walk that could
+rewrite a node in place afterwards.
+
+Three pieces, and each was needed:
+
+  - the CALL, built directly, so no range node ever reaches the arena
+  - a synthesized `import * as $range from "std/core/range.yoop";`, PREPENDED to
+    the file's decl run. Every consumer reads the leading run of IMPORT_DECLs and
+    stops at the first other declaration, so an appended one would be silently
+    ignored. Only a file that wrote a range gets it
+  - `..` at precedence 15, looser than every arithmetic operator, AND a slice's
+    bounds parsed AT that precedence. That second half is what keeps `xs[a..b]`
+    a slice rather than an index by a Range
+
+Plus the hazard the reference names `inForInIterExpr`: the iterable of a
+`for x in ... {` runs right up to the body's brace, so a trailing `a.b` path
+would swallow it as a variant PAYLOAD - `for i in 0..xs.len {` reads
+`xs.len { ... }` as `Enum.Case { ... }`. Inside the RHS a `{` only opens a
+payload when it LOOKS like one (`{ <name> :`), which no block can be.
+
+**5.9 The IMPLICIT region form - DONE, 1 file.** `ephemeral makeGuard(1);` with
+no braces. What it owns is the rest of the ENCLOSING scope rather than a block of
+its own, so it opens no dispose scope and records into the one already open -
+which is what makes two of them in a row unwind in reverse, exactly like two
+`disposable` bindings. Fifteen lines across parse, pass D and codegen.
+
+**5.10 `Trait.method(ref vt, ...)` with a vtable receiver - DONE, 1 file.** The
+second spelling of a slot dispatch, and the one a caller writes when it never
+learns which vtable it was handed - `await Readable.read(ref r, ref buf)` where
+`r: Reader`. It used to be refused as a non-struct receiver. Now the static
+trait path checks whether the receiver is a vtable erasing THIS trait and routes
+to the same checker `Reader.read(...)` goes to, so codegen needs nothing new -
+the slot index lands in the same side table either way.
+
+**5.11 Composed kinds actually COMPOSE - DONE, 1 file, and one silent
+miscompile.** `kind scoped_alt = disposable_base & { mustNotEscape scope; };`
+did not parse, because the composition scan stopped at the first `;` and the
+inline body has one inside it. That was the reported blocker.
+
+The real finding was underneath: a composition's operands were consumed and
+recorded NOTHING, so `scoped_alt h: Vec3 = ...` compiled to no scope-end call at
+all. `examples/pass/layout_compose/main.yoop` was reporting `ok` in the probe
+and silently dropping its `bye vec4` - a promise deleted rather than refused,
+which is the exact failure the "refuse by name" rule exists to prevent, and
+which no probe category can see.
+
+Both operand shapes now land in the same childIds run a braced kind uses: a NAME
+becomes a `compose` clause carrying it, and an inline `{ ... }` body's clauses
+are pushed straight in (an anonymous bag of clauses IS a clause list, so there
+is nothing to name and nothing to look up). Pass A merges each named operand's
+already-registered KindInfo - booleans OR in, `disposeMethod` takes the first
+that names one - and an operand nothing declares is refused BY NAME.
+
+**5.12 `==` on two VARIANTS - DONE, 1 file, and the last bad-ir in the corpus.**
+`enum_eq.yoop` had been the entire `bad-ir` bucket since phase 2: the compare
+was emitted as an `icmp` on the aggregate, which is INVALID IR rather than a
+wrong answer, so the compile succeeded and clang refused what it produced. A
+variant comparison is a TAG comparison - two `Circle`s with different radii are
+equal, and a structural comparison is what `switch` is for - which is the
+documented semantics and the reference's. Twelve lines, and the probe's bad-ir
+count is now zero.
+
+### Re-probed after the whole of phase 5
+
+The corpus is now 453 files - five additions, all of them these items'
+(`parse/range.yoop`, `parse/unsafe_ptr.yoop`, `typecheck/unsafe_ptr_ops.yoop`,
+`codegen/unsafe_ptr_ops.yoop`, `codegen/instr_ptr.yoop`):
+
+    222   compile all the way to an executable
+    205   reach clang and fail ONLY for having no `main`, so 427 files are done
+    0     reach clang and produce invalid IR - the bad-ir bucket is EMPTY for
+          the first time in the plan's history
+    26    stop earlier, at a named parse or typecheck refusal
+
+22 distinct refusal sites, down from 42, and 27 more files are done. Unlike most
+passes the two counts moved TOGETHER throughout, which is what a tail looks like
+from the inside: nothing here gated anything else, so every item that closed
+finished the files behind it immediately.
+
+**The same probe run with STAGE 3 produces a byte-identical report**, and stage2
+and stage3 are byte-identical as binaries and as emitted `.ll`. The whole slice
+suite runs through stage3 too.
+
+The remaining refusal distribution, as DISTINCT SITES - 22 of them, and
+SEVENTEEN are deliberate:
+
+    13     `@precompile` (out of scope by design). 13 files
+    3      module const/let needing comptime (out of scope). 5 files
+    2      `union` decls (refused by name, sized below). 4 files
+    1      `pooled` FIELDS and `propagates<pooled>` (refused by name). 1 file
+    2      module-level `let` with a non-literal initializer. 2 files
+    1      reserved words as NAMES in name-only positions. 1 file
+
+The last two rows are the only OPEN work left in the corpus, plus `union`. Both
+of the remaining `union` files also want something else - `union_rgba.yoop` wants
+nothing more, and `keyword_field_names.yoop` wants reserved-word names as well.
+
+### 5.13 `union` - OPEN, sized, 4 files, 2 sites
+
+Left refused BY NAME rather than half-built, which is the rule this plan states
+for exactly this shape. It is the one remaining item that is real machinery
+rather than a tail item, and the sizing is now concrete rather than a guess.
+
+What it needs, established by reading the reference's implementation:
+
+  - a LAYOUT of its own: every field at offset 0, size the largest field's,
+    alignment the largest field's. `sizeOfType` grows a case; nothing else in
+    typecheck/layout.yoop does
+  - an LLVM type of its own: `%union.mod__Name = type { [N x i8] }`, a byte
+    buffer rather than a field list, because the fields overlap
+  - ADDRESS-BASED field access, and this is the part that is not an extension of
+    anything. The bootstrap's structs are SSA aggregates - a read is a load plus
+    `extractvalue`, and there is nothing to reinterpret an aggregate as. A union
+    field read has to be "the union's own address, loaded at the field's type",
+    which is the variant-PAYLOAD shape rather than the struct one. The write
+    side already has an address walk (`emitFieldAddress`); the read side does
+    not
+  - a LITERAL that stores exactly one field at the union's address, again as
+    that field's own LLVM type
+
+`Type.Union` and `Symbol.Union` exist and nothing constructs either, so pass A
+and pass C are the small half. The estimate is 250 to 400 lines plus fixtures,
+and the risk that makes it worth deferring rather than rushing is that the read
+path touches the same code every struct read goes through, in a compiler that
+currently self-hosts to a byte-identical fixpoint.
+
+### 5.14 A module-level `let` with a non-literal initializer - OPEN, 2 files
+
+`let state: ServeState = http.serveStateNew(MAX_CONCURRENT);` and
+`let counters: int32[] = [0, 0, 0, 0];`. Refused by name today ("a global's
+initializer is fixed at compile time").
+
+The reference's answer, and it is the one to copy: the global gets a ZERO
+initializer, and each file with any such decl emits
+`define internal void @<mod>__module_init<file>()` that stores the real values.
+`main` calls every one of them in the module graph's topological order before
+anything else. So this is not comptime - it is a run-time initializer with a
+defined order, and it is what a mutable global needs anyway (its payload has to
+be writable storage that two globals with the same initial bytes do not share).
+
+Deferred because it changes what `main` EMITS, which is the one function the
+self-host fixpoint is most sensitive to, and 2 files is not worth spending that
+risk on at the end of a pass. Roughly 150 lines: a global emitted as
+zeroinitializer, a per-file init function, a call list threaded to `main`.
+
+### 5.15 Reserved words as NAMES - OPEN, 1 file
+
+`function fputs(type: string, kind: ref FILE): int32;`. C headers use `type`,
+`kind` and `enum` as parameter names, so generated bindings fail to parse on the
+first collision. The reference accepts a reserved word in NAME-ONLY positions -
+struct, union, variant and enum field and case names, extern parameter names,
+the right of a field access, and struct-literal field names - and refuses it
+everywhere else (`function f(type: int32)` on an ORDINARY function is "type is a
+reserved word and cannot be used as a name", established by probing).
+
+Small - it is `parseIdentAsName` plus a variant that accepts a keyword token,
+wired to the positions above - but the one file that wants it also wants
+`union`, so it finishes nothing on its own.
+
+### 5.16 A DOUBLE DISPOSE after a manual discharge - OPEN, 1 file
+
+Found by 4.3's program probe, in `examples/tour/ep08_kinds.yoop`, whose own
+`// expected output:` block says what should happen and whose prose says why:
+
+    manualDispose:
+      use 3
+      close 3
+      after manual dispose
+      close 3          <- the bootstrap emits this second one
+
+`manualDispose()` calls `Disposable.dispose(ref c)` BY HAND on a
+`disposable`-kinded binding, and the extra line lands after
+`after manual dispose` - so it is the scope-end call at the closing brace, not a
+missing one on the reference's side. The reference tracks that the obligation
+was DISCHARGED on this path (`snapshotSat` / `mergeSatIntersect` in
+`src/jsyooptypecheck/kindCheck.js`) and emits nothing at scope end.
+
+This is a real correctness bug rather than a rendering difference: a `dispose`
+that frees is being called twice on the same value. It has not bitten anything
+else because nothing in `std/`, `examples/pass/` or `bootstrap/src/` disposes a
+kinded binding by hand.
+
+Not small, and the reason is the shape rather than the size.
+`codegen/dispose_stack.yoop` is a purely SYNTACTIC scope stack - it knows which
+bindings are open and how far to unwind, and nothing about what has happened to
+them. Discharge is PATH-SENSITIVE: a `dispose` inside an `if` discharges on one
+branch and not the other, so the answer at the closing brace is an INTERSECTION
+over the paths that reach it, which is the same merge shape `diverge.yoop`
+already does for "does control flow always leave this statement". So the work is
+a satisfied-set on the dispose stack, set by a manual call, snapshotted at a
+branch and intersected at the join - and it belongs in typecheck beside
+`diverge.yoop` rather than in codegen, because only pass D sees the branches as
+branches.
+
+### 5.17 `function main(): void` has no defined exit status - OPEN, 1 file
+
+`examples/playground/sqlite_demo/main.yoop` prints byte-identical output under
+both compilers and exits 6 under the bootstrap against 0 under the reference. 6
+is the length of the last thing it printed: the last statement is
+`printf("\ndone\n")` and `w0` is never written after it.
+
+**BOTH compilers emit `define void @main()`**, which is ABI-illegal for C's
+entry point, so neither writes the return register. The reference's 0 is
+INCIDENTAL - `yoop_runtime_shutdown()` happens to be its last call and happens to
+leave 0 there. Change the printed text to 21 characters and the bootstrap exits
+21; the reference would move too if its last call ever returned something else.
+
+The fix is to emit `define i32 @main()` and `ret i32 0` for a `void` main, which
+is what C says a missing `return` in `main` means. Deferred rather than done in
+4.3 for the same reason 5.14 was: it changes what `main` EMITS, which is the one
+function the self-host fixpoint is most sensitive to, and one playground file is
+not worth spending that risk on at the end of a pass. It is also worth fixing on
+BOTH sides in one change, since the defect is shared.
+
+### 5.18 A field carrying a kind by PREFIX - OPEN, 1 file
+
+`examples/pass/propagates_full/main.yoop`:
+
+    type Session propagates<disposable> {
+      handle: disposable FileHandle,
+    }
+
+The clause says the obligation belongs to the fields, and `propagatedFieldsOf`
+in `typecheck/propagate.yoop` counts a field as supplying the kind only when its
+own TYPE propagates it. `FileHandle` does not - it implements `Disposable`
+outright - and the field says so with an explicit PREFIX in its annotation
+instead. So the type propagates a kind no field appears to carry and the binding
+is refused by name. The reference counts both spellings.
+
+Already in the follow-ups as unbuilt; what 4.3 added is a corpus file that wants
+it, and the sizing. It is not a one-liner: `Type.Field` is `{ name, typeId }`
+and has nowhere to put a carried kind, so the work is a `carriedKind` slot on
+`Field`, filled in pass C where the struct's fields are built (the one place the
+annotation node and its `KIND_PREFIX` list are both in hand), and one extra test
+in `propagatedFieldsOf`. Every construction site of `Field` moves with it.
+
+### 5.19 The `modules/` import root - OPEN, 1 file
+
+`import { ... } from "modules/math"` - the program-owned package directory,
+refused by name in `source_graph/walk.yoop`. `examples/modules_demo/` is built
+entirely around it, so it is the one example DIRECTORY the bootstrap cannot
+build at all.
+
+The reference's rule (`src/jsyoopdriver/moduleGraph.js`): `modules/<name>`
+resolves against a `modules/` directory found by walking UP from the importing
+file, stopping at the first one that exists. The point is relocatability - a
+library at `json-repo/json/` with its dependencies at `json-repo/modules/`
+writes `import ... from "modules/http"`, and the same file copied into a
+consumer at `app/modules/json/` resolves the same line against `app/modules/`.
+The walk is bounded so a stray `modules/` in a home directory cannot answer for
+an unrelated program.
+
+Small, and self-contained: one upward walk in `source_graph/resolve.yoop` and
+the refusal in `walk.yoop` comes out. It needs a fixture tree under
+`bootstrap/tests/graph/` with two nesting depths, because the whole feature is
+which `modules/` answers.
+
 ---
 
 ## How each step is done
@@ -2649,6 +3770,27 @@ easier to fix from a compiler that works than from one that does not.
    valid IR with none, so its code is fully handled and `done` counts it;
    `bad-ir` is a real codegen bug; `refused` stopped at a named refusal.
    `sites` counts distinct `file:line:message` among the last two.
+
+0b. **And `scripts/probe_programs.sh` when the change could affect what a
+   program DOES**, which the surface probe cannot see: it stops at `--emit-ir`
+   and never links or runs anything. This one takes every entry point under
+   `examples/` that declares a `main`, builds it with BOTH compilers, runs
+   both, and compares stdout and exit code.
+
+       scripts/probe_programs.sh                    # defaults to /tmp/yoopiler_boot
+       scripts/probe_programs.sh /tmp/s3/yoopiler 8 # a built stage, 8 workers
+       scripts/probe_programs.sh /tmp/yoopiler_boot 10 'playground'  # a filter
+
+   Categories: `OK` both built it, ran it, and agree; `DIFFER` both ran it and
+   the two disagree, which is the most interesting result there is; `BOOTGAP`
+   the reference built it and the bootstrap did not, so a bootstrap bug;
+   `REFGAP` the reverse; `STALE` neither built it, which is a finding about the
+   PROGRAM. Added by item 4.3, and it found two bugs - undefined behaviour in
+   printf and a double dispose - that no amount of probing IR could have.
+
+   Run BOTH after a change, and run each with stage1 and stage3. The two probes
+   are separate on purpose: the surface numbers steer this plan and a change
+   that moved them would be a broken probe, not progress.
 
 1. **Measure first.** Probe the sites; do not infer the shape from one example.
    Attribute a blocker to the file it is IN, not to the probe that hit it. The
@@ -2701,8 +3843,100 @@ are already named refusals in the compiler will announce themselves.
   types and calls but not pattern constructors. Nothing in the corpus needs it.
 - **A template literal handed DIRECTLY to printf as its format string** renders
   differently between the two compilers (`3.140000` vs `3.14`, `1` vs `true`).
-  Pre-existing, and it bites six `examples/pass/` programs that only recently
-  started compiling. Fixtures route through `printf("%s\n", ...)` instead.
+  Pre-existing. Item 4.3's program probe measured how far it reaches: **23 of
+  the 279 example programs**, across `examples/pass/`, `examples/tour/` and
+  `examples/playground/`, and it is 23 of the 26 places the two compilers
+  disagree at all. The bootstrap is the one that is right - it builds the string
+  with the language's own interpolation rules, where the reference turns the
+  template into a C format string at compile time and lets printf re-render.
+  Fixtures route through `printf("%s\n", ...)` instead.
+  The SAFETY half of the same difference is fixed as of 4.3 - see
+  `codegen/printf_format.yoop`. Several of those 23 files carry an in-file
+  `// expected output:` comment spelling the REFERENCE's rendering
+  (`casts.yoop:15`, `float_literal.yoop:10`, `heap_alloc_struct.yoop:19`,
+  `runtime_introspect.yoop:67`, `traits_multi_impl/main.yoop:38`,
+  `ep02_values_and_loops.yoop:63`, `time_calendar.yoop`); under "the bootstrap
+  is right" those comments are stale and want a pass of their own.
+- **A RUNTIME format string WITH varargs is broken in the reference.**
+  `printf(runtimeFmt, 5)` renders the format through `%s` and then appends `5`
+  after it, so `"with varargs %d%%\n"` prints as `with varargs %d%%` followed by
+  a bare `5`. The bootstrap prints `with varargs 5%`. Found while writing the
+  `printf_runtime_format` slice fixture for 4.3, which is why that fixture
+  covers the shape in a comment rather than an assertion - a fixture is checked
+  against both compilers and has to stay inside their intersection.
+- **A value `enum` passed where its UNDERLYING primitive is declared.** The
+  reference COERCES (`SDL_Init(flags)` against
+  `function SDL_Init(flags: uint32);` with `flags: InitFlags`); the bootstrap
+  refuses by name, `argument 1 of "SDL_Init" is uint32, not enum InitFlags`.
+  Measured by 4.3 against a probe program, and it corrects item 1.2's write-up
+  and bootstrap/README.md, which both claimed "no implicit conversion in either
+  direction" of BOTH compilers. Left refused because refusing is the safe
+  direction - a program the bootstrap accepts means the same thing on both
+  sides - and one playground file wants it
+  (`examples/playground/nebula_arena/`).
+- **`ns.CONSTANT` reports `unknown name "<ns>"`.** A module `const` reached
+  through a namespace (`sdl.EVT_QUIT`) is the same gap `ns.Variant.Case` has,
+  and it is the last thing between the bootstrap and
+  `examples/playground/diskscope/`. What is worth fixing even before the
+  feature is the MESSAGE: it names neither the feature nor the fix, on a line
+  where the namespace certainly IS known.
+- **A missing comma in an `implements (...)` list is accepted by the reference.**
+  `type E implements (Into<HttpError> WithContext<HttpError>)` in
+  `examples/playground/servertest2/`. SPEC.md says the list is comma-separated
+  (`implements (Disposable, Iterable<Message>)`), so the PROGRAM is malformed
+  and this is reference leniency rather than a bootstrap gap. The papercut is
+  the bootstrap's message, `expected RPAREN, got IDENT`, which does not say
+  "you are missing a comma".
+- **The JS reference's `stringHash` is WRONG, so the two compilers disagree
+  about MAP ITERATION ORDER.** Found by 3.1, and the first place the "integer
+  literal above int64 wraps silently" reference bug below is observable.
+  `std/core/strings.yoop`'s FNV-1a offset basis is 14695981039346656037, which
+  is above int64 max; the reference loses precision reading it, so every hash it
+  computes is off. FNV-1a of "t" is 12638201494206808739 and the bootstrap says
+  so; the reference says 12637105281113482372. The bootstrap is right, nothing
+  in the tree depends on hash order, and no fixture may start to - a `Map` walk
+  cannot be asserted against both compilers.
+- **`--warn-disposable` fires inside DERIVE-GENERATED code.** The `Vec` and
+  `Map` walkers bind `_deriveVecN` / `_deriveMapN` locals, which the advisory
+  warning reads as unhandled disposables pointing at a `@derive`d declaration
+  with no actionable fix. The reference marks the generated method
+  `isDeriveGenerated` and skips advisory diagnostics on it; the bootstrap has no
+  such flag. The warning is opt-in, so nothing in the ordinary build sees it.
+- **`@derive(display)` guard rails are LOAD errors here, not diagnostics.** The
+  expansion runs at load time because that is the only place the module's arena
+  is writable (see 3.1), so a generic derived type, an alias, a duplicate
+  `toString` and a missing `Display` stop the compile rather than accumulating.
+  Same wording, different channel. Moving it back to typecheck needs a `ref` to
+  a Module inside the graph's Vec, which the bootstrap has no spelling for.
+- **A vtable's slot ORDER is its own declaration order, not the trait's.** See
+  3.4. Unobservable across compilers - a vtable value never leaves the program
+  that built it - and every corpus vtable declares its slots in trait order. The
+  fix, if one is ever wanted, is a declaration-ordered method list on
+  `Type.Trait` rather than only the `Map`.
+- **`Trait.method(ref vt, ...)` with a vtable receiver** - DONE 2026-08-13 as
+  item 5.10. It used to be refused, on the grounds that every corpus site wrote
+  the vtable's own name; `examples/pass/reader_vtable_smoke/main.yoop` does not,
+  and it cannot - a function handed a `Reader` and nothing else has only the
+  trait to name. Both spellings now reach the same slot dispatch, and the
+  vtable's name in a diagnostic is read off the TYPE so the two read alike.
+- **A CROSS-MODULE call to an `export "C"` function** emits the mangled name and
+  fails to link. That is not a bootstrap gap: the reference does exactly the
+  same thing (`use of undefined value '@lib_<hash>__add_one'`), established by
+  probing while item 5.6 landed. The per-module `externNames` table is what
+  answers "bare C name or mangled one", and an importing module has no entry in
+  its own. Nothing in the corpus writes one.
+- **A NARROWER compound-assignment rule than the reference's.** After 5.5 an
+  element target works when its SUBSCRIPT is a name or an integer literal.
+  `xs[g()] += 1` stays refused by name, because the bootstrap DESUGARS the
+  compound forms (naming the target twice) where the reference keeps a
+  COMPOUND_ASSIGNMENT node and addresses the lvalue once. Refusing is the safe
+  direction - a program the bootstrap accepts means the same thing on both
+  sides - and every subscript in the corpus is a literal or a name.
+- **Shadowing with a DIFFERENT TYPE is a reference bug.**
+  `let x: int32 = 5; if (c) { let x: string = "s"; } return x;` makes the
+  reference emit `ret i32 %t4` on a `ptr`: it restores the NAME and not the
+  type. The bootstrap gets it right, so `shadowing.yoop` documents the case in a
+  comment rather than asserting it - a slice fixture is checked against both.
 - **Reference bugs found along the way**, none of which the bootstrap should
   copy: a string literal passed as a printf vararg prints twice out of order;
   `&` on a float crashes its codegen; a const array write SIGBUSes; a duplicate
@@ -2713,7 +3947,25 @@ are already named refusals in the compiler will announce themselves.
   enum is not a prim, so the unsigned override never fires - see 2.11); an
   integer literal above int64 WRAPS silently rather than being refused, so
   `const N: usize = 18446744073709551615;` is 0 there and is itself here (found
-  by 2.12, which had to stop using a max-value sentinel because of it).
+  by 2.12, which had to stop using a max-value sentinel because of it). And two
+  found by 4.3's program probe, both in `examples/playground/`, both of which
+  make the reference the reason the program does not build:
+  `algoscope/main.yoop` makes it CRASH with `RangeError: Maximum call stack size
+  exceeded` in `findScopedIdentInExpr`, and `sdl_demo/main.yoop` makes it emit
+  invalid IR (`floating point constant invalid for type`, which the bootstrap
+  avoids by emitting every float constant as a 64-bit hex pattern - see
+  `utils/float_bits.yoop`).
+- **A `switch` over a BOOL** - DONE 2026-08-13 as item 5.3, and the
+  exhaustiveness question the entry raised is what made it its own scrutinee
+  kind rather than a one-bit integer. See the item.
+- **An intrinsic reached by a NAMED import and then called unqualified.** After
+  item 3.6, an unqualified call means the intrinsic only when THIS module wrote
+  the `extern "intrinsic"` block; a module that imported the name and called it
+  bare gets a call to a symbol nothing defines, which is a link error rather
+  than a wrong answer. No file in std, examples or bootstrap does it, because a
+  std value import has to come through a namespace. The complete fix is a set of
+  intrinsic SymbolIds rather than a per-module set of names, and it is the same
+  shape the reference's `$builtin__` decl ids have.
 - **The layer-2 AST parity dump** (item 4.1) - worth doing once the parser stops
   changing shape.
 - **A generic nominal applied to a Func**, spelled twice: two separate
@@ -2833,40 +4085,51 @@ are already named refusals in the compiler will announce themselves.
 
 ---
 
-## Tasks before being done here: 5 / 31
+## Tasks before being done here: 10 / 51
 
-**Five in-scope items left, of thirty-one tracked.** This is the work IN FLIGHT,
+**Ten in-scope items left, of fifty-one tracked.** This is the work IN FLIGHT,
 not the follow-ups above - those are deliberately deferred past self-hosting and
 are not counted here.
 
 Open:
 
-    2.2  whatever the next surface probe finds (a rolling bucket)
-    3.1  `@derive(display)` expansion - its prerequisite, std AUTOLOADS, is
-         also what five files stop at after 3.5
-    3.4  building a vtable VALUE, the erasure machinery - sized, 11 sites
-    4.1  the layer-2 AST parity dump
-    4.3  the complex tests and the playground programs
+    2.2   whatever the next probe finds (a rolling bucket)
+    4.1   the layer-2 AST parity dump
+    4.5   `yoopiler --test` in the bootstrap driver - sized, ~300 lines
+    5.13  `union` - sized, refused by name, 4 files
+    5.14  a module-level `let` with a non-literal initializer, 2 files
+    5.15  reserved words as NAMES in name-only positions, 1 file
+    5.16  a DOUBLE DISPOSE after a manual discharge, 1 file
+    5.17  `function main(): void` has no defined exit status, 1 file
+    5.18  a field carrying a kind by PREFIX rather than by its type, 1 file
+    5.19  the `modules/` import root, 1 example directory
 
-Closed since the last count: **4.4, the edit-verify loop.** It was added and
-closed in the same pass, which is why the denominator moved and the numerator
-did not. It is the only item here that is not about the language: waiting on
-compile-and-verify was the largest single cost anyone working on the bootstrap
-paid, and a full pass over every command an agent runs went from 271 seconds to
-161.
+Closed since the last count: **4.3, the complex tests and the playground
+programs.** It is the first item measured over code the surface probe had never
+touched, and it did what a first look at real programs does: 218 of 279 example
+programs build under both compilers, run, and agree exactly, and everything that
+does not is now enumerated rather than suspected.
 
-Before that: **3.5, the task half - `task`, `wait`, the handle struct and the
-spawn.** It is the item that made async RUNNABLE: `main` cannot be async and a
-coroutine is reachable only through `await`, so until a spawn could be joined
-there was no way for any of 3.3's machinery to execute.
+**The denominator grew by five and the numerator by four, which is this plan's
+usual shape and is the process working.** Four of the five new items were found
+by pointing the new probe at programs nothing had run in a while - 4.5, 5.16,
+5.17 and 5.18 - and the fifth, 5.19, was a named refusal nobody had costed. Two
+of the five (5.16 and 5.17) are things no amount of `--emit-ir` could have
+found, because both are about what a program DOES rather than whether it
+compiles.
 
-Everything left is either a named feature with a written-up shape (3.1, 3.4) or
-a sweep (2.2, 4.1, 4.3). Nothing left blocks the compiler from building itself.
+**What is left is one feature, one dump format, and seven sized one-file
+items.** 4.5 is the last thing the reference DRIVER does that the bootstrap
+cannot, so it is the one on the critical path to retiring `src/`. 5.16 is the
+only correctness bug among them. Nothing the corpus depends on to COMPILE is
+open: seventeen of the twenty-two remaining surface refusal sites are
+deliberate, and twenty-four of the twenty-nine program-probe gaps are refusals
+this plan already names.
 
 **Keep this counter current.** Update BOTH numbers whenever an item closes or a
 new one is added, in the same edit that marks the item itself - a stale counter
-is worse than none. Expect the denominator to GROW: ten of the thirty were not
-visible when this plan was written, because each landed feature exposes the next
-blocker behind it. That is the process working, not scope creep. An item that
-turns out to be deferred rather than done moves to the follow-ups list and comes
-OFF both numbers.
+is worse than none. Expect the denominator to GROW: twenty-five of the forty-six
+were not visible when this plan was written, because each landed feature exposes
+the next blocker behind it. That is the process working, not scope creep. An
+item that turns out to be deferred rather than done moves to the follow-ups list
+and comes OFF both numbers.

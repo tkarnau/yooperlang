@@ -1,0 +1,14 @@
+module plat;
+
+// A SIBLING file of the same directory module. Declarations are shared across
+// a module's files with no import between them, so both the extern and the
+// C-exported function are reachable here - and both have to emit the same
+// unmangled symbol the declaring file does. The set that answers "bare C name
+// or mangled one" is per MODULE for exactly this reason.
+export function sayThere(): int32 {
+  return puts("from a sibling file");
+}
+
+export function viaCExport(): int32 {
+  return plat_note(41);
+}

@@ -1,0 +1,6 @@
+// The stub sibling of kinds.yoop above. Loaded SECOND, which is the ordering
+// the autoload list exists to guarantee: the real traits.yoop writes
+// `async read(...)` and `async` is a kind the real kinds.yoop declares.
+export trait Display {
+    function toString(ref self): string;
+}

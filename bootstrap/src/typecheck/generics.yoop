@@ -525,6 +525,17 @@ export function inferTypeArgs(
         default: { }
       }
     }
+    // `Task<T>` against `Task<int32>`. A builtin generic NAME rather than a
+    // declared one, so it has no origin for the instance case below to match on
+    // and needs its own line - the same reason `T[]` and `ref T` each do.
+    // `waitUntil<T>(h: Task<T>, ...)` is what wants it: T is only reachable
+    // through the handle.
+    case Type.Task { result: dr }: {
+      switch (typeAt(ref prog, actual)) {
+        case Type.Task { result: ar }: { inferTypeArgs(ref prog, dr, ar, ref params, ref bound); }
+        default: { }
+      }
+    }
     // `Vec<T>` against `Vec<NodeId>`: same origin, so the arguments line up.
     // This is the case that makes `let v: Vec<NodeId> = vec.vecNew(8)` work,
     // where nothing but the RETURN type mentions T.

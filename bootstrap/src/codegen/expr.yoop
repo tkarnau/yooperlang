@@ -146,6 +146,9 @@ function emitExprInner(ref cx: Cx, exprId: NodeId, ref out: Operand): string {
     case ASTNodeKind.REF_EXPRESSION, ASTNodeKind.ADDRESS_OF_EXPRESSION: {
       return emitRefExpr(ref cx, expr, expr.childA, ref out);
     }
+    case ASTNodeKind.UNSAFE_PTR_CAST: {
+      return emitUnsafePtrOp(ref cx, expr, exprId, ref out);
+    }
     case ASTNodeKind.ASSIGNMENT: {
       return emitAssignment(ref cx, expr, ref out);
     }
@@ -219,6 +222,25 @@ function emitLocalRead(ref cx: Cx, expr: ASTNode, ref out: Operand): string {
 // what makes the lookup below total.
 function emitRefExpr(ref cx: Cx, expr: ASTNode, targetId: NodeId, ref out: Operand): string {
   const target = nodeAt(cx.ast, targetId);
+
+  // `ref fp` where `fp` is ALREADY a `ref T` - a RE-borrow. The slot holds the
+  // borrowed ADDRESS, so the borrow is what is IN the slot rather than the
+  // slot's own address: one load, and `ref ref T` never exists. Pass D typed it
+  // that way; this is the instruction half. A `ref` PARAMETER does not come
+  // here, because the body sees its type already unwrapped to `T`.
+  if (isRefAt(ref cx, targetId)) {
+    const err = emitRefBase(ref cx, target, targetId, ref out);
+    if (err.len > 0) {
+      return err;
+    }
+    emitOpenBorrow(ref cx, REF_LLVM_TYPE, ref out);
+    return "";
+  }
+  return emitRefBase(ref cx, target, targetId, ref out);
+}
+
+// The ADDRESS `ref` names, for each of the three things that has one.
+function emitRefBase(ref cx: Cx, target: ASTNode, targetId: NodeId, ref out: Operand): string {
 
   // `ref x.f` - the FIELD's address, which is a gep on the base's slot rather
   // than the slot itself. Same address a field assignment stores through, so
@@ -344,6 +366,14 @@ function emitBinaryExpr(ref cx: Cx, expr: ASTNode, exprId: NodeId, ref out: Oper
     return emitShortCircuit(ref cx, expr, ref out);
   }
 
+  // POINTER ARITHMETIC steps by ELEMENTS rather than by the operand's own
+  // width, so it is a gep (or a division) rather than an `add`. Comparison is
+  // NOT here: `p == null` is an ordinary icmp over two pointers.
+  if ((expr.operator == TokenTags.PLUS || expr.operator == TokenTags.MINUS) &&
+      (isUnsafePtrAt(ref cx, expr.childA) || isUnsafePtrAt(ref cx, expr.childB))) {
+    return emitPointerArith(ref cx, expr, exprId, ref out);
+  }
+
   let lhs: Operand = Operand.None;
   const lerr = emitExpr(ref cx, expr.childA, ref lhs);
   if (lerr.len > 0) { return lerr; }
@@ -351,6 +381,28 @@ function emitBinaryExpr(ref cx: Cx, expr: ASTNode, exprId: NodeId, ref out: Oper
   let rhs: Operand = Operand.None;
   const rerr = emitExpr(ref cx, expr.childB, ref rhs);
   if (rerr.len > 0) { return rerr; }
+
+  // `a == b` on two VARIANTS is a TAG comparison. An `icmp` on the aggregate
+  // itself is invalid IR rather than a wrong answer, which is how this stayed
+  // hidden: the compile succeeds and clang refuses what it produced. Comparing
+  // tags only is the documented semantics and the reference's - two `Circle`s
+  // with different radii are equal, and a structural comparison is what
+  // `switch` is for.
+  if ((expr.operator == TokenTags.EQEQ || expr.operator == TokenTags.NEQ) &&
+      isVariantAt(ref cx, expr.childA) && isVariantAt(ref cx, expr.childB)) {
+    const variantTy = typeOf(ref cx, expr.childA);
+    const leftTag = emitVariantTag(ref cx, variantTy, lhs);
+    const rightTag = emitVariantTag(ref cx, variantTy, rhs);
+    const tagCmp = freshTemp(cx.e);
+    let pred = "eq";
+    if (expr.operator == TokenTags.NEQ) {
+      pred = "ne";
+    }
+    emitICmp(ref cx, tagCmp, pred, VARIANT_TAG_TYPE,
+      Operand.Temp { id: leftTag }, Operand.Temp { id: rightTag });
+    out = Operand.Temp { id: tagCmp };
+    return "";
+  }
 
   // A comparison is a compare over the OPERAND type and yields i1; arithmetic
   // is one instruction over the result type. `typeOf(exprId)` is bool for a

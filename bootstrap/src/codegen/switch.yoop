@@ -40,6 +40,11 @@ export function emitSwitch(ref cx: Cx, stmt: ASTNode, retTy: string, ref termina
   // the underlying width, so `valueTy` is already the right type and there is no
   // tag to extract and no slot to spill into.
   const overEnum = isValueEnumAt(ref cx, stmt.childA);
+  // A BOOL scrutinee dispatches on itself too, as `switch i1`. It is called out
+  // because it is the other kind that may be EXHAUSTIVE with no default arm, so
+  // it needs the unreachable default block below rather than a fall-through to
+  // the join.
+  const overBool = isBoolAt(ref cx, stmt.childA);
 
   // A variant dispatches on its TAG, and its arms read payload fields out of a
   // stack slot - a loaded value has no address to reinterpret. Both are set up
@@ -80,7 +85,7 @@ export function emitSwitch(ref cx: Cx, stmt: ASTNode, retTy: string, ref termina
   // return on some path.
   let unreachableLabel: usize = 0;
   if (!hasDefaultArm) {
-    if (overVariant || overEnum) {
+    if (overVariant || overEnum || overBool) {
       unreachableLabel = freshLabel(cx.e);
       defaultLabel = unreachableLabel;
     } else {

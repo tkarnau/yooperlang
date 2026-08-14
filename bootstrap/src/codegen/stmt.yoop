@@ -102,11 +102,24 @@ export function emitStatement(
       // `while (true)` with no `break` is the one exception - see loop.yoop.
       return emitWhile(ref cx, stmt, retTy, ref terminated);
     }
+    // Both `for` heads BIND a name that is scoped to the loop and not to the
+    // enclosing block, so the locals block opens around the whole statement
+    // rather than around its body - the body's own `emitBlock` pushes a second
+    // one inside this. Without it `let i = 99; for (let i = 0; ...) {}` would
+    // leave the head's slot resolving for `i` afterwards, which is a silently
+    // wrong read rather than an error. Same scope pass D pushes in
+    // checkForLoop.
     case ASTNodeKind.FOR_LOOP: {
-      return emitFor(ref cx, stmt, stmtId, retTy);
+      localsPushBlock(cx.locals);
+      const ferr = emitFor(ref cx, stmt, stmtId, retTy);
+      localsPopBlock(cx.locals);
+      return ferr;
     }
     case ASTNodeKind.FOR_IN_LOOP: {
-      return emitForIn(ref cx, stmt, stmtId, retTy);
+      localsPushBlock(cx.locals);
+      const ierr = emitForIn(ref cx, stmt, stmtId, retTy);
+      localsPopBlock(cx.locals);
+      return ierr;
     }
     case ASTNodeKind.KIND_REGION: {
       return emitKindRegion(ref cx, stmt, stmtId, retTy, ref terminated);

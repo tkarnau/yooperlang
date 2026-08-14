@@ -12,10 +12,14 @@
 // `Closer.close(ref r)` would emit written by hand. That is what makes it
 // emergent rather than built in: the kind below is a user's.
 //
-// Two forms, told apart by what follows the name:
+// Three forms, told apart by what follows the name:
 //
 //   tracked r: Res = open(1);        a BINDING, disposed at scope end
 //   region open(2) { ... }           an anonymous REGION, disposed at the brace
+//   region open(3);                  the IMPLICIT region: no block, so what it
+//                                    owns is the rest of the ENCLOSING scope
+//                                    and it unwinds beside every other binding
+//                                    there, in reverse order
 //
 // Order is REVERSE declaration: a later binding may hold a borrow of an earlier
 // one, so it has to go first.
@@ -32,6 +36,19 @@ kind region {
   mustCall close beforeScopeEnd;
   ownsBlock;
 }
+
+// A COMPOSED kind: every operand's clauses at once. Both operand shapes are
+// here - a NAME, and an inline `{ ... }` body, which is an anonymous bag of
+// clauses with no name to look up.
+//
+// It is worth an executable fixture because the failure mode is silence: a
+// composition whose operands are dropped still compiles, still typechecks, and
+// simply never emits the scope-end call its operand promised.
+kind noescape { appliesTo binding; mustNotEscape scope; }
+
+kind scoped_named = tracked & noescape;
+
+kind scoped_inline = tracked & { mustNotEscape scope; };
 
 trait Closer {
   function close(ref self): void;
@@ -102,5 +119,39 @@ function main(): int {
     printf("  inside\n");
   }
 
+  printf("composed:\n");
+  composed();
+
+  printf("implicit:\n");
+  implicitLifo();
+  printf("implicit mixed:\n");
+  implicitMixed();
+
   return 0;
+}
+
+// A composed kind carries what its operands carry. Both spellings dispose, and
+// they unwind in the same reverse order any other binding does.
+function composed(): void {
+  scoped_named a: Res = open(70);
+  scoped_inline b: Res = open(71);
+  printf("  body\n");
+}
+
+// The IMPLICIT region form: no braces, so the subject lives to the end of the
+// enclosing scope. Two of them in a row unwind in REVERSE, which is what says
+// they are two entries in ONE scope rather than two nested blocks.
+function implicitLifo(): void {
+  region open(50);
+  region open(51);
+  printf("  body\n");
+}
+
+// ...and it shares that scope with ordinary bindings, so the whole run unwinds
+// together in reverse declaration order rather than regions-then-bindings.
+function implicitMixed(): void {
+  tracked a: Res = open(60);
+  region open(61);
+  tracked b: Res = open(62);
+  printf("  body\n");
 }

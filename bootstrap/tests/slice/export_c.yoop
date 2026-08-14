@@ -1,0 +1,29 @@
+// `export "C" function` - a definition emitted under its bare C name.
+//
+// It asks the mangler the same question an `extern "C"` does and gets the same
+// answer, from the opposite direction: an extern says "this symbol is defined
+// somewhere else under exactly this spelling", and an export says "this symbol
+// is defined HERE under exactly this spelling". Both land in one per-module
+// table, which is what makes a SIBLING file of a directory module emit the same
+// symbol the declaring file does.
+//
+// Not covered, because neither compiler supports it: calling a C-exported
+// function from an IMPORTING module. The reference emits the mangled name there
+// and fails to link, so a fixture asserting anything about it would be
+// asserting against a bug.
+
+import { sayHere, sayThere, viaCExport } from "./lib/plat";
+
+// A C export in the ENTRY module too, called from an ordinary function beside
+// it.
+export "C" function add_one(n: int32): int32 {
+  return n + 1;
+}
+
+function main(): int32 {
+  _ = sayHere();
+  _ = sayThere();
+  printf("viaCExport=%d\n", viaCExport());
+  printf("add_one=%d\n", add_one(5));
+  return 0;
+}

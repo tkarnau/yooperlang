@@ -1,0 +1,99 @@
+module typecheck;
+
+/*
+  "Does control flow always LEAVE this statement?"
+
+  One caller: the handler form of `?`, `expr? e { ... }`, whose block runs
+  INSTEAD of the expression producing a value. Falling out of the bottom would
+  leave the binding the `?` feeds holding nothing, and the Ok payload read that
+  follows would read it out of a value that holds an Err. So the block has to
+  leave, and this is what says whether it does.
+
+  The rule is DIVERGES, not "ends in a return". A `break` or a `continue` leaves
+  the block just as permanently as far as the enclosing expression is concerned,
+  which is what makes this legal inside a loop:
+
+      for (let i = 0; i < 5; i += 1) {
+        let v: int32 = readAt(i)? e { continue; };
+      }
+
+  Deliberately CONSERVATIVE: anything not listed answers false. A false negative
+  costs the user an explicit `return` and a diagnostic that says so; a false
+  positive would let codegen fall through into the Ok path with no value in
+  hand, which is a silent miscompile. The same asymmetry the reference's
+  diverge.js states, and the same shapes - the two lists were written to agree.
+
+  Called AFTER the block has been checked, which is what lets the switch case be
+  as short as it is: pass D has already refused a switch that is neither
+  exhaustive nor defaulted, so a switch that got this far covers every value and
+  "every arm diverges" is the whole question.
+*/
+
+import { AST, ASTNode, ASTNodeKind, NodeId, childAt, nodeAt } from "../ast";
+
+export function alwaysDiverges(ref ast: AST, stmtId: NodeId): bool {
+  if (stmtId == 0) {
+    return false;
+  }
+  const stmt = nodeAt(ref ast, stmtId);
+  switch (stmt.kind) {
+    // The terminators themselves.
+    case ASTNodeKind.RETURN_STATEMENT,
+         ASTNodeKind.BREAK_STATEMENT,
+         ASTNodeKind.CONTINUE_STATEMENT: {
+      return true;
+    }
+    // A block diverges as soon as ANY of its statements does - everything after
+    // that point is unreachable, so where in the run it sits does not matter.
+    case ASTNodeKind.BLOCK: {
+      return anyStatementDiverges(ref ast, stmt.childA);
+    }
+    // Both halves. An `if` with no `else` never diverges, and an `else if`
+    // chain works because the else slot holds a nested IF_STATEMENT.
+    case ASTNodeKind.IF_STATEMENT: {
+      return stmt.childC != 0 &&
+        alwaysDiverges(ref ast, stmt.childB) &&
+        alwaysDiverges(ref ast, stmt.childC);
+    }
+    // Every arm. See the note above for why exhaustiveness is not re-asked.
+    case ASTNodeKind.SWITCH_STATEMENT: {
+      return everyArmDiverges(ref ast, stmt);
+    }
+    default: {
+      return false;
+    }
+  }
+}
+
+// True when any statement of a BLOCK's list diverges.
+function anyStatementDiverges(ref ast: AST, listId: NodeId): bool {
+  if (listId == 0) {
+    return false;
+  }
+  const list = nodeAt(ref ast, listId);
+  let i: usize = 0;
+  while (i < list.childCount) {
+    if (alwaysDiverges(ref ast, childAt(ref ast, list, i))) {
+      return true;
+    }
+    i += 1;
+  }
+  return false;
+}
+
+// A switch with no arms diverges nowhere, which is why the count is tested
+// rather than left to the loop's vacuous truth.
+function everyArmDiverges(ref ast: AST, stmt: ASTNode): bool {
+  if (stmt.childCount == 0) {
+    return false;
+  }
+  let i: usize = 0;
+  while (i < stmt.childCount) {
+    const arm = nodeAt(ref ast, childAt(ref ast, stmt, i));
+    if (!alwaysDiverges(ref ast, arm.childB)) {
+      return false;
+    }
+    i += 1;
+  }
+  return true;
+}

@@ -23,7 +23,7 @@ import { Program, TypedModule, TypeId, Type, Symbol, symbolAt, typeAt, TYPE_VOID
   DeclId, DECL_NONE_ID, GenericSort, derefType, lookupMethod, methodSymbolName,
   anyOpenArg, findFuncInstance, funcTypeIsAsync,
   nominalModuleOf, isValueEnumType, lookupEnumCase,
-  IterableWalk, iterableWalkOf } from "../typecheck";
+  IterableWalk, iterableWalkOf, isUnsafePtrType, sizeOfType } from "../typecheck";
 import { ASTNode, childAt, nodeAt } from "../ast";
 
 // ----- the typecheck boundary ----------------------------------------------
@@ -453,6 +453,15 @@ export function isVariantAt(ref cx: Cx, nodeId: NodeId): bool {
   return isVariantType(cx.prog, resolvedTypeAt(ref cx, nodeId));
 }
 
+// True when the node's resolved type is `bool`. Only the switch asks: a bool is
+// the one non-variant scrutinee that can be exhaustive without a default arm.
+export function isBoolAt(ref cx: Cx, nodeId: NodeId): bool {
+  switch (typeAt(cx.prog, derefType(cx.prog, resolvedTypeAt(ref cx, nodeId)))) {
+    case Type.Prim { prim: p }: { return p == PrimKind.BOOL; }
+    default: { return false; }
+  }
+}
+
 // The step shape of a `for ... in` iterable, or an `ok: false` answer meaning
 // "walk it as an array". A property of the TYPE rather than a decoration, so
 // asking again here is a lookup and not a second typecheck - same boundary
@@ -560,5 +569,40 @@ export function moduleGlobalTypeOf(ref cx: Cx, name: string): string {
         default: { return ""; }
       }
     }
+  }
+}
+
+// True when the node's resolved type is a raw pointer. Only pointer ARITHMETIC
+// asks: `p + n` is a gep and `p - q` is a division, and neither is what the
+// ordinary integer path would emit.
+export function isUnsafePtrAt(ref cx: Cx, nodeId: NodeId): bool {
+  return isUnsafePtrType(cx.prog, derefType(cx.prog, resolvedTypeAt(ref cx, nodeId)));
+}
+
+// The LLVM type of what an `unsafe_ptr<T>` points at, which is the element type
+// a gep steps by. "i8" for anything without one, which cannot be reached: pass D
+// refuses arithmetic on the opaque pointer.
+export function pointeeLlvmType(ref cx: Cx, nodeId: NodeId): string {
+  const pointee = unsafePointeeOf(ref cx, nodeId);
+  if (pointee == TYPE_ERROR_ID) {
+    return "i8";
+  }
+  return llvmType(cx.prog, pointee);
+}
+
+// The SIZE of that pointee, which is what turns a byte difference into an
+// element count.
+export function pointeeSize(ref cx: Cx, nodeId: NodeId): usize {
+  const pointee = unsafePointeeOf(ref cx, nodeId);
+  if (pointee == TYPE_ERROR_ID) {
+    return 1;
+  }
+  return sizeOfType(cx.prog, pointee);
+}
+
+function unsafePointeeOf(ref cx: Cx, nodeId: NodeId): TypeId {
+  switch (typeAt(cx.prog, derefType(cx.prog, resolvedTypeAt(ref cx, nodeId)))) {
+    case Type.UnsafePtr { pointee: p }: { return p; }
+    default: { return TYPE_ERROR_ID; }
   }
 }

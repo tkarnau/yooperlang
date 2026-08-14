@@ -1018,11 +1018,25 @@ working set stays small.
   helpers in [../tools/](../tools/) (~30 names) and example-local helpers under
   [../examples/](../examples/). The bootstrap's module-level consts were fixed
   on 2026-08-12 (`TOKEN_SCAN_LIST`, `KEYWORD_LIST`, `WHITESPACE_CHAR_CODES`).
-- **Two playground examples are stale** since the async conversion and no longer
-  compile: `examples/playground/todo_api` and `examples/playground/yoopstore`
-  both hit `async function must be awaited` on `serve` / `serveDefault`. Nothing
-  under playground/ is covered by e2e, which is why this sat unnoticed. Fixing
-  them is a call-site `await` plus whatever coloring that cascades into.
+- **Six playground examples are stale**, and the count is measured rather than
+  remembered as of 2026-08-13 - `scripts/probe_programs.sh` builds all 20
+  playground entry points with both compilers, and these six fail under the JS
+  REFERENCE too, so each is a finding about the program:
+  - `todo_api`, `yoopstore` and `sun_moon` hit `async function must be awaited`
+    on `serve` / `serveDefault` since the async conversion. Three, not the two
+    this entry used to say. Fixing them is a call-site `await` plus whatever
+    coloring that cascades into.
+  - `chat_agent` predates the std value-import rule:
+    `imports of value "tcpListen" from "std/net" must use the namespace form`.
+  - `algoscope` makes the reference CRASH -
+    `RangeError: Maximum call stack size exceeded` in `findScopedIdentInExpr`.
+  - `sdl_demo` makes the reference emit INVALID IR,
+    `floating point constant invalid for type`.
+
+  The last two are reference bugs rather than stale programs. Nothing under
+  playground/ is covered by e2e, which is why all of this sat unnoticed; the
+  program probe is what looks now, and CLAUDE.md's rule stands - a stale program
+  there is not a regression and must not expand the change in front of you.
 - **Figure out the idempotent cleanup/dispose pattern** (free-then-null, guard on
   null) so `dispose` is safe to call more than once. This is the discipline the
   advisory ownership model leans on instead of compiler-enforced affine moves.

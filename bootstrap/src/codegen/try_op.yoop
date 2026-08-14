@@ -47,9 +47,13 @@ export function emitTryOp(ref cx: Cx, expr: ASTNode, exprId: NodeId, ref out: Op
   const operandTy = llvmType(cx.prog, operandType);
   const got = fallibleShapeOf(cx.prog, operandType);
   const want = fallibleShapeOf(cx.prog, cx.fnRet);
-  // Pass D proved both of these. Codegen does zero type-checking, so reaching
-  // here with either false means pass D let something through.
-  if (!got.isFallible || !want.isFallible) {
+  // Pass D proved the operand is fallible. Codegen does zero type-checking, so
+  // reaching here with it false means pass D let something through.
+  //
+  // The enclosing RETURN is only asked about for the propagating form: a
+  // handler is allowed in a function returning a plain value, which is the
+  // whole reason the form exists.
+  if (!got.isFallible || (expr.childC == 0 && !want.isFallible)) {
     return internalError("'?' on a non-fallible type reached codegen", "try");
   }
 
@@ -65,9 +69,21 @@ export function emitTryOp(ref cx: Cx, expr: ASTNode, exprId: NodeId, ref out: Op
   emitCondBr(ref cx, Operand.Temp { id: isErr }, errLabel, okLabel);
 
   emitLabel(ref cx, errLabel);
-  const eerr = emitErrReturn(ref cx, exprId, operandType, operandTy, slot.id, ref got, ref want);
-  if (eerr.len > 0) {
-    return eerr;
+  // `expr? e { ... }` runs the user's block here instead of returning. Pending
+  // disposals are deliberately NOT fired around it: pass D proved the block
+  // leaves, and whichever terminator it uses - `return`, `break`, `continue` -
+  // fires the disposals appropriate to ITS exit. Firing them here as well would
+  // be a double free.
+  if (expr.childC != 0) {
+    const herr = emitTryHandler(ref cx, expr, operandType, operandTy, slot.id, ref got);
+    if (herr.len > 0) {
+      return herr;
+    }
+  } else {
+    const eerr = emitErrReturn(ref cx, exprId, operandType, operandTy, slot.id, ref got, ref want);
+    if (eerr.len > 0) {
+      return eerr;
+    }
   }
 
   emitLabel(ref cx, okLabel);
@@ -130,11 +146,15 @@ function emitErrReturn(
   // agreeing about being void.
   if (want.errType != TYPE_VOID_ID) {
     const errTy = llvmType(cx.prog, want.errType);
-    // The two Err payloads either AGREE or convert. Pass D decided which and
-    // recorded it; the conversion is a `ref self` method on the operand's error
-    // type, so what it needs is the payload's address rather than its value.
+    // The two Err payloads either AGREE, convert, or take a NOTE on the way
+    // out. Pass D decided which and recorded it; each of the first two is a
+    // `ref self` method on the operand's error type, so what they need is the
+    // payload's address rather than its value.
     let moved: usize = 0;
-    if (map.mapContainsKey(ref cx.tm.tryIntoUses, uint64(exprId))) {
+    if (contextOf(ref cx, exprId) != 0) {
+      moved = emitContextPayload(ref cx, exprId, operandType, operandTy, slotId,
+        ref got, errTy);
+    } else if (map.mapContainsKey(ref cx.tm.tryIntoUses, uint64(exprId))) {
       moved = emitIntoCall(ref cx, operandType, operandTy, slotId, got.errOrdinal,
         got.errType, errTy);
     } else {

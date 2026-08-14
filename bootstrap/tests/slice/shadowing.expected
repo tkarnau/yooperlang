@@ -1,0 +1,13 @@
+nestedIf: 106 7
+threeDeep: 12321
+counterShadow inner: 0
+counterShadow inner: 1
+counterShadow inner: 2
+counterShadow: 99
+forInShadow inner: 1
+forInShadow inner: 2
+forInShadow: 42
+loopBody: 106
+armShadow: 1011 1022
+paramShadow: 503
+exit=0

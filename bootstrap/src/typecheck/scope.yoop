@@ -7,8 +7,12 @@ module typecheck;
 // `if (c) { const a = 1; } return a;` would typecheck against a slot that only
 // exists on one path.
 //
-// Shadowing an OUTER name is rejected rather than allowed. Yoop has no
-// shadowing story yet, and refusing is the reversible choice.
+// Shadowing an OUTER name is ALLOWED, and redeclaring one in the SAME block is
+// not. That is the reference's rule: `let v = 7; if (c) { let v = 99; }` is two
+// bindings and the outer one snaps back after the branch, while a second `let v`
+// beside the first is "redeclaration of v". The two questions are different -
+// one is a nested scope, the other is one scope contradicting itself - so the
+// declare test reads the TOP block and the lookup walks the whole stack.
 //
 // A binding carries MUTABILITY as well as a type, because `const a = 1; a = 2;`
 // has to be refused and the type alone cannot say so. It rides here rather than
@@ -78,8 +82,9 @@ export function scopePop(ref s: LocalScope): void {
   s.blocks.len -= 1;
 }
 
-// False when the name is already visible - in THIS block or any enclosing one.
-// The caller turns that into the diagnostic, since only it has the location.
+// False when the name is already declared in THIS block. An enclosing block's
+// binding is shadowed rather than refused. The caller turns the false into the
+// diagnostic, since only it has the location.
 export function scopeDeclare(
   ref s: LocalScope,
   name: string,
@@ -102,10 +107,10 @@ export function scopeDeclareRefParam(
 }
 
 function scopeDeclareBinding(ref s: LocalScope, name: string, b: Binding): bool {
-  switch (scopeLookup(ref s, name)) {
+  let top = vec.vecGet(ref s.blocks, s.blocks.len - 1);
+  switch (map.mapGet(ref top, name)) {
     case Option.Some { value: existing }: { return false; }
     case Option.None: {
-      let top = vec.vecGet(ref s.blocks, s.blocks.len - 1);
       map.mapInsert(ref top, name, b);
       vec.vecSet(ref s.blocks, s.blocks.len - 1, top);
       return true;

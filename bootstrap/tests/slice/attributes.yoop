@@ -3,11 +3,17 @@
 // same way it looks through an `export`.
 //
 // So a decorated type is an ORDINARY type here: it has its fields, it passes by
-// value, it can be exported and imported. What is not built is the expansion -
-// generating the `toString` from the field annotations - which is why nothing
-// below interpolates one. typecheck/derive.yoop records the three things that
-// expansion waits on, and interpolating a derived type is refused BY NAME
-// saying so (asserted in typecheck.test.yoop, since a fixture has to compile).
+// value, it can be exported and imported. That is what this fixture is for -
+// derive_display.yoop covers what the generated `toString` RENDERS, and nothing
+// below interpolates one.
+//
+// `Display` is declared here because the expansion grafts the method under an
+// `implements Display` clause and this fixture runs with no std root, so there
+// is no autoloaded std/core/traits.yoop to reach.
+
+trait Display {
+  function toString(ref self): string;
+}
 
 @derive(display)
 export type Point {

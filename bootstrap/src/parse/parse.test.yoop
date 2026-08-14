@@ -17,8 +17,8 @@ import * as str from "std/core/strings.yoop";
 import { Vec }, * as vec from "std/core/vec.yoop";
 import { Result } from "std/core/types.yoop";
 import { disposable } from "std/core/kinds.yoop";
-import { AST, ASTNode, ASTNodeKind, NodeId, childAt, declOf, emptyArena, isExportDecl, nodeAt } from "../ast";
-import { parse } from "../parse";
+import { AST, ASTNode, ASTNodeKind, NodeId, childAt, declOf, emptyArena, isExportDecl, isCExportDecl, nodeAt } from "../ast";
+import { parse, parseInto, expandDerives } from "../parse";
 import { TokenTags, tagName } from "../lex";
 
 suite function namedImportsBuildSpecifierNodes(): void {
@@ -232,6 +232,35 @@ suite function variantConstructorsAndPatternsShareOneShape(): void {
     theory.isSuccessful = str.stringEq(field.name, "r")
       && binding.kind == ASTNodeKind.IDENT && str.stringEq(binding.name, "v");
     theory.detail = `{ r: v } gave field "${field.name}" bound to a ${binding.kind} named "${binding.name}"`;
+  }
+
+  // SHORTHAND: `{ r }` is `{ r: r }` and lands in the arena identically, so
+  // nothing after the parser can tell which spelling was written.
+  let short = parseOk("function f(): int { switch (s) { case Shape.Circle { r }: { return r; } } }");
+  const shortPattern = firstSwitchPattern(ref short);
+  let test theory: Case = t.asserts("a shorthand pattern field binds its own name") {
+    const list = nodeAt(ref short, shortPattern.childA);
+    const field = nodeAt(ref short, childAt(ref short, list, 0));
+    const binding = nodeAt(ref short, field.childA);
+    theory.isSuccessful = str.stringEq(field.name, "r")
+      && binding.kind == ASTNodeKind.IDENT && str.stringEq(binding.name, "r");
+    theory.detail = `{ r } gave field "${field.name}" bound to a ${binding.kind} named "${binding.name}"`;
+  }
+
+  let mixed = parseOk(
+    "function f(): int { switch (s) { case Shape.Rect { w, h: tall, d: _ }: { return w; } } }"
+  );
+  const mixedPattern = firstSwitchPattern(ref mixed);
+  let test theory: Case = t.asserts("shorthand, explicit and discard mix in one pattern") {
+    const list = nodeAt(ref mixed, mixedPattern.childA);
+    const f0 = nodeAt(ref mixed, childAt(ref mixed, list, 0));
+    const f1 = nodeAt(ref mixed, childAt(ref mixed, list, 1));
+    const f2 = nodeAt(ref mixed, childAt(ref mixed, list, 2));
+    theory.isSuccessful = list.childCount == 3
+      && str.stringEq(nodeAt(ref mixed, f0.childA).name, "w")
+      && str.stringEq(nodeAt(ref mixed, f1.childA).name, "tall")
+      && str.stringEq(nodeAt(ref mixed, f2.childA).name, "_");
+    theory.detail = `{ w, h: tall, d: _ } gave ${list.childCount} field(s)`;
   }
 
   // The regression the constructor could easily cause.
@@ -598,12 +627,24 @@ suite function importFormsOutsideTheSubsetAreRefusedByName(): void {
     theory.detail = `export const failed to parse: ${parseError("export const X: int = 1;")}`;
   }
 
-  // The one export form still missing, and the message names the reason rather
-  // than the punctuation: the symbol table cannot record C-ABI-ness, and every
-  // caller has to agree on the spelling.
-  let test theory: Case = t.asserts("`export \"C\" function` is refused by name") {
-    theory.isSuccessful = refusalMentions("export \"C\" function f(): void { }", "export \"C\" function");
-    theory.detail = `wanted a refusal naming export "C", got: ${parseError("export \"C\" function f(): void { }")}`;
+  // `export "C" function` gets its OWN wrapper kind, which is what tells pass A
+  // to record the name as one keeping its bare C spelling.
+  let cexport = parseOk("export \"C\" function f(): void { }");
+  let test theory: Case = t.asserts("`export \"C\" function` wraps in its own kind") {
+    const wrapper = topLevel(ref cexport, 0);
+    theory.isSuccessful = wrapper.kind == ASTNodeKind.EXPORT_C_FUNCTION_DECL
+      && isExportDecl(ref cexport, topLevelId(ref cexport, 0))
+      && isCExportDecl(ref cexport, topLevelId(ref cexport, 0))
+      && nodeAt(ref cexport, declOf(ref cexport, topLevelId(ref cexport, 0))).kind == ASTNodeKind.FUNCTION_DECL;
+    theory.detail = `parsed a ${wrapper.kind}`;
+  }
+
+  // "C" is the only ABI a DEFINITION can carry - an intrinsic has no body for
+  // `export` to do anything with.
+  let test theory: Case = t.asserts("any other export ABI is refused by name") {
+    const src = "export \"intrinsic\" function f(): void { }";
+    theory.isSuccessful = refusalMentions(src, "unsupported export ABI");
+    theory.detail = `wanted an ABI refusal, got: ${parseError(src)}`;
   }
 }
 
@@ -1163,6 +1204,71 @@ suite function kindPrefixesReplaceTheFunctionKeyword(): void {
   }
 }
 
+// A kind prefix may stand BESIDE the `function` keyword as well as instead of
+// it - `suite function addsNumbers(): void { }`, which is how every file in
+// examples/testing/ and every *.test.yoop in this tree declares a suite.
+//
+// The two spellings had drifted apart: a METHOD accepted both because
+// `parseKindPrefixRun` consumes the keyword when it is there, and a top-level
+// declaration went through `parseKindPrefixes`, which stops on IDENT-then-
+// FUNCTION and left the run empty. So `suite function f()` reported "unexpected
+// token at top level: IDENT" on a declaration that is perfectly well formed.
+suite function kindPrefixesBesideTheFunctionKeyword(): void {
+  let ast = parseOk("suite function addsNumbers(): void { return; }");
+  const decl = topLevel(ref ast, 0);
+
+  let test theory: Case = t.asserts("prefix-and-keyword is an ordinary FUNCTION_DECL") {
+    theory.isSuccessful = decl.kind == ASTNodeKind.FUNCTION_DECL && str.stringEq(decl.name, "addsNumbers");
+    theory.detail = `the node is ${decl.kind} named "${decl.name}", wanted FUNCTION_DECL "addsNumbers"`;
+  }
+
+  let test theory: Case = t.asserts("the prefix is recorded, not eaten by the keyword") {
+    const prefixes = nodeAt(ref ast, decl.childE);
+    const first = nodeAt(ref ast, childAt(ref ast, prefixes, 0));
+    theory.isSuccessful = prefixes.childCount == 1 && str.stringEq(first.name, "suite");
+    theory.detail = `recorded ${prefixes.childCount} prefix(es), first "${first.name}", wanted 1 and "suite"`;
+  }
+
+  // The keyword is consumed rather than left for the name parser, so the body
+  // is where it belongs. A run that stopped one token early would name the
+  // function "function" and then fail on the parameter list.
+  let test theory: Case = t.asserts("the body and return type survive the keyword") {
+    theory.isSuccessful = decl.childC != 0 && decl.childD != 0;
+    theory.detail = `return slot ${decl.childC}, body slot ${decl.childD}, wanted both non-zero`;
+  }
+
+  let several = parseOk("pooled tainted function buf(): int { return 1; }");
+  let test theory: Case = t.asserts("several prefixes and a keyword all land in the list") {
+    theory.isSuccessful = nodeAt(ref several, topLevel(ref several, 0).childE).childCount == 2;
+    theory.detail = `recorded ${nodeAt(ref several, topLevel(ref several, 0).childE).childCount} prefix(es), wanted 2`;
+  }
+
+  let exported = parseOk("export suite function addsNumbers(): void { return; }");
+  let test theory: Case = t.asserts("`export suite function` reaches the same parser") {
+    const inner = nodeAt(ref exported, topLevel(ref exported, 0).childA);
+    theory.isSuccessful = inner.kind == ASTNodeKind.FUNCTION_DECL && inner.childE != 0;
+    theory.detail = `the exported decl is ${inner.kind} with prefix slot ${inner.childE}`;
+  }
+
+  // The METHOD side of the same spelling, which is what it was already doing -
+  // asserted here so the two stay one mechanism rather than two.
+  let method = parseOk("type Echo { n: int, traced function area(ref self): int { return self.n; } }");
+  let test theory: Case = t.asserts("a method takes prefix-and-keyword too") {
+    const m = nodeAt(ref method, childAt(ref method, topLevel(ref method, 0), 1));
+    theory.isSuccessful = m.kind == ASTNodeKind.METHOD_DECL && m.childE != 0 && str.stringEq(m.name, "area");
+    theory.detail = `the member is ${m.kind} named "${m.name}", prefix slot ${m.childE}`;
+  }
+
+  // A bare `function` with nothing in front of it is still a plain function -
+  // accepting IDENT-then-FUNCTION at top level must not make one of those into
+  // a prefixed declaration with an empty prefix list.
+  let plain = parseOk("function addsNumbers(): void { return; }");
+  let test theory: Case = t.asserts("a plain `function` records no prefix list") {
+    theory.isSuccessful = topLevel(ref plain, 0).childE == 0;
+    theory.detail = `plain function recorded prefix slot ${topLevel(ref plain, 0).childE}, wanted 0`;
+  }
+}
+
 // A method is a function one scope in, so a kind prefix stands where `function`
 // would there too. The synthesized `ref self` has to survive it, which is the
 // half a "does it parse" check would miss.
@@ -1668,13 +1774,19 @@ suite function bitwiseNotIsAPrefixOperator(): void {
 // `Reader.from(ref s)` ERASES a concrete type into a vtable value. `from` is a
 // keyword token, so the generic "expected IDENT, got FROM" pointed a reader at
 // punctuation on a line that is perfectly well formed.
-suite function buildingAVtableValueIsRefusedByName(): void {
-  let test theory: Case = t.asserts("`X.from(ref v)` is refused as the erasure machinery") {
-    theory.isSuccessful = refusalMentions(
-      "function f(): int { let r: Reader = Reader.from(ref s); return 0; }",
-      "builds a type-ERASED vtable value"
-    );
-    theory.detail = `wanted the erasure refusal, got: ${parseError("function f(): int { let r: Reader = Reader.from(ref s); return 0; }")}`;
+suite function fromParsesAsAMemberNameOnACall(): void {
+  // `from` is a KEYWORD token, so the postfix loop has to spell the member name
+  // itself. What comes out is an ordinary CALL_EXPRESSION with the base in
+  // childB - the same shape `ns.fn()` produces, since the parser cannot tell a
+  // vtable from a namespace and does not try.
+  let ast = parseOk("function f(): int { let r: Reader = Reader.from(ref s); return 0; }");
+  let test theory: Case = t.asserts("`X.from(ref v)` is a qualified CALL, not a parse error") {
+    const decl = firstStatement(ref ast);
+    const call = nodeAt(ref ast, decl.childB);
+    theory.isSuccessful = call.kind == ASTNodeKind.CALL_EXPRESSION
+      && str.stringEq(call.name, "from")
+      && str.stringEq(nodeAt(ref ast, call.childB).name, "Reader");
+    theory.detail = `parsed a ${call.kind} named "${call.name}"`;
   }
 
   // DECLARING one still parses - that half has been here since phase 9.G, and
@@ -1698,7 +1810,8 @@ suite function buildingAVtableValueIsRefusedByName(): void {
 // The compound forms have no node of their own - they desugar in the parser
 // into `target = target <op> value`, which is why one const check covers both
 // spellings. That desugaring names the target TWICE, so it is only sound on a
-// target that costs nothing to read: a name, or a path of fields reaching one.
+// target that costs nothing to read: a name, a path of fields reaching one, or
+// an element whose subscript is itself a name or a literal.
 suite function compoundAssignmentDesugarsOnPlaceTargetsOnly(): void {
   let field = parseOk("function f(): void { a.b.c += 1; }");
   let test theory: Case = t.asserts("a nested field path desugars to a plain assignment") {
@@ -1728,17 +1841,34 @@ suite function compoundAssignmentDesugarsOnPlaceTargetsOnly(): void {
     theory.detail = `the re-read is "${reread.name}" over a ${base.kind} named "${base.name}"`;
   }
 
-  // An index target would evaluate its subscript twice - once to read and once
-  // to write - so it stays refused until a real COMPOUND_ASSIGNMENT node lands.
-  let test theory: Case = t.asserts("an index target is refused rather than evaluated twice") {
+  // An ELEMENT target is a place too, as long as the subscript is free to read
+  // twice. The re-read copies BOTH halves - a shared subscript node would be
+  // decorated from two directions.
+  let elem = parseOk("function f(): void { xs[i] += 1; }");
+  let test theory: Case = t.asserts("an element target desugars, subscript and all") {
+    const assign = nodeAt(ref elem, firstStatement(ref elem).childA);
+    const combined = nodeAt(ref elem, assign.childB);
+    const reread = nodeAt(ref elem, combined.childA);
+    const target = nodeAt(ref elem, assign.childA);
+    theory.isSuccessful = assign.kind == ASTNodeKind.ASSIGNMENT
+      && target.kind == ASTNodeKind.INDEX_EXPRESSION
+      && reread.kind == ASTNodeKind.INDEX_EXPRESSION
+      && reread.childB != target.childB
+      && str.stringEq(nodeAt(ref elem, reread.childB).name, "i");
+    theory.detail = `xs[i] += 1 gave a ${assign.kind} over a ${reread.kind}`;
+  }
+
+  // A subscript that could be evaluated twice OBSERVABLY stays refused: the
+  // desugaring would call `g` once to read and again to write.
+  let test theory: Case = t.asserts("a call in the subscript is refused rather than evaluated twice") {
     const src = "function f(): void { xs[g()] += 1; }";
-    theory.isSuccessful = refusalMentions(src, "a name or a field path");
+    theory.isSuccessful = refusalMentions(src, "free to read twice");
     theory.detail = `wanted a place-target refusal, got: ${parseError(src)}`;
   }
 
   let test theory: Case = t.asserts("so is a call's result") {
     const src = "function f(): void { g() += 1; }";
-    theory.isSuccessful = refusalMentions(src, "a name or a field path");
+    theory.isSuccessful = refusalMentions(src, "free to read twice");
     theory.detail = `wanted a place-target refusal, got: ${parseError(src)}`;
   }
 }
@@ -1837,6 +1967,107 @@ suite function attributesWrapTheDeclarationTheyDecorate(): void {
   }
 }
 
+// The GRAFT. `@derive(display)` generates the method as source text, reparses
+// it into the same arena, and splices the METHOD_DECL onto the end of the
+// declaration's member run - so what the later passes read is a declaration
+// that looks written by hand.
+//
+// Asserted on the ARENA rather than on the rendered string for the same reason
+// every other suite here is: the member run and the implements list are the
+// shapes pass A, pass C and codegen walk, and a rendering test would not notice
+// either of them being spliced wrong.
+suite function deriveDisplayGraftsAMethodIntoTheDecl(): void {
+  let ast = expandOk("trait Display { function toString(ref self): string; }\n@derive(display)\ntype P { x: int, y: int }");
+  const decl = nodeAt(ref ast, declOf(ref ast, topLevelId(ref ast, 1)));
+
+  let test theory: Case = t.asserts("the member run grows by one and keeps its fields in order") {
+    const f0 = nodeAt(ref ast, childAt(ref ast, decl, 0));
+    const f1 = nodeAt(ref ast, childAt(ref ast, decl, 1));
+    theory.isSuccessful = decl.childCount == 3
+      && f0.kind == ASTNodeKind.FIELD_DECL && str.stringEq(f0.name, "x")
+      && f1.kind == ASTNodeKind.FIELD_DECL && str.stringEq(f1.name, "y");
+    theory.detail = `the run holds ${decl.childCount} member(s)`;
+  }
+
+  let test theory: Case = t.asserts("the last member is a METHOD_DECL named toString") {
+    const m = nodeAt(ref ast, childAt(ref ast, decl, decl.childCount - 1));
+    theory.isSuccessful = m.kind == ASTNodeKind.METHOD_DECL && str.stringEq(m.name, "toString");
+    theory.detail = `the last member is a ${m.kind} named "${m.name}"`;
+  }
+
+  // A diagnostic from generated code has to land on the line the USER wrote.
+  // Without the restamp it points into a source buffer that no longer exists.
+  let test theory: Case = t.asserts("the grafted method carries the DECL's source location") {
+    const m = nodeAt(ref ast, childAt(ref ast, decl, decl.childCount - 1));
+    theory.isSuccessful = m.sourceLoc.pos == decl.sourceLoc.pos
+      && m.sourceLoc.line == decl.sourceLoc.line;
+    theory.detail = `the method points at line ${m.sourceLoc.line}, the decl at ${decl.sourceLoc.line}`;
+  }
+
+  let test theory: Case = t.asserts("`implements Display` is added to a decl that had no clause") {
+    const list = nodeAt(ref ast, decl.childD);
+    const first = nodeAt(ref ast, childAt(ref ast, list, 0));
+    theory.isSuccessful = decl.childD != 0 && list.childCount == 1
+      && str.stringEq(first.name, "Display");
+    theory.detail = `the clause holds ${list.childCount} trait(s)`;
+  }
+
+  // Merged, not appended: a type already claiming Display must not claim it
+  // twice, or the impl check runs over the same trait a second time.
+  let listed = expandOk("trait Display { function toString(ref self): string; }\n@derive(display)\ntype P implements Display { x: int }");
+  let test theory: Case = t.asserts("a clause already naming Display is left alone") {
+    const d = nodeAt(ref listed, declOf(ref listed, topLevelId(ref listed, 1)));
+    const list = nodeAt(ref listed, d.childD);
+    theory.isSuccessful = list.childCount == 1;
+    theory.detail = `the clause holds ${list.childCount} trait(s), wanted 1`;
+  }
+
+  // An existing clause naming something else KEEPS it and gains Display beside.
+  let both = expandOk("trait Display { function toString(ref self): string; }\ntrait Named { function name(ref self): string; }\n@derive(display)\ntype P implements Named { x: int, function name(ref self): string { return \"p\"; } }");
+  let test theory: Case = t.asserts("an unrelated clause keeps its trait and gains Display") {
+    const d = nodeAt(ref both, declOf(ref both, topLevelId(ref both, 2)));
+    const list = nodeAt(ref both, d.childD);
+    const a = nodeAt(ref both, childAt(ref both, list, 0));
+    const b = nodeAt(ref both, childAt(ref both, list, 1));
+    theory.isSuccessful = list.childCount == 2
+      && str.stringEq(a.name, "Named") && str.stringEq(b.name, "Display");
+    theory.detail = `the clause holds ${list.childCount}: "${a.name}", "${b.name}"`;
+  }
+
+  // A VARIANT grafts the same way, onto a run that holds its CASES.
+  let sumType = expandOk("trait Display { function toString(ref self): string; }\n@derive(display)\nvariant S { A { n: int }, B }");
+  let test theory: Case = t.asserts("a variant's cases survive the splice and the method lands last") {
+    const d = nodeAt(ref sumType, declOf(ref sumType, topLevelId(ref sumType, 1)));
+    const c0 = nodeAt(ref sumType, childAt(ref sumType, d, 0));
+    const m = nodeAt(ref sumType, childAt(ref sumType, d, d.childCount - 1));
+    theory.isSuccessful = d.childCount == 3
+      && c0.kind == ASTNodeKind.VARIANT_CASE
+      && m.kind == ASTNodeKind.METHOD_DECL;
+    theory.detail = `the run holds ${d.childCount} member(s), the first a ${c0.kind}`;
+  }
+
+  let test theory: Case = t.asserts("a GENERIC decl is refused by name rather than left underived") {
+    const src = "@derive(display)\ntype Box<T> { v: T }";
+    const message = expandError(src);
+    theory.isSuccessful = str.stringIndexOf(message, "is not yet supported") < message.len;
+    theory.detail = `wanted the generic refusal, got: ${message}`;
+  }
+
+  let test theory: Case = t.asserts("an ALIAS is refused by name") {
+    const src = "@derive(display)\ntype NodeId = int;";
+    const message = expandError(src);
+    theory.isSuccessful = str.stringIndexOf(message, "cannot apply to type alias") < message.len;
+    theory.detail = `wanted the alias refusal, got: ${message}`;
+  }
+
+  let test theory: Case = t.asserts("a hand-written toString is refused rather than duplicated") {
+    const src = "@derive(display)\ntype P { x: int, function toString(ref self): string { return \"p\"; } }";
+    const message = expandError(src);
+    theory.isSuccessful = str.stringIndexOf(message, "already defines") < message.len;
+    theory.detail = `wanted the duplicate refusal, got: ${message}`;
+  }
+}
+
 // `expr?` is a POSTFIX operator, and everything below follows from that one
 // choice. A statement-level rewrite would cover `let x = f()?;` and nothing
 // else; being in the postfix loop is what makes `f(g()?)`, `a? + b?` and
@@ -1897,29 +2128,59 @@ suite function tryOpIsPostfixAndWrapsItsOperand(): void {
     theory.detail = `the call has ${nodeAt(ref arg, call.childA).childCount} argument(s)`;
   }
 
-  // The two OTHER things a `?` starts in the reference. Both are refused BY
-  // NAME rather than left to fail as "expected semicolon, got ...": each reads
-  // as plain propagation once the extra tokens are dropped, so a generic syntax
-  // error would point a reader at punctuation instead of at the feature.
-  let test theory: Case = t.asserts("`expr? e { ... }` is refused by name") {
-    const src = "function f(): R { let x: int = g()? e { return 0; }; }";
-    theory.isSuccessful = refusalMentions(src, "handling a failure at the `?`");
-    theory.detail = `wanted a handler-form refusal, got: ${parseError(src)}`;
-  }
-
-  let test theory: Case = t.asserts("`expr? \"context\"` is refused by name") {
-    const src = "function f(): R { let x: int = g()? \"loading config\"; }";
-    theory.isSuccessful = refusalMentions(src, "prefixing a note onto a string Err");
-    theory.detail = `wanted a context-form refusal, got: ${parseError(src)}`;
+  // The two OTHER things a `?` starts, each told apart from plain propagation
+  // by the ONE token after the `?`. Both hang off the same TRY_OP node - the
+  // context in childB, the handler block in childC with its binding in `name` -
+  // so a reader of the arena can see which form was written without consulting
+  // a side table.
+  let ctx = parseOk("function f(): R { let x: int = g()? \"loading config\"; }");
+  let test theory: Case = t.asserts("`expr? \"context\"` hangs the string off childB") {
+    const t0 = firstLetInitializer(ref ctx);
+    theory.isSuccessful = t0.kind == ASTNodeKind.TRY_OP
+      && t0.childB != 0
+      && nodeAt(ref ctx, t0.childB).kind == ASTNodeKind.STRING_LITERAL
+      && t0.childC == 0;
+    theory.detail = `childB is ${nodeAt(ref ctx, t0.childB).kind}`;
   }
 
   // The template-literal spelling of the same form, which lexes differently and
-  // so needs its own tag in the check.
-  let test theory: Case = t.asserts("the template spelling of the context form is refused too") {
-    const src = "function f(): R { let x: int = g()? `reading ${n}`; }";
-    theory.isSuccessful = refusalMentions(src, "prefixing a note onto a string Err");
-    theory.detail = `wanted a context-form refusal, got: ${parseError(src)}`;
+  // so needs its own case: the note may interpolate.
+  let tmplCtx = parseOk("function f(): R { let x: int = g()? `reading ${n}`; }");
+  let test theory: Case = t.asserts("the template spelling of the context form parses") {
+    const t0 = firstLetInitializer(ref tmplCtx);
+    theory.isSuccessful = t0.kind == ASTNodeKind.TRY_OP
+      && t0.childB != 0
+      && nodeAt(ref tmplCtx, t0.childB).kind == ASTNodeKind.TEMPLATE_LITERAL;
+    theory.detail = `childB is ${nodeAt(ref tmplCtx, t0.childB).kind}`;
   }
+
+  let handler = parseOk("function f(): R { let x: int = g()? e { return 0; }; }");
+  let test theory: Case = t.asserts("`expr? e { ... }` binds the name and takes the block") {
+    const t0 = firstLetInitializer(ref handler);
+    theory.isSuccessful = t0.kind == ASTNodeKind.TRY_OP
+      && str.stringEq(t0.name, "e")
+      && t0.childC != 0
+      && nodeAt(ref handler, t0.childC).kind == ASTNodeKind.BLOCK
+      && t0.childB == 0;
+    theory.detail = `binding "${t0.name}", childC is ${nodeAt(ref handler, t0.childC).kind}`;
+  }
+
+  // A `?` followed by neither is still plain propagation, which is the whole
+  // reason the decision is one token deep: nothing that legitimately follows a
+  // postfix `?` is a string or an `IDENT {`.
+  let plainQ = parseOk("function f(): R { let x: int = g()?; }");
+  let test theory: Case = t.asserts("a plain `?` fills neither slot") {
+    const t0 = firstLetInitializer(ref plainQ);
+    theory.isSuccessful = t0.kind == ASTNodeKind.TRY_OP && t0.childB == 0 && t0.childC == 0;
+    theory.detail = `childB=${t0.childB} childC=${t0.childC}`;
+  }
+}
+
+// The initializer of `let x: int = <expr>;` in the first statement. The `?`
+// forms are written in a binding rather than in a `return`, because the handler
+// form's block ends in a `;` that only a declaration has.
+function firstLetInitializer(ref ast: AST): ASTNode {
+  return nodeAt(ref ast, firstStatement(ref ast).childB);
 }
 
 // A value `enum` is the third nominal decl, and the one whose arena shape is
@@ -2150,6 +2411,39 @@ function parseOk(src: string): AST propagates<disposable> {
   }
 }
 
+// Parse AND expand, the way the loader does. `@derive(display)` runs between
+// the two, so a test that wants the grafted method has to come through here
+// rather than through parseOk - which is deliberate, since every other suite in
+// this file is about what the PARSER alone produces.
+function expandOk(src: string): AST propagates<disposable> {
+  let srcBuf: Vec<uint8> = vec.vecNew(src.len + 1);
+  vec.vecExtendFrom(ref srcBuf, intr.stringAsBytes(src));
+  switch (parseInto(emptyArena(), vec.vecAsArray(ref srcBuf))) {
+    case Result.Err { error: e }: { return emptyArena(); }
+    case Result.Ok { value: file }: {
+      switch (expandDerives(file.ast, file.root)) {
+        case Result.Err { error: de }: { return emptyArena(); }
+        case Result.Ok { value: ast }: { return ast; }
+      }
+    }
+  }
+}
+
+// The expansion's refusal message, or "" when it expanded clean.
+function expandError(src: string): string propagates<disposable> {
+  let srcBuf: Vec<uint8> = vec.vecNew(src.len + 1);
+  vec.vecExtendFrom(ref srcBuf, intr.stringAsBytes(src));
+  switch (parseInto(emptyArena(), vec.vecAsArray(ref srcBuf))) {
+    case Result.Err { error: e }: { return e.rawMessage; }
+    case Result.Ok { value: file }: {
+      switch (expandDerives(file.ast, file.root)) {
+        case Result.Err { error: de }: { return de.message; }
+        case Result.Ok { value: ast }: { return ""; }
+      }
+    }
+  }
+}
+
 // The parse error's message, or "" when the source parsed clean.
 function parseError(src: string): string {
   let srcBuf: Vec<uint8> = vec.vecNew(src.len + 1);
@@ -2216,7 +2510,13 @@ function firstParamAnnotation(ref ast: AST): ASTNode {
 }
 
 function firstStatement(ref ast: AST): ASTNode {
-  const fn = topLevel(ref ast, 0);
+  return firstStatementOfDecl(ref ast, 0);
+}
+
+// The same, for a file whose function is not the FIRST declaration - which is
+// every file that wrote a range, since the lowering prepends an import.
+function firstStatementOfDecl(ref ast: AST, index: usize): ASTNode {
+  const fn = topLevel(ref ast, index);
   const block = nodeAt(ref ast, fn.childD);
   const statements = nodeAt(ref ast, block.childA);
   return nodeAt(ref ast, childAt(ref ast, statements, 0));
@@ -2361,4 +2661,71 @@ function poolString(ref ast: AST, id: usize): string {
     return "";
   }
   return vec.vecGet(ref ast.strings, id);
+}
+
+// `a..b` - the RANGE operator, lowered in the parser into the call it means.
+// Nothing above the parser learns that `..` exists, which is why these
+// assertions are about a CALL rather than about a range node.
+suite function aRangeLowersToACall(): void {
+  let ast = parseOk("function f(): void { for i in 0..n { } }");
+  let test theory: Case = t.asserts("`a..b` becomes a qualified call to exclusive") {
+    const forIn = firstStatementOfDecl(ref ast, 1);
+    const call = nodeAt(ref ast, forIn.childA);
+    theory.isSuccessful = call.kind == ASTNodeKind.CALL_EXPRESSION
+      && str.stringEq(call.name, "exclusive")
+      && str.stringEq(nodeAt(ref ast, call.childB).name, "$range")
+      && nodeAt(ref ast, call.childA).childCount == 2;
+    theory.detail = `0..n parsed as a ${call.kind} named "${call.name}"`;
+  }
+
+  // The synthesized import goes FIRST, because every consumer reads the
+  // leading run of IMPORT_DECLs and stops at the first other declaration.
+  let test theory: Case = t.asserts("a file using a range gets the range import, first") {
+    const first = topLevel(ref ast, 0);
+    theory.isSuccessful = first.kind == ASTNodeKind.IMPORT_DECL
+      && str.stringEq(first.name, "$range");
+    theory.detail = `the first decl is a ${first.kind} named "${first.name}"`;
+  }
+
+  // ...and a file that used no range pays nothing.
+  let plain = parseOk("function f(): void { }");
+  let test theory: Case = t.asserts("a file with no range gets no import") {
+    theory.isSuccessful = topLevel(ref plain, 0).kind == ASTNodeKind.FUNCTION_DECL;
+    theory.detail = `the first decl is a ${topLevel(ref plain, 0).kind}`;
+  }
+
+  // `..` binds LOOSER than arithmetic, so the right bound is the whole `n - 1`.
+  let looser = parseOk("function f(): void { for i in 1..n - 1 { } }");
+  let test theory: Case = t.asserts("`..` binds looser than arithmetic") {
+    const forIn = firstStatementOfDecl(ref looser, 1);
+    const call = nodeAt(ref looser, forIn.childA);
+    const args = nodeAt(ref looser, call.childA);
+    const end = nodeAt(ref looser, childAt(ref looser, args, 1));
+    theory.isSuccessful = end.kind == ASTNodeKind.BINARY_EXPRESSION;
+    theory.detail = `the end bound is a ${end.kind}, wanted BINARY_EXPRESSION`;
+  }
+
+  // The SAME token in a subscript is still a slice - the bound is parsed AT
+  // range precedence, so the `..` closes it instead of being folded in.
+  let slice = parseOk("function f(): void { const v = xs[1..3]; }");
+  let test theory: Case = t.asserts("a subscript range is still a SLICE") {
+    theory.isSuccessful = !refusalMentions("function f(): void { const v = xs[1..3]; }", "expected");
+    theory.detail = "xs[1..3] stopped parsing";
+  }
+
+  // The loop body's `{` is not a variant payload, even though the iterable
+  // ends on an `a.b` path - which is exactly the shape one opens with.
+  let path = parseOk("function f(): void { for i in 0..xs.len { g(); } }");
+  let test theory: Case = t.asserts("the loop body's brace is not swallowed as a payload") {
+    const forIn = firstStatementOfDecl(ref path, 1);
+    theory.isSuccessful = forIn.kind == ASTNodeKind.FOR_IN_LOOP && forIn.childB != 0;
+    theory.detail = `for i in 0..xs.len parsed as a ${forIn.kind}`;
+  }
+
+  // Outside a for-in the payload form is untouched.
+  let payload = parseOk("function f(): void { const s = Shape.Circle { r: 2 }; }");
+  let test theory: Case = t.asserts("an ordinary variant payload still parses") {
+    theory.isSuccessful = !refusalMentions("function f(): void { const s = Shape.Circle { r: 2 }; }", "expected");
+    theory.detail = "Shape.Circle { r: 2 } stopped parsing";
+  }
 }

@@ -1,0 +1,133 @@
+// Building a vtable VALUE - the type ERASURE.
+//
+// A `vtable Name for Trait { ... }` declaration lays out `{ ptr ctx, ptr m0,
+// ... }`: the erased receiver first, then one function pointer per slot. Three
+// spellings reach it, and all three are here:
+//
+//   Dispatcher.from(ref c)     erase a CONCRETE value. ctx is its address and
+//                              each slot holds that type's own method symbol -
+//                              a method already takes `ptr self` first, so no
+//                              thunk is needed.
+//   OpVT.fromFn(dbl, inc)      erase NAMED FUNCTIONS. ctx is null and each slot
+//                              holds a generated shim that drops it.
+//   Dispatcher.handle(ref d,1) DISPATCH: load ctx and the slot, call through
+//                              the pointer with ctx where `self` goes.
+//   Handler.handle(ref d, 1)   THE SAME dispatch, spelled with the TRAIT's
+//                              name. A caller handed an erased value and
+//                              nothing else has only the trait to write, and a
+//                              vtable erasing that trait is what makes the two
+//                              spellings one call.
+//
+// The point of the array is that three DIFFERENT concrete types sit in one
+// `Dispatcher[]` and the loop cannot know which is which - that is what erasure
+// buys, and a static trait dispatch cannot do it.
+//
+// A vtable holds the receiver's ADDRESS, so `c`, `a` and `s` have to outlive
+// the vtables built from them. They are locals of `main` here, which is the
+// shape the std/http server uses too.
+
+trait Handler {
+  function handle(ref self, req: int): int;
+}
+
+vtable Dispatcher for Handler {
+  handle: (req: int) => int,
+}
+
+type Const implements Handler {
+  value: int,
+  function handle(ref self, req: int): int {
+    return self.value;
+  }
+}
+
+type AddOffset implements Handler {
+  offset: int,
+  function handle(ref self, req: int): int {
+    return req + self.offset;
+  }
+}
+
+type Scale implements Handler {
+  factor: int,
+  function handle(ref self, req: int): int {
+    return req * self.factor;
+  }
+}
+
+// Two slots, to pin that the slot INDEX is used rather than "the only one".
+trait TwoOp {
+  function lo(ref self, n: int): int;
+  function hi(ref self, n: int): int;
+}
+
+vtable OpVT for TwoOp {
+  lo: (n: int) => int,
+  hi: (n: int) => int,
+}
+
+function double(n: int): int {
+  return n * 2;
+}
+
+function bump(n: int): int {
+  return n + 1;
+}
+
+// The erased view is what travels: this takes no type parameter and knows
+// nothing about Const, AddOffset or Scale.
+function fanOut(hs: Dispatcher[], req: int): int {
+  let sum: int = 0;
+  let i: usize = 0;
+  while (i < hs.len) {
+    let h: Dispatcher = hs[i];
+    sum = sum + Dispatcher.handle(ref h, req);
+    i = i + 1;
+  }
+  return sum;
+}
+
+function main(): int {
+  let c: Const = { value: 100 };
+  let a: AddOffset = { offset: 5 };
+  let s: Scale = { factor: 3 };
+
+  let handlers: Dispatcher[] = [
+    Dispatcher.from(ref c),
+    Dispatcher.from(ref a),
+    Dispatcher.from(ref s),
+  ];
+  printf("fan10=%d\n", fanOut(handlers, 10));
+  printf("fan7=%d\n", fanOut(handlers, 7));
+
+  // Built straight into a local, and dispatched without going through an array.
+  let direct: Dispatcher = Dispatcher.from(ref s);
+  printf("direct=%d\n", Dispatcher.handle(ref direct, 11));
+
+  // The vtable stores the receiver's ADDRESS, so writing through the original
+  // is visible to the erased view.
+  s.factor = 10;
+  printf("afterWrite=%d\n", Dispatcher.handle(ref direct, 11));
+
+  // fromFn: no receiver at all, one shim per slot, in slot order.
+  let ops: OpVT = OpVT.fromFn(double, bump);
+  printf("lo=%d hi=%d\n", OpVT.lo(ref ops, 10), OpVT.hi(ref ops, 10));
+
+  // A second fromFn naming the same functions reuses the same shims - two
+  // defines of one symbol would be an invalid redefinition rather than a
+  // duplicate, so this line is really a codegen assertion.
+  let again: OpVT = OpVT.fromFn(double, bump);
+  printf("again=%d\n", OpVT.lo(ref again, 21));
+
+  // The TRAIT's name over the same erased value: the same indirect call, and
+  // the same answer.
+  printf("viaTrait=%d\n", Handler.handle(ref direct, 11));
+  printf("viaTraitFn=%d\n", viaTrait(ref direct, 4));
+  return 0;
+}
+
+// ...and through a function that never learns which vtable it was handed. This
+// is the shape std/http's parser takes a `Reader` in.
+function viaTrait(ref d: Dispatcher, req: int): int {
+  return Handler.handle(ref d, req);
+}

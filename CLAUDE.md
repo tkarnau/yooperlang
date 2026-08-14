@@ -108,7 +108,7 @@ check on a change, and say so when you do.
 
 ## Run / test
 
-- `npm test` - all tests (unit + e2e). Currently 1241 tests, ~47s.
+- `npm test` - all tests (unit + e2e). Currently 1267 tests, ~50s.
 - `npm run test:unit` - fast, no clang.
 - `npm run test:e2e` - full pipeline, requires `clang` on PATH.
 - Compile one file: `node src/yoopiler.js path/to/file.yoop -o out`.
@@ -125,7 +125,7 @@ check on a change, and say so when you do.
   `npm run test:parity` (layer dumps vs the JS reference, ~3s),
   `npm run test:selfhost` (the three-stage build and its fixpoint, ~18s), and
   `node src/yoopiler.js --test bootstrap/src` for every Yoop unit test at once
-  (857 of them, ~8s, ONE build of the graph - the five per-module
+  (965 of them, ~9s, ONE build of the graph - the five per-module
   `--test bootstrap/src/<module>` commands rebuild it five times and take ~15s
   between them; reach for one while iterating on that module).
   **The bootstrap compiles itself as of 2026-08-13**; `YOOP_BOOT_COMPILER=<path>
@@ -135,7 +135,19 @@ check on a change, and say so when you do.
   `--emit-ir` stops after writing `<out>.ll`, which is what
   `scripts/probe_surface.sh` uses - a link nobody reads was a quarter of the
   probe's wall clock. `YOOP_SLICE_CONCURRENCY` and `YOOP_E2E_CONCURRENCY`
-  override how many fixtures those two suites run at once.
+  override how many fixtures those two suites run at once. `--test` is NOT a
+  bootstrap flag; the Yoop test harness is a driver mode only the JS reference
+  has (plan item 4.5).
+- **Two probes, and they answer different questions.**
+  `scripts/probe_surface.sh` compiles every non-test file under `std/`,
+  `examples/pass/` and `bootstrap/src/` and stops at the IR - it says whether
+  codegen HANDLED the file, and its numbers are what
+  [plans/bootstrap-completion.md](plans/bootstrap-completion.md) is steered by.
+  `scripts/probe_programs.sh` takes every entry point under `examples/` that
+  declares a `main`, builds it with BOTH compilers, RUNS both, and compares
+  stdout and exit code - it says whether the program WORKS, and it is the only
+  one that can catch a miscompile. Run both after a change, and run each with
+  stage1 and stage3. Neither may move the other's numbers.
 - `yoopiler --lsp` runs the language server over stdio instead of compiling. The
   import of [src/lsp/server.js](src/lsp/server.js) is **dynamic on purpose** -
   that module attaches `process.stdin` handlers at module scope, so a static

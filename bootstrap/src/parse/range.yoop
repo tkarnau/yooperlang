@@ -1,0 +1,85 @@
+module parse;
+
+// The `..` range operator, and the one place that knows it exists.
+//
+// `a..b` is SUGAR for a call to `exclusive` in std/core/range.yoop:
+//
+//     for i in 0..xs.len { ... }
+//     for i in $range.exclusive(0, xs.len) { ... }     // what it becomes
+//
+// So `Range` stays an ordinary userland type implementing `Iterable<usize>`,
+// and neither the typechecker nor codegen learns a rule: the walk is the same
+// `for ... in` over an iterator that any other `Iterable` gets. Same design as
+// the reference (src/jsyoopdriver/lower_range.js), moved into the parser here
+// because the bootstrap's arena is built as it parses - there is no second
+// walk that could rewrite a node in place afterwards.
+//
+// The lowering has two halves and both are needed:
+//
+//   the CALL       built directly, so no RANGE node ever reaches the arena
+//   the IMPORT     a namespace import of std/core/range.yoop, prepended to the
+//                  file's decl run - only for a file that used a range, which
+//                  is why `ParserState.usedRange` exists
+//
+// The namespace alias is unspellable in user source, so it can never collide
+// with a binding: `$` does not lex as an identifier character.
+
+import { Result } from "std/core/types.yoop";
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import { ASTNode, NodeId, ASTNodeKind } from "../ast";
+import { ParsingError } from "../diagnostics";
+import { posToSourceLocation } from "../lex";
+
+// Unspellable on purpose. Same trick the reference uses, and the same reason.
+export const RANGE_NAMESPACE: string = "$range";
+export const RANGE_STD_PATH: string = "std/core/range.yoop";
+export const RANGE_CTOR: string = "exclusive";
+
+// `start..end` -> `$range.exclusive(start, end)`.
+//
+// A CALL_EXPRESSION with `childB` set is the QUALIFIED shape the parser already
+// builds for `ns.f(...)`, so this synthesizes exactly what a hand-written call
+// would have produced. Both bounds keep their own nodes, so a diagnostic about
+// one still points at what the writer wrote.
+export function buildRangeCall(
+  ref ps: ParserState,
+  startId: NodeId,
+  endId: NodeId
+): Result<ASTNode, ParsingError> {
+  ps.usedRange = true;
+
+  let nsNode = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.IDENT);
+  nsNode.name = RANGE_NAMESPACE;
+
+  disposable args: Vec<NodeId> = vec.vecNew(2);
+  vec.vecPush(ref args, startId);
+  vec.vecPush(ref args, endId);
+  const loc = posToSourceLocation(ps.src, ps.pos, 1);
+
+  let call = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.CALL_EXPRESSION);
+  call.name = RANGE_CTOR;
+  call.childB = SelfLexing.pushNode(ref ps, nsNode);
+  call.childA = SelfLexing.buildListNode(ref ps, ref args, loc);
+  return Result.Ok { value: call };
+}
+
+// `import * as $range from "std/core/range.yoop";`, synthesized.
+//
+// Prepended to the file's decl run rather than appended, because every consumer
+// of the AST reads the LEADING run of IMPORT_DECLs and stops at the first other
+// declaration - the module graph does it to find its edges and pass B to bind
+// them. An import after the first decl would be silently ignored.
+export function buildRangeImport(ref ps: ParserState): NodeId {
+  let node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.IMPORT_DECL);
+  node.name = RANGE_NAMESPACE;
+  node.strId = internString(ref ps, RANGE_STD_PATH);
+  node.childStart = ps.ast.childIds.len;
+  node.childCount = 0;
+  return SelfLexing.pushNode(ref ps, node);
+}
+
+// The precedence `..` binds at: looser than every arithmetic operator, tighter
+// than assignment. It is also the precedence a SLICE's bounds are parsed at,
+// which is what keeps `xs[a..b]` a slice rather than an index by a range.
+export const RANGE_PRECEDENCE: int = 15;

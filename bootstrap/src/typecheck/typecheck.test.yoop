@@ -47,10 +47,59 @@ suite function parametersBindAsLocals(): void {
     theory.detail = "duplicate parameter name produced no diagnostic";
   }
 
+  // The body is a nested block, so a local of the same name SHADOWS the
+  // parameter rather than contradicting it. Same as the reference.
   let shadow = checkSource("function f(a: int): int { const a = 1; return a; }");
-  let test theory: Case = t.asserts("a local may not shadow a parameter") {
-    theory.isSuccessful = shadow.diagnostics.len > 0;
-    theory.detail = "a local redeclaring a parameter produced no diagnostic";
+  let test theory: Case = t.asserts("a local may shadow a parameter") {
+    theory.isSuccessful = shadow.diagnostics.len == 0;
+    theory.detail = `shadowing a parameter reported ${shadow.diagnostics.len} diagnostic(s): ${firstDiagnostic(ref shadow)}`;
+  }
+}
+
+// Shadowing is a NESTED-block question and redeclaration is a same-block one.
+// The two used to be one test - any visible name refused a declaration - and
+// separating them is what let `let v = 7; if (c) { let v = 99; }` compile.
+suite function anInnerBlockShadowsAndAnOuterOneSnapsBack(): void {
+  let inner = checkSource(
+    "function main(): int { let v: int = 7; if (true) { let v: int = 9; return v; } return v; }"
+  );
+  let test theory: Case = t.asserts("a nested block may shadow an outer local") {
+    theory.isSuccessful = inner.diagnostics.len == 0;
+    theory.detail = `shadowing in a nested block reported ${inner.diagnostics.len} diagnostic(s): ${firstDiagnostic(ref inner)}`;
+  }
+
+  let same = checkSource("function main(): int { let v: int = 7; let v: int = 9; return v; }");
+  let test theory: Case = t.asserts("the SAME block still refuses a redeclaration") {
+    theory.isSuccessful = same.diagnostics.len > 0;
+    theory.detail = "redeclaring v beside itself produced no diagnostic";
+  }
+
+  // The head of a `for` is its own scope, so a counter may shadow too - and
+  // the outer name has to be back in scope after the loop.
+  let counter = checkSource(
+    "function main(): int { let i: int = 9; for (let i = 0; i < 2; i += 1) { } return i; }"
+  );
+  let test theory: Case = t.asserts("a for-loop counter may shadow an outer local") {
+    theory.isSuccessful = counter.diagnostics.len == 0;
+    theory.detail = `a shadowing counter reported ${counter.diagnostics.len} diagnostic(s): ${firstDiagnostic(ref counter)}`;
+  }
+
+  let forIn = checkSource(
+    "function main(): int { let e: int = 9; const xs: int[] = [1]; for e in xs { } return e; }"
+  );
+  let test theory: Case = t.asserts("a for-in variable may shadow an outer local") {
+    theory.isSuccessful = forIn.diagnostics.len == 0;
+    theory.detail = `a shadowing for-in variable reported ${forIn.diagnostics.len} diagnostic(s): ${firstDiagnostic(ref forIn)}`;
+  }
+
+  // The shadow ENDS with the block. Reading the inner name afterwards is an
+  // unknown name, not a stale binding.
+  let escaped = checkSource(
+    "function main(): int { if (true) { let only: int = 1; } return only; }"
+  );
+  let test theory: Case = t.asserts("an inner-only binding does not leak past its block") {
+    theory.isSuccessful = escaped.diagnostics.len > 0;
+    theory.detail = "reading a name declared in a closed block produced no diagnostic";
   }
 }
 
@@ -532,21 +581,48 @@ suite function aTypeWithToStringInterpolates(): void {
   }
 }
 
-// `@derive(display)` is parsed and unwrapped, so a decorated type is an
-// ordinary one to every pass. The generated `toString` is NOT built - see
-// typecheck/derive.yoop for the three things it waits on - and the point of
-// these is that the gap says so instead of looking like a bug.
-suite function deriveDisplayIsRecordedRatherThanExpanded(): void {
-  let ok = checkSource("@derive(display)\ntype P { x: int }\nfunction main(): int { const p: P = { x: 1 }; return p.x; }");
+// `@derive(display)` is EXPANDED: the generated `toString` is grafted into the
+// declaration's member run and `Display` is merged into its implements clause,
+// so a decorated type interpolates exactly like one whose author wrote the
+// method out. The expansion itself runs at LOAD time (parse/derive.yoop); what
+// is asserted here is the shape typecheck ends up seeing.
+suite function deriveDisplayIsExpanded(): void {
+  const display = "trait Display { function toString(ref self): string; }\n";
+
+  let ok = checkSource(`${display}@derive(display)\ntype P { x: int }\nfunction main(): int { const p: P = { x: 1 }; return p.x; }`);
   let test theory: Case = t.asserts("a decorated type checks like any other") {
     theory.isSuccessful = ok.diagnostics.len == 0;
     theory.detail = `reported ${ok.diagnostics.len}: ${firstDiagnostic(ref ok)}`;
   }
 
-  let derived = checkSource("@derive(display)\ntype P { x: int }\nfunction main(): int { const p: P = { x: 1 }; printf(\"%s\", `${p}`); return 0; }");
-  let test theory: Case = t.asserts("interpolating one names the attribute, not a missing feature") {
-    theory.isSuccessful = diagnosticsMention(ref derived, "does not expand yet");
-    theory.detail = `wanted the derive diagnostic, got: ${firstDiagnostic(ref derived)}`;
+  let derived = checkSource(`${display}@derive(display)\ntype P { x: int }\nfunction main(): int { const p: P = { x: 1 }; printf("%s", \`${"$"}{p}\`); return 0; }`);
+  let test theory: Case = t.asserts("interpolating one is accepted - the method is there") {
+    theory.isSuccessful = derived.diagnostics.len == 0;
+    theory.detail = `reported ${derived.diagnostics.len}: ${firstDiagnostic(ref derived)}`;
+  }
+
+  // The merged clause is a REAL implements, not a flag: a static trait dispatch
+  // through it has to resolve, and there are no inherent methods, so the
+  // grafted `toString` would be refused outright without it.
+  let dispatch = checkSource(`${display}@derive(display)\ntype P { x: int }\nfunction main(): int { const p: P = { x: 1 }; printf("%s", Display.toString(ref p)); return 0; }`);
+  let test theory: Case = t.asserts("the merged implements clause carries a static dispatch") {
+    theory.isSuccessful = dispatch.diagnostics.len == 0;
+    theory.detail = `reported ${dispatch.diagnostics.len}: ${firstDiagnostic(ref dispatch)}`;
+  }
+
+  // A VARIANT derives too, and its method is an arm-per-case switch.
+  let sumType = checkSource(`${display}@derive(display)\nvariant S { A { n: int }, B }\nfunction main(): int { const s: S = S.B; printf("%s", \`${"$"}{s}\`); return 0; }`);
+  let test theory: Case = t.asserts("a decorated variant interpolates too") {
+    theory.isSuccessful = sumType.diagnostics.len == 0;
+    theory.detail = `reported ${sumType.diagnostics.len}: ${firstDiagnostic(ref sumType)}`;
+  }
+
+  // An existing `implements Display` must NOT be duplicated - the clause is
+  // merged rather than appended blindly.
+  let listed = checkSource(`${display}@derive(display)\ntype P implements Display { x: int }\nfunction main(): int { const p: P = { x: 1 }; printf("%s", \`${"$"}{p}\`); return 0; }`);
+  let test theory: Case = t.asserts("a type already claiming Display is not made to claim it twice") {
+    theory.isSuccessful = listed.diagnostics.len == 0;
+    theory.detail = `reported ${listed.diagnostics.len}: ${firstDiagnostic(ref listed)}`;
   }
 
   // The generic message has to survive for everything else, or the hint starts
@@ -555,6 +631,135 @@ suite function deriveDisplayIsRecordedRatherThanExpanded(): void {
   let test theory: Case = t.asserts("an UNdecorated struct still gets the ordinary refusal") {
     theory.isSuccessful = diagnosticsMention(ref plain, "carries no `toString");
     theory.detail = `wanted the generic interpolation refusal, got: ${firstDiagnostic(ref plain)}`;
+  }
+}
+
+// The four refusals. Each is a real error rather than a silent skip: a decl
+// carrying the attribute and getting no method fails later at an
+// interpolation, which points at the USE instead of at the declaration.
+suite function deriveDisplayRefusesWhatItCannotGenerate(): void {
+  const display = "trait Display { function toString(ref self): string; }\n";
+
+  let generic = checkSource(`${display}@derive(display)\ntype Box<T> { v: T }\nfunction main(): int { return 0; }`);
+  let test theory: Case = t.asserts("a GENERIC type is refused by name") {
+    theory.isSuccessful = diagnosticsMention(ref generic, "is not yet supported - write the Display impl manually");
+    theory.detail = `wanted the generic refusal, got: ${firstDiagnostic(ref generic)}`;
+  }
+
+  let genericVariant = checkSource(`${display}@derive(display)\nvariant Maybe<T> { Some { v: T }, None }\nfunction main(): int { return 0; }`);
+  let test theory: Case = t.asserts("a generic VARIANT names itself a variant") {
+    theory.isSuccessful = diagnosticsMention(ref genericVariant, "on generic variant \"Maybe\"");
+    theory.detail = `wanted the generic variant refusal, got: ${firstDiagnostic(ref genericVariant)}`;
+  }
+
+  let alias = checkSource(`${display}@derive(display)\ntype NodeId = int;\nfunction main(): int { return 0; }`);
+  let test theory: Case = t.asserts("a transparent ALIAS is refused by name") {
+    theory.isSuccessful = diagnosticsMention(ref alias, "cannot apply to type alias");
+    theory.detail = `wanted the alias refusal, got: ${firstDiagnostic(ref alias)}`;
+  }
+
+  let dup = checkSource(`${display}@derive(display)\ntype P implements Display { x: int, function toString(ref self): string { return "p"; } }\nfunction main(): int { return 0; }`);
+  let test theory: Case = t.asserts("a type that already writes toString is refused by name") {
+    theory.isSuccessful = diagnosticsMention(ref dup, "already defines \"toString\"");
+    theory.detail = `wanted the duplicate refusal, got: ${firstDiagnostic(ref dup)}`;
+  }
+}
+
+// Building a vtable VALUE. `vtable Name for Trait { ... }` has declared and laid
+// out for a while; what these are about is the three spellings that USE one, and
+// the refusals that keep a wrong one from compiling into a wrong indirect call.
+suite function aVtableValueIsBuiltAndDispatchedThrough(): void {
+  const VT = "trait H { function handle(ref self, n: int): int; } vtable D for H { handle: (n: int) => int, } type C implements H { v: int, function handle(ref self, n: int): int { return self.v; } } ";
+
+  let ok = checkSource(`${VT}function main(): int { let c: C = { v: 1 }; let d: D = D.from(ref c); return D.handle(ref d, 2); }`);
+  let test theory: Case = t.asserts("`from` erases a struct and the vtable dispatches") {
+    theory.isSuccessful = ok.diagnostics.len == 0;
+    theory.detail = `reported ${ok.diagnostics.len}: ${firstDiagnostic(ref ok)}`;
+  }
+
+  // The vtable stores the receiver's ADDRESS, so a by-value argument would
+  // point at a temporary that is gone by the next statement.
+  let byValue = checkSource(`${VT}function main(): int { let c: C = { v: 1 }; let d: D = D.from(c); return 0; }`);
+  let test theory: Case = t.asserts("a by-value receiver is refused, naming the address") {
+    theory.isSuccessful = diagnosticsMention(ref byValue, "needs a `ref` argument");
+    theory.detail = `wanted the ref refusal, got: ${firstDiagnostic(ref byValue)}`;
+  }
+
+  let wrongImpl = checkSource(`${VT}type Q { n: int }\nfunction main(): int { let q: Q = { n: 1 }; let d: D = D.from(ref q); return 0; }`);
+  let test theory: Case = t.asserts("erasing a type that does not implement the trait is refused") {
+    theory.isSuccessful = diagnosticsMention(ref wrongImpl, "does not implement");
+    theory.detail = `wanted the implements refusal, got: ${firstDiagnostic(ref wrongImpl)}`;
+  }
+
+  let badSlot = checkSource(`${VT}function main(): int { let c: C = { v: 1 }; let d: D = D.from(ref c); return D.nope(ref d, 2); }`);
+  let test theory: Case = t.asserts("a member that is not a slot is refused, naming what a vtable has") {
+    theory.isSuccessful = diagnosticsMention(ref badSlot, "has no slot");
+    theory.detail = `wanted the slot refusal, got: ${firstDiagnostic(ref badSlot)}`;
+  }
+
+  let badArity = checkSource(`${VT}function main(): int { let c: C = { v: 1 }; let d: D = D.from(ref c); return D.handle(ref d); }`);
+  let test theory: Case = t.asserts("a dispatch counts the receiver in its arity") {
+    theory.isSuccessful = diagnosticsMention(ref badArity, "the vtable receiver plus 1");
+    theory.detail = `wanted the arity refusal, got: ${firstDiagnostic(ref badArity)}`;
+  }
+}
+
+// `fromFn` erases NAMED FUNCTIONS instead of a receiver: one per slot, in slot
+// order, and each one has to match its slot's signature.
+suite function fromFnErasesNamedFunctions(): void {
+  const VT = "trait P { function lo(ref self, n: int): int; function hi(ref self, n: int): int; } vtable PV for P { lo: (n: int) => int, hi: (n: int) => int, } function dbl(n: int): int { return n * 2; } function inc(n: int): int { return n + 1; } ";
+
+  let ok = checkSource(`${VT}function main(): int { let v: PV = PV.fromFn(dbl, inc); return PV.lo(ref v, 3); }`);
+  let test theory: Case = t.asserts("one function per slot builds a vtable") {
+    theory.isSuccessful = ok.diagnostics.len == 0;
+    theory.detail = `reported ${ok.diagnostics.len}: ${firstDiagnostic(ref ok)}`;
+  }
+
+  let short = checkSource(`${VT}function main(): int { let v: PV = PV.fromFn(dbl); return 0; }`);
+  let test theory: Case = t.asserts("too few functions is refused, naming the slot count") {
+    theory.isSuccessful = diagnosticsMention(ref short, "one per slot");
+    theory.detail = `wanted the arity refusal, got: ${firstDiagnostic(ref short)}`;
+  }
+
+  // A slot holds a SYMBOL's address, so a function-typed local has nothing to
+  // take the address of and the shim has no target to forward to.
+  let notNamed = checkSource(`${VT}function main(): int { let f: (n: int) => int = dbl; let v: PV = PV.fromFn(f, inc); return 0; }`);
+  let test theory: Case = t.asserts("a function-typed LOCAL is refused, naming the symbol") {
+    theory.isSuccessful = diagnosticsMention(ref notNamed, "has to be a named function");
+    theory.detail = `wanted the named-function refusal, got: ${firstDiagnostic(ref notNamed)}`;
+  }
+}
+
+// A vtable's slots are checked against the trait it erases. Getting one wrong is
+// an indirect call through a mismatched signature - a crash rather than a
+// diagnostic - so the check is at the DECLARATION, before anything can build one.
+suite function aVtableDeclarationIsCheckedAgainstItsTrait(): void {
+  const TR = "trait H { function handle(ref self, n: int): int; } ";
+
+  let missing = checkSource(`${TR}vtable D for H { }\nfunction main(): int { return 0; }`);
+  let test theory: Case = t.asserts("a missing slot is refused by name") {
+    theory.isSuccessful = diagnosticsMention(ref missing, "has no slot for \"handle\"");
+    theory.detail = `wanted the coverage refusal, got: ${firstDiagnostic(ref missing)}`;
+  }
+
+  let extra = checkSource(`${TR}vtable D for H { handle: (n: int) => int, other: () => int, }\nfunction main(): int { return 0; }`);
+  let test theory: Case = t.asserts("a slot the trait does not declare is refused by name") {
+    theory.isSuccessful = diagnosticsMention(ref extra, "which trait \"H\" does not declare");
+    theory.detail = `wanted the unknown-slot refusal, got: ${firstDiagnostic(ref extra)}`;
+  }
+
+  // The slot signature is the trait method's with `ref self` STRIPPED, which is
+  // what makes the count off by one on purpose.
+  let wrongArity = checkSource(`${TR}vtable D for H { handle: (n: int, m: int) => int, }\nfunction main(): int { return 0; }`);
+  let test theory: Case = t.asserts("a slot with the wrong parameter count is refused by name") {
+    theory.isSuccessful = diagnosticsMention(ref wrongArity, "beside `ref self`");
+    theory.detail = `wanted the arity refusal, got: ${firstDiagnostic(ref wrongArity)}`;
+  }
+
+  let wrongRet = checkSource(`${TR}vtable D for H { handle: (n: int) => bool, }\nfunction main(): int { return 0; }`);
+  let test theory: Case = t.asserts("a slot returning the wrong type is refused by name") {
+    theory.isSuccessful = diagnosticsMention(ref wrongRet, "but trait \"H.handle\" returns");
+    theory.detail = `wanted the return refusal, got: ${firstDiagnostic(ref wrongRet)}`;
   }
 }
 
@@ -1518,11 +1723,20 @@ suite function arraysAreTyped(): void {
     theory.detail = "xs.size produced no diagnostic";
   }
 
-  // The desugaring re-reads the target, so it is only sound on a plain name.
+  // The desugaring re-reads the target, so it needs a SUBSCRIPT that is free
+  // to read twice. A literal is, and so is a name.
   let compoundIndex = checkSource("function main(): int { let xs: int[] = [1]; xs[0] += 1; return xs[0]; }");
-  let test theory: Case = t.asserts("compound assignment to an index is refused, not miscompiled") {
-    theory.isSuccessful = compoundIndex.diagnostics.len > 0;
-    theory.detail = "xs[0] += 1 was accepted; the desugaring would evaluate the index twice";
+  let test theory: Case = t.asserts("compound assignment to an element with a literal subscript works") {
+    theory.isSuccessful = compoundIndex.diagnostics.len == 0;
+    theory.detail = `xs[0] += 1 reported: ${firstDiagnostic(ref compoundIndex)}`;
+  }
+
+  let compoundIndexName = checkSource(
+    "function main(): int { let xs: int[] = [1]; let i: usize = 0; xs[i] += 1; return xs[i]; }"
+  );
+  let test theory: Case = t.asserts("a NAME subscript works too") {
+    theory.isSuccessful = compoundIndexName.diagnostics.len == 0;
+    theory.detail = `xs[i] += 1 reported: ${firstDiagnostic(ref compoundIndexName)}`;
   }
 }
 
@@ -2638,22 +2852,29 @@ suite function bitwiseNotTakesAnInteger(): void {
   }
 }
 
-// Building a vtable VALUE is the erasure machinery and is not here. Both
-// spellings are refused BY NAME, because both read as an ordinary call once the
-// missing feature is not on a reader's mind.
-suite function buildingAVtableValueIsRefusedByName(): void {
+// Both spellings that BUILD a vtable value work now (see the three suites
+// above); this one keeps the DECLARATION honest beside them - laying one out
+// with nothing using it still has to check clean, and both build forms reach
+// the vtable path rather than the namespace one.
+suite function aVtableDeclarationStandsOnItsOwn(): void {
   const decls = "trait Pred { function test(ref self, c: uint8): bool; } type Star implements Pred { n: int32, function test(ref self, c: uint8): bool { return true; } } vtable PredVT for Pred { test: (c: uint8) => bool, } ";
 
   let declOnly = checkSource(`${decls}function main(): int { return 0; }`);
-  let test theory: Case = t.asserts("DECLARING a vtable still works") {
+  let test theory: Case = t.asserts("DECLARING a vtable with nothing using it checks clean") {
     theory.isSuccessful = declOnly.diagnostics.len == 0;
     theory.detail = `reported ${declOnly.diagnostics.len}: ${firstDiagnostic(ref declOnly)}`;
   }
 
   let fromFn = checkSource(`${decls}function isX(c: uint8): bool { return true; } function main(): int { let vt: PredVT = PredVT.fromFn(isX); return 0; }`);
-  let test theory: Case = t.asserts("`VT.fromFn(...)` is refused as a vtable, not as a missing namespace") {
-    theory.isSuccessful = diagnosticsMention(ref fromFn, "is a vtable, and building a vtable VALUE");
-    theory.detail = `wanted the vtable refusal, got: ${firstDiagnostic(ref fromFn)}`;
+  let test theory: Case = t.asserts("`VT.fromFn(...)` builds one") {
+    theory.isSuccessful = fromFn.diagnostics.len == 0;
+    theory.detail = `reported ${fromFn.diagnostics.len}: ${firstDiagnostic(ref fromFn)}`;
+  }
+
+  let fromRef = checkSource(`${decls}function main(): int { let s: Star = { n: 1 }; let vt: PredVT = PredVT.from(ref s); return 0; }`);
+  let test theory: Case = t.asserts("`VT.from(ref x)` builds one - `from` is a keyword and still reads as a member") {
+    theory.isSuccessful = fromRef.diagnostics.len == 0;
+    theory.detail = `reported ${fromRef.diagnostics.len}: ${firstDiagnostic(ref fromRef)}`;
   }
 }
 
@@ -3268,6 +3489,108 @@ suite function tryOpChecksTheErrorTypesAgainstEachOther(): void {
   let test theory: Case = t.asserts("two different fallible types agree if their Err payloads do") {
     theory.isSuccessful = crossType.diagnostics.len == 0;
     theory.detail = `reported ${crossType.diagnostics.len}: ${firstDiagnostic(ref crossType)}`;
+  }
+}
+
+// `expr? "context"` - the note prefixed onto the error on the way out. Two
+// shapes and one refusal, and the shapes are genuinely different mechanisms:
+// two `string` payloads are concatenated by the compiler, anything else goes
+// through a `WithContext<TargetErr>` impl on the operand's error type.
+suite function tryOpTakesAContextString(): void {
+  const STRINGS: string = "variant R { Ok { value: int32 }, Err { error: string }, }\nfunction inner(n: int32): R { return R.Ok { value: n }; }\nfunction outer(n: int32): R { let x: int32 = inner(n)? \"loading config\"; return R.Ok { value: x }; }";
+  let concat = checkSource(STRINGS);
+  let test theory: Case = t.asserts("two string Err payloads take a context with no impl at all") {
+    theory.isSuccessful = concat.diagnostics.len == 0;
+    theory.detail = `reported ${concat.diagnostics.len}: ${firstDiagnostic(ref concat)}`;
+  }
+
+  // The TEMPLATE spelling of the same thing. It lexes differently and gets its
+  // own case for that reason; the interpolation is checked like any other.
+  const TEMPLATE: string = "variant R { Ok { value: int32 }, Err { error: string }, }\nfunction inner(n: int32): R { return R.Ok { value: n }; }\nfunction outer(n: int32): R { let x: int32 = inner(n)? `reading ${n}`; return R.Ok { value: x }; }";
+  let templated = checkSource(TEMPLATE);
+  let test theory: Case = t.asserts("an interpolated context checks like any other template") {
+    theory.isSuccessful = templated.diagnostics.len == 0;
+    theory.detail = `reported ${templated.diagnostics.len}: ${firstDiagnostic(ref templated)}`;
+  }
+
+  // A structured payload with the impl: one call does the decoration AND the
+  // conversion, which is why there is no `Into` anywhere in this source.
+  const WITH_CONTEXT: string = "trait WithContext<T> { function withContext(ref self, context: string): T; }\ntype AppErr { detail: string, }\ntype IoErr implements WithContext<AppErr> { code: int32,\n  function withContext(ref self, context: string): AppErr { return { detail: context }; } }\nvariant A { Ok { value: int32 }, Err { error: IoErr }, }\nvariant S { Ok { value: int32 }, Err { error: AppErr }, }\nfunction inner(n: int32): A { return A.Ok { value: n }; }\nfunction outer(n: int32): S { let x: int32 = inner(n)? \"loading header\"; return S.Ok { value: x }; }\nfunction main(): int32 { return 0; }";
+  let viaImpl = checkSource(WITH_CONTEXT);
+  let test theory: Case = t.asserts("a WithContext impl carries a context across two different Err types") {
+    theory.isSuccessful = viaImpl.diagnostics.len == 0;
+    theory.detail = `reported ${viaImpl.diagnostics.len}: ${firstDiagnostic(ref viaImpl)}`;
+  }
+
+  // Neither shape: a struct payload with no impl. The message ends in the
+  // clause a reader would paste, which is the whole reason it names the target
+  // type twice.
+  const NEITHER: string = "type AppErr { detail: string, }\ntype IoErr { code: int32, }\nvariant A { Ok { value: int32 }, Err { error: IoErr }, }\nvariant S { Ok { value: int32 }, Err { error: AppErr }, }\nfunction inner(n: int32): A { return A.Ok { value: n }; }\nfunction outer(n: int32): S { let x: int32 = inner(n)? \"loading header\"; return S.Ok { value: x }; }";
+  let neither = checkSource(NEITHER);
+  let test theory: Case = t.asserts("a struct payload with no WithContext impl is refused by name") {
+    theory.isSuccessful = diagnosticsMention(ref neither, "needs a WithContext<");
+    theory.detail = `wanted a WithContext refusal, got: ${firstDiagnostic(ref neither)}`;
+  }
+
+  let test theory: Case = t.asserts("and the message spells the clause to add") {
+    theory.isSuccessful = diagnosticsMention(ref neither, "implements WithContext<AppErr>");
+    theory.detail = `wanted the fix-it clause, got: ${firstDiagnostic(ref neither)}`;
+  }
+}
+
+// `expr? e { ... }` - handling the failure instead of propagating it. The form
+// exists to work where bare `?` cannot, so the first thing it has to do is stop
+// asking about the enclosing function's return type.
+suite function tryOpTakesAHandlerBlock(): void {
+  const PLAIN_RETURN: string = "variant R { Ok { value: int32 }, Err { error: string }, }\nfunction inner(n: int32): R { return R.Ok { value: n }; }\nfunction outer(n: int32): int32 { let x: int32 = inner(n)? e { return -1; }; return x; }";
+  let handled = checkSource(PLAIN_RETURN);
+  let test theory: Case = t.asserts("a handler works in a function returning a plain value") {
+    theory.isSuccessful = handled.diagnostics.len == 0;
+    theory.detail = `reported ${handled.diagnostics.len}: ${firstDiagnostic(ref handled)}`;
+  }
+
+  // The binding names the Err PAYLOAD, so it has that type inside the block and
+  // an operation the payload does not support is an ordinary type error.
+  const WRONG_USE: string = "variant R { Ok { value: int32 }, Err { error: string }, }\nfunction inner(n: int32): R { return R.Ok { value: n }; }\nfunction outer(n: int32): int32 { let x: int32 = inner(n)? e { return e; }; return x; }";
+  let wrongUse = checkSource(WRONG_USE);
+  let test theory: Case = t.asserts("the binding really is the Err payload's type") {
+    theory.isSuccessful = diagnosticsMention(ref wrongUse, "cannot return string");
+    theory.detail = `wanted a type error on the binding, got: ${firstDiagnostic(ref wrongUse)}`;
+  }
+
+  // The block runs INSTEAD of producing a value, so falling out of the bottom
+  // would leave the binding holding nothing. Refused by name.
+  const FALLS_THROUGH: string = "variant R { Ok { value: int32 }, Err { error: string }, }\nfunction inner(n: int32): R { return R.Ok { value: n }; }\nfunction outer(n: int32): int32 { let x: int32 = inner(n)? e { let y: int32 = 1; }; return x; }";
+  let fallsThrough = checkSource(FALLS_THROUGH);
+  let test theory: Case = t.asserts("a handler block that falls through is refused by name") {
+    theory.isSuccessful = diagnosticsMention(ref fallsThrough, "must not fall through");
+    theory.detail = `wanted a fall-through refusal, got: ${firstDiagnostic(ref fallsThrough)}`;
+  }
+
+  // An `if` with no `else` does not count: the false path falls out.
+  const HALF_IF: string = "variant R { Ok { value: int32 }, Err { error: string }, }\nfunction inner(n: int32): R { return R.Ok { value: n }; }\nfunction outer(n: int32): int32 { let x: int32 = inner(n)? e { if (e.len > 0) { return -1; } }; return x; }";
+  let halfIf = checkSource(HALF_IF);
+  let test theory: Case = t.asserts("an `if` with no `else` does not count as leaving") {
+    theory.isSuccessful = diagnosticsMention(ref halfIf, "must not fall through");
+    theory.detail = `wanted a fall-through refusal, got: ${firstDiagnostic(ref halfIf)}`;
+  }
+
+  // Both halves of one does.
+  const FULL_IF: string = "variant R { Ok { value: int32 }, Err { error: string }, }\nfunction inner(n: int32): R { return R.Ok { value: n }; }\nfunction outer(n: int32): int32 { let x: int32 = inner(n)? e { if (e.len > 0) { return -1; } else { return -2; } }; return x; }";
+  let fullIf = checkSource(FULL_IF);
+  let test theory: Case = t.asserts("an if/else where both halves return does") {
+    theory.isSuccessful = fullIf.diagnostics.len == 0;
+    theory.detail = `reported ${fullIf.diagnostics.len}: ${firstDiagnostic(ref fullIf)}`;
+  }
+
+  // `continue` leaves the block just as permanently as a `return` does, as far
+  // as the enclosing expression is concerned - which is what makes a handler
+  // usable to skip a loop iteration.
+  const CONTINUES: string = "variant R { Ok { value: int32 }, Err { error: string }, }\nfunction inner(n: int32): R { return R.Ok { value: n }; }\nfunction outer(n: int32): int32 { let total: int32 = 0; for (let i = 0; i < 3; i += 1) { let x: int32 = inner(i)? e { continue; }; total = total + x; } return total; }";
+  let continues = checkSource(CONTINUES);
+  let test theory: Case = t.asserts("`continue` counts as leaving the handler block") {
+    theory.isSuccessful = continues.diagnostics.len == 0;
+    theory.detail = `reported ${continues.diagnostics.len}: ${firstDiagnostic(ref continues)}`;
   }
 }
 
@@ -4187,14 +4510,25 @@ suite function aNestedFieldPathCanBeBorrowed(): void {
     theory.detail = `wanted the path-bottom refusal, got: ${firstDiagnostic(ref offCall)}`;
   }
 
-  // So is a path off an ELEMENT: an element address is a different gep, and the
-  // field walk does not build one.
+  // A path off an ELEMENT bottoms out too. An element has an address, so the
+  // walk starts from a gep on the descriptor's data pointer instead of from a
+  // slot - one different first step, and the rest is the ordinary field walk.
+  // `ref entries[i].dispatcher` in std/http's router is why it exists.
   let offElem = checkSource(
     `${DECLS}function main(): int32 { let os: Outer[] = [{ mid: { inner: { n: 1 } } }]; bump(ref os[0].mid.inner); return 0; }`
   );
-  let test theory: Case = t.asserts("a field path off an ELEMENT is still refused") {
-    theory.isSuccessful = diagnosticsMention(ref offElem, "bottoms out in a named binding");
-    theory.detail = `wanted the path-bottom refusal, got: ${firstDiagnostic(ref offElem)}`;
+  let test theory: Case = t.asserts("a field path off an ELEMENT borrows at any depth") {
+    theory.isSuccessful = offElem.diagnostics.len == 0;
+    theory.detail = `reported ${offElem.diagnostics.len}: ${firstDiagnostic(ref offElem)}`;
+  }
+
+  // Writing through one, which is the other half of having an address.
+  let writeElem = checkSource(
+    `${DECLS}function main(): int32 { let os: Outer[] = [{ mid: { inner: { n: 1 } } }]; os[0].mid.inner.n = 9; return os[0].mid.inner.n; }`
+  );
+  let test theory: Case = t.asserts("a field path off an ELEMENT is assignable too") {
+    theory.isSuccessful = writeElem.diagnostics.len == 0;
+    theory.detail = `reported ${writeElem.diagnostics.len}: ${firstDiagnostic(ref writeElem)}`;
   }
 }
 
@@ -4339,5 +4673,134 @@ suite function aPropagatingTypeDisposesItsFields(): void {
   let test theory: Case = t.asserts("a SECOND level of propagation is refused by name") {
     theory.isSuccessful = diagnosticsMention(ref chained, "through a second level");
     theory.detail = `wanted the second-level refusal, got: ${firstDiagnostic(ref chained)}`;
+  }
+}
+
+// `switch` over a BOOL. Exhaustiveness is the whole reason it is its own
+// scrutinee kind rather than a one-bit integer: two values means `true` beside
+// `false` covers everything, so the default arm becomes optional.
+suite function aSwitchOverABoolIsExhaustiveOrDefaulted(): void {
+  let both = checkSource(
+    "function f(b: bool): int32 { switch (b) { case true: { return 1; } case false: { return 0; } } }"
+  );
+  let test theory: Case = t.asserts("both cases need no default arm") {
+    theory.isSuccessful = both.diagnostics.len == 0;
+    theory.detail = `an exhaustive bool switch reported: ${firstDiagnostic(ref both)}`;
+  }
+
+  let defaulted = checkSource(
+    "function f(b: bool): int32 { switch (b) { case true: { return 1; } default: { return 0; } } }"
+  );
+  let test theory: Case = t.asserts("one case plus a default is exhaustive too") {
+    theory.isSuccessful = defaulted.diagnostics.len == 0;
+    theory.detail = `a defaulted bool switch reported: ${firstDiagnostic(ref defaulted)}`;
+  }
+
+  // Unlike the variant rule, BOTH is allowed - the reference accepts it.
+  let bothAndDefault = checkSource(
+    "function f(b: bool): int32 { switch (b) { case true: { return 1; } case false: { return 2; } default: { return 0; } } }"
+  );
+  let test theory: Case = t.asserts("a default beside both cases is not a diagnostic") {
+    theory.isSuccessful = bothAndDefault.diagnostics.len == 0;
+    theory.detail = `a redundant default reported: ${firstDiagnostic(ref bothAndDefault)}`;
+  }
+
+  let partial = checkSource(
+    "function f(b: bool): int32 { switch (b) { case true: { return 1; } } return 0; }"
+  );
+  let test theory: Case = t.asserts("one case and no default is refused by name") {
+    theory.isSuccessful = diagnosticsMention(ref partial, "switch over bool is not exhaustive");
+    theory.detail = `wanted the non-exhaustive refusal, got: ${firstDiagnostic(ref partial)}`;
+  }
+
+  let dup = checkSource(
+    "function f(b: bool): int32 { switch (b) { case true: { return 1; } case true: { return 2; } default: { return 0; } } }"
+  );
+  let test theory: Case = t.asserts("the same value twice is refused") {
+    theory.isSuccessful = diagnosticsMention(ref dup, "duplicate case value true");
+    theory.detail = `wanted the duplicate refusal, got: ${firstDiagnostic(ref dup)}`;
+  }
+
+  // The two spellings do not mix in either direction, even though `true` and
+  // `1` would land on the same jump-table value.
+  let intPattern = checkSource(
+    "function f(b: bool): int32 { switch (b) { case 1: { return 1; } default: { return 0; } } }"
+  );
+  let test theory: Case = t.asserts("an integer pattern against a bool is refused") {
+    theory.isSuccessful = diagnosticsMention(ref intPattern, "must be true or false");
+    theory.detail = `wanted the bool-pattern refusal, got: ${firstDiagnostic(ref intPattern)}`;
+  }
+
+  let boolPattern = checkSource(
+    "function f(n: int32): int32 { switch (n) { case true: { return 1; } default: { return 0; } } }"
+  );
+  let test theory: Case = t.asserts("a bool pattern against an integer is refused") {
+    theory.isSuccessful = diagnosticsMention(ref boolPattern, "must be an integer literal");
+    theory.detail = `wanted the integer-pattern refusal, got: ${firstDiagnostic(ref boolPattern)}`;
+  }
+
+  let variantPattern = checkSource(
+    "variant R { Ok { v: int32 }, Err { e: int32 } }\nfunction f(b: bool): int32 { switch (b) { case R.Ok { v: v }: { return v; } default: { return 0; } } }"
+  );
+  let test theory: Case = t.asserts("a variant pattern against a bool is refused") {
+    theory.isSuccessful = diagnosticsMention(ref variantPattern, "must be true or false");
+    theory.detail = `wanted the bool-pattern refusal, got: ${firstDiagnostic(ref variantPattern)}`;
+  }
+}
+
+// `kind c = a & b;` - a COMPOSED kind is every operand's clauses at once.
+//
+// Recording nothing about the operands is what this replaces, and the failure
+// it caused was SILENT: a binding carrying the composition promised a scope-end
+// call and emitted none. So the assertions are about a `mustCall` arriving
+// through the composition rather than about the syntax.
+suite function aComposedKindCarriesItsOperandsClauses(): void {
+  const KINDS: string = "trait Closer { function close(ref self): void; }\ntype Res implements Closer { id: int32,\n  function close(ref self): void { } }\nkind base { appliesTo binding; requires Closer; mustCall close beforeScopeEnd; }\nkind noescape { appliesTo binding; mustNotEscape scope; }\n";
+
+  let named = checkSource(
+    `${KINDS}kind composed = base & noescape;\nfunction main(): int32 { composed r: Res = { id: 1 }; return r.id; }`
+  );
+  let test theory: Case = t.asserts("a composition of NAMES checks clean") {
+    theory.isSuccessful = named.diagnostics.len == 0;
+    theory.detail = `a composed binding reported: ${firstDiagnostic(ref named)}`;
+  }
+
+  let inline = checkSource(
+    `${KINDS}kind composed = base & { mustNotEscape scope; };\nfunction main(): int32 { composed r: Res = { id: 1 }; return r.id; }`
+  );
+  let test theory: Case = t.asserts("an INLINE operand body checks clean too") {
+    theory.isSuccessful = inline.diagnostics.len == 0;
+    theory.detail = `an inline-composed binding reported: ${firstDiagnostic(ref inline)}`;
+  }
+
+  // The merge is what makes this a diagnostic: the composed kind inherits
+  // `mustCall close`, so a type with no `close` fails the same check a bare
+  // `base` binding would.
+  let missing = checkSource(
+    `${KINDS}type Plain { n: int32 }\nkind composed = base & noescape;\nfunction main(): int32 { composed p: Plain = { n: 1 }; return p.n; }`
+  );
+  let test theory: Case = t.asserts("the operand's mustCall really arrives") {
+    theory.isSuccessful = diagnosticsMention(ref missing, `requires a "close" method`);
+    theory.detail = `wanted the missing-method refusal, got: ${firstDiagnostic(ref missing)}`;
+  }
+
+  // An operand nothing declares is refused BY NAME rather than contributing
+  // nothing, which is the whole point.
+  let unknown = checkSource(
+    `${KINDS}kind composed = base & nosuchkind;\nfunction main(): int32 { return 0; }`
+  );
+  let test theory: Case = t.asserts("an undeclared operand is refused by name") {
+    theory.isSuccessful = diagnosticsMention(ref unknown, "which no kind declares");
+    theory.detail = `wanted the unknown-operand refusal, got: ${firstDiagnostic(ref unknown)}`;
+  }
+
+  // `appliesTo region` arrives through a composition too, which is what lets a
+  // composed kind be written anonymously.
+  let region = checkSource(
+    `${KINDS}kind reg { appliesTo region; requires Closer; mustCall close beforeScopeEnd; ownsBlock; }\nkind composed = reg & noescape;\nfunction open(): Res { return { id: 1 }; }\nfunction main(): int32 { composed open() { } return 0; }`
+  );
+  let test theory: Case = t.asserts("appliesTo region arrives through a composition") {
+    theory.isSuccessful = region.diagnostics.len == 0;
+    theory.detail = `a composed region reported: ${firstDiagnostic(ref region)}`;
   }
 }

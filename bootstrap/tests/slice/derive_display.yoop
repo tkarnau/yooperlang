@@ -1,0 +1,111 @@
+// `@derive(display)` EXPANSION: the attribute generates a `toString` from the
+// field annotations and grafts it into the declaration.
+//
+// `Display` is declared HERE rather than reached through the autoload, so that
+// this fixture runs with the ordinary std root and can be asserted against both
+// compilers. derive_display_autoload.yoop covers the other route - a file that
+// never names the trait at all - and says there why it is bootstrap-only.
+//
+// What each declaration is for:
+//   Point     the plain case - scalars, in declaration order
+//   Empty     no fields at all, which is its own rendering
+//   Manual    a hand-written Display a derived field then dispatches to
+//   Boxed     a generic application that is neither Vec nor Map, so the field
+//             prints a placeholder rather than erroring
+//   Line      one field per strategy: nested derived, string, array loop,
+//             hand-written Display, placeholder for a generic, placeholder for
+//             a function type
+//   Shape     a variant - an arm per case, payload-less and payload alike
+//
+// No `Map` field: the two compilers disagree about hash ORDER (the reference
+// loses precision on the FNV offset basis, which is above int64 max), so a map
+// walk cannot be asserted against both. examples/pass/derive_display_array_vec
+// covers the map shape against the reference alone.
+
+trait Display {
+  function toString(ref self): string;
+}
+
+@derive(display)
+type Point {
+  x: int32,
+  y: int32,
+}
+
+@derive(display)
+type Empty {
+}
+
+type Manual implements Display {
+  code: int32,
+  function toString(ref self): string {
+    return `manual(${self.code})`;
+  }
+}
+
+type Boxed<T> {
+  v: T,
+}
+
+@derive(display)
+type Line {
+  a: Point,
+  b: Point,
+  label: string,
+  tags: int32[],
+  hand: Manual,
+  boxed: Boxed<int32>,
+  cb: (n: int32) => int32,
+}
+
+@derive(display)
+variant Shape {
+  Circle { r: int32 },
+  Named { label: string, n: int32 },
+  Bytes { xs: int32[] },
+  Dot,
+}
+
+function twice(n: int32): int32 {
+  return n * 2;
+}
+
+function main(): int32 {
+  const p: Point = { x: 3, y: 4 };
+  printf("%s\n", `${p}`);
+
+  const e: Empty = { };
+  printf("%s\n", `${e}`);
+
+  const l: Line = {
+    a: { x: 1, y: 2 },
+    b: p,
+    label: "diag",
+    tags: [7, 8, 9],
+    hand: { code: 5 },
+    boxed: { v: 6 },
+    cb: twice,
+  };
+  printf("%s\n", `${l}`);
+
+  const bare: Line = {
+    a: p,
+    b: p,
+    label: "",
+    tags: [],
+    hand: { code: 0 },
+    boxed: { v: 0 },
+    cb: twice,
+  };
+  printf("%s\n", `${bare}`);
+
+  printf("%s\n", `${Shape.Circle { r: 7 }}`);
+  printf("%s\n", `${Shape.Named { label: "hi", n: 2 }}`);
+  printf("%s\n", `${Shape.Bytes { xs: [1, 2, 3] }}`);
+  printf("%s\n", `${Shape.Dot}`);
+
+  // The merged `implements Display` is a real clause, so the derived method
+  // dispatches statically like any other trait method.
+  printf("%s\n", Display.toString(ref p));
+  return 0;
+}

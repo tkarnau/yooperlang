@@ -1,0 +1,168 @@
+module link;
+
+/*
+  Where clang is told to LOOK for a library and its headers - the `-L` and `-I`
+  half of the link line.
+
+  This is toolchain policy rather than compilation, and it used to be left out
+  on the grounds that nothing in the corpus needed it. The program probe
+  disproved that: `examples/pass/https_client/main.yoop` compiles, emits valid
+  IR, names `ssl` - and then dies at `ld: library 'ssl' not found`, because
+  OpenSSL is KEG-ONLY in Homebrew. macOS ships its own LibreSSL, so Homebrew
+  refuses to symlink openssl into a prefix on the default search path, and the
+  directory that actually holds it has to be probed by NAME.
+
+  Same list the reference probes (`librarySearchArgs` in src/toolchain.js), so
+  a program links the same way under either compiler.
+
+  ONE DIFFERENCE, and it is deliberate. The reference branches on
+  `process.platform` and `process.arch`; the bootstrap has neither, so every
+  candidate from every platform is offered and `fs.exists` decides. That lands
+  in the same place for a real machine - `/opt/homebrew` does not exist on
+  Linux and `C:\vcpkg` does not exist on macOS - and it means this file needs
+  no platform check to add. The one place the two could differ is a Windows
+  tree holding BOTH `lib/arm64` and `lib/x64`, where the reference picks the
+  running arch and this offers both, in that order.
+
+  ORDER is the contract, not just the set: clang searches `-L` directories left
+  to right, so an explicit `YOOP_LIB_PATH` has to come first, the conventional
+  prefixes next, and the by-name openssl probes last. That is the reference's
+  order too.
+*/
+
+import * as fs from "std/fs.yoop";
+import * as env from "std/env.yoop";
+import * as str from "std/core/strings.yoop";
+import { Text }, * as text from "std/core/text.yoop";
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { disposable } from "std/core/kinds.yoop";
+
+// Env vars a user points at a library tree the conventions below do not cover.
+const LIB_PATH_VAR: string = "YOOP_LIB_PATH";
+const INCLUDE_PATH_VAR: string = "YOOP_INCLUDE_PATH";
+
+// Appends every `-L<dir>` and `-I<dir>` this machine has, in search order.
+//
+// A directory that does not exist is never named: an `-L` at a missing path is
+// harmless to clang but it is noise in a command line a user may have to read,
+// and the existence probe is what makes one candidate list work on three
+// platforms.
+export function pushSearchPaths(ref cmd: Text): void {
+  disposable libs: Vec<string> = vec.vecNew(8);
+  disposable includes: Vec<string> = vec.vecNew(8);
+  collectSearchPaths(ref libs, ref includes);
+
+  pushEachExisting(ref cmd, ref libs, " -L");
+  pushEachExisting(ref cmd, ref includes, " -I");
+}
+
+// The candidates, in order, before any of them is checked for existence. Split
+// out from the emitting half so a test can read the LIST rather than a command
+// line, which is the only way to assert the order without a machine that has
+// every one of these directories on it.
+export function collectSearchPaths(ref libs: Vec<string>, ref includes: Vec<string>): void {
+  // 1. The explicit override, honoured before any convention.
+  pushPathListVar(ref libs, LIB_PATH_VAR);
+  pushPathListVar(ref includes, INCLUDE_PATH_VAR);
+
+  // 2. Conventional install prefixes. Homebrew on macOS (arm64 then Intel),
+  //    vcpkg and the unzipped-in-place SDK drops on Windows.
+  //
+  //    The Windows ones are spelled with FORWARD slashes, which clang, MSVC
+  //    and the Win32 API all accept, because `fs.pathJoin` joins with `/` and
+  //    a candidate half in one separator and half in the other is worse than
+  //    one consistently in the portable spelling.
+  pushPrefix(ref libs, ref includes, "/opt/homebrew");
+  pushPrefix(ref libs, ref includes, "/usr/local");
+  pushPrefix(ref libs, ref includes, "C:/vcpkg/installed/arm64-windows");
+  pushPrefix(ref libs, ref includes, "C:/vcpkg/installed/x64-windows");
+  pushPrefix(ref libs, ref includes, "C:/SDL2");
+  pushPrefix(ref libs, ref includes, "C:/SDL3");
+  pushPrefix(ref libs, ref includes, "C:/Libraries");
+
+  // 3. The keg-only OpenSSL prefixes, by name. Newest first, because a machine
+  //    with both wants the one its headers were written against.
+  pushPrefix(ref libs, ref includes, "/opt/homebrew/opt/openssl@3");
+  pushPrefix(ref libs, ref includes, "/usr/local/opt/openssl@3");
+  pushPrefix(ref libs, ref includes, "/opt/homebrew/opt/openssl@1.1");
+  pushPrefix(ref libs, ref includes, "/usr/local/opt/openssl@1.1");
+  pushPrefix(ref libs, ref includes, "/opt/homebrew/opt/openssl");
+  pushPrefix(ref libs, ref includes, "/usr/local/opt/openssl");
+}
+
+// `<prefix>/lib/<arch>`, `<prefix>/lib` and `<prefix>/include`.
+//
+// The arch-suffixed directory is the layout the SDL "VC development" zip ships
+// and the one MSVC users expect; it never exists in a Homebrew tree, so
+// offering both costs nothing there.
+function pushPrefix(ref libs: Vec<string>, ref includes: Vec<string>, prefix: string): void {
+  vec.vecPush(ref libs, fs.pathJoin([prefix, "lib", "arm64"]));
+  vec.vecPush(ref libs, fs.pathJoin([prefix, "lib", "x64"]));
+  vec.vecPush(ref libs, fs.pathJoin([prefix, "lib"]));
+  vec.vecPush(ref includes, fs.pathJoin([prefix, "include"]));
+}
+
+// A `PATH`-shaped environment variable, split into its entries.
+//
+// Both separators are tried rather than picked, for the same reason the
+// prefixes above are: there is no platform to ask. A POSIX path never contains
+// `;` and a Windows one never contains `:` outside a drive letter, so splitting
+// on whichever appears is unambiguous - and a Windows path IS the case where
+// guessing wrong matters, since `C:\lib` would split into `C` and `\lib`.
+function pushPathListVar(ref out: Vec<string>, name: string): void {
+  const raw = env.getOr(name, "");
+  if (raw.len == 0) {
+    return;
+  }
+  const separator = pathListSeparator(raw);
+  disposable parts: Vec<string> = vec.vecNew(4);
+  const err = str.split(ref parts, raw, separator, false);
+  if (err.len > 0) {
+    return;
+  }
+  let i: usize = 0;
+  while (i < parts.len) {
+    vec.vecPush(ref out, vec.vecGet(ref parts, i));
+    i += 1;
+  }
+}
+
+// `;` when the value looks like a Windows path list, `:` otherwise. A `;`
+// anywhere is the tell: it is not legal in a POSIX path list separator role and
+// is the Windows one.
+function pathListSeparator(raw: string): string {
+  if (str.stringIndexOf(raw, ";") < raw.len) {
+    return ";";
+  }
+  return ":";
+}
+
+// Every directory in `dirs` that exists, each behind `flag`, deduped.
+//
+// The dedupe is not cosmetic: `/usr/local` and `/usr/local/opt/openssl` both
+// resolve to `/usr/local/lib` on a machine with no keg, and a command line
+// naming one directory six times is one a reader stops reading.
+function pushEachExisting(ref cmd: Text, ref dirs: Vec<string>, flag: string): void {
+  disposable seen: Vec<string> = vec.vecNew(8);
+  let i: usize = 0;
+  while (i < dirs.len) {
+    const dir = vec.vecGet(ref dirs, i);
+    if (fs.exists(dir) && !containsString(ref seen, dir)) {
+      vec.vecPush(ref seen, dir);
+      text.push(ref cmd, flag);
+      text.push(ref cmd, `"${dir}"`);
+    }
+    i += 1;
+  }
+}
+
+function containsString(ref v: Vec<string>, needle: string): bool {
+  let i: usize = 0;
+  while (i < v.len) {
+    if (str.stringEq(vec.vecGet(ref v, i), needle)) {
+      return true;
+    }
+    i += 1;
+  }
+  return false;
+}

@@ -51,6 +51,7 @@ import { Text }, * as text from "std/core/text.yoop";
 import { disposable } from "std/core/kinds.yoop";
 import { ASTNode, ASTNodeKind, NodeId, nodeAt, childAt, kindName } from "../ast";
 import * as str from "std/core/strings.yoop";
+import { Option } from "std/core/types.yoop";
 
 export function emitAwait(ref cx: Cx, expr: ASTNode, exprId: NodeId, ref out: Operand): string {
   // Pass D proved both of these, so reaching either means a coloring rule was
@@ -119,17 +120,43 @@ function emitAsyncCall(
   ref hdl: usize,
   ref slotId: usize
 ): string {
-  // An INDIRECT async call - a coroutine reached through a function-typed field
-  // or a vtable slot - is refused BY NAME rather than emitted. Asked FIRST, so
-  // the refusal does not arrive after half a call has been written into the
-  // instruction stream. Nothing in the corpus writes one; the vtable half of it
-  // is item 3.4.
+  // An INDIRECT async call through a function-typed FIELD or a local holding a
+  // function value is refused BY NAME rather than emitted. Asked FIRST, so the
+  // refusal does not arrive after half a call has been written into the
+  // instruction stream. Nothing in the corpus writes one.
+  //
+  // A VTABLE slot is the other indirect shape and IS emitted - see below. The
+  // two are not one gap: a vtable slot's signature comes from the trait, so its
+  // asyncness is known and stamped, while a function VALUE carries whatever the
+  // annotation said and a `=>` type is never written `async`.
   if (map.mapContainsKey(ref cx.tm.indirectCalls, uint64(callId))) {
     return unsupportedHere("an INDIRECT call to an async function", call.name);
   }
 
+  const throughVtable = map.mapContainsKey(ref cx.tm.vtableSlots, uint64(callId));
+
   disposable args: Vec<CallArg> = vec.vecNew(4);
-  if (call.childA != 0) {
+  // The receiver of a vtable dispatch is the vtable itself and does not travel
+  // as an argument - the erased `ctx` out of its slot 0 goes in its place, and
+  // the slot load below produces both.
+  let ctx: usize = 0;
+  let fnPtr: usize = 0;
+  if (throughVtable) {
+    let slotIndex: usize = 0;
+    switch (map.mapGet(ref cx.tm.vtableSlots, uint64(callId))) {
+      case Option.Some { value: idx }: { slotIndex = idx; }
+      case Option.None: { }
+    }
+    const lerr = emitVtableSlotLoad(ref cx, call, slotIndex, ref ctx, ref fnPtr);
+    if (lerr.len > 0) {
+      return lerr;
+    }
+    vec.vecPush(ref args, { ty: "ptr", value: Operand.Temp { id: ctx } });
+    const aerr = emitDispatchArgs(ref cx, call, ref args);
+    if (aerr.len > 0) {
+      return aerr;
+    }
+  } else if (call.childA != 0) {
     const list = nodeAt(cx.ast, call.childA);
     let i: usize = 0;
     while (i < list.childCount) {
@@ -155,11 +182,15 @@ function emitAsyncCall(
     value: Operand.SlotAddr { name: TEMP_SLOT_NAME, id: slot.id },
   });
 
+  hdl = freshTemp(cx.e);
+  if (throughVtable) {
+    emitCallIndirect(ref cx, hdl, "ptr", fnPtr, ref args);
+    return "";
+  }
   // `callId` is the CALL node's own id, not the `await`'s: a trait-method
   // receiver and a generic instantiation are both recorded against the call,
   // which is where pass D put them.
   const callee = calleeSymbol(ref cx, call, callId);
-  hdl = freshTemp(cx.e);
   emitCall(ref cx, hdl, "ptr", callee.home, callee.name, ref args);
   return "";
 }

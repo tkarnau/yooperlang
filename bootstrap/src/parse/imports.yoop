@@ -26,6 +26,7 @@ import { disposable } from "std/core/kinds.yoop";
 import { NodeId, ASTNodeKind } from "../ast";
 import { TokenTags, tagName } from "../lex";
 import { ParsingError } from "../diagnostics";
+import * as str from "std/core/strings.yoop";
 
 export function parseImportDecl(ref ps: ParserState): Result<NodeId, ParsingError> {
   let node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.IMPORT_DECL);
@@ -154,17 +155,27 @@ export function parseExportDecl(ref ps: ParserState): Result<NodeId, ParsingErro
         peekLengthUsize(ref ps),
       )};
     }
-    // `export "C" function f(...)` - a definition whose SYMBOL keeps its exact
-    // spelling so C can call it. Refused by name rather than left to read as a
-    // typo: the missing piece is that C-ABI-ness has to travel WITH the symbol
-    // (an importing module mangles the name it calls), and `Symbol.Func`
-    // carries nothing but a TypeId today.
+    // `export "C" function f(...) { ... }` - a definition whose SYMBOL keeps
+    // its exact spelling so C can call it. The wrapper gets its OWN kind rather
+    // than a flag, because that is what tells pass A to record the name the way
+    // an `extern` is recorded: the two ask the same question of the mangler
+    // ("this name is the linker's spelling") from opposite directions.
+    //
+    // "C" is the only ABI a definition can carry. "intrinsic" means the
+    // compiler IS the implementation, so there is no body to emit and nothing
+    // for `export` to do with one.
     case TokenTags.STRLITERAL: {
-      return Result.Err { error: SelfLexing.createParsingError(
-        ref ps,
-        "`export \"C\" function` is not supported by the bootstrap yet - it emits the definition under its bare C name, which every caller has to agree on and the symbol table cannot yet record",
-        peekLengthUsize(ref ps),
-      )};
+      const abiTok = SelfLexing.advance(ref ps)?;
+      const abi = decodeStringLiteral(ref ps, abiTok)?;
+      if (!str.stringEq(abi, ABI_C)) {
+        return Result.Err { error: SelfLexing.createParsingError(
+          ref ps,
+          `unsupported export ABI "${abi}" - \`export "C" function\` is the only one`,
+          peekLengthUsize(ref ps),
+        )};
+      }
+      node.kind = ASTNodeKind.EXPORT_C_FUNCTION_DECL;
+      node.childA = parseFunctionDecl(ref ps)?;
     }
     default: {
       // `export kind async { ... }` and `export async fetch(...)`. Both open

@@ -93,6 +93,16 @@ export function emitKindRegion(
   const slot = declareAnonSlot(ref cx, ty);
   emitStore(ref cx, ty, subject, TEMP_SLOT_NAME, slot.id);
 
+  // The IMPLICIT form - `ephemeral makeGuard(1);` - owns the rest of the
+  // ENCLOSING scope rather than a block of its own, so it opens no scope and
+  // records into the one already open. That is the whole difference, and it is
+  // what makes two of them in a row unwind in reverse: they are two entries in
+  // one scope, exactly like two `disposable` bindings.
+  if (stmt.childB == 0) {
+    return recordDisposal(ref cx, TEMP_SLOT_NAME, slot.id,
+      resolvedTypeAt(ref cx, stmtId), method);
+  }
+
   // Its own scope, holding just the subject, so the block's own disposables
   // unwind INSIDE it and the region's call comes last.
   disposePushScope(cx.disposes);

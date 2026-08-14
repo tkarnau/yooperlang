@@ -1,0 +1,6 @@
+quick done=42
+quick isDone=1
+slow timed out
+arm off worker=1
+cancelled task cancelled
+exit=0

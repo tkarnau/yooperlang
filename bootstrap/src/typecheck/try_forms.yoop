@@ -1,0 +1,124 @@
+module typecheck;
+
+/*
+  Pass D's check for the two OTHER things a `?` can be.
+
+    expr? "context"     prefix a note onto the error on the way out
+    expr? e { ... }     handle the failure here instead of returning it
+
+  Split from fallible.yoop because that file answers one shape question -
+  "is this type fallible" - and drives plain propagation, while these two are
+  separate features that happen to hang off the same node. Neither touches the
+  Ok path: whatever a `?` yields, it yields the same way in all three forms.
+
+  Both were established by PROBING the JS reference rather than by reading it,
+  and the findings that shaped them are in bootstrap/README.md under `?`.
+*/
+
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { Map }, * as map from "std/collections/map.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import { AST, ASTNode, NodeId } from "../ast";
+
+// `expr? "context"` - decide HOW the note reaches the outgoing error, and
+// record the choice. Two shapes, asked in this order:
+//
+//   1. both Err payloads are `string` - which every `Result<T, string>` in std
+//      is - and the compiler builds `"<context>: <err>"` itself.
+//   2. anything else: the operand's Err type must promise
+//      `WithContext<TargetErr>`, and the failure branch calls
+//      `withContext(ref err, context)`. One impl does the decoration AND the
+//      conversion, which is why a `?` between two different Err types needs no
+//      separate `Into` when a context is written.
+//
+// False, having reported, when neither applies. The message ends in the
+// `implements` clause the user would paste, which is why the target type is
+// rendered the way it is SPELLED rather than the way it is described.
+function checkTryContext(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  exprId: NodeId,
+  expr: ASTNode,
+  ref got: FallibleShape,
+  ref want: FallibleShape
+): bool {
+  if (got.errType == TYPE_VOID_ID || want.errType == TYPE_VOID_ID) {
+    reportError(
+      ref prog,
+      `'?' context string needs an Err payload to attach to - one of the two Err cases carries none`,
+      expr.sourceLoc
+    );
+    return false;
+  }
+  if (isStringPrimType(ref prog, got.errType) && isStringPrimType(ref prog, want.errType)) {
+    map.mapInsert(ref tm.tryContextConcat, uint64(exprId), true);
+    return true;
+  }
+  if (!claimsAppliedTrait(ref prog, got.errType, WITH_CONTEXT_TRAIT,
+                          WITH_CONTEXT_METHOD, want.errType)) {
+    const target = formatType(ref prog, want.errType);
+    reportError(
+      ref prog,
+      `'?' with a context string needs a WithContext<${target}> impl on ${formatType(ref prog, got.errType)} (or string Err payloads on both sides) - add \`implements WithContext<${target}>\` with \`function withContext(ref self, context: string): ${target}\``,
+      expr.sourceLoc
+    );
+    return false;
+  }
+  return true;
+}
+
+// `expr? e { ... }` - the block runs on the failure path INSTEAD of the
+// expression producing a value, so two things have to hold and neither is about
+// types: `e` names the Err payload for the block's extent, and the block has to
+// LEAVE on every path.
+//
+// Checked with the enclosing return type untouched, so a `return` inside the
+// block checks against the enclosing function's own, and `break` / `continue`
+// stay legal exactly when the `?` sits inside a loop.
+//
+// The result is still the operand's Ok payload: on the path where execution
+// carries on, the `?` unwrapped what it was handed exactly as a bare one does.
+function checkTryHandler(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  exprId: NodeId,
+  expr: ASTNode,
+  ref got: FallibleShape,
+  ref scope: LocalScope
+): TypeId {
+  scopePush(ref scope);
+  if (got.errType == TYPE_VOID_ID) {
+    // Reported against the binding rather than left undeclared, which would
+    // surface as a confusing "unknown name" at the first use inside the block.
+    reportError(
+      ref prog,
+      `'?' handler binds "${expr.name}", but the Err case carries no payload - there is nothing to bind`,
+      expr.sourceLoc
+    );
+  } else if (!scopeDeclare(ref scope, expr.name, got.errType, false)) {
+    reportError(
+      ref prog,
+      `"${expr.name}" is already declared in this scope`,
+      expr.sourceLoc
+    );
+  }
+  checkBlock(ref prog, ref tm, ref ast, expr.childC, prog.currentReturn, ref scope);
+  scopePop(ref scope);
+
+  // Asked AFTER the block is checked, so a `switch` inside it has already been
+  // proved exhaustive-or-defaulted and `alwaysDiverges` does not have to re-ask.
+  if (!alwaysDiverges(ref ast, expr.childC)) {
+    reportError(
+      ref prog,
+      `'?' handler block must not fall through - every path has to leave via return, break or continue (it runs INSTEAD of producing a value, so there is nothing for execution to carry forward)`,
+      expr.sourceLoc
+    );
+    return TYPE_ERROR_ID;
+  }
+  return got.okType;
+}
+
+const WITH_CONTEXT_TRAIT: string = "WithContext";
+const WITH_CONTEXT_METHOD: string = "withContext";

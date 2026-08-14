@@ -92,7 +92,9 @@ export function declOf(ref ast: AST, id: NodeId): NodeId {
   let at = id;
   while (true) {
     const node = nodeAt(ref ast, at);
-    if (node.kind == ASTNodeKind.EXPORT_DECL || node.kind == ASTNodeKind.ATTRIBUTE) {
+    if (node.kind == ASTNodeKind.EXPORT_DECL ||
+        node.kind == ASTNodeKind.EXPORT_C_FUNCTION_DECL ||
+        node.kind == ASTNodeKind.ATTRIBUTE) {
       at = node.childA;
       continue;
     }
@@ -104,9 +106,27 @@ export function declOf(ref ast: AST, id: NodeId): NodeId {
 // `export` sits under the `@derive`, so a naive test on the outer node says no
 // for every decorated declaration.
 export function isExportDecl(ref ast: AST, id: NodeId): bool {
+  return isExportKind(exportWrapperKindOf(ref ast, id));
+}
+
+// True when the wrapper is the `export "C"` one specifically. It is an export
+// like any other AND its symbol keeps its bare spelling, so the two questions
+// are asked separately.
+export function isCExportDecl(ref ast: AST, id: NodeId): bool {
+  return exportWrapperKindOf(ref ast, id) == ASTNodeKind.EXPORT_C_FUNCTION_DECL;
+}
+
+// The export wrapper's kind, looking through an attribute - the `export` sits
+// under the `@derive`, so a naive test on the outer node says no for every
+// decorated declaration.
+function exportWrapperKindOf(ref ast: AST, id: NodeId): ASTNodeKind {
   const node = nodeAt(ref ast, id);
   if (node.kind == ASTNodeKind.ATTRIBUTE) {
-    return nodeAt(ref ast, node.childA).kind == ASTNodeKind.EXPORT_DECL;
+    return nodeAt(ref ast, node.childA).kind;
   }
-  return node.kind == ASTNodeKind.EXPORT_DECL;
+  return node.kind;
+}
+
+function isExportKind(k: ASTNodeKind): bool {
+  return k == ASTNodeKind.EXPORT_DECL || k == ASTNodeKind.EXPORT_C_FUNCTION_DECL;
 }

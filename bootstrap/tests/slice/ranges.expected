@@ -1,0 +1,19 @@
+xs[0]=10
+xs[1]=20
+xs[2]=30
+xs[3]=40
+mid 1
+mid 2
+count=3 sum=3
+a0
+a1
+a2
+b0
+b1
+b2
+e0
+e1
+k0
+k2
+slice.len=2 20 30
+exit=0

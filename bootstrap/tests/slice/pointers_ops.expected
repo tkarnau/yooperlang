@@ -1,0 +1,6 @@
+view.len=8 view[5]=15
+viaView=15
+elems=2 byteDiff=8 readBack=77
+stride=1
+roundTrip=1200
+exit=0

@@ -381,7 +381,13 @@ function primKindOfName(name: string): Option<PrimKind> {
   if (str.stringEq(name, "uint32") || str.stringEq(name, "c_uint")) {
     return Option.Some { value: PrimKind.UINT32 };
   }
-  if (str.stringEq(name, "uint64") || str.stringEq(name, "c_ulong")) {
+  // `uintptr` is what `unsafe_ptr.toInt` answers with. LP64 again: it is the
+  // width of a pointer, which is uint64 on both targets the compiler builds
+  // for. The reference keeps it as a distinct NAME and the same width; here it
+  // is an alias, which accepts strictly more and rejects nothing the reference
+  // accepts.
+  if (str.stringEq(name, "uint64") || str.stringEq(name, "c_ulong") ||
+      str.stringEq(name, "uintptr") || str.stringEq(name, "c_uintptr_t")) {
     return Option.Some { value: PrimKind.UINT64 };
   }
   if (str.stringEq(name, "usize") || str.stringEq(name, "c_size_t")) {

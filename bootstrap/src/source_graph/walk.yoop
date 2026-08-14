@@ -71,6 +71,17 @@ export function loadModuleGraph(entryPath: string, stdRoot: string): LoadGraphRe
     stdRoot: stdRoot,
   };
 
+  // The std autoloads go in BEFORE the entry, so they sit early in the
+  // topological order and every user module reads declarations that are already
+  // filled. See autoload.yoop for which two and why.
+  let autoLoads: Map<string, string> = map.mapNew(0, map.stringKeyOps());
+  const autoErr = loadAutoloads(ref loader, ref autoLoads, stdRoot);
+  if (autoErr.len > 0) {
+    Disposable.dispose(ref loader.byPath);
+    Disposable.dispose(ref loader.onStack);
+    return LoadGraphResult.Err { error: autoErr };
+  }
+
   const loaded = loadUnit(ref loader, entryAbs, entryPath, true);
   // The scaffolding goes now, on both paths. `modules` does not: on success it
   // is MOVED into the graph (the one-owner discipline the rest of this module
@@ -84,9 +95,6 @@ export function loadModuleGraph(entryPath: string, stdRoot: string): LoadGraphRe
       return LoadGraphResult.Err { error: e };
     }
     case Result.Ok { value: entryIndex }: {
-      // No std autoloads wired yet; an empty map keeps the ModuleGraph shape
-      // whole. Annotated because `V` is not inferable from stringKeyOps alone.
-      let autoLoads: Map<string, string> = map.mapNew(0, map.stringKeyOps());
       return LoadGraphResult.Ok { value: {
         modules: loader.modules,
         entryIndex: entryIndex,
@@ -94,6 +102,35 @@ export function loadModuleGraph(entryPath: string, stdRoot: string): LoadGraphRe
       }};
     }
   }
+}
+
+// Pull the always-present std modules into the graph and record where each one
+// landed. Returns "" on success.
+//
+// A missing file is skipped rather than reported: a caller with no std root -
+// which is every test that passes "" - has no std to autoload, and that is not
+// a broken compile. A file that IS there and fails to load is a real error,
+// because something the graph is about to depend on is broken.
+function loadAutoloads(ref st: Loader, ref out: Map<string, string>, stdRoot: string): string {
+  disposable entries: Vec<AutoloadEntry> = autoloadEntries(stdRoot);
+  let i: usize = 0;
+  while (i < entries.len) {
+    const entry = vec.vecGet(ref entries, i);
+    if (fs.exists(entry.path)) {
+      const abs = fs.normalizePath(entry.path);
+      if (abs.len > 0) {
+        switch (loadUnit(ref st, abs, entry.path, false)) {
+          case Result.Err { error: e }: { return e; }
+          case Result.Ok { value: index }: {
+            const mod = vec.vecGet(ref st.modules, index);
+            map.mapInsert(ref out, entry.key, mod.id);
+          }
+        }
+      }
+    }
+    i += 1;
+  }
+  return "";
 }
 
 // Load whatever MODULE owns `absPath`, plus everything it imports. Returns its

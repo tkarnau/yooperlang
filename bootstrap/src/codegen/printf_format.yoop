@@ -1,0 +1,80 @@
+module codegen;
+
+/*
+  `printf(<a runtime string>)` - the one variadic call site that has to be
+  rewritten rather than emitted.
+
+  C's printf reads its first argument as a FORMAT. That is fine for a literal,
+  which the author wrote and can see; it is not fine for a string the program
+  built at run time, because every `%` in the DATA becomes a conversion reading
+  a vararg nobody pushed:
+
+      printf(`target ${raw}\n`);        // raw = "/todos/7?note=a%20b"
+
+  emits one argument and no varargs, so `%20` is read as a width-20 conversion
+  and `%2F` as a `%f` on whatever happened to be in the register. Measured on
+  examples/pass/http_url_smoke: `encode=a%20b%2Fc%3Fd%3De` came out as
+  `encode=a                   b0.000000c0.000000d8776975808e`, and the last of
+  those numbers is a stack address. Undefined behaviour, not a rendering
+  difference.
+
+  So a printf whose format is not a compile-time constant gets `"%s"` spliced in
+  front of it and becomes the vararg it should always have been. The test is the
+  lowered OPERAND rather than anything about the syntax: `Operand.StrRef` IS
+  "a module-level string constant", which is what a string literal and a
+  template with no interpolation both lower to, and everything else - a built
+  template, a loaded local, a returned string - is a runtime value.
+
+  WHY ONLY WITH NO VARARGS. `printf(fmt, x, y)` means the author is using `fmt`
+  as a format and passing it arguments; rewriting that would drop them. The
+  hazard is exactly the zero-vararg case, where there is nothing for a
+  conversion to legitimately consume.
+
+  The reference does not need this: it turns a template into a format string at
+  COMPILE time (`${x}` becomes a literal `%d` and `x` becomes a vararg), so the
+  runtime halves always arrive through `%s`. That design is also why it renders
+  an interpolated float as `3.140000` and an interpolated bool as `1`, which is
+  the known divergence recorded in plans/bootstrap-completion.md - the bootstrap
+  builds the string with the language's own rules first. This file is what makes
+  the two safe in the same place without giving that up.
+*/
+
+import { Vec }, * as vec from "std/core/vec.yoop";
+import * as text from "std/core/text.yoop";
+
+// Splices `"%s"` in front of a printf whose format is a runtime string.
+//
+// A no-op for everything else, which is nearly every call: a literal format, a
+// call with varargs, and any variadic callee that is not printf all pass
+// through untouched.
+export function guardRuntimeFormat(
+  ref cx: Cx,
+  ref args: Vec<CallArg>,
+  name: string,
+  fixedCount: usize
+): void {
+  if (!text.equals(name, PRINTF_NAME) || fixedCount != 1 || args.len != 1) {
+    return;
+  }
+  if (isConstantString(vec.vecGet(ref args, 0).value)) {
+    return;
+  }
+
+  // Push the old format to the end and overwrite slot 0, rather than inserting:
+  // `Vec` has no insert, and with exactly one element "append then overwrite"
+  // IS the insert.
+  vec.vecPush(ref args, vec.vecGet(ref args, 0));
+  vec.vecSet(ref args, 0, {
+    ty: "ptr",
+    value: Operand.StrRef { id: internStringConstant(cx.e, "%s") },
+  });
+}
+
+// True when the operand is a module-level string constant - the one case where
+// the author can SEE the conversions in the format they wrote.
+function isConstantString(value: Operand): bool {
+  switch (value) {
+    case Operand.StrRef { id: i }: { return true; }
+    default: { return false; }
+  }
+}

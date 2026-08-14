@@ -154,7 +154,10 @@ export function definitionSymbol(ref cx: Cx, name: string): SymbolName {
     let inst = funcInstanceAt(cx.prog, cx.instance);
     return { home: cx.tm.moduleId, name: inst.name };
   }
-  if (keepsCName(name)) {
+  // `main`, and an `export "C" function` - which pass A recorded in
+  // `externNames` for exactly this reason. Both are DEFINED under the bare
+  // spelling a C caller has to use.
+  if (keepsCName(name) || isExtern(ref cx, name)) {
     return { home: "", name: name };
   }
   return { home: cx.tm.moduleId, name: name };

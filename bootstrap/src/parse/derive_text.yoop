@@ -1,0 +1,233 @@
+module parse;
+
+// The SOURCE TEXT `@derive(display)` expands to.
+//
+// The generated `toString` is written as Yoop source and reparsed rather than
+// built node by node, which is the reference's design (src/jsyoopderive/
+// expand.js) and worth keeping: the method is ordinary code, so anything the
+// parser learns later - a better loop, a shorter template - is inherited for
+// free, and there is no second AST builder to keep in step with the first.
+//
+// This file does the TEXT half only. derive.yoop reparses it and grafts the
+// result in.
+//
+// Every generated local is prefixed `_derive` and suffixed with a SLOT - the
+// field's index for a struct, `<case>_<field>` for a variant payload - so two
+// fields of one type never collide and a user field named `_deriveF0` is the
+// only way to break it.
+
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { Text }, * as txt from "std/core/text.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import * as str from "std/core/strings.yoop";
+import { AST, ASTNode, ASTNodeKind, NodeId, childAt, nodeAt } from "../ast";
+
+// How one field is rendered. INLINE interpolates directly and the container
+// shapes each get an accumulator loop; PLACEHOLDER prints fixed text instead of
+// erroring, which is what keeps a derived type with one unprintable field
+// usable.
+enum DeriveShape { INLINE, ARRAY, VEC, MAP, PLACEHOLDER }
+
+type FieldShape {
+  shape: DeriveShape,
+  placeholder: string,   // only meaningful for PLACEHOLDER
+}
+
+// Push `line` with every `@` replaced by `slot`, then a newline.
+//
+// `@` starts an attribute and nothing else in the language, and no attribute is
+// ever generated - so it is free to be the substitution marker, and the
+// generated statements below read as the source they are rather than as a run
+// of pushes.
+function pushSlotted(ref out: Text, line: string, slot: string): void {
+  disposable src: Text = txt.fromString(line);
+  const bs = txt.bytes(ref src);
+  let i: usize = 0;
+  while (i < bs.len) {
+    if (bs[i] == '@') {
+      txt.push(ref out, slot);
+    } else {
+      txt.pushByte(ref out, bs[i]);
+    }
+    i += 1;
+  }
+  txt.pushByte(ref out, 10);
+}
+
+// Classify a field's type ANNOTATION into an emission strategy. Syntactic on
+// purpose: the expansion runs before anything is interned, so `Vec` here is the
+// spelling and not the type.
+function classifyAnnot(ref ast: AST, annotId: NodeId): FieldShape {
+  if (annotId == 0) {
+    return { shape: DeriveShape.PLACEHOLDER, placeholder: "<unknown>" };
+  }
+  const n = nodeAt(ref ast, annotId);
+  switch (n.kind) {
+    case ASTNodeKind.TYPE_ANNOTATION_REF_TYPE: {
+      // Interpolation derefs a borrow before it asks about Display, so a `ref`
+      // field renders as its inner type - but only for the inline shape, since
+      // a loop over a borrowed container is a second lowering nobody needs.
+      const inner = classifyAnnot(ref ast, n.childA);
+      if (inner.shape == DeriveShape.INLINE) {
+        return inner;
+      }
+      return { shape: DeriveShape.PLACEHOLDER, placeholder: "<ref>" };
+    }
+    case ASTNodeKind.TYPE_ANNOTATION_ARRAY_TYPE: {
+      const elem = classifyAnnot(ref ast, n.childA);
+      if (elem.shape == DeriveShape.INLINE) {
+        return { shape: DeriveShape.ARRAY, placeholder: "" };
+      }
+      return { shape: DeriveShape.PLACEHOLDER, placeholder: "<array>" };
+    }
+    case ASTNodeKind.TYPE_ANNOTATION_FUNC_TYPE: {
+      return { shape: DeriveShape.PLACEHOLDER, placeholder: "<fn>" };
+    }
+    case ASTNodeKind.TYPE_ANNOTATION_TYPE_NAME: {
+      return classifyTypeName(ref ast, n);
+    }
+    default: {
+      return { shape: DeriveShape.PLACEHOLDER, placeholder: "<unknown>" };
+    }
+  }
+}
+
+// A bare name is INLINE - a primitive, or a nominal type whose own `toString`
+// the interpolation will find. A name with type ARGUMENTS is an application,
+// and only `Vec<T>` and `Map<K, V>` have a walk the generator knows.
+function classifyTypeName(ref ast: AST, n: ASTNode): FieldShape {
+  if (n.childA == 0) {
+    return { shape: DeriveShape.INLINE, placeholder: "" };
+  }
+  const args = nodeAt(ref ast, n.childA);
+  if (str.stringEq(n.name, "Vec") && args.childCount == 1) {
+    const elem = classifyAnnot(ref ast, childAt(ref ast, args, 0));
+    if (elem.shape == DeriveShape.INLINE) {
+      return { shape: DeriveShape.VEC, placeholder: "" };
+    }
+    return { shape: DeriveShape.PLACEHOLDER, placeholder: "<vec>" };
+  }
+  // BOTH arguments are checked. The reference checks only the key - its
+  // `classify(annot.typeArgs[1] === "inline")` classifies a BOOLEAN, whose
+  // answer is the truthy string "<unknown>", so the value type never gates the
+  // expansion. Following that would generate `${value}` on a type with no
+  // `toString`, which is a diagnostic pointing into source the user never
+  // wrote; refusing to expand is the safe half of the difference.
+  if (str.stringEq(n.name, "Map") && args.childCount == 2) {
+    const k = classifyAnnot(ref ast, childAt(ref ast, args, 0));
+    const v = classifyAnnot(ref ast, childAt(ref ast, args, 1));
+    if (k.shape == DeriveShape.INLINE && v.shape == DeriveShape.INLINE) {
+      return { shape: DeriveShape.MAP, placeholder: "" };
+    }
+    return { shape: DeriveShape.PLACEHOLDER, placeholder: "<map>" };
+  }
+  disposable lower: Text = txt.toLowerAscii(n.name);
+  return { shape: DeriveShape.PLACEHOLDER, placeholder: `<${txt.view(ref lower)}>` };
+}
+
+// One field's contribution: any setup statements onto `setup`, and the
+// `name: <text>` fragment onto `parts`.
+//
+// `access` is the source expression holding the value - `self.x` for a struct
+// field, a pattern-bound local for a variant payload.
+function emitFieldFragment(
+  ref ast: AST,
+  field: ASTNode,
+  access: string,
+  slot: string,
+  ref setup: Text,
+  ref parts: Text
+): void {
+  const cls = classifyAnnot(ref ast, field.childA);
+  txt.push(ref parts, field.name);
+  txt.push(ref parts, ": ");
+  switch (cls.shape) {
+    case DeriveShape.INLINE: {
+      txt.push(ref parts, "${");
+      txt.push(ref parts, access);
+      txt.push(ref parts, "}");
+    }
+    case DeriveShape.ARRAY: {
+      // The array is bound to a local first: `for x in self.f {` trips the
+      // variant-constructor postfix (`IDENT.IDENT {` reads as a constructor),
+      // so the iterated expression has to be a bare identifier.
+      txt.push(ref setup, "let _deriveArr");
+      txt.push(ref setup, slot);
+      txt.push(ref setup, " = ");
+      txt.push(ref setup, access);
+      txt.push(ref setup, ";\n");
+      pushSlotted(ref setup, "let _deriveF@: string = \"[\";", slot);
+      pushSlotted(ref setup, "let _deriveFirst@: bool = true;", slot);
+      pushSlotted(ref setup, "for _deriveItem@ in _deriveArr@ {", slot);
+      pushSlotted(ref setup, "  if (_deriveFirst@) {", slot);
+      pushSlotted(ref setup, "    _deriveF@ = `${_deriveF@}${_deriveItem@}`;", slot);
+      pushSlotted(ref setup, "    _deriveFirst@ = false;", slot);
+      pushSlotted(ref setup, "  } else {", slot);
+      pushSlotted(ref setup, "    _deriveF@ = `${_deriveF@}, ${_deriveItem@}`;", slot);
+      pushSlotted(ref setup, "  }", slot);
+      pushSlotted(ref setup, "}", slot);
+      pushSlotted(ref setup, "_deriveF@ = `${_deriveF@}]`;", slot);
+      pushFragmentLocal(ref parts, slot);
+    }
+    case DeriveShape.VEC: {
+      txt.push(ref setup, "let _deriveVec");
+      txt.push(ref setup, slot);
+      txt.push(ref setup, " = ");
+      txt.push(ref setup, access);
+      txt.push(ref setup, ";\n");
+      pushSlotted(ref setup, "let _deriveF@: string = \"[\";", slot);
+      pushSlotted(ref setup, "let _deriveI@: usize = 0;", slot);
+      pushSlotted(ref setup, "while (_deriveI@ < _deriveVec@.len) {", slot);
+      pushSlotted(ref setup, "  if (_deriveI@ > 0) {", slot);
+      pushSlotted(ref setup, "    _deriveF@ = `${_deriveF@}, `;", slot);
+      pushSlotted(ref setup, "  }", slot);
+      pushSlotted(ref setup, "  let _deriveElem@ = _deriveVec@.data[_deriveI@];", slot);
+      pushSlotted(ref setup, "  _deriveF@ = `${_deriveF@}${_deriveElem@}`;", slot);
+      pushSlotted(ref setup, "  _deriveI@ = _deriveI@ + 1;", slot);
+      pushSlotted(ref setup, "}", slot);
+      pushSlotted(ref setup, "_deriveF@ = `${_deriveF@}]`;", slot);
+      pushFragmentLocal(ref parts, slot);
+    }
+    case DeriveShape.MAP: {
+      // A map is SPARSE, so the walk runs to `cap` and skips any slot whose
+      // state byte is not 1 (occupied) rather than counting to `len`.
+      txt.push(ref setup, "let _deriveMap");
+      txt.push(ref setup, slot);
+      txt.push(ref setup, " = ");
+      txt.push(ref setup, access);
+      txt.push(ref setup, ";\n");
+      pushSlotted(ref setup, "let _deriveF@: string = \"[\";", slot);
+      pushSlotted(ref setup, "let _deriveI@: usize = 0;", slot);
+      pushSlotted(ref setup, "while (_deriveI@ < _deriveMap@.cap) {", slot);
+      pushSlotted(ref setup, "  if (_deriveMap@.states[_deriveI@] != 1) {", slot);
+      pushSlotted(ref setup, "    _deriveI@ = _deriveI@ + 1;", slot);
+      pushSlotted(ref setup, "    continue;", slot);
+      pushSlotted(ref setup, "  }", slot);
+      pushSlotted(ref setup, "  if (_deriveF@.len > 1) {", slot);
+      pushSlotted(ref setup, "    _deriveF@ = `${_deriveF@}, `;", slot);
+      pushSlotted(ref setup, "  }", slot);
+      pushSlotted(ref setup, "  let _deriveK@ = _deriveMap@.keys[_deriveI@];", slot);
+      pushSlotted(ref setup, "  let _deriveV@ = _deriveMap@.values[_deriveI@];", slot);
+      pushSlotted(
+        ref setup,
+        "  _deriveF@ = `${_deriveF@}{ key: ${_deriveK@}, value: ${_deriveV@} }`;",
+        slot
+      );
+      pushSlotted(ref setup, "  _deriveI@ = _deriveI@ + 1;", slot);
+      pushSlotted(ref setup, "}", slot);
+      pushSlotted(ref setup, "_deriveF@ = `${_deriveF@}]`;", slot);
+      pushFragmentLocal(ref parts, slot);
+    }
+    case DeriveShape.PLACEHOLDER: {
+      txt.push(ref parts, cls.placeholder);
+    }
+  }
+}
+
+// `${_deriveF3}` - the accumulator every container shape ends up in.
+function pushFragmentLocal(ref parts: Text, slot: string): void {
+  txt.push(ref parts, "${_deriveF");
+  txt.push(ref parts, slot);
+  txt.push(ref parts, "}");
+}
+

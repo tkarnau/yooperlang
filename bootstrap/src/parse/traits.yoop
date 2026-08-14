@@ -82,7 +82,7 @@ function parseMethodSig(
   // `async read(ref self, ...): R;` - a kind prefix stands where `function`
   // would, on a method exactly as on a top-level declaration. A signature needs
   // no codegen at all, so this half has always been free.
-  const prefixes = parseMethodKindPrefixes(ref ps)?;
+  const prefixes = parseKindPrefixRun(ref ps)?;
   let node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.METHOD_SIG);
   node.childE = prefixes;
   node.name = parseIdentAsName(ref ps)?;
@@ -107,7 +107,7 @@ export function parseMethodDecl(
 ): Result<NodeId, ParsingError> {
   // `async handle(ref self, ...)` - a kind prefix stands where `function` would,
   // on a method exactly as on a top-level declaration.
-  const prefixes = parseMethodKindPrefixes(ref ps)?;
+  const prefixes = parseKindPrefixRun(ref ps)?;
   let node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.METHOD_DECL);
   node.childE = prefixes;
   node.name = parseIdentAsName(ref ps)?;
@@ -116,46 +116,6 @@ export function parseMethodDecl(
   node.childC = parseTypeAnnotation(ref ps)?;
   node.childD = parseBlock(ref ps)?;
   return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
-}
-
-// The kind prefixes on a method, plus the `function` keyword when one is there.
-//
-// Three spellings reach here and all three are the reference's:
-//
-//     function area(ref self): int32 { }          no prefix, keyword required
-//     traced area(ref self): int32 { }            the prefix REPLACES it
-//     traced function area(ref self): int32 { }   both, which is also legal
-//
-// So the run of prefixes ends at either another identifier (the method's name)
-// or at `function`, and the keyword is consumed when present and demanded when
-// nothing replaced it. `parseKindPrefixes` alone cannot do this: it stops on
-// IDENT-then-FUNCTION, which is exactly the third spelling.
-function parseMethodKindPrefixes(ref ps: ParserState): Result<NodeId, ParsingError> {
-  const loc = posToSourceLocation(ps.src, ps.pos, 1);
-  disposable ids: Vec<NodeId> = vec.vecNew(2);
-  while (SelfLexing.peek(ref ps).tag == TokenTags.IDENT && atMethodPrefixIdent(ref ps)) {
-    let prefix = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.KIND_PREFIX);
-    prefix.name = parseIdentAsName(ref ps)?;
-    vec.vecPush(ref ids, SelfLexing.pushNode(ref ps, prefix));
-  }
-  if (ids.len == 0 || SelfLexing.peek(ref ps).tag == TokenTags.FUNCTION) {
-    SelfLexing.expect(ref ps, TokenTags.FUNCTION)?;
-  }
-  if (ids.len == 0) {
-    return Result.Ok { value: 0 };
-  }
-  return Result.Ok { value: SelfLexing.buildListNode(ref ps, ref ids, loc) };
-}
-
-// Whether the identifier the parser is on is a PREFIX rather than the method's
-// own name: something follows it that a name cannot be followed by.
-function atMethodPrefixIdent(ref ps: ParserState): bool {
-  switch (SelfLexing.peekAhead(ref ps, 1)) {
-    case Result.Err { error: e }: { return false; }
-    case Result.Ok { value: tok }: {
-      return tok.tag == TokenTags.IDENT || tok.tag == TokenTags.FUNCTION;
-    }
-  }
 }
 
 // A method's parameter list, with `self`'s annotation filled in.

@@ -1,0 +1,241 @@
+module codegen;
+
+/*
+  The four `Task<T>` intrinsics from std/core/concurrency.yoop.
+
+    cancel(h)             one call, no result
+    isDone(h)             one call, an i32
+    armComplete(h)        one call, an i32
+    waitUntil(h, ns)      one call, then a WaitResult<T> built out of its answer
+
+  They are intrinsics rather than externs for one reason, and it is the same
+  reason `wait` is an operator: each takes a `Task<T>`, and an `extern "C"`
+  signature has no way to spell one. Passing the handle as a raw pointer would
+  work for three of them and lose exactly the thing the fourth needs - the
+  result type T that `WaitResult<T>` is built around.
+
+  Three of the four are a call and nothing else, which is what makes this file
+  small. `waitUntil` is the one with shape: the runtime answers with an i32 -
+  0 done, 1 timed out, 2 cancelled - and the value the language hands back is a
+  three-case variant, so the lowering is a jump table over the outcome with one
+  arm per case. Only the `Done` arm reads the task's result, out of byte 48 of
+  the handle exactly as `wait` does.
+
+  Typecheck needed NO special case for any of this, which is the one place this
+  diverges from the reference. Its checker has a hand-written resolver per
+  intrinsic; here the declared signatures
+  (`waitUntil<T>(h: Task<T>, deadline_ns: uint64): WaitResult<T>`) go through
+  the same generic-intrinsic path `heapAlloc<T>` uses, so T is inferred from the
+  handle and `WaitResult<T>` instantiates like any other generic variant. The
+  one thing that was missing was a `Task<T>` case in `inferTypeArgs`, which is
+  general rather than about these four.
+*/
+
+import { ASTNode, NodeId } from "../ast";
+import { TypeId, TYPE_ERROR_ID, lookupVariantCase, variantCaseFieldAt } from "../typecheck";
+
+// `cancel(h)` - flag the handle and wake its waiters. Advisory: a step already
+// running is not interrupted, it observes the flag when it next parks.
+export function emitCancelIntrinsic(ref cx: Cx, expr: ASTNode, ref out: Operand): string {
+  let handle: Operand = Operand.None;
+  const err = emitIntrinsicArg(ref cx, expr, 0, ref handle);
+  if (err.len > 0) {
+    return err;
+  }
+  cx.e.usesTaskIntrinsics = true;
+  emitTaskCancel(ref cx, handle);
+  out = Operand.None;
+  return "";
+}
+
+// `isDone(h)` - 1 or 0, and never a park. This is what lets `awaitTask` re-test
+// after a wake instead of trusting that the wake meant anything.
+export function emitIsDoneIntrinsic(ref cx: Cx, expr: ASTNode, ref out: Operand): string {
+  return emitHandlePredicate(ref cx, expr, true, ref out);
+}
+
+// `armComplete(h)` - register THIS task for a wake when `h` finishes. The
+// caller suspends itself afterwards; arming and parking are deliberately two
+// steps, because a task may arm on several handles before it parks once.
+export function emitArmCompleteIntrinsic(ref cx: Cx, expr: ASTNode, ref out: Operand): string {
+  return emitHandlePredicate(ref cx, expr, false, ref out);
+}
+
+// The shared half of the two int-returning ones: evaluate the handle, call,
+// hand back the i32.
+function emitHandlePredicate(ref cx: Cx, expr: ASTNode, isDone: bool, ref out: Operand): string {
+  let handle: Operand = Operand.None;
+  const err = emitIntrinsicArg(ref cx, expr, 0, ref handle);
+  if (err.len > 0) {
+    return err;
+  }
+  cx.e.usesTaskIntrinsics = true;
+  const dest = freshTemp(cx.e);
+  if (isDone) {
+    emitTaskIsDone(ref cx, dest, handle);
+  } else {
+    emitTaskArmComplete(ref cx, dest, handle);
+  }
+  out = Operand.Temp { id: dest };
+  return "";
+}
+
+// `waitUntil(h, deadline_ns)` - the bounded join.
+//
+//   %t3 = call i32 @yoop_task_wait_until_ns(ptr %t1, i64 %t2)
+//   %sc.1.addr = alloca %variant.conc__WaitResult_int32
+//   switch i32 %t3, label %L3 [ i32 0, label %L1   i32 1, label %L2 ]
+// L1:                                  ; done - tag, then the result at byte 48
+//   ...
+// L2:                                  ; timed out - the tag and nothing else
+// L3:                                  ; cancelled, and the default
+// L4:
+//   %t9 = load %variant.conc__WaitResult_int32, ptr %sc.1.addr
+//
+// The DEFAULT lands on Cancelled rather than on an unreachable block. The
+// runtime's outcome is an int it may one day widen, and reading an unknown
+// outcome as "this task is not going to produce a value" is the safe reading of
+// every extension anyone would add. The reference makes the same choice.
+export function emitWaitUntilIntrinsic(
+  ref cx: Cx,
+  expr: ASTNode,
+  exprId: NodeId,
+  ref out: Operand
+): string {
+  let handle: Operand = Operand.None;
+  let deadline: Operand = Operand.None;
+  const e1 = emitIntrinsicArg(ref cx, expr, 0, ref handle);
+  if (e1.len > 0) { return e1; }
+  const e2 = emitIntrinsicArg(ref cx, expr, 1, ref deadline);
+  if (e2.len > 0) { return e2; }
+  cx.e.usesTaskIntrinsics = true;
+
+  const resultType = resolvedTypeAt(ref cx, exprId);
+  let shape: WaitResultShape = waitResultShapeOf(ref cx, resultType);
+  if (!shape.found) {
+    return unsupportedHere(
+      "`waitUntil` needs the three-case `WaitResult<T>` from std/core/concurrency.yoop in scope",
+      expr.name
+    );
+  }
+
+  const outcome = freshTemp(cx.e);
+  emitTaskWaitUntilNs(ref cx, outcome, handle, deadline);
+
+  const resultTy = llvmType(cx.prog, resultType);
+  const slot = declareAnonSlot(ref cx, resultTy);
+
+  const doneLabel = freshLabel(cx.e);
+  const timeoutLabel = freshLabel(cx.e);
+  const cancelledLabel = freshLabel(cx.e);
+  const joinLabel = freshLabel(cx.e);
+
+  emitSwitchOpen(ref cx, "i32", Operand.Temp { id: outcome }, cancelledLabel);
+  emitSwitchCase(ref cx, "i32", Operand.Imm { value: 0 }, doneLabel);
+  emitSwitchCase(ref cx, "i32", Operand.Imm { value: 1 }, timeoutLabel);
+  emitSwitchClose(ref cx);
+
+  emitLabel(ref cx, doneLabel);
+  emitWaitResultTag(ref cx, resultTy, slot.id, shape.doneOrdinal);
+  emitDonePayload(ref cx, handle, resultType, resultTy, slot.id, ref shape);
+  emitBr(ref cx, joinLabel);
+
+  emitLabel(ref cx, timeoutLabel);
+  emitWaitResultTag(ref cx, resultTy, slot.id, shape.timeoutOrdinal);
+  emitBr(ref cx, joinLabel);
+
+  emitLabel(ref cx, cancelledLabel);
+  emitWaitResultTag(ref cx, resultTy, slot.id, shape.cancelledOrdinal);
+  emitBr(ref cx, joinLabel);
+
+  emitLabel(ref cx, joinLabel);
+  const value = freshTemp(cx.e);
+  emitLoadFromSlot(ref cx, value, resultTy, TEMP_SLOT_NAME, slot.id);
+  out = Operand.Temp { id: value };
+  return "";
+}
+
+// One arm's tag store. Every arm writes one and only the `Done` arm writes
+// anything else, which is why this is the whole of two of the three arms.
+//
+//   %t4 = getelementptr inbounds %variant.conc__WaitResult_int32, ptr %sc.1.addr, i32 0, i32 0
+//   store i32 0, ptr %t4
+function emitWaitResultTag(ref cx: Cx, resultTy: string, slotId: usize, ordinal: usize): void {
+  const tagAddr = freshTemp(cx.e);
+  emitGepField(ref cx, tagAddr, resultTy, TEMP_SLOT_NAME, slotId, 0);
+  emitStoreToPtr(ref cx, VARIANT_TAG_TYPE, Operand.Imm { value: uint64(ordinal) }, tagAddr);
+}
+
+// The `Done` arm's payload: the task's result, copied out of the handle and
+// into `Done { value: T }`.
+//
+//   %t5 = getelementptr inbounds i8, ptr %t1, i64 48
+//   %t6 = load i32, ptr %t5
+//   %t7 = getelementptr inbounds %variant.conc__WaitResult_int32, ptr %sc.1.addr, i32 0, i32 1
+//   %t8 = getelementptr inbounds %variantc.conc__WaitResult_int32__Done, ptr %t7, i32 0, i32 0
+//   store i32 %t6, ptr %t8
+//
+// Byte 48, always, exactly as `wait` reads it: the handle's prefix layout is
+// universal, and this site cannot name the task function the handle came from
+// any more than a `wait` can.
+function emitDonePayload(
+  ref cx: Cx,
+  handle: Operand,
+  resultType: TypeId,
+  resultTy: string,
+  slotId: usize,
+  ref shape: WaitResultShape
+): void {
+  const valueTy = llvmType(cx.prog, shape.valueType);
+  const resultAddr = freshTemp(cx.e);
+  emitGepTaskByteOffset(ref cx, resultAddr, handle, TASK_RESULT_BYTE_OFFSET);
+  const loaded = freshTemp(cx.e);
+  emitLoadFromPtr(ref cx, loaded, valueTy, resultAddr);
+
+  const payloadAddr = freshTemp(cx.e);
+  emitGepField(ref cx, payloadAddr, resultTy, TEMP_SLOT_NAME, slotId, 1);
+  const fieldAddr = freshTemp(cx.e);
+  emitGepFieldOfPtr(ref cx, fieldAddr,
+    caseLlvmNameOf(ref cx, resultType, shape.doneOrdinal), payloadAddr, 0);
+  emitStoreToPtr(ref cx, valueTy, Operand.Temp { id: loaded }, fieldAddr);
+}
+
+// Where each case of the caller's `WaitResult<T>` sits, and what `Done` carries.
+//
+// Read off the TYPE rather than assumed, because the ordinals are a property of
+// the declaration in std and not of this file. `found` is false when the type
+// is not the three-case shape - which is not a compiler bug, since a module is
+// free to have its own `WaitResult`, so it gets a refusal rather than an
+// internal error.
+type WaitResultShape {
+  found: bool,
+  doneOrdinal: usize,
+  timeoutOrdinal: usize,
+  cancelledOrdinal: usize,
+  valueType: TypeId,
+}
+
+function waitResultShapeOf(ref cx: Cx, t: TypeId): WaitResultShape {
+  const missing: WaitResultShape = { found: false, doneOrdinal: 0, timeoutOrdinal: 0,
+    cancelledOrdinal: 0, valueType: TYPE_ERROR_ID };
+  const done = lookupVariantCase(cx.prog, t, "Done");
+  const timeout = lookupVariantCase(cx.prog, t, "Timeout");
+  const cancelled = lookupVariantCase(cx.prog, t, "Cancelled");
+  if (!done.found || !timeout.found || !cancelled.found) {
+    return missing;
+  }
+  if (done.fieldCount != 1) {
+    return missing;
+  }
+  const payload = variantCaseFieldAt(cx.prog, t, usize(done.ordinal), 0);
+  if (!payload.found) {
+    return missing;
+  }
+  return {
+    found: true,
+    doneOrdinal: usize(done.ordinal),
+    timeoutOrdinal: usize(timeout.ordinal),
+    cancelledOrdinal: usize(cancelled.ordinal),
+    valueType: payload.typeId,
+  };
+}

@@ -1,0 +1,63 @@
+// A printf whose FORMAT is a string the program built, rather than one the
+// author wrote.
+//
+// C reads printf's first argument as a format, so every `%` in it is a
+// conversion. That is what the author meant for a literal and never what they
+// meant for runtime data: `printf(percentEncoded)` with no varargs behind it
+// makes `%20` a width-20 conversion and `%2F` a float read off whatever is in
+// the register. The bootstrap used to emit exactly that - measured on
+// examples/pass/http_url_smoke, where `encode=a%20b%2Fc%3Fd%3De` printed as
+// `encode=a                   b0.000000c0.000000d8776975808e` and the last
+// number was a stack address.
+//
+// So a printf with NO varargs and a non-constant format gets `"%s"` spliced in
+// front. Every line below is a shape that decides where the rewrite applies,
+// which is why they are in one program: the difference between them is the
+// whole rule.
+//
+// Nothing here interpolates a float or a bool DIRECTLY into printf's format.
+// That renders `3.140000` / `1` under the reference and `3.14` / `true` under
+// the bootstrap - a known divergence recorded in the follow-ups - so a fixture
+// asserted against both has to stay off it. A string interpolates identically.
+
+extern "C" from "stdio.h" {
+  function printf(fmt: string, ...): int32;
+}
+
+// Returned rather than written inline, so the value reaching printf is a LOAD
+// and not the module-level constant. That distinction is the rewrite's test.
+function percentEncoded(): string {
+  return "a%20b%2Fc%3Fd%3De";
+}
+
+function main(): int32 {
+  const raw: string = percentEncoded();
+
+  // A BUILT template as the only argument. The operand is a runtime buffer.
+  printf(`percent=${raw}\n`);
+
+  // A plain runtime string as the only argument - the same hazard with no
+  // template anywhere in it.
+  printf(raw);
+  printf("\n");
+
+  // A LITERAL format still means what C says it means, `%%` included. Rewriting
+  // this one would print the escape rather than a per cent sign.
+  printf("literal %d%%\n", 42);
+
+  // A format WITH varargs is the author using it as a format, so it is left
+  // alone even though the first argument is not a literal here either. NOT
+  // asserted, because it is outside the two compilers' intersection: the
+  // reference renders any runtime format through `%s` and then appends the
+  // varargs after it, so `printf(percentFormat(), 5)` prints
+  // `with varargs %d%%` followed by a bare `5`. That is a reference bug and it
+  // is in the follow-ups; the bootstrap prints `with varargs 5%`. The rule this
+  // line exists to pin - a call WITH varargs is never rewritten - is covered by
+  // the `printf("literal %d%%\n", 42)` above, which would print the escape
+  // rather than a per cent sign if it were.
+
+  // The spelling that was always safe: the built string as a `%s` vararg.
+  const n: int32 = 7;
+  printf("via %s\n", `n=${n} raw=${raw}`);
+  return 0;
+}

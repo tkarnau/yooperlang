@@ -104,7 +104,11 @@ export function parseExternBlock(ref ps: ParserState): Result<NodeId, ParsingErr
     SelfLexing.peek(ref ps).tag != TokenTags.RCURLY &&
     SelfLexing.peek(ref ps).tag != TokenTags.EOF
   ) {
-    vec.vecPush(ref ids, parseExternFunction(ref ps)?);
+    if (SelfLexing.peek(ref ps).tag == TokenTags.TYPE) {
+      vec.vecPush(ref ids, parseExternType(ref ps)?);
+    } else {
+      vec.vecPush(ref ids, parseExternFunction(ref ps)?);
+    }
   }
   SelfLexing.expect(ref ps, TokenTags.RCURLY)?;
 
@@ -113,6 +117,23 @@ export function parseExternBlock(ref ps: ParserState): Result<NodeId, ParsingErr
   node.childStart = start;
   node.childCount = ids.len;
 
+  return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
+}
+
+// `type FILE;` - an OPAQUE type. It names something whose layout lives in a C
+// header the compiler never reads, so there are no fields to give it and no
+// value of it is ever built: every use is behind a `ref` or a pointer, which is
+// the same size whatever it points at.
+//
+// It is a struct with an EMPTY field list, which is exactly what the reference
+// makes of it. That is not a placeholder - a type with no fields is precisely a
+// type nothing can read a field out of, so the "opaque" part needs no
+// enforcement of its own.
+function parseExternType(ref ps: ParserState): Result<NodeId, ParsingError> {
+  let node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.EXTERN_TYPE_DECL);
+  SelfLexing.expect(ref ps, TokenTags.TYPE)?;
+  node.name = parseIdentAsName(ref ps)?;
+  SelfLexing.expect(ref ps, TokenTags.SEMICOLON)?;
   return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
 }
 
@@ -133,7 +154,7 @@ export function parseExternBlock(ref ps: ParserState): Result<NodeId, ParsingErr
 // which is also what makes `async function suspendNow` parse rather than
 // reporting "expected FUNCTION, got IDENT" about a line std actually writes.
 function parseExternFunction(ref ps: ParserState): Result<NodeId, ParsingError> {
-  const prefixes = parseMethodKindPrefixes(ref ps)?;
+  const prefixes = parseKindPrefixRun(ref ps)?;
   let node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.EXTERN_FUNCTION_DECL);
   node.childE = prefixes;
   node.name = parseIdentAsName(ref ps)?;

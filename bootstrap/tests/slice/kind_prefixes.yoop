@@ -1,5 +1,5 @@
-// Kind prefixes where they are not on a top-level function: on a METHOD, and on
-// a PARAMETER.
+// Kind prefixes in every position that is not a plain `function` keyword: on a
+// METHOD, on a PARAMETER, and on a top-level function BESIDE the keyword.
 //
 // `async` is a kind, not a keyword, so a prefix is an identifier standing where
 // `function` would - and a method is a function one scope in. The whole feature
@@ -87,6 +87,25 @@ enum Color implements Coded {
   }
 }
 
+// A TOP-LEVEL declaration takes the prefix-and-keyword spelling too, and that
+// is the spelling every `*.test.yoop` in this tree uses (`suite function
+// addsNumbers(): void`). It used to be a parse error - "unexpected token at top
+// level: IDENT" - because the top-level prefix run stopped on IDENT-then-
+// FUNCTION where the METHOD run consumed the keyword. Both go through one
+// function now, which is why this fixture asserts both in one program: the
+// keyword has to be consumed rather than taken for the function's NAME, and a
+// run that stopped one token early would emit a function called `function`.
+// `traced` declares `signature () => void`, and the reference enforces that on
+// a TOP-LEVEL function (it does not on a method), so these two take nothing and
+// return nothing and report through a module-level global instead.
+traced function tripled(): void {
+  tally = tally * 3;
+}
+
+traced marked function quadrupled(): void {
+  tally = tally * 4;
+}
+
 // A prefix on a PARAMETER, with and without `ref` after it.
 function boxed(checked b: Rect): int {
   return Shape.area(ref b) + 1;
@@ -95,6 +114,8 @@ function boxed(checked b: Rect): int {
 function fromRect(checked ref r: Rect, bump: int): int {
   return Shape.area(ref r) + bump;
 }
+
+let tally: int = 1;
 
 function main(): int {
   const r: Rect = { w: 3, h: 4 };
@@ -110,5 +131,9 @@ function main(): int {
   printf("colors=%d %d\n", int(Color.Red), int(Color.Green));
 
   printf("params=%d %d\n", boxed(r), fromRect(ref r, 100));
+
+  tripled();
+  quadrupled();
+  printf("tally=%d\n", tally);
   return 0;
 }

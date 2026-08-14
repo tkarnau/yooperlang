@@ -1,0 +1,6 @@
+// An entry that imports NOTHING. Whatever ends up in its graph beside it got
+// there by being autoloaded, which is what makes this the right fixture for
+// that test.
+function main(): int32 {
+    return 0;
+}

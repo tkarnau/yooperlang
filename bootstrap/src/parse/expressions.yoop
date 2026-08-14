@@ -9,6 +9,12 @@ import { disposable } from "std/core/kinds.yoop";
 import { ASTNode, ASTNodeKind, NodeId, nodeAt } from "../ast";
 import { TokenTags, tagName, getTokenPrecedence, posToSourceLocation } from "../lex";
 import { ParsingError } from "../diagnostics";
+import * as str from "std/core/strings.yoop";
+
+// `Reader.from(ref s)` names its member with a KEYWORD token, so the postfix
+// loop has to spell the name itself. Named rather than written inline because
+// pass D matches on the same string - see the vtable builder there.
+const VTABLE_FROM_MEMBER: string = "from";
 
 export function parseExpressionStatement(ref ps: ParserState): ParsingResult {
   let node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.EXPRESSION_STATEMENT);
@@ -176,7 +182,15 @@ export function parseExpression(ref ps: ParserState, minPrecedence: int): Parsin
     case TokenTags.IDENT: {
       const name = parseIdentAsName(ref ps)?;
       // handle errno stuff...
-      // handle unsafe_ptr stuff...
+      // `unsafe_ptr.cast<T>(p)` and its three siblings. `unsafe_ptr` is a TYPE
+      // NAME rather than a namespace, so this is a spelling the parser has to
+      // recognize by text - there is nothing to resolve it against. An
+      // `unsafe_ptr` followed by a `.` and anything else falls through to the
+      // ordinary IDENT path, which is what keeps the name usable as a local.
+      if (str.stringEq(name, UNSAFE_PTR_NAME) && atUnsafePtrOp(ref ps)) {
+        node = parseUnsafePtrOpRest(ref ps)?;
+        break;
+      }
       if (SelfLexing.peek(ref ps).tag == TokenTags.LPAREN) {
         node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.CALL_EXPRESSION);
         node.name = name;
@@ -209,7 +223,11 @@ export function parseExpression(ref ps: ParserState, minPrecedence: int): Parsin
         continue;
       }
 
-      const firstId = parseExpression(ref ps, 0)?;
+      // AT range precedence, so the bound stops at the `..` rather than
+      // consuming it as a range operator. That is the reference's rule too -
+      // `xs[a..b]` is a slice and `a..b` is a Range, and the only thing that
+      // separates them is that a slice's bounds are parsed this way.
+      const firstId = parseExpression(ref ps, RANGE_PRECEDENCE)?;
       // `xs[a..b]` / `xs[a..]` - a SLICE, not an index. Told apart by the `..`
       // after the first expression, which is why the index is parsed first and
       // reinterpreted rather than looked ahead for.
@@ -234,41 +252,36 @@ export function parseExpression(ref ps: ParserState, minPrecedence: int): Parsin
     // There is no ternary `a ? b : c` in this language, so a `?` in expression
     // position is never anything else and no lookahead is needed.
     if (postfixTag == TokenTags.QUESTION) {
-      // Two OTHER things a `?` can start in the reference, both refused by
-      // name. Plain propagation is the only one built here, and either of these
-      // read as propagation if the extra tokens are just dropped - which turns
-      // "deal with it here" into "send it up", silently.
-      //
-      // Both are decidable from the tokens right after the `?`, with no real
-      // lookahead: what legitimately follows a postfix `?` is an operator, a
-      // closer, a `.` or a `;`, and never an IDENT or a string.
-      //
-      // `expr? e { ... }` - handle the failure here instead of returning it.
-      // A different feature: it needs a BLOCK with the error bound in it.
-      if (SelfLexing.peekAhead(ref ps, 1)?.tag == TokenTags.IDENT &&
-          SelfLexing.peekAhead(ref ps, 2)?.tag == TokenTags.LCURLY) {
-        return Result.Err { error: SelfLexing.createParsingError(
-          ref ps,
-          "`expr? e { ... }` - handling a failure at the `?` - is not supported by the bootstrap yet; only `?` propagation is",
-          peekLengthUsize(ref ps),
-        )};
-      }
-      // `expr? "context"` - prefix a note onto a `string` Err on the way out,
-      // giving `"loading config: negative input"`. Also a different feature: it
-      // builds a string in the failure branch, and it only applies when the Err
-      // payload is a string.
-      const afterQuestion = SelfLexing.peekAhead(ref ps, 1)?.tag;
-      if (afterQuestion == TokenTags.STRLITERAL ||
-          afterQuestion == TokenTags.TEMPLATELITERAL) {
-        return Result.Err { error: SelfLexing.createParsingError(
-          ref ps,
-          "`expr? \"context\"` - prefixing a note onto a string Err - is not supported by the bootstrap yet; only `?` propagation is",
-          peekLengthUsize(ref ps),
-        )};
-      }
       let tryNode = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.TRY_OP);
       SelfLexing.advance(ref ps)?;
       tryNode.childA = SelfLexing.pushNode(ref ps, node);
+
+      // Three things a `?` can start, told apart by the ONE token after it and
+      // with no real lookahead: what legitimately follows a plain postfix `?` is
+      // an operator, a closer, a `.` or a `;`, and never a string or an IDENT.
+      //
+      // `expr? "context"` - a note prefixed onto the Err on the way out.
+      // Deliberately restricted to the two literal token forms rather than any
+      // expression, which is the reference's rule and its reason: `f()? -x`
+      // would otherwise be ambiguous with a subtraction, while a string can
+      // never continue an expression.
+      const afterQuestion = SelfLexing.peek(ref ps).tag;
+      if (afterQuestion == TokenTags.STRLITERAL ||
+          afterQuestion == TokenTags.TEMPLATELITERAL) {
+        tryNode.childB = parseTryContext(ref ps)?;
+        node = tryNode;
+        continue;
+      }
+      // `expr? e { ... }` - HANDLE the failure here instead of returning it.
+      // The binding is required: a bare `? { ... }` would be indistinguishable
+      // from a `for x in items()? { ... }` body.
+      if (afterQuestion == TokenTags.IDENT &&
+          SelfLexing.peekAhead(ref ps, 1)?.tag == TokenTags.LCURLY) {
+        tryNode.name = parseIdentAsName(ref ps)?;
+        tryNode.childC = parseBlock(ref ps)?;
+        node = tryNode;
+        continue;
+      }
       node = tryNode;
       continue;
     }
@@ -293,28 +306,23 @@ export function parseExpression(ref ps: ParserState, minPrecedence: int): Parsin
       const baseId = SelfLexing.pushNode(ref ps, node);
 
       // `Reader.from(ref s)` - ERASING a concrete type into a vtable value.
-      // `from` is a keyword token (it is how an import and an extern name their
-      // source), so the generic "expected IDENT, got FROM" sent a reader after
-      // punctuation on a line that is perfectly well formed. Refused BY NAME
-      // instead, because what is missing is a FEATURE and not a spelling: a
-      // vtable value is `{ ctx, m0, m1, ... }`, so building one means adding
-      // the ctx slot to the layout, recording which trait the vtable erases and
-      // in what method order, and giving `Trait.method(ref vt, ...)` an
-      // indirect path beside the static one it resolves today.
       //
-      // Gated on the `(` that makes it a CALL. `l.from.x` on a struct with a
-      // field called `from` is a different gap - the field DECLARATION does not
-      // parse either - and claiming it is about vtables would send the reader
-      // somewhere there is nothing to find.
+      // `from` is a KEYWORD token (it is how an import and an extern name their
+      // source), so `parseIdentAsName` would report "expected IDENT, got FROM"
+      // about a line that is perfectly well formed. Read as a member name here
+      // instead, gated on the `(` that makes it a call - which is what keeps
+      // `l.from.x` on a struct with a field called `from` a separate question,
+      // since the field DECLARATION does not parse either.
+      //
+      // Whether the base really is a vtable is pass D's to answer; the parser
+      // cannot tell one from a namespace, exactly as it cannot for `ns.fn()`.
+      let member: string = "";
       if (SelfLexing.peek(ref ps).tag == TokenTags.FROM && peekAheadIsLParen(ref ps)) {
-        return Result.Err { error: SelfLexing.createParsingError(
-          ref ps,
-          "`X.from(ref v)` builds a type-ERASED vtable value, which the bootstrap does not do yet - declaring and laying out a `vtable` works, building one does not",
-          peekLengthUsize(ref ps),
-        )};
+        SelfLexing.advance(ref ps)?;
+        member = VTABLE_FROM_MEMBER;
+      } else {
+        member = parseIdentAsName(ref ps)?;
       }
-
-      const member = parseIdentAsName(ref ps)?;
 
       // `ns.fn(...)` is a QUALIFIED CALL, not a field read of a function value.
       // The parser cannot tell a namespace from a struct local - that needs name
@@ -334,7 +342,8 @@ export function parseExpression(ref ps: ParserState, minPrecedence: int): Parsin
       // braces are what make it unambiguous; a payload-less `Result.None` is
       // the same tokens as `p.x` and stays a FIELD_ACCESS for pass D to sort
       // out once names resolve.
-      if (SelfLexing.peek(ref ps).tag == TokenTags.LCURLY) {
+      if (SelfLexing.peek(ref ps).tag == TokenTags.LCURLY &&
+          (!ps.inForInIterExpr || looksLikeVariantPayload(ref ps))) {
         let ctorNode = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.VARIANT_CONSTRUCTOR);
         ctorNode.name = member;
         ctorNode.childB = baseId;
@@ -371,19 +380,20 @@ export function parseExpression(ref ps: ParserState, minPrecedence: int): Parsin
   //
   // The JS reference keeps a dedicated COMPOUND_ASSIGNMENT node so the lvalue
   // is addressed once. Desugaring instead NAMES THE TARGET TWICE, so it is only
-  // sound when reading the target has no side effect and costs nothing - which
-  // is exactly a name, or a path of field accesses reaching one. Those are what
-  // `isPlaceExpr` admits, and everything else is refused rather than silently
-  // evaluated twice.
+  // sound when reading the target has no side effect and costs nothing - a
+  // name, a path of field accesses reaching one, and an ELEMENT whose subscript
+  // is itself a name or an integer literal. Those are what `isPlaceExpr`
+  // admits, and everything else is refused rather than silently evaluated
+  // twice.
   const compoundOp = binaryOpOfCompound(SelfLexing.peek(ref ps).tag);
   if (compoundOp != TokenTags.NOTOKEN) {
     // `xs[f()] += 1` is the case this protects: re-reading the target would
-    // call `f` once to read and again to write. An index target stays refused
-    // until a real COMPOUND_ASSIGNMENT node lands, rather than miscompiling.
+    // call `f` once to read and again to write. It stays refused until a real
+    // COMPOUND_ASSIGNMENT node lands, rather than miscompiling.
     if (!isPlaceExpr(ref ps, node)) {
       return Result.Err { error: SelfLexing.createParsingError(
         ref ps,
-        `compound assignment is only supported on a name or a field path so far - write it out as "target = target <op> value"`,
+        `compound assignment needs a target that is free to read twice - a name, a field path, or an element whose subscript is a name or a literal. Write it out as "target = target <op> value"`,
         peekLengthUsize(ref ps),
       )};
     }
@@ -413,6 +423,15 @@ export function parseExpression(ref ps: ParserState, minPrecedence: int): Parsin
     SelfLexing.advance(ref ps)?; // consumer operator token
     // recurse through, finding the side - actually using the precedence here
     const right = parseExpression(ref ps, precedence)?;
+
+    // `a..b` is not arithmetic - it builds a Range VALUE, and it is lowered
+    // right here into the call to std/core/range.yoop that it means. See
+    // range.yoop; nothing above the parser learns that `..` exists.
+    if (opToken.tag == TokenTags.DOTDOT) {
+      node = buildRangeCall(ref ps, SelfLexing.pushNode(ref ps, node), right)?;
+      continue;
+    }
+
     let binNode = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.BINARY_EXPRESSION);
     binNode.operator = opToken.tag;
     // push the current node onto the left
@@ -439,7 +458,24 @@ function isPlaceExpr(ref ps: ParserState, node: ASTNode): bool {
   if (node.kind == ASTNodeKind.FIELD_ACCESS) {
     return isPlaceExpr(ref ps, nodeAt(ref ps.ast, node.childA));
   }
+  // `xs[i]` and `w.sectors[i].ceiling` - an ELEMENT, as long as the SUBSCRIPT
+  // is re-readable for free. A name and an integer literal both are; anything
+  // else - a call, arithmetic, another index - is refused, because the
+  // desugaring names the target twice and would evaluate the subscript twice
+  // with it. That is a narrower rule than the reference's (it addresses the
+  // lvalue once and so admits any subscript), and it is the safe direction: a
+  // program the bootstrap accepts means the same thing on both sides.
+  if (node.kind == ASTNodeKind.INDEX_EXPRESSION) {
+    return isCheapSubscript(nodeAt(ref ps.ast, node.childB))
+      && isPlaceExpr(ref ps, nodeAt(ref ps.ast, node.childA));
+  }
   return false;
+}
+
+// A subscript that costs nothing to read twice and cannot observe being read
+// twice.
+function isCheapSubscript(node: ASTNode): bool {
+  return node.kind == ASTNodeKind.IDENT || node.kind == ASTNodeKind.INT_LITERAL;
 }
 
 // A fresh copy of a place expression, for the read half of a desugared compound
@@ -470,11 +506,46 @@ function clonePlaceExpr(ref ps: ParserState, id: NodeId): Result<NodeId, Parsing
     copy.childA = baseId;
     return Result.Ok { value: SelfLexing.pushNode(ref ps, copy) };
   }
+  if (src.kind == ASTNodeKind.INDEX_EXPRESSION) {
+    // The SUBSCRIPT is copied as well as the base. isPlaceExpr already proved
+    // it is a name or an integer literal, so the copy is one node and reading
+    // it a second time is free.
+    const baseId = clonePlaceExpr(ref ps, src.childA)?;
+    const subscriptId = cloneCheapSubscript(ref ps, src.childB)?;
+    let copy = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.INDEX_EXPRESSION);
+    copy.sourceLoc = src.sourceLoc;
+    copy.childA = baseId;
+    copy.childB = subscriptId;
+    return Result.Ok { value: SelfLexing.pushNode(ref ps, copy) };
+  }
   // isPlaceExpr gates every caller, so reaching here is a parser bug rather
   // than anything the writer did.
   return Result.Err { error: SelfLexing.createParsingError(
     ref ps,
     `internal: cannot copy ${src.kind} as a compound-assignment target`,
+    peekLengthUsize(ref ps),
+  )};
+}
+
+// The subscript half of the copy above. One node, always - isCheapSubscript is
+// what makes that true.
+function cloneCheapSubscript(ref ps: ParserState, id: NodeId): Result<NodeId, ParsingError> {
+  const src = nodeAt(ref ps.ast, id);
+  if (src.kind == ASTNodeKind.IDENT) {
+    let copy = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.IDENT);
+    copy.name = src.name;
+    copy.sourceLoc = src.sourceLoc;
+    return Result.Ok { value: SelfLexing.pushNode(ref ps, copy) };
+  }
+  if (src.kind == ASTNodeKind.INT_LITERAL) {
+    let copy = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.INT_LITERAL);
+    copy.intVal = src.intVal;
+    copy.sourceLoc = src.sourceLoc;
+    return Result.Ok { value: SelfLexing.pushNode(ref ps, copy) };
+  }
+  return Result.Err { error: SelfLexing.createParsingError(
+    ref ps,
+    `internal: cannot copy ${src.kind} as a compound-assignment subscript`,
     peekLengthUsize(ref ps),
   )};
 }
@@ -580,10 +651,31 @@ function parseSliceRest(
   node.childA = baseId;
   node.childB = startId;
   if (SelfLexing.peek(ref ps).tag != TokenTags.RBRACKET) {
-    node.childC = parseExpression(ref ps, 0)?;
+    node.childC = parseExpression(ref ps, RANGE_PRECEDENCE)?;
   }
   SelfLexing.expect(ref ps, TokenTags.RBRACKET)?;
   return Result.Ok { value: node };
+}
+
+// True when the `{` at the cursor looks like a variant constructor's PAYLOAD
+// rather than a loop body: a payload always opens `{ <name> :`, and no block
+// can. Only asked inside a for-in RHS, so the ordinary constructor path keeps
+// accepting the empty `Shape.Dot {}` form. A NESTED payload still matches, so
+// `for x in iterOf(Shape.Circle { r: 5 })` is unaffected. The reference's rule
+// and its reason.
+function looksLikeVariantPayload(ref ps: ParserState): bool {
+  switch (SelfLexing.peekAhead(ref ps, 1)) {
+    case Result.Err { error: e }: { return false; }
+    case Result.Ok { value: first }: {
+      if (first.tag == TokenTags.RCURLY) {
+        return false;
+      }
+    }
+  }
+  switch (SelfLexing.peekAhead(ref ps, 2)) {
+    case Result.Err { error: e2 }: { return false; }
+    case Result.Ok { value: second }: { return second.tag == TokenTags.COLON; }
+  }
 }
 
 // Whether the token AFTER the current one is a `(`. One token past the cursor
@@ -595,4 +687,22 @@ function peekAheadIsLParen(ref ps: ParserState): bool {
     case Result.Ok { value: next }: { return next.tag == TokenTags.LPAREN; }
     case Result.Err { error: e }: { return false; }
   }
+}
+
+// The optional string after a `?` - `f()? "loading config"` or
+// `f()? `field ${n}``. Only the two LITERAL token forms, which is the
+// reference's rule and its reason: a general expression would make `f()? -x`
+// ambiguous with subtraction, while a string can never continue an expression.
+//
+// The caller has already decided the next token is one of the two, so this only
+// has to build the node.
+function parseTryContext(ref ps: ParserState): ParsingResult {
+  if (SelfLexing.peek(ref ps).tag == TokenTags.TEMPLATELITERAL) {
+    const tmpl = parseTemplateLiteral(ref ps)?;
+    return Result.Ok { value: SelfLexing.pushNode(ref ps, tmpl) };
+  }
+  let node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.STRING_LITERAL);
+  const tok = SelfLexing.advance(ref ps)?;
+  node.strId = internString(ref ps, decodeStringLiteral(ref ps, tok)?);
+  return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
 }

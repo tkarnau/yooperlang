@@ -30,4 +30,24 @@ nested:
   inside
   close 41
   close 40
+composed:
+  open 70
+  open 71
+  body
+  close 71
+  close 70
+implicit:
+  open 50
+  open 51
+  body
+  close 51
+  close 50
+implicit mixed:
+  open 60
+  open 61
+  open 62
+  body
+  close 62
+  close 61
+  close 60
 exit=0

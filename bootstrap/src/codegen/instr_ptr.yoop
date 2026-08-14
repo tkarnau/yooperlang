@@ -1,0 +1,27 @@
+module codegen;
+
+// The two raw-pointer conversion instructions. Text only - what to convert and
+// when is unsafe_ptr_ops.yoop's question.
+
+//   %t1 = ptrtoint ptr %t0 to i64
+export function emitPtrToInt(ref cx: Cx, dest: usize, intTy: string, value: Operand): void {
+  startInstr(ref cx);
+  temp(ref cx, dest);
+  part(ref cx, " = ptrtoint ptr ");
+  operand(ref cx, value);
+  part(ref cx, " to ");
+  part(ref cx, intTy);
+  endInstr(ref cx);
+}
+
+//   %t1 = inttoptr i64 %t0 to ptr
+export function emitIntToPtr(ref cx: Cx, dest: usize, intTy: string, value: Operand): void {
+  startInstr(ref cx);
+  temp(ref cx, dest);
+  part(ref cx, " = inttoptr ");
+  part(ref cx, intTy);
+  part(ref cx, " ");
+  operand(ref cx, value);
+  part(ref cx, " to ptr");
+  endInstr(ref cx);
+}

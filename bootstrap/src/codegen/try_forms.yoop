@@ -1,0 +1,165 @@
+module codegen;
+
+/*
+  The two OTHER things a `?` can be, and both of them live in its FAILURE
+  BRANCH.
+
+    expr? "context"     prefix a note onto the error on the way out
+    expr? e { ... }     handle the failure here instead of returning it
+
+  Split from try_op.yoop because that file is the propagation DIAMOND - the tag
+  test, the early return, the unwrap - and these are two things that happen once
+  the branch has already been taken. Nothing here touches the Ok path, which is
+  exactly why the context form costs the success path nothing.
+*/
+
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { Map }, * as map from "std/collections/map.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import { ASTNode, NodeId, nodeAt } from "../ast";
+import { TypeId, TYPE_VOID_ID, FallibleShape, moduleIdOf, nominalModuleOf,
+  methodSymbolName } from "../typecheck";
+
+// ----- `expr? "context"` -----------------------------------------------------
+
+// The context expression's NodeId, or 0 for a plain `?`. A one-line reader so
+// the two places that ask the question cannot disagree about which slot holds
+// it.
+function contextOf(ref cx: Cx, exprId: NodeId): NodeId {
+  return nodeAt(cx.ast, exprId).childB;
+}
+
+// The decorated Err payload, built in the FAILURE branch - which is the whole
+// point of the form's cost model: an interpolated context
+// (`f()? \`field ${n}\``) evaluates only when the thing actually failed, so the
+// success path pays nothing at all.
+//
+// Two shapes, and pass D picked which:
+//
+//   CONCAT   both payloads are `string`, so the note is glued on directly:
+//            `"<context>: <err>"`. Same three-part machinery a template
+//            literal is built with, which is why there is no string code here.
+//   IMPL     the operand's Err type promises `WithContext<TargetErr>`, and its
+//            method produces the outer payload. That one call does the
+//            conversion too, so `Into` is not consulted alongside it.
+function emitContextPayload(
+  ref cx: Cx,
+  exprId: NodeId,
+  operandType: TypeId,
+  operandTy: string,
+  slotId: usize,
+  ref got: FallibleShape,
+  targetTy: string
+): usize {
+  let context: Operand = Operand.None;
+  const err = emitExpr(ref cx, contextOf(ref cx, exprId), ref context);
+  if (err.len > 0) {
+    // The context is a string or template literal and nothing else - the parser
+    // accepts no other shape there - so neither can fail to emit. Falling back
+    // to an empty note keeps this total rather than growing an error channel
+    // through a value-returning helper for a branch that cannot be taken.
+    context = Operand.StrRef { id: internStringConstant(cx.e, "") };
+  }
+  const addr = emitCasePayloadAddr(ref cx, operandType, operandTy, slotId, got.errOrdinal);
+  if (map.mapContainsKey(ref cx.tm.tryContextConcat, uint64(exprId))) {
+    return emitContextConcat(ref cx, context, addr);
+  }
+  return emitWithContextCall(ref cx, context, addr, got.errType, targetTy);
+}
+
+//   %t6 = load ptr, ptr %t5
+//   ... strlen / malloc / memcpy, three parts: the context, ": ", the error
+//
+// `"loading config" + ": " + "negative input"` is `"loading config: negative
+// input"`, which is the reference's separator and its order. The result is a
+// fresh malloc that nothing frees, exactly like every other built string here.
+function emitContextConcat(ref cx: Cx, context: Operand, errAddr: usize): usize {
+  cx.e.usesStringBuilder = true;
+  const errValue = freshTemp(cx.e);
+  emitLoadFromPtr(ref cx, errValue, "ptr", errAddr);
+
+  disposable parts: Vec<Operand> = vec.vecNew(3);
+  vec.vecPush(ref parts, context);
+  vec.vecPush(ref parts, Operand.StrRef { id: internStringConstant(cx.e, CONTEXT_SEPARATOR) });
+  vec.vecPush(ref parts, Operand.Temp { id: errValue });
+
+  let joined: Operand = Operand.None;
+  emitConcatParts(ref cx, ref parts, ref joined);
+  switch (joined) {
+    case Operand.Temp { id: t }: { return t; }
+    default: { return errValue; }
+  }
+}
+
+//   %t7 = call %struct.m__AppError @m__IoError__withContext(ptr %t5, ptr %t6)
+//
+// The `WithContext<TargetErr>` conversion, called on the operand's Err payload
+// IN PLACE. An ordinary static trait dispatch, exactly like `?`'s `into` - the
+// receiver's concrete type is right here and no vtable is anywhere near it.
+function emitWithContextCall(
+  ref cx: Cx,
+  context: Operand,
+  errAddr: usize,
+  sourceErrType: TypeId,
+  targetTy: string
+): usize {
+  disposable args: Vec<CallArg> = vec.vecNew(2);
+  vec.vecPush(ref args, { ty: REF_LLVM_TYPE, value: Operand.Temp { id: errAddr } });
+  vec.vecPush(ref args, { ty: "ptr", value: context });
+  const dest = freshTemp(cx.e);
+  emitCall(ref cx, dest, targetTy,
+    moduleIdOf(cx.prog, nominalModuleOf(cx.prog, sourceErrType)),
+    methodSymbolName(cx.prog, sourceErrType, WITH_CONTEXT_METHOD_NAME),
+    ref args);
+  return dest;
+}
+
+// ----- `expr? e { ... }` -----------------------------------------------------
+
+// The handler block: bind the Err payload to the name the `?` gave it, then
+// emit the block. Nothing follows it, because pass D proved every path out of
+// the block leaves - which is what makes it safe for the Ok label after this to
+// have exactly one predecessor, the same property plain propagation relies on.
+function emitTryHandler(
+  ref cx: Cx,
+  expr: ASTNode,
+  operandType: TypeId,
+  operandTy: string,
+  slotId: usize,
+  ref got: FallibleShape
+): string {
+  localsPushBlock(cx.locals);
+  if (got.errType != TYPE_VOID_ID) {
+    const errTy = llvmType(cx.prog, got.errType);
+    const loaded = emitCasePayloadLoad(ref cx, operandType, operandTy, slotId,
+      got.errOrdinal, errTy);
+    // An ordinary local from here on, so every read of it in the block is an
+    // ordinary load - the same materialization a switch arm's pattern binding
+    // gets, and for the same reason.
+    const local = declareLocal(ref cx, expr.name, errTy);
+    emitStore(ref cx, errTy, Operand.Temp { id: loaded }, expr.name, local.id);
+  }
+
+  let terminated = false;
+  let err = "";
+  emitBlock(ref cx, expr.childC, llvmType(cx.prog, cx.fnRet), ref terminated, ref err);
+  localsPopBlock(cx.locals);
+  if (err.len > 0) {
+    return err;
+  }
+  // Unreachable on well-formed input - pass D refused a block that falls
+  // through - but LLVM wants a terminator on every basic block, and the block's
+  // own exit may have been emitted into a nested label rather than here.
+  if (!terminated) {
+    emitUnreachable(ref cx);
+  }
+  return "";
+}
+
+// `WithContext<T>`'s only member, reached the same way and for the same reason.
+const WITH_CONTEXT_METHOD_NAME: string = "withContext";
+
+// What goes between the note and the error it decorates. The reference's, and a
+// fixture asserts the resulting text.
+const CONTEXT_SEPARATOR: string = ": ";
+

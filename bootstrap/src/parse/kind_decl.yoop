@@ -104,19 +104,65 @@ function parseKindParams(ref ps: ParserState): Result<NodeId, ParsingError> {
   return Result.Ok { value: SelfLexing.buildListNode(ref ps, ref ids, loc) };
 }
 
-// Everything up to the `;` of a composition. The operands are consumed and not
-// recorded - see the note above.
+// `kind scoped_alt = disposable_base & { mustNotEscape scope; };` - a
+// COMPOSITION: the composed kind is every operand's clauses at once.
+//
+// Both operand shapes land in the SAME childIds run the braced form uses, which
+// is what lets pass A read a composed kind exactly as it reads a written-out
+// one:
+//
+//   a NAME          a KIND_CLAUSE named `compose`, carrying the operand's name.
+//                   Pass A merges that operand's already-registered clauses in.
+//   an inline BODY  its clauses, parsed by parseKindClause and pushed straight
+//                   into the run. An anonymous bag of clauses with no name and
+//                   no `appliesTo` is exactly a clause list, so there is
+//                   nothing to name and nothing to look up.
+//
+// This used to consume the operands and record NOTHING, which compiled a
+// `scoped_alt h: Vec3 = ...` binding to no scope-end call at all - a promise
+// dropped rather than refused.
 function parseKindComposition(ref ps: ParserState, node: ASTNode): Result<NodeId, ParsingError> {
   let guard = node;
+  disposable ids: Vec<NodeId> = vec.vecNew(2);
   while (
     SelfLexing.peek(ref ps).tag != TokenTags.SEMICOLON &&
     SelfLexing.peek(ref ps).tag != TokenTags.EOF
   ) {
+    const tag = SelfLexing.peek(ref ps).tag;
+    if (tag == TokenTags.LCURLY) {
+      SelfLexing.advance(ref ps)?;
+      while (
+        SelfLexing.peek(ref ps).tag != TokenTags.RCURLY &&
+        SelfLexing.peek(ref ps).tag != TokenTags.EOF
+      ) {
+        vec.vecPush(ref ids, parseKindClause(ref ps)?);
+      }
+      SelfLexing.expect(ref ps, TokenTags.RCURLY)?;
+      continue;
+    }
+    if (tag == TokenTags.IDENT) {
+      let operand = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.KIND_CLAUSE);
+      operand.name = COMPOSE_CLAUSE;
+      operand.strId = internString(ref ps, parseIdentAsName(ref ps)?);
+      vec.vecPush(ref ids, SelfLexing.pushNode(ref ps, operand));
+      continue;
+    }
+    // `&` and anything else joining the operands. There is one operator, so
+    // there is nothing to record about which was written.
     SelfLexing.advance(ref ps)?;
   }
   SelfLexing.expect(ref ps, TokenTags.SEMICOLON)?;
+
+  const start: usize = ps.ast.childIds.len;
+  vec.vecExtendFrom(ref ps.ast.childIds, vec.vecAsArray(ref ids));
+  guard.childStart = start;
+  guard.childCount = ids.len;
   return Result.Ok { value: SelfLexing.pushNode(ref ps, guard) };
 }
+
+// The clause a composition's NAMED operand is recorded as. Not a spelling any
+// source writes - the `&` is - so it can never collide with a real clause word.
+export const COMPOSE_CLAUSE: string = "compose";
 
 // One clause, recorded by its LEADING WORD and otherwise consumed.
 //
@@ -185,140 +231,3 @@ function parseKindClause(ref ps: ParserState): Result<NodeId, ParsingError> {
   SelfLexing.expect(ref ps, TokenTags.SEMICOLON)?;
   return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
 }
-
-// ----- declarations that CARRY a kind ----------------------------------------
-
-// True when the parser is looking at a kind-prefixed declaration: two
-// identifiers in a row, where the second is not itself opening a kind decl.
-//
-// `async fetch(` and `pooled tainted buf(` both match. A lone IDENT does not,
-// which is what keeps an ordinary expression statement from being misread.
-export function atKindPrefixedDecl(ref ps: ParserState): bool {
-  if (SelfLexing.peek(ref ps).tag != TokenTags.IDENT) {
-    return false;
-  }
-  switch (SelfLexing.peekAhead(ref ps, 1)) {
-    case Result.Ok { value: next }: { return next.tag == TokenTags.IDENT; }
-    case Result.Err { error: e }: { return false; }
-  }
-}
-
-// True when the parser is looking at a kind-prefixed METHOD inside a type,
-// variant or enum body: `async handle(ref self, ...)`.
-//
-// Stricter than `atKindPrefixedDecl`, and it has to be. A member run holds more
-// than declarations, so two identifiers in a row are not enough to go on:
-//
-//   * an ENUM case may be `AB A | B`, which opens IDENT IDENT. This walks the
-//     whole run of identifiers and requires it to END at a `(`, so `AB A | B`
-//     stops at `|` and is a case again.
-//   * an enum or variant case may be a BARE identifier with the method right
-//     after it and no comma between - `Green` then `function toString(...)`.
-//     That is IDENT FUNCTION and it is genuinely ambiguous with
-//     `traced function area(...)`, the reference's prefix-AND-keyword spelling.
-//     `bareIdentIsMember` is how the caller says which body it is in: a struct
-//     field is always `name: T`, so there the shape can only be a prefix.
-export function atKindPrefixedMethod(ref ps: ParserState, bareIdentIsMember: bool): bool {
-  if (SelfLexing.peek(ref ps).tag != TokenTags.IDENT) {
-    return false;
-  }
-  let n: usize = 1;
-  while (n < MAX_METHOD_PREFIX_LOOKAHEAD) {
-    switch (SelfLexing.peekAhead(ref ps, n)) {
-      case Result.Err { error: e }: { return false; }
-      case Result.Ok { value: tok }: {
-        if (tok.tag == TokenTags.IDENT) {
-          n += 1;
-        } else if (tok.tag == TokenTags.FUNCTION) {
-          return !bareIdentIsMember;
-        } else {
-          // At least two identifiers - one prefix and the method's name - and
-          // the run ends where a parameter list starts.
-          return n >= 2 && tok.tag == TokenTags.LPAREN;
-        }
-      }
-    }
-  }
-  return false;
-}
-
-// How many identifiers a kind-prefixed method may stack before the parser stops
-// looking. Nothing in the corpus uses more than two prefixes; the cap exists so
-// a malformed member run cannot make the scan walk the rest of the file.
-const MAX_METHOD_PREFIX_LOOKAHEAD: usize = 8;
-
-// `async fetch(u: string): string { ... }` - one or more kind prefixes, then a
-// declaration carrying them.
-//
-// Only a FUNCTION can be reached this way today. A kind-prefixed type is
-// written `disposable type Foo`, which the type parser already handles, so the
-// bare `IDENT IDENT (` shape is unambiguously a function.
-export function parseKindPrefixedDecl(ref ps: ParserState): Result<NodeId, ParsingError> {
-  const prefixes = parseKindPrefixes(ref ps)?;
-  if (SelfLexing.peek(ref ps).tag != TokenTags.IDENT) {
-    return Result.Err { error: SelfLexing.createParsingError(
-      ref ps,
-      `expected a function name after a kind prefix, got ${tagName(SelfLexing.peek(ref ps).tag)}`,
-      peekLengthUsize(ref ps),
-    )};
-  }
-  return parseFunctionRest(ref ps, prefixes);
-}
-
-// Whether any prefix in a KIND_PREFIX list is named `name`. What pass A uses to
-// find `async` and `task` without the parser having to know either word.
-export function kindPrefixesInclude(ref ast: AST, listId: NodeId, name: string): bool {
-  if (listId == 0) {
-    return false;
-  }
-  const list = nodeAt(ref ast, listId);
-  let i: usize = 0;
-  while (i < list.childCount) {
-    if (str.stringEq(nodeAt(ref ast, childAt(ref ast, list, i)).name, name)) {
-      return true;
-    }
-    i += 1;
-  }
-  return false;
-}
-
-// ----- the propagates clause -------------------------------------------------
-
-// `propagates<disposable>` after a function's return type or a type's name.
-//
-// It says: values flowing OUT of this carry the named kinds, so a caller
-// inherits the obligation. `vecNew` hands back storage someone has to dispose,
-// and the clause is how the signature says so instead of a comment.
-//
-// Recorded as a NODE_LIST of KIND_PREFIX nodes - the clause IS a list of kind
-// names, so it needs no node kind of its own. Nothing enforces it, the same as
-// every other kind surface here; what matters is that it PARSES, because the
-// bootstrap's own source carries 48 of these and cannot be read without them.
-//
-// Returns 0 when there is no clause.
-export function parsePropagatesClause(ref ps: ParserState): Result<NodeId, ParsingError> {
-  if (!peekIsWord(ref ps, PROPAGATES_KEYWORD)) {
-    return Result.Ok { value: 0 };
-  }
-  const loc = posToSourceLocation(ps.src, ps.pos, 1);
-  SelfLexing.advance(ref ps)?;
-  SelfLexing.expect(ref ps, TokenTags.LT)?;
-
-  disposable ids: Vec<NodeId> = vec.vecNew(2);
-  while (true) {
-    let node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.KIND_PREFIX);
-    node.name = parseIdentAsName(ref ps)?;
-    vec.vecPush(ref ids, SelfLexing.pushNode(ref ps, node));
-    if (SelfLexing.peek(ref ps).tag != TokenTags.COMMA) {
-      break;
-    }
-    SelfLexing.advance(ref ps)?;
-  }
-
-  // The same `>>` split every other closing angle bracket goes through:
-  // `propagates<Foo<T>>` ends in one right-shift token.
-  consumeClosingGt(ref ps)?;
-  return Result.Ok { value: SelfLexing.buildListNode(ref ps, ref ids, loc) };
-}
-
-export const PROPAGATES_KEYWORD: string = "propagates";

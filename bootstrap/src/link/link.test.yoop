@@ -1,0 +1,138 @@
+// Tests for the `link` module - layer 6, the clang line.
+//
+// What is testable here is the part that is a DECISION rather than a shell-out:
+// which runtime sources a program gets, and where clang is told to look for a
+// library. The `system()` call itself is covered by every slice fixture, which
+// only pass because something linked.
+//
+// Both suites assert ORDER as well as membership, and that is the point of them
+// rather than a bonus. clang searches `-L` directories left to right, so a list
+// with the right entries in the wrong order finds the wrong libssl - and a glue
+// source added for a program that did not ask for TLS is a build that needs
+// OpenSSL headers to compile a hello world.
+
+import.test;
+import * as t from "std/test.yoop";
+import { suite, test, Case } from "std/test.yoop";
+import * as str from "std/core/strings.yoop";
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import { collectSearchPaths, glueSources } from "../link";
+
+// `yoop_tls.c` is excluded from the sources every program gets, because it
+// includes <openssl/ssl.h>. It has to come BACK for a program that named
+// OpenSSL, or an https program links against libssl and then fails on
+// `yoop_tls_connect`.
+suite function tlsGlueFollowsTheLibraryNames(): void {
+  let test theory: Case = t.asserts("a program naming \"ssl\" gets yoop_tls.c") {
+    disposable libs: Vec<string> = vec.vecNew(2);
+    vec.vecPush(ref libs, "ssl");
+    disposable glue: Vec<string> = glueSources("/rt", ref libs);
+    theory.isSuccessful = glue.len == 1 && str.stringEq(vec.vecGet(ref glue, 0), "/rt/yoop_tls.c");
+    theory.detail = `got ${glue.len} glue source(s), wanted 1 named /rt/yoop_tls.c`;
+  }
+
+  // Either half means both, matching the `-lssl -lcrypto` lowering: libssl
+  // cannot link without libcrypto, so a program that named one meant TLS.
+  let test theory: Case = t.asserts("naming only \"crypto\" gets it too") {
+    disposable libs: Vec<string> = vec.vecNew(2);
+    vec.vecPush(ref libs, "crypto");
+    disposable glue: Vec<string> = glueSources("/rt", ref libs);
+    theory.isSuccessful = glue.len == 1;
+    theory.detail = `got ${glue.len} glue source(s), wanted 1`;
+  }
+
+  let test theory: Case = t.asserts("a program naming neither gets no glue at all") {
+    disposable libs: Vec<string> = vec.vecNew(2);
+    vec.vecPush(ref libs, "m");
+    vec.vecPush(ref libs, "framework:OpenGL");
+    disposable glue: Vec<string> = glueSources("/rt", ref libs);
+    theory.isSuccessful = glue.len == 0;
+    theory.detail = `got ${glue.len} glue source(s), wanted 0`;
+  }
+
+  let test theory: Case = t.asserts("a program naming no library at all gets no glue") {
+    disposable libs: Vec<string> = vec.vecNew(2);
+    disposable glue: Vec<string> = glueSources("/rt", ref libs);
+    theory.isSuccessful = glue.len == 0;
+    theory.detail = `got ${glue.len} glue source(s), wanted 0`;
+  }
+}
+
+// The candidate list, before any of it is checked against this machine's
+// filesystem. Asserting the LIST rather than a command line is the only way to
+// pin the order without a machine that has every one of these directories.
+suite function searchPathsAreOfferedInSearchOrder(): void {
+  disposable libs: Vec<string> = vec.vecNew(8);
+  disposable includes: Vec<string> = vec.vecNew(8);
+  collectSearchPaths(ref libs, ref includes);
+
+  let test theory: Case = t.asserts("a conventional prefix contributes lib/, lib/<arch> and include/") {
+    theory.isSuccessful = indexOf(ref libs, "/opt/homebrew/lib") < libs.len &&
+      indexOf(ref libs, "/opt/homebrew/lib/arm64") < libs.len &&
+      indexOf(ref includes, "/opt/homebrew/include") < includes.len;
+    theory.detail = `homebrew lib at ${indexOf(ref libs, "/opt/homebrew/lib")}, arm64 at ${indexOf(ref libs, "/opt/homebrew/lib/arm64")}, include at ${indexOf(ref includes, "/opt/homebrew/include")} of ${libs.len}/${includes.len}`;
+  }
+
+  // The whole reason this file exists: OpenSSL is keg-only in Homebrew, so
+  // `/opt/homebrew/lib` does NOT hold libssl and the by-name prefix does. It
+  // has to be offered, and it has to be offered after the general prefixes so
+  // an ordinary library is still found in the ordinary place.
+  let test theory: Case = t.asserts("the keg-only openssl prefixes come after the general ones") {
+    const general = indexOf(ref libs, "/opt/homebrew/lib");
+    const keg = indexOf(ref libs, "/opt/homebrew/opt/openssl@3/lib");
+    theory.isSuccessful = general < keg && keg < libs.len;
+    theory.detail = `/opt/homebrew/lib at ${general}, openssl@3 at ${keg}, of ${libs.len}`;
+  }
+
+  let test theory: Case = t.asserts("openssl@3 is offered before openssl@1.1") {
+    theory.isSuccessful =
+      indexOf(ref libs, "/opt/homebrew/opt/openssl@3/lib") <
+      indexOf(ref libs, "/opt/homebrew/opt/openssl@1.1/lib");
+    theory.detail = `openssl@3 at ${indexOf(ref libs, "/opt/homebrew/opt/openssl@3/lib")}, openssl@1.1 at ${indexOf(ref libs, "/opt/homebrew/opt/openssl@1.1/lib")}`;
+  }
+
+  // The Windows candidates ride in the same list rather than behind a platform
+  // check, because the bootstrap has none. `fs.exists` is what drops them, so
+  // they have to BE here for a Windows run to find anything.
+  let test theory: Case = t.asserts("the Windows candidates are offered too") {
+    theory.isSuccessful = indexOf(ref libs, "C:/vcpkg/installed/x64-windows/lib") < libs.len;
+    theory.detail = `vcpkg x64 lib at ${indexOf(ref libs, "C:/vcpkg/installed/x64-windows/lib")} of ${libs.len}`;
+  }
+
+  let test theory: Case = t.asserts("every include candidate is an include/ directory") {
+    theory.isSuccessful = allEndWith(ref includes, "/include") || includes.len == 0;
+    theory.detail = `${includes.len} include candidate(s), not all ending in /include`;
+  }
+}
+
+// The position of `needle` in `v`, or `v.len` when it is absent. Same "an
+// out-of-range index means absent" convention `stringIndexOf` uses.
+function indexOf(ref v: Vec<string>, needle: string): usize {
+  let i: usize = 0;
+  while (i < v.len) {
+    if (str.stringEq(vec.vecGet(ref v, i), needle)) {
+      return i;
+    }
+    i += 1;
+  }
+  return v.len;
+}
+
+// True when every entry ends in `suffix`. `YOOP_INCLUDE_PATH` is the one source
+// of entries this cannot promise anything about, so the caller allows an empty
+// list rather than this reporting on one.
+function allEndWith(ref v: Vec<string>, suffix: string): bool {
+  let i: usize = 0;
+  while (i < v.len) {
+    const s = vec.vecGet(ref v, i);
+    if (s.len < suffix.len) {
+      return false;
+    }
+    if (str.lastIndexOf(s, suffix) != s.len - suffix.len) {
+      return false;
+    }
+    i += 1;
+  }
+  return true;
+}

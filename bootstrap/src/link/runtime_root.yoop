@@ -30,6 +30,7 @@ module link;
 
 import * as fs from "std/fs.yoop";
 import * as env from "std/env.yoop";
+import * as str from "std/core/strings.yoop";
 import { Vec }, * as vec from "std/core/vec.yoop";
 import { disposable } from "std/core/kinds.yoop";
 
@@ -104,4 +105,44 @@ export function runtimeSources(runtimeRoot: string): Vec<string> propagates<disp
   vec.vecPush(ref out, fs.pathJoin([runtimeRoot, "yoop_cancel.c"]));
   vec.vecPush(ref out, fs.pathJoin([runtimeRoot, "yoop_time.c"]));
   return out;
+}
+
+// The GLUE sources - runtime files a program gets only because of what it
+// LINKS, keyed on the library names `extern "C" from library "X"` collected
+// graph-wide.
+//
+// One entry today: `yoop_tls.c`, which `#include`s <openssl/ssl.h>. Putting it
+// in `runtimeSources` would make OpenSSL headers a build requirement for every
+// program in the world that allocates, which is why the exclusion note at the
+// top of this file exists - and why the file has to come BACK for a program
+// that asked for TLS. Without it an https program links, finds libssl, and then
+// fails on `yoop_tls_connect` and friends.
+//
+// The reference (`glueSourcesForLinkFlags` in src/runtimeBuild.js) has a second
+// entry, `yoop_gl_win32.c`, gated on being ON Windows as well as on naming
+// OpenGL. The bootstrap has no platform check - the same known gap that makes
+// it emit `-framework` everywhere - so that one is left out rather than added
+// unconditionally, which on macOS would hand clang a translation unit that does
+// not compile.
+export function glueSources(runtimeRoot: string, ref linkLibraries: Vec<string>): Vec<string> propagates<disposable> {
+  let out: Vec<string> = vec.vecNew(2);
+  if (namesTls(ref linkLibraries)) {
+    vec.vecPush(ref out, fs.pathJoin([runtimeRoot, "yoop_tls.c"]));
+  }
+  return out;
+}
+
+// Whether the program named OpenSSL. Either half means both, exactly as the
+// `-lssl -lcrypto` lowering in clang.yoop does: libssl cannot link without
+// libcrypto, so a program that named one meant TLS.
+function namesTls(ref linkLibraries: Vec<string>): bool {
+  let i: usize = 0;
+  while (i < linkLibraries.len) {
+    const name = vec.vecGet(ref linkLibraries, i);
+    if (str.stringEq(name, "ssl") || str.stringEq(name, "crypto")) {
+      return true;
+    }
+    i += 1;
+  }
+  return false;
 }

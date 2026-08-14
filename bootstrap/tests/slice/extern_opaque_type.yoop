@@ -1,0 +1,71 @@
+// `type FILE;` inside an extern block - an OPAQUE type - and the RE-BORROW
+// that always comes with one.
+//
+// An opaque type names something whose layout lives in a C header the compiler
+// never reads. It is a struct with an EMPTY field list, which is not a
+// placeholder: a type with no fields is exactly a type nothing can read a field
+// out of, so "opaque" needs no enforcement of its own. Every use is behind a
+// `ref`, which is one pointer whatever it points at.
+//
+// The re-borrow is here rather than in its own fixture because an opaque type
+// is what produces one in practice. `fopen` returns `ref FILE`, so the local
+// holding it is ALREADY a borrow, and `fclose(ref fp)` is `ref` on something
+// that is one - a RE-borrow rather than a second one. `ref ref T` is not a
+// type; there is one address either way and the callee gets it.
+
+extern "C" from "stdio.h" {
+  type FILE;
+  function fopen(path: string, mode: string): ref FILE;
+  function fclose(ref fp: FILE): int32;
+  function fputs(s: string, ref fp: FILE): int32;
+  function fgetc(ref fp: FILE): int32;
+  function remove(path: string): int32;
+}
+
+// The handle is passed on THROUGH another function, so the re-borrow happens
+// twice: once from a local and once from a parameter that arrived as one.
+function writeLine(ref fp: FILE, s: string): int32 {
+  return fputs(s, ref fp);
+}
+
+function countBytes(ref fp: FILE): int32 {
+  let n: int32 = 0;
+  let ch: int32 = fgetc(ref fp);
+  while (ch != -1) {
+    n = n + 1;
+    ch = fgetc(ref fp);
+  }
+  return n;
+}
+
+// The re-borrow is not limited to externs: a plain Yoop type behaves the same
+// way, and this is the half that PROVES it is a re-borrow rather than a copy -
+// both calls write through to the same object.
+type Counter { n: int32 }
+
+function bump(ref c: Counter): void {
+  c.n += 1;
+}
+
+function bumpTwice(): int32 {
+  let c: Counter = { n: 10 };
+  let r: ref Counter = ref c;
+  bump(ref r);   // `ref` on something already a borrow
+  bump(r);       // and the bare forwarding spelling, which is the same thing
+  return c.n;
+}
+
+function main(): int32 {
+  const path: string = "/tmp/yoop_extern_opaque.txt";
+  let out: ref FILE = fopen(path, "w");
+  writeLine(ref out, "abcdefgh");
+  fclose(ref out);
+
+  let inp: ref FILE = fopen(path, "r");
+  printf("bytes: %d\n", countBytes(ref inp));
+  fclose(ref inp);
+  remove(path);
+
+  printf("bumpTwice: %d\n", bumpTwice());
+  return 0;
+}

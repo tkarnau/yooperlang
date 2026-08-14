@@ -470,6 +470,9 @@ function checkExpr(
     case ASTNodeKind.ADDRESS_OF_EXPRESSION: {
       resolved = checkAddressOf(ref prog, ref tm, ref ast, expr, ref scope);
     }
+    case ASTNodeKind.UNSAFE_PTR_CAST: {
+      resolved = checkUnsafePtrOp(ref prog, ref tm, ref ast, expr, ref scope);
+    }
     case ASTNodeKind.SLICE_EXPRESSION: {
       resolved = checkSlice(ref prog, ref tm, ref ast, expr, ref scope);
     }
@@ -512,7 +515,17 @@ function checkExpr(
         operandExpected = primTypeId(PrimKind.BOOL);
       }
       let left = checkExpr(ref prog, ref tm, ref ast, expr.childA, operandExpected, ref scope);
-      const right = checkExpr(ref prog, ref tm, ref ast, expr.childB, left, ref scope);
+      // POINTER ARITHMETIC is the one shape where the two operands are not
+      // meant to agree - `p + 2` is a pointer and an integer - so the right
+      // side gets NO expectation there. Handing it `left` would pin the literal
+      // to a pointer and report "cannot assign untyped int to unsafe_ptr<T>"
+      // about a line that is perfectly well formed.
+      let rightExpected = left;
+      if (isUnsafePtrType(ref prog, left) &&
+          (expr.operator == TokenTags.PLUS || expr.operator == TokenTags.MINUS)) {
+        rightExpected = TYPE_ERROR_ID;
+      }
+      const right = checkExpr(ref prog, ref tm, ref ast, expr.childB, rightExpected, ref scope);
 
       // An untyped int literal takes the OTHER operand's type. The right side
       // gets that for free - it is checked WITH `left` as its expectation - but
@@ -537,7 +550,11 @@ function checkExpr(
         left = checkExpr(ref prog, ref tm, ref ast, expr.childA, right, ref scope);
       }
 
-      if (left != right) {
+      if (isPointerArith(ref prog, expr.operator, left, right)) {
+        // C's rules: a pointer steps by ELEMENTS, and two pointers subtract to
+        // a count of them. See typecheck/unsafe_ptr_ops.yoop.
+        resolved = checkPointerArith(ref prog, expr, left, right);
+      } else if (left != right) {
         reportError(
           ref prog,
           `operator "${tagSpelling(expr.operator)}" cannot be applied to ${formatType(ref prog, left)} and ${formatType(ref prog, right)}`,
@@ -1110,6 +1127,16 @@ function checkQualifiedCall(
     return checkTraitCall(ref prog, ref tm, ref ast, expr, exprId, base, traitType, ref scope);
   }
 
+  // `Reader.from(ref s)`, `PredVT.fromFn(f)`, `Reader.read(ref r, buf)` - the
+  // base is a VTABLE. All three are `Name.member(...)` and none of them is a
+  // module lookup, so they fork here. See typecheck/vtable.yoop.
+  const vtableType = vtableTypeNamed(ref prog, ref tm, base.name);
+  if (vtableType != TYPE_ERROR_ID) {
+    return checkVtableCall(
+      ref prog, ref tm, ref ast, expr, exprId, base, vtableType, ref scope
+    );
+  }
+
   let sourceIndex: ModuleId = 0;
   switch (namespaceModuleOf(ref prog, ref tm, base, ref scope)) {
     case Option.Some { value: mi }: { sourceIndex = mi; }
@@ -1179,20 +1206,6 @@ function namespaceModuleOf(
   }
   switch (symbolAt(ref prog, symId)) {
     case Symbol.Namespace { module: mi }: { return Option.Some { value: mi }; }
-    // `PredVT.fromFn(f)` - the OTHER half of building a vtable value, and the
-    // sibling of the `X.from(ref v)` the parser refuses by name. It reaches
-    // here rather than the parser because `fromFn` is an ordinary IDENT, and
-    // "is not an imported namespace" would be a true statement about the wrong
-    // thing: the base is a vtable and the reader wants to know that BUILDING
-    // one is what is missing.
-    case Symbol.Vtable { typeId: vtId }: {
-      reportError(
-        ref prog,
-        `"${base.name}" is a vtable, and building a vtable VALUE (\`${base.name}.from(ref v)\`, \`${base.name}.fromFn(...)\`) is not supported by the bootstrap yet - declaring and laying one out is`,
-        base.sourceLoc
-      );
-      return Option.None;
-    }
     default: {
       reportError(
         ref prog,
@@ -1266,7 +1279,7 @@ function checkRefExpr(
       !fieldPathBottomsOutInAName(ref ast, expr.childA)) {
     reportError(
       ref prog,
-      "`ref` on a field needs a path that bottoms out in a named binding - `ref f().x` and `ref xs[i].y` have no address the field walk can start from",
+      "`ref` on a field needs a path that bottoms out in a named binding or an array element - `ref f().x` has no address the field walk can start from",
       expr.sourceLoc
     );
     return TYPE_ERROR_ID;
@@ -1275,6 +1288,15 @@ function checkRefExpr(
   if (inner == TYPE_ERROR_ID) {
     return TYPE_ERROR_ID;
   }
+  // `ref` on something that is ALREADY a borrow is a RE-borrow, not a second
+  // one. `let fp: ref FILE = fopen(...); fclose(ref fp);` is how every C handle
+  // in the corpus is passed on, and `ref ref FILE` is not a type - there is one
+  // address either way, and the callee gets it. The reference agrees: `ref r`
+  // and a bare `r` both reach a `ref P` parameter there, and both write
+  // through to the same object. Codegen's half is in emitRefExpr.
+  if (derefType(ref prog, inner) != inner) {
+    return inner;
+  }
   return internRef(ref prog, inner);
 }
 
@@ -1282,10 +1304,12 @@ function checkRefExpr(
 // any depth - codegen's `emitFieldAddress` already recurses through a nested
 // base, so the address is a gep on a gep and there is nothing new to build.
 //
-// What is refused is a path whose BOTTOM has no storage: `ref f().x` (a
-// temporary has no address at all) and `ref xs[i].y` (an element address is a
-// different gep, and the field walk does not build one). Both are named rather
-// than left to fail in codegen, where the message would be about a slot lookup.
+// An array ELEMENT bottoms out too - `ref entries[i].dispatcher` is how
+// std/http's router reaches a route's erased handler, and an element has an
+// address exactly as a named binding does. What is refused is a path whose
+// bottom has no storage at all: `ref f().x`, where the temporary is gone before
+// anything could point at it. Named rather than left to fail in codegen, where
+// the message would be about a slot lookup.
 function fieldPathBottomsOutInAName(ref ast: AST, targetId: NodeId): bool {
   let atId = targetId;
   let node = nodeAt(ref ast, atId);
@@ -1293,7 +1317,7 @@ function fieldPathBottomsOutInAName(ref ast: AST, targetId: NodeId): bool {
     atId = node.childA;
     node = nodeAt(ref ast, atId);
   }
-  return node.kind == ASTNodeKind.IDENT;
+  return node.kind == ASTNodeKind.IDENT || node.kind == ASTNodeKind.INDEX_EXPRESSION;
 }
 
 // `Trait.method(ref receiver, ...)` - resolved STATICALLY by the receiver.
@@ -1354,6 +1378,18 @@ function checkTraitCall(
     }
     map.mapInsert(ref tm.calleeReceiver, uint64(exprId), receiverType);
     return checkArgsAgainstFunc(ref prog, ref tm, ref ast, expr, exprId, bound, expr.name, ref scope);
+  }
+
+  // A VTABLE receiver erasing THIS trait: `Readable.read(ref r, buf)` where
+  // `r` is a `Reader`. The call is an indirect one through the slot, which is
+  // exactly what `Reader.read(ref r, buf)` means - so it goes to the same
+  // checker rather than looking for a method the erased type does not have.
+  // The reference accepts both spellings, and a caller handed a `Reader` and
+  // nothing else has only the trait's name to write.
+  if (vtableTraitOf(ref prog, receiverType) == traitType) {
+    return checkVtableDispatch(
+      ref prog, ref tm, ref ast, expr, exprId, base, receiverType, ref scope
+    );
   }
 
   const method = lookupMethod(ref prog, receiverType, expr.name);
@@ -1595,6 +1631,13 @@ function isComparison(tag: TokenTags): bool {
 function isAddressableFieldBase(ref ast: AST, id: NodeId): bool {
   const node = nodeAt(ref ast, id);
   if (node.kind == ASTNodeKind.IDENT) {
+    return true;
+  }
+  // An array ELEMENT has an address too, and `emitFieldAddress` builds it the
+  // same way for a write as for a borrow. Keeping the two answers in step is
+  // the point: `ref xs[i].f` and `xs[i].f = v` are the same gep, so one being
+  // legal and the other not would be an inconsistency with no reason behind it.
+  if (node.kind == ASTNodeKind.INDEX_EXPRESSION) {
     return true;
   }
   if (node.kind == ASTNodeKind.FIELD_ACCESS) {
@@ -2192,11 +2235,16 @@ function checkSwitch(
   // routing them to the integer checker would add "must be literals, not variant
   // cases" to every arm, so one mistake would produce N diagnostics.
   const overEnum = isEnum && checkEnumScrutinee(ref prog, stmt, scrutType);
-  if (!isEnum && scrutType != TYPE_ERROR_ID && !overVariant &&
+  // A BOOL is its own scrutinee kind rather than a one-bit integer. It has
+  // exactly two values, so it is the only non-variant switch that can be
+  // exhaustive without a default - and `case true:` is a pattern an integer
+  // switch must refuse, which a shared "it is an integer" path could not say.
+  const overBool = scrutType == primTypeId(PrimKind.BOOL);
+  if (!isEnum && scrutType != TYPE_ERROR_ID && !overVariant && !overBool &&
       !isIntPrimType(ref prog, scrutType)) {
     reportError(
       ref prog,
-      `cannot switch over ${formatType(ref prog, scrutType)} - the bootstrap typechecker handles integers, enums and variants so far`,
+      `cannot switch over ${formatType(ref prog, scrutType)} - the bootstrap typechecker handles integers, bools, enums and variants so far`,
       stmt.sourceLoc
     );
   }
@@ -2209,6 +2257,11 @@ function checkSwitch(
   let caseCount: usize = variantCaseCount(ref prog, scrutType);
   if (overEnum) {
     caseCount = enumCaseCount(ref prog, scrutType);
+  }
+  // Slot 0 is `false` and slot 1 is `true`, which is the pattern's own value
+  // used as its ordinal - the one scrutinee kind where those two coincide.
+  if (overBool) {
+    caseCount = 2;
   }
   let c: usize = 0;
   while (c < caseCount) {
@@ -2234,6 +2287,8 @@ function checkSwitch(
       checkVariantArm(ref prog, ref tm, ref ast, arm, scrutType, ref covered, ref scope);
     } else if (overEnum) {
       checkEnumArm(ref prog, ref tm, ref ast, arm, scrutType, ref covered, ref seenValues);
+    } else if (overBool) {
+      checkBoolArm(ref prog, ref tm, ref ast, arm, scrutType, ref covered);
     } else if (!isEnum) {
       checkArmPatterns(ref prog, ref tm, ref ast, arm, scrutType);
     }
@@ -2253,6 +2308,19 @@ function checkSwitch(
   }
   if (overEnum) {
     checkEnumExhaustive(ref prog, stmt, scrutType, ref covered, sawDefault);
+    return;
+  }
+  if (overBool) {
+    // Exhaustive OR defaulted, and unlike a variant BOTH is allowed - the
+    // reference accepts a default beside both cases, and a bool has so few
+    // values that a redundant default is not worth a diagnostic.
+    if (!sawDefault && !(vec.vecGet(ref covered, 0) && vec.vecGet(ref covered, 1))) {
+      reportError(
+        ref prog,
+        "switch over bool is not exhaustive - add 'default' or list both true and false",
+        stmt.sourceLoc
+      );
+    }
     return;
   }
   // A string-backed enum reached the refusal above; its arms are checked but
@@ -2355,6 +2423,46 @@ function checkExhaustive(
   );
 }
 
+// Every pattern of one BOOL arm. Each has to be written `true` or `false` -
+// `case 1:` is refused even though the value would match, because the two
+// spellings mean different types and the reference refuses it too - and each
+// records which of the two values it covers.
+function checkBoolArm(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  arm: ASTNode,
+  scrutType: TypeId,
+  ref covered: Vec<bool>
+): void {
+  if (arm.childA == 0) {
+    return;
+  }
+  const list = nodeAt(ref ast, arm.childA);
+  let i: usize = 0;
+  while (i < list.childCount) {
+    const patternId = childAt(ref ast, list, i);
+    const pattern = nodeAt(ref ast, patternId);
+    if (pattern.kind != ASTNodeKind.LITERAL_PATTERN ||
+        (pattern.operator != TokenTags.TRUE && pattern.operator != TokenTags.FALSE)) {
+      reportError(ref prog, "pattern must be true or false to match bool", pattern.sourceLoc);
+      i += 1;
+      continue;
+    }
+    const slot: usize = usize(pattern.intVal);
+    if (vec.vecGet(ref covered, slot)) {
+      if (slot == 1) {
+        reportError(ref prog, "duplicate case value true", pattern.sourceLoc);
+      } else {
+        reportError(ref prog, "duplicate case value false", pattern.sourceLoc);
+      }
+    }
+    vec.vecSet(ref covered, slot, true);
+    vec.vecSet(ref tm.resolvedTypes, patternId, scrutType);
+    i += 1;
+  }
+}
+
 // Each pattern is decorated with the scrutinee's type, which is what tells
 // codegen the width to emit the case value at.
 function checkArmPatterns(
@@ -2371,11 +2479,23 @@ function checkArmPatterns(
   let i: usize = 0;
   while (i < list.childCount) {
     const patternId = childAt(ref ast, list, i);
-    if (nodeAt(ref ast, patternId).kind == ASTNodeKind.VARIANT_PATTERN) {
+    const pattern = nodeAt(ref ast, patternId);
+    if (pattern.kind == ASTNodeKind.VARIANT_PATTERN) {
       reportError(
         ref prog,
         "this switch is over an integer, so its patterns must be literals, not variant cases",
-        nodeAt(ref ast, patternId).sourceLoc
+        pattern.sourceLoc
+      );
+      i += 1;
+      continue;
+    }
+    // The other direction of the bool rule above: `true` is not an integer
+    // literal, however much its VALUE looks like one.
+    if (pattern.operator == TokenTags.TRUE || pattern.operator == TokenTags.FALSE) {
+      reportError(
+        ref prog,
+        `pattern must be an integer literal to match ${formatType(ref prog, scrutType)}`,
+        pattern.sourceLoc
       );
       i += 1;
       continue;
@@ -2883,6 +3003,11 @@ function checkKindRegion(
     i += 1;
   }
 
+  // The IMPLICIT form has no block of its own: what it owns is the rest of the
+  // enclosing scope, and there is nothing more to walk here.
+  if (stmt.childB == 0) {
+    return;
+  }
   scopePush(ref scope);
   checkBlock(ref prog, ref tm, ref ast, stmt.childB, retType, ref scope);
   scopePop(ref scope);

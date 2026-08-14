@@ -1,36 +1,40 @@
 module typecheck;
 
-// `@derive(display)`, as far as the bootstrap takes it today.
+// `@derive(display)`, on the typecheck side.
 //
-// The attribute PARSES and `declOf` unwraps it, so a decorated declaration is
-// an ordinary one to every pass - which is what lets the eight derived types in
-// the bootstrap's own source compile. What is NOT built is the expansion: the
-// reference generates a `toString` from the field annotations, reparses it, and
-// grafts it in (src/jsyoopderive/expand.js).
+// The EXPANSION itself is not here - it is syntactic, and it runs at load time
+// in parse/derive.yoop, where the module's arena is still something to write
+// to. Two things are left for this layer, and both are about names rather than
+// about shape:
 //
-// Three things have to exist before that expansion can, and none of them did
-// when this was measured:
+//   1. Reaching `Display`. The generated method is grafted under an
+//      `implements Display` clause, and a file that derives need never have
+//      imported the trait - `@derive(display)\ntype Point { ... }` with no
+//      imports at all is the common case. The reference synthesizes an
+//      `import { Display } from "std/core/traits.yoop"` into the module body;
+//      the bootstrap binds the SYMBOL directly instead, because its imports are
+//      wired from edges the module graph recorded rather than from the AST, so
+//      a synthesized import node would bind nothing. Same effect, one step
+//      earlier.
+//   2. Naming the attribute in a diagnostic when the expansion did NOT happen -
+//      a generic derived type, which is refused by name and left without a
+//      method. Interpolating one would otherwise get the generic "carries no
+//      toString" message, which reads as a bug in a declaration that is
+//      perfectly well formed.
 //
-//   1. Display dispatch in TEMPLATE INTERPOLATION. The generated body is
-//      entirely template literals over the fields, and `${self.sourceLoc}`
-//      interpolates a struct. Today `templatePartKind` calls anything that is
-//      not a string, int or bool UNSUPPORTED, so the generated code would not
-//      typecheck even if it were generated perfectly.
-//   2. A way to reach `Display`. It lives in std/core/traits.yoop, which the
-//      reference AUTOLOADS into every module graph; the bootstrap has no
-//      autoload, and none of the deriving files import it.
-//   3. The graft itself - splice a method into a decl's member run, merge the
-//      implements clause, restamp source locations onto the decl.
-//
-// So the gap is recorded rather than half-built, and this file exists to make
-// it say so at the one place a user would notice.
+// The rendering rules live in parse/derive_text.yoop, including the one place
+// the bootstrap deliberately differs from src/jsyoopderive/expand.js.
 
+import { Vec }, * as vec from "std/core/vec.yoop";
 import * as map from "std/collections/map.yoop";
 import * as str from "std/core/strings.yoop";
 import { Option } from "std/core/types.yoop";
-import { AST, ASTNode, ASTNodeKind, NodeId, nodeAt } from "../ast";
+import { AST, ASTNode, ASTNodeKind, NodeId, childAt, declOf, nodeAt } from "../ast";
+import { Module } from "../source_graph";
+import { SourceLocation } from "../diagnostics";
 
 const DERIVE_ATTRIBUTE: string = "derive";
+const DISPLAY_TRAIT: string = "Display";
 
 // Record a decorated type's NAME while pass A walks the top level.
 //
@@ -65,4 +69,84 @@ export function carriesDeriveDisplay(ref prog: Program, t: TypeId): bool {
     case Option.Some { value: found }: { return found; }
     case Option.None: { return false; }
   }
+}
+
+// Bind `Display` into a deriving module that has no name for it.
+//
+// Runs at the end of pass B, which is the last point before the `implements`
+// clauses resolve in pass C. Topological order is what makes the lookup a
+// lookup: std/core/traits.yoop is an AUTOLOAD, so it walks before the entry and
+// its exports are registered by the time any deriving module is reached.
+//
+// The trait is found by scanning for a module EXPORTING a trait called
+// `Display` rather than by path, which is the reference's own fallback and is
+// what lets a test with a stub std - or with the trait declared inline - work
+// with no std root at all. A module that already binds the name keeps its own.
+export function bindDerivedDisplayTrait(ref prog: Program, ref tm: TypedModule, m: Module): void {
+  const site = firstDeriveSite(ref m.ast, m);
+  if (site.nodeId == 0) {
+    return;
+  }
+  switch (map.mapGet(ref tm.names, DISPLAY_TRAIT)) {
+    case Option.Some { value: bound }: { return; }
+    case Option.None: { }
+  }
+  let i: usize = 0;
+  while (i < prog.modules.len) {
+    let source = vec.vecGet(ref prog.modules, i);
+    switch (map.mapGet(ref source.exports, DISPLAY_TRAIT)) {
+      case Option.Some { value: symId }: {
+        switch (symbolAt(ref prog, symId)) {
+          case Symbol.Trait { typeId: traitId }: {
+            map.mapInsert(ref tm.names, DISPLAY_TRAIT, symId);
+            return;
+          }
+          default: { }
+        }
+      }
+      case Option.None: { }
+    }
+    i += 1;
+  }
+  // Nothing in the graph declares it. Said HERE rather than left to the
+  // implements clause, which would report `"Display" is not a trait` about a
+  // clause the user never wrote - the reference makes the same call, in its own
+  // expander and with the same reason.
+  beginFile(ref prog, site.filePath);
+  reportError(
+    ref prog,
+    `@derive(display) needs a trait named "Display", which is autoloaded from std/core/traits.yoop - no module in this graph declares one, so compile through the driver or declare the trait yourself`,
+    site.sourceLoc
+  );
+}
+
+// Where a module first carries `@derive(...)`, or nodeId 0 for not at all.
+//
+// The binding is not unconditional: making `Display` resolve in every module
+// would be a name appearing out of nowhere, and would shadow a module declaring
+// one of its own.
+type DeriveSite {
+  nodeId: NodeId,
+  filePath: string,
+  sourceLoc: SourceLocation,
+}
+
+function firstDeriveSite(ref ast: AST, m: Module): DeriveSite {
+  let f: usize = 0;
+  while (f < m.files.len) {
+    const file = vec.vecGet(ref m.files, f);
+    const programNode = nodeAt(ref ast, file.root);
+    let i: usize = 0;
+    while (i < programNode.childCount) {
+      const childId = childAt(ref ast, programNode, i);
+      const child = nodeAt(ref ast, childId);
+      if (child.kind == ASTNodeKind.ATTRIBUTE && str.stringEq(child.name, DERIVE_ATTRIBUTE)) {
+        return { nodeId: childId, filePath: file.absPath, sourceLoc: child.sourceLoc };
+      }
+      i += 1;
+    }
+    f += 1;
+  }
+  const none: SourceLocation = { pos: 0, line: 0, column: 0, length: 0 };
+  return { nodeId: 0, filePath: "", sourceLoc: none };
 }

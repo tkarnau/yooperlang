@@ -1,0 +1,218 @@
+module parse;
+
+/*
+  Declarations that CARRY a kind, and the `propagates<...>` clause.
+
+  Split out of kind_decl.yoop, which holds the other half - the `kind NAME
+  { ... }` DECLARATION. The two halves share a vocabulary and nothing else: one
+  reads a kind's clauses, this one reads a kind's NAME standing where the
+  `function` keyword would.
+
+      async fetch(u: string): string { ... }      the prefix REPLACES `function`
+      suite function addsNumbers(): void { ... }  both, which is also legal
+
+  Both spellings are the reference's, and both reach `parseKindPrefixRun` -
+  which is why that one function serves the top level and a type's member run
+  alike. `parseKindPrefixes` in types.yoop cannot: it stops on IDENT-then-
+  FUNCTION, because in an ANNOTATION position (`owned string`) a following
+  `function` keyword means the annotation ended.
+*/
+
+import { Result } from "std/core/types.yoop";
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import * as str from "std/core/strings.yoop";
+import { AST, NodeId, ASTNodeKind, childAt, nodeAt } from "../ast";
+import { TokenTags, tagName, posToSourceLocation } from "../lex";
+import { ParsingError } from "../diagnostics";
+
+// True when the parser is looking at a kind-prefixed declaration at TOP LEVEL:
+// an identifier followed by another identifier, or by the `function` keyword.
+//
+// `async fetch(`, `pooled tainted buf(` and `suite function addsNumbers(` all
+// match. A lone IDENT does not, which is what keeps an ordinary expression
+// statement from being misread.
+//
+// The IDENT-then-FUNCTION case is safe HERE and would not be inside a member
+// run: at top level nothing else opens with a bare identifier (a `module`
+// header and a `kind` declaration are both checked in front of this), while a
+// variant or enum case may be a bare name with a method right after it. See
+// `atKindPrefixedMethod` for that side.
+export function atKindPrefixedDecl(ref ps: ParserState): bool {
+  if (SelfLexing.peek(ref ps).tag != TokenTags.IDENT) {
+    return false;
+  }
+  switch (SelfLexing.peekAhead(ref ps, 1)) {
+    case Result.Ok { value: next }: {
+      return next.tag == TokenTags.IDENT || next.tag == TokenTags.FUNCTION;
+    }
+    case Result.Err { error: e }: { return false; }
+  }
+}
+
+// True when the parser is looking at a kind-prefixed METHOD inside a type,
+// variant or enum body: `async handle(ref self, ...)`.
+//
+// Stricter than `atKindPrefixedDecl`, and it has to be. A member run holds more
+// than declarations, so two identifiers in a row are not enough to go on:
+//
+//   * an ENUM case may be `AB A | B`, which opens IDENT IDENT. This walks the
+//     whole run of identifiers and requires it to END at a `(`, so `AB A | B`
+//     stops at `|` and is a case again.
+//   * an enum or variant case may be a BARE identifier with the method right
+//     after it and no comma between - `Green` then `function toString(...)`.
+//     That is IDENT FUNCTION and it is genuinely ambiguous with
+//     `traced function area(...)`, the reference's prefix-AND-keyword spelling.
+//     `bareIdentIsMember` is how the caller says which body it is in: a struct
+//     field is always `name: T`, so there the shape can only be a prefix.
+export function atKindPrefixedMethod(ref ps: ParserState, bareIdentIsMember: bool): bool {
+  if (SelfLexing.peek(ref ps).tag != TokenTags.IDENT) {
+    return false;
+  }
+  let n: usize = 1;
+  while (n < MAX_METHOD_PREFIX_LOOKAHEAD) {
+    switch (SelfLexing.peekAhead(ref ps, n)) {
+      case Result.Err { error: e }: { return false; }
+      case Result.Ok { value: tok }: {
+        if (tok.tag == TokenTags.IDENT) {
+          n += 1;
+        } else if (tok.tag == TokenTags.FUNCTION) {
+          return !bareIdentIsMember;
+        } else {
+          // At least two identifiers - one prefix and the method's name - and
+          // the run ends where a parameter list starts.
+          return n >= 2 && tok.tag == TokenTags.LPAREN;
+        }
+      }
+    }
+  }
+  return false;
+}
+
+// How many identifiers a kind-prefixed method may stack before the parser stops
+// looking. Nothing in the corpus uses more than two prefixes; the cap exists so
+// a malformed member run cannot make the scan walk the rest of the file.
+const MAX_METHOD_PREFIX_LOOKAHEAD: usize = 8;
+
+// `async fetch(u: string): string { ... }` - one or more kind prefixes, then a
+// declaration carrying them.
+//
+// Only a FUNCTION can be reached this way today. A kind-prefixed type is
+// written `disposable type Foo`, which the type parser already handles, so the
+// bare `IDENT IDENT (` shape is unambiguously a function.
+export function parseKindPrefixedDecl(ref ps: ParserState): Result<NodeId, ParsingError> {
+  const prefixes = parseKindPrefixRun(ref ps)?;
+  if (SelfLexing.peek(ref ps).tag != TokenTags.IDENT) {
+    return Result.Err { error: SelfLexing.createParsingError(
+      ref ps,
+      `expected a function name after a kind prefix, got ${tagName(SelfLexing.peek(ref ps).tag)}`,
+      peekLengthUsize(ref ps),
+    )};
+  }
+  return parseFunctionRest(ref ps, prefixes);
+}
+
+// The run of kind prefixes in front of a function, plus the `function` keyword
+// when one is there.
+//
+// Three spellings reach here and all three are the reference's:
+//
+//     function area(ref self): int32 { }          no prefix, keyword required
+//     traced area(ref self): int32 { }            the prefix REPLACES it
+//     traced function area(ref self): int32 { }   both, which is also legal
+//
+// So the run of prefixes ends at either another identifier (the declaration's
+// name) or at `function`, and the keyword is consumed when present and demanded
+// when nothing replaced it. That last clause is why a METHOD may call this with
+// no prefix at all: `function area(...)` is the ordinary spelling and the
+// keyword is required there. A TOP-LEVEL caller only ever arrives with at least
+// one prefix, because a bare `function` is dispatched on its own token.
+//
+// `parseKindPrefixes` in types.yoop cannot do this job: it stops on
+// IDENT-then-FUNCTION, which is exactly the third spelling.
+export function parseKindPrefixRun(ref ps: ParserState): Result<NodeId, ParsingError> {
+  const loc = posToSourceLocation(ps.src, ps.pos, 1);
+  disposable ids: Vec<NodeId> = vec.vecNew(2);
+  while (SelfLexing.peek(ref ps).tag == TokenTags.IDENT && atKindPrefixIdent(ref ps)) {
+    let prefix = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.KIND_PREFIX);
+    prefix.name = parseIdentAsName(ref ps)?;
+    vec.vecPush(ref ids, SelfLexing.pushNode(ref ps, prefix));
+  }
+  if (ids.len == 0 || SelfLexing.peek(ref ps).tag == TokenTags.FUNCTION) {
+    SelfLexing.expect(ref ps, TokenTags.FUNCTION)?;
+  }
+  if (ids.len == 0) {
+    return Result.Ok { value: 0 };
+  }
+  return Result.Ok { value: SelfLexing.buildListNode(ref ps, ref ids, loc) };
+}
+
+// Whether the identifier the parser is on is a PREFIX rather than the
+// declaration's own name: something follows it that a name cannot be followed
+// by.
+function atKindPrefixIdent(ref ps: ParserState): bool {
+  switch (SelfLexing.peekAhead(ref ps, 1)) {
+    case Result.Err { error: e }: { return false; }
+    case Result.Ok { value: tok }: {
+      return tok.tag == TokenTags.IDENT || tok.tag == TokenTags.FUNCTION;
+    }
+  }
+}
+
+// Whether any prefix in a KIND_PREFIX list is named `name`. What pass A uses to
+// find `async` and `task` without the parser having to know either word.
+export function kindPrefixesInclude(ref ast: AST, listId: NodeId, name: string): bool {
+  if (listId == 0) {
+    return false;
+  }
+  const list = nodeAt(ref ast, listId);
+  let i: usize = 0;
+  while (i < list.childCount) {
+    if (str.stringEq(nodeAt(ref ast, childAt(ref ast, list, i)).name, name)) {
+      return true;
+    }
+    i += 1;
+  }
+  return false;
+}
+
+// ----- the propagates clause -------------------------------------------------
+
+// `propagates<disposable>` after a function's return type or a type's name.
+//
+// It says: values flowing OUT of this carry the named kinds, so a caller
+// inherits the obligation. `vecNew` hands back storage someone has to dispose,
+// and the clause is how the signature says so instead of a comment.
+//
+// Recorded as a NODE_LIST of KIND_PREFIX nodes - the clause IS a list of kind
+// names, so it needs no node kind of its own. Nothing enforces it, the same as
+// every other kind surface here; what matters is that it PARSES, because the
+// bootstrap's own source carries 48 of these and cannot be read without them.
+//
+// Returns 0 when there is no clause.
+export function parsePropagatesClause(ref ps: ParserState): Result<NodeId, ParsingError> {
+  if (!peekIsWord(ref ps, PROPAGATES_KEYWORD)) {
+    return Result.Ok { value: 0 };
+  }
+  const loc = posToSourceLocation(ps.src, ps.pos, 1);
+  SelfLexing.advance(ref ps)?;
+  SelfLexing.expect(ref ps, TokenTags.LT)?;
+
+  disposable ids: Vec<NodeId> = vec.vecNew(2);
+  while (true) {
+    let node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.KIND_PREFIX);
+    node.name = parseIdentAsName(ref ps)?;
+    vec.vecPush(ref ids, SelfLexing.pushNode(ref ps, node));
+    if (SelfLexing.peek(ref ps).tag != TokenTags.COMMA) {
+      break;
+    }
+    SelfLexing.advance(ref ps)?;
+  }
+
+  // The same `>>` split every other closing angle bracket goes through:
+  // `propagates<Foo<T>>` ends in one right-shift token.
+  consumeClosingGt(ref ps)?;
+  return Result.Ok { value: SelfLexing.buildListNode(ref ps, ref ids, loc) };
+}
+
+export const PROPAGATES_KEYWORD: string = "propagates";

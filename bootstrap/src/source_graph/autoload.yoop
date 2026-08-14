@@ -1,0 +1,72 @@
+module source_graph;
+
+/*
+  The std modules every graph gets whether anything imported them or not.
+
+  Two of them, and each is here because something that USED to be built into the
+  compiler now lives in std source:
+
+    core/kinds.yoop    declares `async`, `task`, `joined`, `pooled`,
+                       `disposable`, `ephemeral` and `owned`. These were
+                       reserved WORDS once, so they were always in scope; they
+                       are ordinary `kind` decls now and the autoload is what
+                       keeps that true. A kind is reached by NAME from a
+                       graph-wide registry rather than through imports, so
+                       merely being IN the graph is enough - nothing has to
+                       import it for `task compute(): int32` to resolve.
+    core/traits.yoop   declares `Display`, `Into`, `WithContext`, `Iterable`,
+                       `Readable` and `Writable`. The compiler names three of
+                       those itself (`Into` for `?`, `WithContext` for
+                       `? "context"`, `Display` for `@derive(display)`), and
+                       each is matched by NAME rather than resolved as a symbol
+                       for a reason the autoload does not remove: the module
+                       WRITING a `?` need never have heard of `Into`. What the
+                       autoload buys is that the declaration is always
+                       somewhere in the graph, so a generated `toString` has a
+                       trait to be checked against.
+
+  ORDER matters, and it is the reason this is a list rather than a set:
+  traits.yoop writes `async read(ref self, ...)`, and `async` is a kind that
+  kinds.yoop declares. Loading traits first would refuse it.
+
+  Both walk BEFORE the entry, so they land early in the topological order and
+  every user module can see their declarations already filled. Loading is
+  idempotent - a graph that imports either one anyway finds it in `byPath` and
+  the autoload costs one lookup.
+
+  The reference autoloads two MORE, `core/format.yoop` and `core/strings.yoop`,
+  because its codegen lowers an interpolated template literal into a call to
+  `stringConcatAll` and needs those symbols to exist. The bootstrap emits its
+  own string-builder helpers inline and calls libc, so it would be paying for
+  two modules nothing reads. That is a deliberate divergence, and it is
+  invisible: no program can tell whether a module it never named was loaded.
+
+  Missing files are SKIPPED rather than reported. A caller with no std root at
+  all - every source_graph and codegen test passes "" - is not broken, it just
+  has no std, and turning that into an error would make the autoload a new way
+  for a compile to fail.
+*/
+
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import * as fs from "std/fs.yoop";
+
+// One autoloaded module: where to find it, and the key it is recorded under in
+// `ModuleGraph.autoLoadModuleIds`. The key is the BASE NAME, matching the
+// reference, so a later reader asks for "kinds" rather than for a path.
+export type AutoloadEntry {
+  key: string,
+  path: string,
+}
+
+// The autoload list for this std root, in load order. Empty when there is no
+// root to resolve against.
+export function autoloadEntries(stdRoot: string): Vec<AutoloadEntry> propagates<disposable> {
+  let out: Vec<AutoloadEntry> = vec.vecNew(2);
+  if (stdRoot.len == 0) {
+    return out;
+  }
+  vec.vecPush(ref out, { key: "kinds", path: fs.pathJoin([stdRoot, "core", "kinds.yoop"]) });
+  vec.vecPush(ref out, { key: "traits", path: fs.pathJoin([stdRoot, "core", "traits.yoop"]) });
+  return out;
+}

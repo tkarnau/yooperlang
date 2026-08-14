@@ -1,0 +1,102 @@
+module codegen;
+
+// The IR shapes a vtable needs and nothing else emits.
+//
+// Everything else the erasure uses already exists - alloca, gep, store, load,
+// an indirect call - so this file is two things: the SHIM a `fromFn` slot
+// holds, and the dedupe that keeps one of them per target symbol.
+
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { Map }, * as map from "std/collections/map.yoop";
+import { Text }, * as text from "std/core/text.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import * as str from "std/core/strings.yoop";
+
+// What a generated shim is called: `yoop_fromfn_shim__<module>__<target>`.
+// The module is in it because two modules may each build a vtable from a
+// function of the same bare name, and one LLVM module holds them both.
+const FROMFN_SHIM_PREFIX: string = "yoop_fromfn_shim__";
+
+//   define i32 @yoop_fromfn_shim__m_0__isDigit(ptr %ctx, i32 %a0) {
+//   entry:
+//     %r = call i32 @m_0__isDigit(i32 %a0)
+//     ret i32 %r
+//   }
+//
+// A vtable slot is always called with the erased receiver first, and a plain
+// named function has no receiver to take it. The shim is the adapter: it
+// declares the leading `ptr`, ignores it, and forwards the rest.
+//
+// Emitted into `globals` rather than into the current function's buffer, for
+// the obvious reason - it is a top-level define, and the function being walked
+// is only half written. `params` is the slot's parameter types, which are the
+// trait method's minus `ref self`.
+//
+// Returns the shim's symbol name. Idempotent: a second `fromFn` naming the same
+// function reuses the first shim, since two defines of one symbol is an invalid
+// redefinition rather than a duplicate.
+export function emitFromFnShim(
+  ref e: Emitter,
+  moduleId: string,
+  targetHome: string,
+  targetName: string,
+  retTy: string,
+  ref params: Vec<string>
+): string propagates<disposable> {
+  const shim = shimSymbolName(moduleId, targetName);
+  if (map.mapContainsKey(ref e.fromFnShims, shim)) {
+    return shim;
+  }
+  map.mapInsert(ref e.fromFnShims, shim, true);
+
+  text.push(ref e.globals, "define ");
+  text.push(ref e.globals, retTy);
+  text.push(ref e.globals, " @");
+  text.push(ref e.globals, shim);
+  text.push(ref e.globals, "(ptr %ctx");
+  let i: usize = 0;
+  while (i < params.len) {
+    text.push(ref e.globals, ", ");
+    text.push(ref e.globals, vec.vecGet(ref params, i));
+    text.push(ref e.globals, " %a");
+    text.pushUint(ref e.globals, uint64(i));
+    i += 1;
+  }
+  text.push(ref e.globals, ") {\nentry:\n");
+
+  const isVoid = str.stringEq(retTy, "void");
+  text.push(ref e.globals, "  ");
+  if (!isVoid) {
+    text.push(ref e.globals, "%r = ");
+  }
+  text.push(ref e.globals, "call ");
+  text.push(ref e.globals, retTy);
+  text.push(ref e.globals, " @");
+  if (targetHome.len > 0) {
+    text.push(ref e.globals, targetHome);
+    text.push(ref e.globals, SYMBOL_MODULE_SEPARATOR);
+  }
+  text.push(ref e.globals, targetName);
+  text.push(ref e.globals, "(");
+  i = 0;
+  while (i < params.len) {
+    if (i > 0) {
+      text.push(ref e.globals, ", ");
+    }
+    text.push(ref e.globals, vec.vecGet(ref params, i));
+    text.push(ref e.globals, " %a");
+    text.pushUint(ref e.globals, uint64(i));
+    i += 1;
+  }
+  text.push(ref e.globals, ")\n  ret ");
+  text.push(ref e.globals, retTy);
+  if (!isVoid) {
+    text.push(ref e.globals, " %r");
+  }
+  text.push(ref e.globals, "\n}\n");
+  return shim;
+}
+
+function shimSymbolName(moduleId: string, targetName: string): string propagates<disposable> {
+  return `${FROMFN_SHIM_PREFIX}${moduleId}${SYMBOL_MODULE_SEPARATOR}${targetName}`;
+}

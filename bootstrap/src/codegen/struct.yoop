@@ -116,6 +116,25 @@ export function emitFieldAddress(ref cx: Cx, target: ASTNode, ref addr: usize): 
     return "";
   }
 
+  // An ARRAY ELEMENT base has no slot either, and its address is a different
+  // gep - off the descriptor's data pointer rather than off a local. Computing
+  // it first and stepping one field in is the same two-step the nested-field
+  // case below does; only the first step differs.
+  if (baseNode.kind == ASTNodeKind.INDEX_EXPRESSION) {
+    let elemPtr: usize = 0;
+    const err = emitElementAddress(ref cx, baseNode, target.childA, ref elemPtr);
+    if (err.len > 0) {
+      return err;
+    }
+    const dest = freshTemp(cx.e);
+    emitGepFieldOfPtr(
+      ref cx, dest, typeOf(ref cx, target.childA), elemPtr,
+      fieldPositionOf(ref cx, target.childA, target.name)
+    );
+    addr = dest;
+    return "";
+  }
+
   // A nested base has no slot of its own; its ADDRESS is what the outer gep
   // starts from, so compute that first and then step one field further in.
   if (baseNode.kind == ASTNodeKind.FIELD_ACCESS) {

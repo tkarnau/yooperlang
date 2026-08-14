@@ -1,0 +1,14 @@
+// A STUB stand-in for std/core/kinds.yoop, for the autoload test in
+// source_graph.test.yoop. It only has to be a loadable module named by the
+// autoload list; the real one is much larger and the graph layer does not read
+// a byte of either.
+export kind disposable {
+    appliesTo binding;
+    mustCall dispose beforeScopeEnd;
+}
+
+export kind task {
+    appliesTo function;
+    pausable;
+    provides Task;
+}

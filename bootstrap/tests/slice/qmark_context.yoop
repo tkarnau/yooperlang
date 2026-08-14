@@ -1,0 +1,155 @@
+// `expr? "context"` - prefixing a note onto the error on the way out.
+//
+// Two shapes, and they are genuinely different mechanisms rather than one with
+// a flag:
+//
+//   BOTH PAYLOADS ARE `string`  the compiler concatenates "<context>: <err>"
+//                               itself. Every `Result<T, string>` in std is
+//                               this one.
+//   ANYTHING ELSE               the operand's Err type promises
+//                               `WithContext<TargetErr>` and its method
+//                               produces the outer payload. That one call also
+//                               does the CONVERSION, which is why `readByte`
+//                               below returns a `Result<int32, IoError>` and
+//                               `load` returns a `Result<int32, AppError>`
+//                               with no `Into` impl anywhere.
+//
+// The separator is ": " and the note goes in FRONT, so contexts stack outward
+// as the error propagates: `nested` prefixes an already-prefixed string.
+//
+// `noisy` is the load-bearing part of the template case. It prints, and it is
+// interpolated into a context - so if the context expression were evaluated
+// anywhere but the failure branch, the "(building context 9)" line would appear
+// on the happy path too and the expected output below would stop matching. That
+// is the whole cost model of the form asserted as an output line.
+
+// `Result` and `WithContext` are declared HERE rather than imported, so the
+// fixture needs no std root at all. `WithContext` is matched by NAME plus its
+// one argument by both compilers - the module writing a `?` need never have
+// heard of the trait, while the module declaring the error type certainly has -
+// so a local declaration is the same trait as far as either is concerned.
+
+extern "C" from "stdio.h" {
+  function printf(fmt: string, ...): int32;
+}
+
+variant Result<T, E> {
+  Ok { value: T },
+  Err { error: E },
+}
+
+trait WithContext<T> {
+  function withContext(ref self, context: string): T;
+}
+
+// ----- both payloads are `string` --------------------------------------------
+
+function parsePositive(n: int32): Result<int32, string> {
+  if (n < 0) {
+    return Result.Err { error: "negative input" };
+  }
+  return Result.Ok { value: n };
+}
+
+function plainContext(n: int32): Result<int32, string> {
+  const v: int32 = parsePositive(n)? "reading count";
+  return Result.Ok { value: v + 1 };
+}
+
+function noisy(tag: int32): int32 {
+  printf("%s\n", `  (building context ${tag})`);
+  return tag;
+}
+
+function templateContext(n: int32, tag: int32): Result<int32, string> {
+  const v: int32 = parsePositive(n)? `reading field ${noisy(tag)}`;
+  return Result.Ok { value: v + 1 };
+}
+
+function nestedContext(n: int32): Result<int32, string> {
+  const v: int32 = plainContext(n)? "loading config";
+  return Result.Ok { value: v };
+}
+
+// ----- a structured payload, through WithContext ------------------------------
+
+type ParseError implements WithContext<ParseError> {
+  msg: string,
+  line: int32,
+  // The context goes on the message and `line` is preserved, which is the whole
+  // reason this routes through an impl instead of a blind string concat.
+  function withContext(ref self, context: string): ParseError {
+    return { msg: `${context}: ${self.msg}`, line: self.line };
+  }
+}
+
+function parseField(n: int32): Result<int32, ParseError> {
+  if (n < 0) {
+    return Result.Err { error: { msg: "not a number", line: 12 } };
+  }
+  return Result.Ok { value: n };
+}
+
+function parseRecord(n: int32): Result<int32, ParseError> {
+  const v: int32 = parseField(n)? `field ${n}`;
+  return Result.Ok { value: v * 2 };
+}
+
+// ----- and the CROSS-shape one, where the impl converts as well ---------------
+
+type AppError {
+  detail: string,
+  code: int32,
+}
+
+type IoError implements WithContext<AppError> {
+  code: int32,
+  function withContext(ref self, context: string): AppError {
+    return { detail: `${context} (io ${self.code})`, code: self.code };
+  }
+}
+
+function readByte(n: int32): Result<int32, IoError> {
+  if (n < 0) {
+    return Result.Err { error: { code: 5 } };
+  }
+  return Result.Ok { value: n };
+}
+
+function load(n: int32): Result<int32, AppError> {
+  const b: int32 = readByte(n)? "loading header";
+  return Result.Ok { value: b };
+}
+
+function showStr(label: string, r: Result<int32, string>): void {
+  switch (r) {
+    case Result.Ok { value: v }: { printf("%s\n", `${label}: ok ${v}`); }
+    case Result.Err { error: e }: { printf("%s\n", `${label}: err "${e}"`); }
+  }
+}
+
+function main(): int32 {
+  showStr("plain happy", plainContext(4));
+  showStr("plain sad", plainContext(-1));
+  showStr("template happy", templateContext(4, 9));
+  showStr("template sad", templateContext(-1, 9));
+  showStr("nested sad", nestedContext(-1));
+
+  switch (parseRecord(3)) {
+    case Result.Ok { value: v }: { printf("%s\n", `same ok ${v}`); }
+    case Result.Err { error: e }: { printf("%s\n", `same err "${e.msg}" line=${e.line}`); }
+  }
+  switch (parseRecord(-1)) {
+    case Result.Ok { value: v }: { printf("%s\n", `same ok ${v}`); }
+    case Result.Err { error: e }: { printf("%s\n", `same err "${e.msg}" line=${e.line}`); }
+  }
+  switch (load(7)) {
+    case Result.Ok { value: v }: { printf("%s\n", `cross ok ${v}`); }
+    case Result.Err { error: e }: { printf("%s\n", `cross err "${e.detail}" code=${e.code}`); }
+  }
+  switch (load(-1)) {
+    case Result.Ok { value: v }: { printf("%s\n", `cross ok ${v}`); }
+    case Result.Err { error: e }: { printf("%s\n", `cross err "${e.detail}" code=${e.code}`); }
+  }
+  return 0;
+}

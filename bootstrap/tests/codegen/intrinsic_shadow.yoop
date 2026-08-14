@@ -1,0 +1,29 @@
+// A module declaring an ordinary function named after an INTRINSIC another
+// module in the same graph declared.
+//
+// This is std/tls/ffi.yoop's shape exactly: it exports `ctxFree(ref c: TlsCtx)`
+// while std/core/alloc.yoop's `ctxFree<T>(a: T[])` is an intrinsic elsewhere in
+// the graph. `Program.intrinsics` is keyed by NAME and graph-wide, so codegen
+// used to lower the call below to `@yoop_ctx_free` with an `extractvalue` on a
+// struct pointer in front of it - invalid IR here, and a silent miscompile
+// wherever the two shapes happened to line up.
+//
+// Read by bootstrap/src/codegen/codegen.test.yoop; it is never run.
+
+import * as intr from "./intrinsic_shadow_other.yoop";
+
+type Ctx {
+  p: int32,
+}
+
+function ctxFree(ref c: Ctx): void {
+  c.p = 0;
+}
+
+function main(): int32 {
+  let c: Ctx = { p: 1 };
+  ctxFree(ref c);
+  let xs: int32[] = intr.ctxAlloc(2);
+  intr.ctxFree(xs);
+  return c.p;
+}

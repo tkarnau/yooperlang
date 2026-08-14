@@ -1,0 +1,74 @@
+// `expr? e { ... }` - handling a failure AT the `?` instead of propagating it.
+//
+// Three things this asserts, and each is a separate property of the form:
+//
+//   1. it works in a function that does NOT return a fallible variant. `handled`
+//      returns a plain int32, where a bare `?` is a typecheck error outright.
+//      That is the whole reason the form exists.
+//   2. `continue` counts as leaving, so a handler can skip a loop iteration
+//      rather than leaving the function. `summed` adds only the even indices.
+//   3. the Ok path is untouched: no handler code runs, and the unwrapped value
+//      flows into the binding exactly as it does for a bare `?`. Every "handler
+//      saw" line below is one that would appear on a success too if it did not.
+//
+// `e` is bound to the Err payload for the block's extent and nowhere else.
+
+extern "C" from "stdio.h" {
+  function printf(fmt: string, ...): int32;
+}
+
+variant Reading {
+  Ok { value: int32 },
+  Err { error: string },
+}
+
+function readAt(i: int32): Reading {
+  if (i % 2 == 1) {
+    return Reading.Err { error: "odd index" };
+  }
+  return Reading.Ok { value: i * 10 };
+}
+
+// 1. A non-fallible return type.
+function handled(i: int32): int32 {
+  let v: int32 = readAt(i)? e {
+    printf("%s\n", `  handler saw: ${e}`);
+    return -1;
+  };
+  return v;
+}
+
+// 2. `continue` as the way out, skipping the failures.
+function summed(): int32 {
+  let total: int32 = 0;
+  for (let i = 0; i < 5; i += 1) {
+    let v: int32 = readAt(i)? e {
+      printf("%s\n", `  skipping ${i} (${e})`);
+      continue;
+    };
+    total = total + v;
+  }
+  return total;
+}
+
+// 3. Leaving through an `if`/`else` where BOTH halves return, which is the
+// shape the divergence check has to see through rather than a bare `return`.
+function viaIf(i: int32): int32 {
+  let v: int32 = readAt(i)? e {
+    if (e.len > 0) {
+      return -2;
+    } else {
+      return -3;
+    }
+  };
+  return v;
+}
+
+function main(): int32 {
+  printf("%s\n", `handled(2)=${handled(2)}`);
+  printf("%s\n", `handled(3)=${handled(3)}`);
+  printf("%s\n", `summed=${summed()}`);
+  printf("%s\n", `viaIf(1)=${viaIf(1)}`);
+  printf("%s\n", `viaIf(4)=${viaIf(4)}`);
+  return 0;
+}

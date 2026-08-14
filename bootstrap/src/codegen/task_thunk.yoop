@@ -142,3 +142,22 @@ export function emitTaskRuntimeDeclarations(ref e: Emitter): string {
   if (err.len > 0) { return err; }
   return externDeclare(ref e, "yoop_task_free_sync_pair", "void", ["ptr"], false);
 }
+
+// The `declare` lines the four `Task<T>` INTRINSICS call into, on their own
+// flag rather than on `hasTasks`. A module that only ever holds a handle
+// somebody else spawned still cancels and polls it, and declares no `task` -
+// std/core/concurrency.yoop's `awaitTask` is that module.
+//
+//   declare void @yoop_task_cancel(ptr)
+//   declare i32 @yoop_task_is_done(ptr)
+//   declare i32 @yoop_task_arm_complete(ptr)
+//   declare i32 @yoop_task_wait_until_ns(ptr, i64)
+export function emitTaskIntrinsicDeclarations(ref e: Emitter): string {
+  let err = externDeclare(ref e, "yoop_task_cancel", "void", ["ptr"], false);
+  if (err.len > 0) { return err; }
+  err = externDeclare(ref e, "yoop_task_is_done", "i32", ["ptr"], false);
+  if (err.len > 0) { return err; }
+  err = externDeclare(ref e, "yoop_task_arm_complete", "i32", ["ptr"], false);
+  if (err.len > 0) { return err; }
+  return externDeclare(ref e, "yoop_task_wait_until_ns", "i32", ["ptr", "i64"], false);
+}

@@ -152,6 +152,12 @@ export enum TokenTags {
 export function getTokenPrecedence(tag: TokenTags): int {
   switch(tag) {
     case TokenTags.EQ: { return 10; }
+    // `a..b` builds a RANGE value rather than computing anything, and it binds
+    // looser than every arithmetic operator so `0..n + 1` is `0..(n + 1)`.
+    // Same number the reference uses, and the same reason a slice's bounds are
+    // parsed AT this precedence: that is what stops `xs[a..b]`'s first bound
+    // from swallowing the `..`.
+    case TokenTags.DOTDOT: { return 15; }
     case TokenTags.OROR: { return 20; }
     case TokenTags.ANDAND: { return 30; }
     case TokenTags.PIPE: { return 35; }

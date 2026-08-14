@@ -1,0 +1,238 @@
+module parse;
+
+// `@derive(display)` - the EXPANSION.
+//
+// The attribute parses and wraps its target (attributes.yoop); this is what
+// turns the wrapper into a real `toString`. The shape is the reference's
+// (src/jsyoopderive/expand.js): generate the method as Yoop SOURCE TEXT from
+// the field annotations (derive_text.yoop), reparse it into the SAME arena,
+// splice the METHOD_DECL into the declaration's member run, and merge `Display`
+// into its `implements` clause. Downstream passes then see a declaration that
+// is indistinguishable from one whose author wrote the method out.
+//
+// WHERE it runs is the one thing that is not the reference's. There, expansion
+// is the first step of typechecking; here it runs at LOAD time, right after a
+// file is parsed, because that is the only place the module's arena is
+// reachable as something to write to - typecheck borrows the graph and reads a
+// Module by value, so a grafted node would land in a copy and codegen would
+// never see it. Nothing else depends on the ordering: the expansion is
+// syntactic, so there is nothing for it to learn from a later pass.
+//
+// The ATTRIBUTE node is LEFT in place rather than replaced by its target.
+// `declOf` already looks through one, so every pass reads the declaration
+// either way, and leaving it keeps the top-level body run untouched - which
+// matters here because a file's imports are recorded by index into it.
+
+import { Result } from "std/core/types.yoop";
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { Text }, * as txt from "std/core/text.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import * as str from "std/core/strings.yoop";
+import { AST, ASTNode, ASTNodeKind, NodeId, childAt, declOf, nodeAt } from "../ast";
+import { SourceLocation } from "../diagnostics";
+
+const DERIVE_ATTRIBUTE: string = "derive";
+const DISPLAY_TRAIT: string = "Display";
+
+// A refusal from the expansion, carrying the declaration's own location so the
+// loader can render it the way it renders a parse error.
+export type DeriveError {
+  message: string,
+  sourceLoc: SourceLocation,
+}
+
+// Expand every `@derive(display)` at this file's top level, in place.
+//
+// The arena is MOVED in and back out, for the same reason `parseInto` moves
+// one: the reparse of each generated method appends to it, and the caller has
+// to end up holding the grown arena rather than a stale copy of its header.
+export function expandDerives(ast: AST, root: NodeId): Result<AST, DeriveError> propagates<disposable> {
+  let cur: AST = ast;
+  // Each reparse sets `ast.root` to its own throwaway PROGRAM node. The file's
+  // real root is what the module graph recorded, so put it back.
+  const savedRoot: NodeId = cur.root;
+  const program = nodeAt(ref cur, root);
+  let i: usize = 0;
+  while (i < program.childCount) {
+    const childId = childAt(ref cur, program, i);
+    i += 1;
+    const outer = nodeAt(ref cur, childId);
+    if (outer.kind != ASTNodeKind.ATTRIBUTE) {
+      continue;
+    }
+    if (!str.stringEq(outer.name, DERIVE_ATTRIBUTE)) {
+      continue;
+    }
+    const declId = declOf(ref cur, childId);
+    const declNode = nodeAt(ref cur, declId);
+    const refusal = deriveGuard(declNode);
+    if (refusal.len > 0) {
+      return Result.Err { error: { message: refusal, sourceLoc: declNode.sourceLoc } };
+    }
+    if (declaresToString(ref cur, declNode)) {
+      let word: string = "type";
+      if (declNode.kind == ASTNodeKind.VARIANT_DECL) {
+        word = "variant";
+      }
+      return Result.Err { error: {
+        message: `${word} "${declNode.name}" already defines "toString" - remove @derive(display) or the manual method`,
+        sourceLoc: declNode.sourceLoc,
+      } };
+    }
+
+    disposable src: Text = txt.make(512);
+    deriveDisplaySource(ref cur, declNode, ref src);
+    switch (parseInto(cur, txt.bytes(ref src))) {
+      case Result.Err { error: pe }: {
+        // The generated text is the compiler's, not the user's, so a parse
+        // failure here is an internal bug rather than something to act on -
+        // and saying so is what stops it reading as a mistake in the decl.
+        return Result.Err { error: {
+          message: `internal: the \`toString\` generated for @derive(display) on "${declNode.name}" did not parse: ${pe.rawMessage}`,
+          sourceLoc: declNode.sourceLoc,
+        } };
+      }
+      case Result.Ok { value: parsed }: {
+        cur = parsed.ast;
+        graftDerived(ref cur, declId, parsed.root);
+      }
+    }
+  }
+  cur.root = savedRoot;
+  return Result.Ok { value: cur };
+}
+
+// The four guard rails, in the reference's order and with its wording. Each is
+// a real refusal rather than a silent skip: a decl carrying the attribute and
+// getting no method would fail later at an interpolation, pointing at the use
+// instead of at the declaration.
+function deriveGuard(declNode: ASTNode): string {
+  const isVariant = declNode.kind == ASTNodeKind.VARIANT_DECL;
+  if (!isVariant && declNode.kind != ASTNodeKind.TYPE_DECL) {
+    return `@derive(display) only applies to a struct 'type' or 'variant' declaration`;
+  }
+  let word: string = "type";
+  if (isVariant) {
+    word = "variant";
+  }
+  // `type NodeId = usize;` - a transparent alias has an RHS in childC and no
+  // members at all, so there is nothing to render.
+  if (!isVariant && declNode.childC != 0) {
+    return `@derive(display) cannot apply to type alias "${declNode.name}" - it only applies to struct and variant declarations`;
+  }
+  // A generic needs the method substituted through every instantiation, which
+  // is the monomorphizer's business and not the parser's.
+  if (declNode.childA != 0) {
+    return `@derive(display) on generic ${word} "${declNode.name}" is not yet supported - write the Display impl manually`;
+  }
+  return "";
+}
+
+// True when the declaration already carries a `toString` of its own. Checked in
+// expandDerives rather than in deriveGuard because it reads the member run.
+function declaresToString(ref ast: AST, declNode: ASTNode): bool {
+  let i: usize = 0;
+  while (i < declNode.childCount) {
+    const member = nodeAt(ref ast, childAt(ref ast, declNode, i));
+    if (member.kind == ASTNodeKind.METHOD_DECL && str.stringEq(member.name, "toString")) {
+      return true;
+    }
+    i += 1;
+  }
+  return false;
+}
+
+// Move the generated METHOD_DECL out of its host type and into the real one.
+//
+// The member run is a CONTIGUOUS slice of `childIds`, so appending means
+// re-splicing the whole run at the end of the pool and re-pointing
+// childStart / childCount. The old slice is left where it is; nothing indexes
+// into it any more and the arena is thrown away whole.
+function graftDerived(ref ast: AST, declId: NodeId, wrapperRoot: NodeId): void {
+  const wrapperProgram = nodeAt(ref ast, wrapperRoot);
+  if (wrapperProgram.childCount == 0) {
+    return;
+  }
+  const wrapperDecl = nodeAt(ref ast, childAt(ref ast, wrapperProgram, 0));
+  if (wrapperDecl.childCount == 0) {
+    return;
+  }
+  const methodId = childAt(ref ast, wrapperDecl, 0);
+
+  let decl = nodeAt(ref ast, declId);
+  // Every location in the generated subtree points into a source buffer that
+  // exists only for the length of the reparse. Restamping the DECL's own
+  // location onto all of it is what makes a diagnostic from generated code
+  // land on the line the user wrote.
+  restampLocations(ref ast, methodId, decl.sourceLoc);
+
+  const start: usize = ast.childIds.len;
+  let k: usize = 0;
+  while (k < decl.childCount) {
+    vec.vecPush(ref ast.childIds, childAt(ref ast, decl, k));
+    k += 1;
+  }
+  vec.vecPush(ref ast.childIds, methodId);
+  decl.childStart = start;
+  decl.childCount = decl.childCount + 1;
+
+  decl.childD = mergedImplements(ref ast, decl.childD, wrapperDecl.childD);
+  vec.vecSet(ref ast.nodes, declId, decl);
+}
+
+// `implements Display`, added only if it is not already claimed.
+//
+// The generated host was parsed with the clause on it, so the annotation node
+// to add already exists and needs no hand-built node: with no clause of its
+// own, the declaration simply adopts the generated LIST.
+function mergedImplements(ref ast: AST, existing: NodeId, generated: NodeId): NodeId {
+  if (existing == 0) {
+    return generated;
+  }
+  const gen = nodeAt(ref ast, generated);
+  if (gen.childCount == 0) {
+    return existing;
+  }
+  let list = nodeAt(ref ast, existing);
+  let k: usize = 0;
+  while (k < list.childCount) {
+    const annot = nodeAt(ref ast, childAt(ref ast, list, k));
+    if (str.stringEq(annot.name, DISPLAY_TRAIT)) {
+      return existing;
+    }
+    k += 1;
+  }
+  const start: usize = ast.childIds.len;
+  k = 0;
+  while (k < list.childCount) {
+    vec.vecPush(ref ast.childIds, childAt(ref ast, list, k));
+    k += 1;
+  }
+  vec.vecPush(ref ast.childIds, childAt(ref ast, gen, 0));
+  list.childStart = start;
+  list.childCount = list.childCount + 1;
+  vec.vecSet(ref ast.nodes, existing, list);
+  return existing;
+}
+
+// Stamp one location over a whole subtree. Post-parse the arena is a tree, so
+// the walk terminates without a seen set; NodeId 0 is the absent sentinel.
+function restampLocations(ref ast: AST, id: NodeId, loc: SourceLocation): void {
+  if (id == 0) {
+    return;
+  }
+  let n = nodeAt(ref ast, id);
+  n.sourceLoc = loc;
+  vec.vecSet(ref ast.nodes, id, n);
+  restampLocations(ref ast, n.childA, loc);
+  restampLocations(ref ast, n.childB, loc);
+  restampLocations(ref ast, n.childC, loc);
+  restampLocations(ref ast, n.childD, loc);
+  restampLocations(ref ast, n.childE, loc);
+  restampLocations(ref ast, n.childF, loc);
+  let k: usize = 0;
+  while (k < n.childCount) {
+    restampLocations(ref ast, childAt(ref ast, n, k), loc);
+    k += 1;
+  }
+}

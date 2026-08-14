@@ -8,6 +8,7 @@ module typecheck;
 // always `setType` on the EXISTING slot, never a fresh intern - see the shell
 // discipline note in program.yoop.
 
+import * as str from "std/core/strings.yoop";
 import { Vec }, * as vec from "std/core/vec.yoop";
 import { Map }, * as map from "std/collections/map.yoop";
 import { disposable } from "std/core/kinds.yoop";
@@ -154,9 +155,15 @@ function fillFileShells(
         // same childB/childC slots, and no body is the only difference.
         let x: usize = 0;
         while (x < declNode.childCount) {
-          fillExternSignature(
-            ref prog, ref tm, ref m.ast, nodeAt(ref m.ast, childAt(ref m.ast, declNode, x))
-          );
+          const externNode = nodeAt(ref m.ast, childAt(ref m.ast, declNode, x));
+          // An OPAQUE `type FILE;` fills like an ordinary struct decl with no
+          // members: no fields, no methods, no traits, and `populated` set - so
+          // layout can answer questions about it without a second rule.
+          if (externNode.kind == ASTNodeKind.EXTERN_TYPE_DECL) {
+            fillStructFields(ref prog, ref tm, ref m.ast, externNode, moduleId);
+          } else {
+            fillExternSignature(ref prog, ref tm, ref m.ast, externNode);
+          }
           x += 1;
         }
       }
@@ -718,13 +725,26 @@ function checkParamKind(ref prog: Program, ref ast: AST, paramNode: ASTNode): vo
   }
 }
 
-// A vtable's fields, and the promise that it erases a real trait.
+// A vtable's slots, and the promise that it erases a real trait.
 //
-// The fields are ordinary struct fields whose types happen to be functions -
-// which is exactly what a vtable is - so this is the struct fill with one extra
-// check. Whether each field MATCHES the trait's corresponding method is not
-// checked yet: nothing can build a vtable value, so a mismatch has no way to be
-// observed, and inventing the rule before the erasure exists would be guessing.
+// Each declared field is a function TYPE and has to match the trait's method of
+// the same name with its leading `ref self` STRIPPED - a vtable slot takes the
+// erased `ctx` pointer in self's place, and the pointer is untyped precisely
+// because the concrete receiver is what the vtable forgot.
+//
+// The SLOT ORDER is the vtable's own declaration order, not the trait's. The
+// reference orders by the trait, which it can do because a JS Map iterates in
+// insertion order; the bootstrap's Map is a hash table with no order to read,
+// and the vtable's AST is the one place an order is written down that both the
+// builder and the dispatch can agree on. Nothing crosses a compiler boundary -
+// a vtable value never leaves the program that built it - so the two layouts
+// differing where a user writes the fields out of order is unobservable.
+//
+// ASYNCNESS is stamped from the TRAIT rather than read off the annotation. A
+// `=>` type is never written `async`, and an async slot has a different calling
+// convention (a coroutine handle back, a result slot argument), so the trait
+// has to be the authority or the two sides drift silently. Same rule, same
+// reason, as the reference.
 function fillVtable(
   ref prog: Program,
   ref tm: TypedModule,
@@ -746,7 +766,8 @@ function fillVtable(
   // Naming a struct there is the same class of mistake as `implements` on a
   // non-trait, and reads the same way.
   const traitAnnot = nodeAt(ref ast, declNode.childA);
-  if (traitTypeNamed(ref prog, ref tm, traitAnnot.name) == TYPE_ERROR_ID) {
+  const traitId = traitTypeNamed(ref prog, ref tm, traitAnnot.name);
+  if (traitId == TYPE_ERROR_ID) {
     reportError(
       ref prog,
       `"${traitAnnot.name}" is not a trait, so vtable "${declNode.name}" cannot erase it`,
@@ -755,24 +776,151 @@ function fillVtable(
   }
 
   let fields: Vec<Field> = vec.vecNew(declNode.childCount);
+  let methodOrder: Vec<string> = vec.vecNew(declNode.childCount);
   let i: usize = 0;
   while (i < declNode.childCount) {
     const fieldNode = nodeAt(ref ast, childAt(ref ast, declNode, i));
+    const declared = resolveTypeAnnotation(ref prog, ref tm, ref ast, fieldNode.childA);
     vec.vecPush(ref fields, {
       name: fieldNode.name,
-      typeId: resolveTypeAnnotation(ref prog, ref tm, ref ast, fieldNode.childA),
+      typeId: vtableSlotType(
+        ref prog, declNode.name, traitId, traitAnnot.name, fieldNode, declared
+      ),
     });
+    vec.vecPush(ref methodOrder, fieldNode.name);
     i += 1;
   }
+  checkVtableCoversTrait(ref prog, declNode, traitId, traitAnnot.name, ref methodOrder);
 
-  setType(ref prog, typeId, Type.Struct {
+  setType(ref prog, typeId, Type.VTable {
     decl: { name: declNode.name, module: moduleId, populated: true,
             propagatesKind: propagatedKindNameOf(ref ast, declNode) },
+    forTrait: traitId,
     fields: fields,
-    methods: map.mapNew(0, map.stringKeyOps()),
-    implementsTraits: vec.vecNew(0),
-    generic: { origin: 0, args: vec.vecNew(0) },
+    methodOrder: methodOrder,
   });
+}
+
+// One slot's type: the declared `=>` type, checked against the trait method and
+// re-interned with the trait's asyncness.
+//
+// A mismatch is reported and the DECLARED type kept, so the rest of the fill
+// keeps its shape and a second diagnostic does not pile onto the first.
+function vtableSlotType(
+  ref prog: Program,
+  vtableName: string,
+  traitId: TypeId,
+  traitName: string,
+  fieldNode: ASTNode,
+  declared: TypeId
+): TypeId {
+  if (traitId == TYPE_ERROR_ID) {
+    return declared;
+  }
+  const methodType = lookupMethod(ref prog, traitId, fieldNode.name);
+  if (methodType == TYPE_ERROR_ID) {
+    reportError(
+      ref prog,
+      `vtable "${vtableName}" has slot "${fieldNode.name}", which trait "${traitName}" does not declare`,
+      fieldNode.sourceLoc
+    );
+    return declared;
+  }
+  switch (typeAt(ref prog, declared)) {
+    case Type.Func { params: slotParams, ret: slotRet, variadic: slotVariadic,
+                     isAsync: slotAsync }: {
+      switch (typeAt(ref prog, methodType)) {
+        case Type.Func { params: mParams, ret: mRet, variadic: mVariadic, isAsync: mAsync }: {
+          // The trait signature carries `ref self` first; the slot does not.
+          if (slotParams.len + 1 != mParams.len) {
+            reportError(
+              ref prog,
+              `vtable slot "${fieldNode.name}" takes ${slotParams.len} parameter(s), but trait "${traitName}.${fieldNode.name}" takes ${mParams.len - 1} beside \`ref self\``,
+              fieldNode.sourceLoc
+            );
+            return declared;
+          }
+          let p: usize = 0;
+          while (p < slotParams.len) {
+            const want = vec.vecGet(ref mParams, p + 1);
+            const got = vec.vecGet(ref slotParams, p);
+            if (!typeAccepts(ref prog, want, got)) {
+              reportError(
+                ref prog,
+                `vtable slot "${fieldNode.name}" parameter ${p + 1} is ${formatType(ref prog, got)}, but trait "${traitName}.${fieldNode.name}" declares ${formatType(ref prog, want)}`,
+                fieldNode.sourceLoc
+              );
+              return declared;
+            }
+            p += 1;
+          }
+          if (!typeAccepts(ref prog, mRet, slotRet)) {
+            reportError(
+              ref prog,
+              `vtable slot "${fieldNode.name}" returns ${formatType(ref prog, slotRet)}, but trait "${traitName}.${fieldNode.name}" returns ${formatType(ref prog, mRet)}`,
+              fieldNode.sourceLoc
+            );
+            return declared;
+          }
+          if (slotAsync == mAsync) {
+            return declared;
+          }
+          return internType(ref prog, Type.Func {
+            params: slotParams, ret: slotRet, variadic: slotVariadic, isAsync: mAsync,
+          });
+        }
+        default: { return declared; }
+      }
+    }
+    default: {
+      reportError(
+        ref prog,
+        `vtable slot "${fieldNode.name}" is ${formatType(ref prog, declared)}, and every slot of a vtable has to be a function type`,
+        fieldNode.sourceLoc
+      );
+      return declared;
+    }
+  }
+}
+
+// Every trait method needs a slot. A missing one is refused HERE rather than at
+// the build: `Reader.from(ref s)` would otherwise store a pointer for some
+// methods and leave the rest holding whatever the stack had.
+function checkVtableCoversTrait(
+  ref prog: Program,
+  declNode: ASTNode,
+  traitId: TypeId,
+  traitName: string,
+  ref methodOrder: Vec<string>
+): void {
+  if (traitId == TYPE_ERROR_ID) {
+    return;
+  }
+  switch (typeAt(ref prog, traitId)) {
+    case Type.Trait { decl: d, methods: mm, typeParams: tp, extendsTraits: et }: {
+      for entry in map.mapIter(ref mm) {
+        if (!containsName(ref methodOrder, entry.key)) {
+          reportError(
+            ref prog,
+            `vtable "${declNode.name}" has no slot for "${entry.key}", which trait "${traitName}" requires`,
+            declNode.sourceLoc
+          );
+        }
+      }
+    }
+    default: { }
+  }
+}
+
+function containsName(ref names: Vec<string>, needle: string): bool {
+  let i: usize = 0;
+  while (i < names.len) {
+    if (str.stringEq(vec.vecGet(ref names, i), needle)) {
+      return true;
+    }
+    i += 1;
+  }
+  return false;
 }
 
 // Every type and variant decl's `implements` promise, once all fills are done.

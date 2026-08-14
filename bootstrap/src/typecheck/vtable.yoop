@@ -1,0 +1,133 @@
+module typecheck;
+
+// Building a vtable VALUE, and calling through one - the TYPE ERASURE half of
+// `vtable Name for Trait { ... }`.
+//
+// A vtable value is `{ ptr ctx, ptr m0, ptr m1, ... }`: the erased receiver
+// followed by one function pointer per slot. Three spellings reach it, and all
+// three are written `VTableName.member(...)`, which is why they share one entry
+// point here rather than sitting in three places:
+//
+//   Reader.from(ref s)        erase a CONCRETE value. ctx is its address, and
+//                             each slot holds that type's own trait-method
+//                             symbol - a method already takes `ptr self` first,
+//                             so the concrete symbol IS the erased one and no
+//                             thunk is needed.
+//   PredVT.fromFn(f, g)       erase a set of NAMED FUNCTIONS. There is no
+//                             receiver, so ctx is null and each slot holds a
+//                             shim that drops the leading ctx and forwards.
+//   Reader.read(ref r, buf)   DISPATCH: load the slot, load ctx, call
+//                             indirectly with ctx in self's place.
+//
+// The type is `Type.VTable`, filled by pass C (see fillVtable). Everything this
+// file needs is on it: the trait it erases, the slot types, and the slot ORDER
+// that the builder and the dispatch have to agree on.
+//
+// Codegen reads three decorations, all keyed by the CALL node: `vtableBuilds`
+// says which concrete type a `from` erases, `vtableFromFns` marks the shim
+// form, and `vtableSlots` carries the slot index of a dispatch. Same division
+// every other call decoration uses - pass D establishes the fact, codegen emits
+// it, and neither asks the other's question.
+
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { Map }, * as map from "std/collections/map.yoop";
+import * as str from "std/core/strings.yoop";
+import { Option } from "std/core/types.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import { AST, ASTNode, ASTNodeKind, NodeId, childAt, nodeAt } from "../ast";
+
+const VTABLE_FROM: string = "from";
+const VTABLE_FROM_FN: string = "fromFn";
+
+// No slot of this name. `usize` max would wrap in the reference, so the count
+// itself is the sentinel: an index is always below `methodOrder.len`.
+export const VTABLE_NO_SLOT: usize = 0;
+
+// The vtable a name binds, or TYPE_ERROR_ID when it binds something else.
+// Silent - the caller has the location and the better message.
+export function vtableTypeNamed(ref prog: Program, ref tm: TypedModule, name: string): TypeId {
+  const symId = lookupOwnName(ref tm, name);
+  if (symId == SYMBOL_NONE_ID) {
+    return TYPE_ERROR_ID;
+  }
+  switch (symbolAt(ref prog, symId)) {
+    case Symbol.Vtable { typeId: t }: { return t; }
+    default: { return TYPE_ERROR_ID; }
+  }
+}
+
+// The trait a vtable erases, or TYPE_ERROR_ID.
+export function vtableTraitOf(ref prog: Program, vtableType: TypeId): TypeId {
+  switch (typeAt(ref prog, vtableType)) {
+    case Type.VTable { decl: d, forTrait: ft, fields: f, methodOrder: mo }: { return ft; }
+    default: { return TYPE_ERROR_ID; }
+  }
+}
+
+// Which slot a method name occupies, plus whether it is one at all. Two answers
+// in one struct because `found` cannot ride in the index - slot 0 is real.
+export type VtableSlot {
+  found: bool,
+  index: usize,
+  slotType: TypeId,
+}
+
+export function vtableSlotNamed(ref prog: Program, vtableType: TypeId, name: string): VtableSlot {
+  switch (typeAt(ref prog, vtableType)) {
+    case Type.VTable { decl: d, forTrait: ft, fields: f, methodOrder: mo }: {
+      let i: usize = 0;
+      while (i < mo.len) {
+        if (str.stringEq(vec.vecGet(ref mo, i), name)) {
+          return { found: true, index: i, slotType: vec.vecGet(ref f, i).typeId };
+        }
+        i += 1;
+      }
+    }
+    default: { }
+  }
+  return { found: false, index: VTABLE_NO_SLOT, slotType: TYPE_ERROR_ID };
+}
+
+// How many slots a vtable has. Codegen needs it to size the store loop; pass D
+// needs it to check `fromFn`'s arity.
+export function vtableSlotCount(ref prog: Program, vtableType: TypeId): usize {
+  switch (typeAt(ref prog, vtableType)) {
+    case Type.VTable { decl: d, forTrait: ft, fields: f, methodOrder: mo }: { return mo.len; }
+    default: { return 0; }
+  }
+}
+
+export function vtableSlotNameAt(ref prog: Program, vtableType: TypeId, i: usize): string {
+  switch (typeAt(ref prog, vtableType)) {
+    case Type.VTable { decl: d, forTrait: ft, fields: f, methodOrder: mo }: {
+      if (i < mo.len) {
+        return vec.vecGet(ref mo, i);
+      }
+    }
+    default: { }
+  }
+  return "";
+}
+
+// `VTableName.member(...)`, whichever of the three it is.
+export function checkVtableCall(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  expr: ASTNode,
+  exprId: NodeId,
+  base: ASTNode,
+  vtableType: TypeId,
+  ref scope: LocalScope
+): TypeId {
+  if (str.stringEq(expr.name, VTABLE_FROM)) {
+    return checkVtableFrom(ref prog, ref tm, ref ast, expr, exprId, base, vtableType, ref scope);
+  }
+  if (str.stringEq(expr.name, VTABLE_FROM_FN)) {
+    return checkVtableFromFn(ref prog, ref tm, ref ast, expr, exprId, base, vtableType, ref scope);
+  }
+  return checkVtableDispatch(
+    ref prog, ref tm, ref ast, expr, exprId, base, vtableType, ref scope
+  );
+}
+

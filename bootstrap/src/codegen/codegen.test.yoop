@@ -597,6 +597,140 @@ suite function aTaskCallOutsideABindingIsRefusedByName(): void {
   }
 }
 
+// An intrinsic NAME is an ordinary identifier, and being one somewhere in the
+// graph does not make every call to it one. std/tls/ffi.yoop declares
+// `ctxFree(ref c: TlsCtx)` beside the allocator's `ctxFree<T>(a: T[])`, and
+// lowering its calls as the intrinsic emitted an `extractvalue` on a struct
+// pointer - invalid IR here, and a silent miscompile wherever the two shapes
+// happened to line up.
+suite function anOrdinaryFunctionMayShareAnIntrinsicsName(): void {
+  const INTRINSICS: string = "extern \"intrinsic\" from \"compiler\" { function ctxFree<T>(a: T[]): void; } ";
+
+  // The module DECLARED the intrinsic, so its unqualified call means it: a
+  // `ctx_free` call into the runtime and no `@test__ctxFree` anywhere.
+  let test theory: Case = t.asserts("a module that declared the intrinsic gets the lowering") {
+    disposable e: Emitted = emitSource(
+      `${INTRINSICS}function main(): int32 { let xs: int32[] = [1, 2]; ctxFree(xs); return 0; }`
+    );
+    const ir = text.view(ref e.ir);
+    theory.isSuccessful = occurrences(ir, "call void @yoop_ctx_free(ptr ") == 1 &&
+      occurrences(ir, "@test__ctxFree") == 0;
+    theory.detail = `codegen said "${e.error}"`;
+  }
+
+  // And the shadowing case, which needs two MODULES: one declares the intrinsic
+  // and the other declares an ordinary function of the same name and calls
+  // both. The unqualified call is the function; the qualified one through the
+  // namespace is still the intrinsic.
+  let test theory: Case = t.asserts("an unqualified call reaches the module's own function") {
+    disposable e: Emitted = emitFixture("intrinsic_shadow.yoop");
+    const ir = text.view(ref e.ir);
+    // Two hits: the `define` line and the call. Matched without the module
+    // id, which carries the module's POSITION in the graph and so moves with
+    // whatever else the graph happens to hold.
+    theory.isSuccessful = occurrences(ir, "__ctxFree(ptr ") == 2;
+    theory.detail = `codegen said "${e.error}"; the local ctxFree was lowered as the intrinsic`;
+  }
+
+  let test theory: Case = t.asserts("and the qualified one in the same file still reaches the intrinsic") {
+    disposable e: Emitted = emitFixture("intrinsic_shadow.yoop");
+    const ir = text.view(ref e.ir);
+    theory.isSuccessful = occurrences(ir, "call void @yoop_ctx_free(ptr ") == 1 &&
+      occurrences(ir, "call ptr @yoop_ctx_alloc(") == 1;
+    theory.detail = `codegen said "${e.error}"`;
+  }
+}
+
+// ----- the `Task<T>` intrinsics ----------------------------------------------
+//
+// `cancel`, `isDone`, `armComplete` and `waitUntil`. Three of the four are a
+// single call into runtime/yoop_runtime.c, and the assertions here are about
+// the SYMBOL NAMES and the argument types - which are a contract with C that
+// nothing else in the tree would notice being wrong. A misspelled one is a link
+// failure; a `waitUntil` handed an i32 deadline where the C side reads a
+// uint64_t is a garbage timeout that still links.
+//
+// The behaviour is asserted end to end in tests/slice/task_intrinsics.yoop.
+// What is here is what a running program cannot show: that the declares exist,
+// that they exist only when something used them, and that the three-way switch
+// over the runtime's outcome names all three cases.
+
+const TASK_INTRINSICS: string = "extern \"intrinsic\" from \"compiler\" { function cancel<T>(h: Task<T>): void; function isDone<T>(h: Task<T>): c_int; function armComplete<T>(h: Task<T>): c_int; function waitUntil<T>(h: Task<T>, deadline_ns: uint64): WaitResult<T>; } ";
+const WAIT_RESULT: string = "variant WaitResult<T> { Done { value: T }, Timeout, Cancelled, } ";
+
+suite function theTaskIntrinsicsLowerToRuntimeCalls(): void {
+  const src = `${TASK_KINDS}${TASK_INTRINSICS}task w(): int32 { return 1; } function main(): int32 { pooled h = w(); const d: c_int = isDone(h); const a: c_int = armComplete(h); cancel(h); return d + a; }`;
+
+  let test theory: Case = t.asserts("each of the three lowers to its own runtime call") {
+    disposable e: Emitted = emitSource(src);
+    const ir = text.view(ref e.ir);
+    theory.isSuccessful = occurrences(ir, "call i32 @yoop_task_is_done(ptr ") == 1 &&
+      occurrences(ir, "call i32 @yoop_task_arm_complete(ptr ") == 1 &&
+      occurrences(ir, "call void @yoop_task_cancel(ptr ") == 1;
+    theory.detail = `codegen said "${e.error}"`;
+  }
+
+  // The declares ride on their OWN flag rather than on `hasTasks`, because a
+  // module that only ever holds a handle somebody else spawned still polls it.
+  let test theory: Case = t.asserts("the declares are emitted with the right signatures") {
+    disposable e: Emitted = emitSource(src);
+    const ir = text.view(ref e.ir);
+    theory.isSuccessful = occurrences(ir, "declare i32 @yoop_task_is_done(ptr)") == 1 &&
+      occurrences(ir, "declare i32 @yoop_task_arm_complete(ptr)") == 1 &&
+      occurrences(ir, "declare void @yoop_task_cancel(ptr)") == 1 &&
+      occurrences(ir, "declare i32 @yoop_task_wait_until_ns(ptr, i64)") == 1;
+    theory.detail = `codegen said "${e.error}"`;
+  }
+
+  // A program with a task but no intrinsic call declares none of them. The flag
+  // is what makes that true, and a program full of unused declares is how you
+  // stop noticing that a symbol went missing.
+  let test theory: Case = t.asserts("a task program that calls none of them declares none of them") {
+    disposable e: Emitted = emitSource(
+      `${TASK_KINDS}task w(): int32 { return 1; } function main(): int32 { pooled h = w(); return 0; }`
+    );
+    const ir = text.view(ref e.ir);
+    theory.isSuccessful = occurrences(ir, "@yoop_task_is_done") == 0 &&
+      occurrences(ir, "@yoop_task_wait_until_ns") == 0;
+    theory.detail = `codegen said "${e.error}"`;
+  }
+}
+
+// `waitUntil` is the one with shape: the runtime answers with an i32 and the
+// language hands back a three-case variant, so the lowering is a jump table
+// with one arm per case and only the `Done` arm reads the task's result.
+suite function waitUntilBuildsTheWaitResultVariant(): void {
+  const src = `${TASK_KINDS}${WAIT_RESULT}${TASK_INTRINSICS}task w(): int32 { return 1; } function main(): int32 { pooled h = w(); const r: WaitResult<int32> = waitUntil(h, uint64(5)); return 0; }`;
+
+  let test theory: Case = t.asserts("it calls the bounded wait with a 64-bit deadline") {
+    disposable e: Emitted = emitSource(src);
+    theory.isSuccessful = occurrences(text.view(ref e.ir), "call i32 @yoop_task_wait_until_ns(ptr ") == 1;
+    theory.detail = `codegen said "${e.error}"`;
+  }
+
+  // Two named cases and a DEFAULT, not three named ones. An outcome the runtime
+  // grows later reads as Cancelled - "this task is not going to produce a
+  // value" - which is the safe reading of any extension.
+  let test theory: Case = t.asserts("the outcome dispatches through a two-case switch with a default") {
+    disposable e: Emitted = emitSource(src);
+    const ir = text.view(ref e.ir);
+    theory.isSuccessful = occurrences(ir, "switch i32 %t") == 1 &&
+      occurrences(ir, "i32 0, label %L") == 1 &&
+      occurrences(ir, "i32 1, label %L") == 1;
+    theory.detail = `codegen said "${e.error}"`;
+  }
+
+  // Byte 48, exactly as `wait` reads it. The handle's prefix layout is
+  // universal, so this site never names the task function the handle came from.
+  let test theory: Case = t.asserts("the Done arm reads the result at byte 48 of the handle") {
+    disposable e: Emitted = emitSource(src);
+    const ir = text.view(ref e.ir);
+    theory.isSuccessful = occurrences(ir, "getelementptr inbounds i8, ptr %t") > 0 &&
+      occurrences(ir, ", i64 48") == 1;
+    theory.detail = `codegen said "${e.error}"`;
+  }
+}
+
 type Emitted implements Disposable propagates<disposable> {
   ir: Text,               // empty when `error` is set
   error: string,          // "" when codegen succeeded
@@ -605,6 +739,88 @@ type Emitted implements Disposable propagates<disposable> {
   function dispose(ref self): void {
     Disposable.dispose(ref self.ir);
     Disposable.dispose(ref self.linkLibraries);
+  }
+}
+
+// A vtable VALUE is `{ ptr ctx, ptr m0, ... }`, and getting the ctx slot wrong
+// is a call through the wrong offset rather than anything a verifier catches -
+// which is why these assert the OFFSETS and not just that something was
+// emitted.
+suite function aVtableValueCarriesACtxSlot(): void {
+  const VT: string = "trait H { function handle(ref self, n: int32): int32; } vtable D for H { handle: (n: int32) => int32, } type C implements H { v: int32, function handle(ref self, n: int32): int32 { return self.v; } } ";
+
+  let test theory: Case = t.asserts("the type definition is one ptr per slot, plus the ctx") {
+    disposable e: Emitted = emitSource(`${VT}function main(): int32 { return 0; }`);
+    const ir = text.view(ref e.ir);
+    theory.isSuccessful = occurrences(ir, "%vtable.test__D = type { ptr, ptr }") == 1;
+    theory.detail = `codegen said "${e.error}"; wanted a two-pointer vtable definition`;
+  }
+
+  let test theory: Case = t.asserts("`from` stores the receiver at 0 and the method at 1") {
+    disposable e: Emitted = emitSource(
+      `${VT}function main(): int32 { let c: C = { v: 7 }; let d: D = D.from(ref c); return 0; }`
+    );
+    const ir = text.view(ref e.ir);
+    theory.isSuccessful =
+      occurrences(ir, "%vtable.test__D, ptr %sc.3.addr, i32 0, i32 0") == 1 &&
+      occurrences(ir, "store ptr %c.2.addr, ptr %t3") == 1 &&
+      occurrences(ir, "%vtable.test__D, ptr %sc.3.addr, i32 0, i32 1") == 1 &&
+      occurrences(ir, "store ptr @test__C__handle, ptr %t4") == 1;
+    theory.detail = `codegen said "${e.error}"; the erasure does not fill both slots`;
+  }
+
+  // No thunk: a method already takes `ptr self` first, so the CONCRETE symbol
+  // is directly usable as the erased one. A shim here would be dead weight.
+  let test theory: Case = t.asserts("`from` emits no wrapper around the method") {
+    disposable e: Emitted = emitSource(
+      `${VT}function main(): int32 { let c: C = { v: 7 }; let d: D = D.from(ref c); return 0; }`
+    );
+    const ir = text.view(ref e.ir);
+    theory.isSuccessful = occurrences(ir, "yoop_fromfn_shim") == 0;
+    theory.detail = `codegen said "${e.error}"; an erasure from a struct grew a shim`;
+  }
+
+  let test theory: Case = t.asserts("a dispatch loads ctx and the slot, then calls indirectly") {
+    disposable e: Emitted = emitSource(
+      `${VT}function main(): int32 { let c: C = { v: 7 }; let d: D = D.from(ref c); return D.handle(ref d, 1); }`
+    );
+    const ir = text.view(ref e.ir);
+    theory.isSuccessful =
+      occurrences(ir, "%vtable.test__D, ptr %d.4.addr, i32 0, i32 0") == 1 &&
+      occurrences(ir, "%vtable.test__D, ptr %d.4.addr, i32 0, i32 1") == 1 &&
+      occurrences(ir, "= call i32 %t9(ptr %t7, i32 1)") == 1;
+    theory.detail = `codegen said "${e.error}"; the dispatch is not an indirect call`;
+  }
+}
+
+// `fromFn` has no receiver, so ctx is null and each slot holds a generated shim
+// that drops the leading pointer and forwards. One shim per target symbol: two
+// defines of one name is an invalid redefinition rather than a duplicate.
+suite function fromFnNullsCtxAndEmitsOneShimPerTarget(): void {
+  const VT: string = "trait P { function test(ref self, n: int32): bool; } vtable PV for P { test: (n: int32) => bool, } function isPos(n: int32): bool { return n > 0; } ";
+
+  let test theory: Case = t.asserts("ctx is null and the slot holds the shim") {
+    disposable e: Emitted = emitSource(
+      `${VT}function main(): int32 { let v: PV = PV.fromFn(isPos); return 0; }`
+    );
+    const ir = text.view(ref e.ir);
+    theory.isSuccessful =
+      occurrences(ir, "store ptr null, ptr %t") == 1 &&
+      occurrences(ir, "define i1 @yoop_fromfn_shim__test__isPos(ptr %ctx, i32 %a0) {") == 1 &&
+      occurrences(ir, "call i1 @test__isPos(i32 %a0)") == 1 &&
+      occurrences(ir, "store ptr @yoop_fromfn_shim__test__isPos, ptr %t") == 1;
+    theory.detail = `codegen said "${e.error}"; the fromFn shim is wrong`;
+  }
+
+  let test theory: Case = t.asserts("two fromFn calls on one function share ONE shim") {
+    disposable e: Emitted = emitSource(
+      `${VT}function main(): int32 { let a: PV = PV.fromFn(isPos); let b: PV = PV.fromFn(isPos); return 0; }`
+    );
+    const ir = text.view(ref e.ir);
+    theory.isSuccessful =
+      occurrences(ir, "define i1 @yoop_fromfn_shim__test__isPos") == 1 &&
+      occurrences(ir, "store ptr @yoop_fromfn_shim__test__isPos, ptr %t") == 2;
+    theory.detail = `codegen said "${e.error}"; the shim was emitted twice`;
   }
 }
 

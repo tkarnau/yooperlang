@@ -1,0 +1,146 @@
+module codegen;
+
+// Calling THROUGH a vtable - the indirect half.
+//
+// Two loads and one call: ctx out of slot 0, the function pointer out of the
+// named slot, then `call ... %fnPtr(ptr %ctx, ...)`. The receiver the user
+// wrote (`ref d`) is the VTABLE, not the erased value, so it does not travel as
+// an argument - the ctx it holds goes in `self`'s place instead, which is the
+// one place a vtable call differs from an ordinary indirect one.
+//
+// The slot LOAD is exported because the async dispatch needs exactly the same
+// two loads and a different call, and await_op.yoop owns the call shape (a
+// trailing result slot, a coroutine handle back) beside the drive loop it
+// feeds.
+
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { Text }, * as text from "std/core/text.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import { ASTNode, NodeId, childAt, nodeAt } from "../ast";
+import { Type, TypeId, typeAt } from "../typecheck";
+
+// `PredDispatcher.test(ref pred, ch)` - load ctx and the slot, call through it.
+//
+// The SYNC half. An async slot returns a coroutine handle and takes the
+// caller's result slot, and driving that is await_op.yoop's business.
+function emitVtableDispatch(
+  ref cx: Cx,
+  expr: ASTNode,
+  exprId: NodeId,
+  slotIndex: usize,
+  ref out: Operand
+): string {
+  let ctx: usize = 0;
+  let fnPtr: usize = 0;
+  const err = emitVtableSlotLoad(ref cx, expr, slotIndex, ref ctx, ref fnPtr);
+  if (err.len > 0) {
+    return err;
+  }
+
+  disposable args: Vec<CallArg> = vec.vecNew(4);
+  vec.vecPush(ref args, { ty: "ptr", value: Operand.Temp { id: ctx } });
+  const aerr = emitDispatchArgs(ref cx, expr, ref args);
+  if (aerr.len > 0) {
+    return aerr;
+  }
+
+  const retTy = typeOf(ref cx, exprId);
+  const isVoid = text.equals(retTy, "void");
+  let dest: usize = 0;
+  if (!isVoid) {
+    dest = freshTemp(cx.e);
+  }
+  emitCallIndirect(ref cx, dest, retTy, fnPtr, ref args);
+  if (isVoid) {
+    out = Operand.None;
+  } else {
+    out = Operand.Temp { id: dest };
+  }
+  return "";
+}
+
+// The two loads every dispatch begins with, shared with the async one.
+//
+//     %t1 = getelementptr inbounds %vtable.m__PredVT, ptr %pred.1.addr, i32 0, i32 0
+//     %t2 = load ptr, ptr %t1                        the erased receiver
+//     %t3 = getelementptr inbounds %vtable.m__PredVT, ptr %pred.1.addr, i32 0, i32 1
+//     %t4 = load ptr, ptr %t3                        the slot
+export function emitVtableSlotLoad(
+  ref cx: Cx,
+  expr: ASTNode,
+  slotIndex: usize,
+  ref ctx: usize,
+  ref fnPtr: usize
+): string {
+  let vtAddr: Operand = Operand.None;
+  const err = emitVtableReceiver(ref cx, expr, ref vtAddr);
+  if (err.len > 0) {
+    return err;
+  }
+  // The receiver is `ref VT`, so the vtable's own LLVM type is one deref away.
+  // Read off the ARGUMENT rather than off the call, because a dispatch's node
+  // type is the slot's RETURN.
+  const args = nodeAt(cx.ast, expr.childA);
+  const vtLlvm = pointeeTypeOf(ref cx, childAt(cx.ast, args, 0));
+
+  const ctxGep = freshTemp(cx.e);
+  emitGepFieldOfAddr(ref cx, ctxGep, vtLlvm, vtAddr, VTABLE_CTX_INDEX);
+  ctx = freshTemp(cx.e);
+  emitLoadFromPtr(ref cx, ctx, "ptr", ctxGep);
+
+  const slotGep = freshTemp(cx.e);
+  emitGepFieldOfAddr(ref cx, slotGep, vtLlvm, vtAddr, slotIndex + VTABLE_FIRST_SLOT);
+  fnPtr = freshTemp(cx.e);
+  emitLoadFromPtr(ref cx, fnPtr, "ptr", slotGep);
+  return "";
+}
+
+// Every argument PAST the vtable receiver, in call order.
+export function emitDispatchArgs(ref cx: Cx, expr: ASTNode, ref args: Vec<CallArg>): string {
+  if (expr.childA == 0) {
+    return "";
+  }
+  const list = nodeAt(cx.ast, expr.childA);
+  let i: usize = 1;
+  while (i < list.childCount) {
+    const argId = childAt(cx.ast, list, i);
+    let value: Operand = Operand.None;
+    const err = emitExpr(ref cx, argId, ref value);
+    if (err.len > 0) {
+      return err;
+    }
+    vec.vecPush(ref args, { ty: typeOf(ref cx, argId), value: value });
+    i += 1;
+  }
+  return "";
+}
+
+// The first argument's operand: the receiver of a `from`, the vtable of a
+// dispatch. Both are written `ref x` and both evaluate to an address.
+function emitVtableReceiver(ref cx: Cx, expr: ASTNode, ref out: Operand): string {
+  if (expr.childA == 0) {
+    return internalError("a vtable call reached codegen with no arguments", expr.name);
+  }
+  const list = nodeAt(cx.ast, expr.childA);
+  if (list.childCount == 0) {
+    return internalError("a vtable call reached codegen with no arguments", expr.name);
+  }
+  return emitExpr(ref cx, childAt(cx.ast, list, 0), ref out);
+}
+
+// A slot's LLVM signature, split the way an emitter wants it: the return type
+// back, the parameter types pushed onto `params`.
+export function slotSignature(ref cx: Cx, slotType: TypeId, ref params: Vec<string>): string {
+  switch (typeAt(cx.prog, slotType)) {
+    case Type.Func { params: p, ret: r, variadic: v, isAsync: a }: {
+      let i: usize = 0;
+      while (i < p.len) {
+        vec.vecPush(ref params, llvmType(cx.prog, vec.vecGet(ref p, i)));
+        i += 1;
+      }
+      return llvmType(cx.prog, r);
+    }
+    default: { return "void"; }
+  }
+}
+

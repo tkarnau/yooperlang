@@ -1,0 +1,87 @@
+module parse;
+
+// `unsafe_ptr.<op>(...)` - the four raw-pointer operations.
+//
+//   unsafe_ptr.cast<T>(p)       reinterpret the pointee. LLVM pointers are
+//                               opaque, so this is a TYPE change and no
+//                               instruction at all
+//   unsafe_ptr.toInt(p)         the address as an integer
+//   unsafe_ptr.fromInt<T>(n)    an integer back as a pointer
+//   unsafe_ptr.toArray<T>(p, n) borrow a (pointer, length) pair as `T[]`,
+//                               which is what wraps a malloc'd buffer as
+//                               something the language can index
+//
+// `unsafe_ptr` is a TYPE NAME rather than a namespace, so there is nothing to
+// resolve the left side against and the whole form is recognized by TEXT. The
+// reference does the same, in the same place, and for the same reason. An
+// `unsafe_ptr` followed by a `.` and any other member falls back to an ordinary
+// identifier, so a local called `unsafe_ptr` stays legal.
+//
+// All four land in one node kind, told apart by `name`:
+//
+//   UNSAFE_PTR_CAST
+//     name     the op, one of the four spellings below
+//     childA   the operand
+//     childB   the type argument, or 0 for `toInt`
+//     childC   the LENGTH, for `toArray` only
+
+import { Result } from "std/core/types.yoop";
+import { ASTNode, ASTNodeKind } from "../ast";
+import { TokenTags } from "../lex";
+import * as str from "std/core/strings.yoop";
+import { ParsingError } from "../diagnostics";
+
+// The type name the four operations hang off. Spelled here rather than imported
+// from typecheck, which sits ABOVE parse in the dependency order.
+export const UNSAFE_PTR_NAME: string = "unsafe_ptr";
+
+export const UNSAFE_PTR_OP_CAST: string = "cast";
+export const UNSAFE_PTR_OP_TO_INT: string = "toInt";
+export const UNSAFE_PTR_OP_FROM_INT: string = "fromInt";
+export const UNSAFE_PTR_OP_TO_ARRAY: string = "toArray";
+
+// True when an `unsafe_ptr` just consumed is followed by `.` and one of the
+// four op names. Anything else is an ordinary identifier with a field access
+// after it, which is the caller's fall-through.
+export function atUnsafePtrOp(ref ps: ParserState): bool {
+  if (SelfLexing.peek(ref ps).tag != TokenTags.DOT) {
+    return false;
+  }
+  return isUnsafePtrOpName(peekAheadText(ref ps, 1));
+}
+
+function isUnsafePtrOpName(member: string): bool {
+  return str.stringEq(member, UNSAFE_PTR_OP_CAST)
+    || str.stringEq(member, UNSAFE_PTR_OP_TO_INT)
+    || str.stringEq(member, UNSAFE_PTR_OP_FROM_INT)
+    || str.stringEq(member, UNSAFE_PTR_OP_TO_ARRAY);
+}
+
+// Everything after the `unsafe_ptr` the caller already consumed. `atUnsafePtrOp`
+// gated this, so the `.` and the op name are both known to be there.
+export function parseUnsafePtrOpRest(ref ps: ParserState): Result<ASTNode, ParsingError> {
+  let node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.UNSAFE_PTR_CAST);
+  SelfLexing.expect(ref ps, TokenTags.DOT)?;
+  node.name = parseIdentAsName(ref ps)?;
+
+  // `toInt` is the one with no type argument: it answers with an integer, and
+  // which integer is not a choice.
+  if (!str.stringEq(node.name, UNSAFE_PTR_OP_TO_INT)) {
+    SelfLexing.expect(ref ps, TokenTags.LT)?;
+    node.childB = parseTypeAnnotation(ref ps)?;
+    consumeClosingGt(ref ps)?;
+  }
+
+  SelfLexing.expect(ref ps, TokenTags.LPAREN)?;
+  node.childA = parseExpression(ref ps, 0)?;
+  if (str.stringEq(node.name, UNSAFE_PTR_OP_TO_ARRAY)) {
+    SelfLexing.expect(ref ps, TokenTags.COMMA)?;
+    node.childC = parseExpression(ref ps, 0)?;
+  }
+  SelfLexing.expect(ref ps, TokenTags.RPAREN)?;
+
+  // The NODE rather than its id: the caller is in the middle of parsePrimary,
+  // whose postfix loop pushes whatever it ends up with. Handing back an id here
+  // would push twice.
+  return Result.Ok { value: node };
+}

@@ -1,0 +1,178 @@
+module codegen;
+
+// `unsafe_ptr.cast<T>(p)`, `.toInt(p)`, `.fromInt<T>(n)` and `.toArray<T>(p, n)`.
+//
+// Three of the four cost between zero and one instruction, because LLVM's
+// pointers are OPAQUE: a `ptr` is a `ptr` whatever it points at, so `cast` is a
+// change of TYPE and nothing else, and pass D already made it.
+//
+//   cast      no instruction. The operand IS the answer
+//   toInt     ptrtoint
+//   fromInt   inttoptr
+//   toArray   two insertvalues - the same `{ ptr, i64 }` descriptor a slice
+//             builds, over memory nothing here owns
+//
+// The instruction TEXT is in instr_ptr.yoop beside this, per the walk / emit /
+// append split the rest of codegen follows.
+
+import { ASTNode, NodeId, nodeAt } from "../ast";
+import { TokenTags } from "../lex";
+import { UNSAFE_PTR_OP_CAST, UNSAFE_PTR_OP_TO_INT, UNSAFE_PTR_OP_FROM_INT,
+  UNSAFE_PTR_OP_TO_ARRAY } from "../parse";
+import { Text }, * as text from "std/core/text.yoop";
+
+export function emitUnsafePtrOp(ref cx: Cx, expr: ASTNode, exprId: NodeId, ref out: Operand): string {
+  if (text.equals(expr.name, UNSAFE_PTR_OP_TO_ARRAY)) {
+    return emitPtrToArray(ref cx, expr, exprId, ref out);
+  }
+
+  let operand: Operand = Operand.None;
+  const oerr = emitExpr(ref cx, expr.childA, ref operand);
+  if (oerr.len > 0) {
+    return oerr;
+  }
+
+  // A reinterpret with opaque pointers is the operand, unchanged.
+  if (text.equals(expr.name, UNSAFE_PTR_OP_CAST)) {
+    out = operand;
+    return "";
+  }
+
+  const dest = freshTemp(cx.e);
+  if (text.equals(expr.name, UNSAFE_PTR_OP_TO_INT)) {
+    emitPtrToInt(ref cx, dest, PTR_INT_TYPE, operand);
+    out = Operand.Temp { id: dest };
+    return "";
+  }
+  if (text.equals(expr.name, UNSAFE_PTR_OP_FROM_INT)) {
+    // The operand was checked against `usize`, so it arrives at pointer width
+    // and needs no widening of its own.
+    emitIntToPtr(ref cx, dest, PTR_INT_TYPE, operand);
+    out = Operand.Temp { id: dest };
+    return "";
+  }
+  return internalError("codegen cannot emit unsafe_ptr op", expr.name);
+}
+
+// `unsafe_ptr.toArray<T>(p, n)` - a DESCRIPTOR over memory the language did not
+// allocate. Identical in shape to what a slice builds, and deliberately so:
+// what comes out is an ordinary `T[]`, so indexing, `.len` and `.ptr` all work
+// with nothing new behind them.
+//
+//   %t1 = insertvalue { ptr, i64 } undef, ptr %p, 0
+//   %t2 = insertvalue { ptr, i64 } %t1, i64 8, 1
+function emitPtrToArray(ref cx: Cx, expr: ASTNode, exprId: NodeId, ref out: Operand): string {
+  let base: Operand = Operand.None;
+  const berr = emitExpr(ref cx, expr.childA, ref base);
+  if (berr.len > 0) {
+    return berr;
+  }
+  let length: Operand = Operand.None;
+  const lerr = emitExpr(ref cx, expr.childC, ref length);
+  if (lerr.len > 0) {
+    return lerr;
+  }
+
+  const withData = freshTemp(cx.e);
+  emitInsertValue(ref cx, withData, "undef", "ptr", base, 0);
+  const withLen = freshTemp(cx.e);
+  emitInsertValueTemp(ref cx, withLen, withData, ARRAY_LEN_TYPE, length, 1);
+  out = Operand.Temp { id: withLen };
+  return "";
+}
+
+// The integer a pointer converts to and from. LP64 on both targets, which is
+// also why `uintptr` resolves to `uint64`.
+const PTR_INT_TYPE: string = "i64";
+
+// The second field of an array descriptor.
+const ARRAY_LEN_TYPE: string = "i64";
+
+// ----- pointer ARITHMETIC ---------------------------------------------------
+//
+// `p + n` and `p - n` step by ELEMENTS, which is what `getelementptr` already
+// means - the element type is the whole instruction, so there is no size to
+// compute and no multiply to emit:
+//
+//   %t2 = getelementptr i32, ptr %t0, i64 %t1
+//
+// `p - q` is the other direction and does need the size, because the answer is
+// a COUNT of elements rather than of bytes:
+//
+//   %t3 = ptrtoint ptr %p to i64
+//   %t4 = ptrtoint ptr %q to i64
+//   %t5 = sub i64 %t3, %t4
+//   %t6 = sdiv i64 %t5, 4
+//
+// Pass D proved both pointees are the same and neither is opaque, so the
+// element type is readable off either side.
+export function emitPointerArith(ref cx: Cx, expr: ASTNode, exprId: NodeId, ref out: Operand): string {
+  let lhs: Operand = Operand.None;
+  const lerr = emitExpr(ref cx, expr.childA, ref lhs);
+  if (lerr.len > 0) {
+    return lerr;
+  }
+  let rhs: Operand = Operand.None;
+  const rerr = emitExpr(ref cx, expr.childB, ref rhs);
+  if (rerr.len > 0) {
+    return rerr;
+  }
+
+  if (isUnsafePtrAt(ref cx, expr.childA) && isUnsafePtrAt(ref cx, expr.childB)) {
+    return emitPointerDifference(ref cx, expr, ref lhs, ref rhs, ref out);
+  }
+
+  // One side is the pointer and the other is the offset, in either order.
+  let base = lhs;
+  let offsetId = expr.childB;
+  let offset = rhs;
+  if (!isUnsafePtrAt(ref cx, expr.childA)) {
+    base = rhs;
+    offsetId = expr.childA;
+    offset = lhs;
+  }
+
+  // `p - n` is `p + (0 - n)`. A gep takes a signed index, so the negation is
+  // one `sub` and the same instruction carries both operators.
+  if (expr.operator == TokenTags.MINUS) {
+    const negated = freshTemp(cx.e);
+    emitBinOp(ref cx, negated, "sub", typeOf(ref cx, offsetId), Operand.Imm { value: 0 }, offset);
+    offset = Operand.Temp { id: negated };
+  }
+
+  const dest = freshTemp(cx.e);
+  emitGepElem(ref cx, dest, pointeeLlvmType(ref cx, exprId), base, typeOf(ref cx, offsetId), offset);
+  out = Operand.Temp { id: dest };
+  return "";
+}
+
+function emitPointerDifference(
+  ref cx: Cx,
+  expr: ASTNode,
+  ref lhs: Operand,
+  ref rhs: Operand,
+  ref out: Operand
+): string {
+  const leftInt = freshTemp(cx.e);
+  emitPtrToInt(ref cx, leftInt, PTR_INT_TYPE, lhs);
+  const rightInt = freshTemp(cx.e);
+  emitPtrToInt(ref cx, rightInt, PTR_INT_TYPE, rhs);
+  const byteDiff = freshTemp(cx.e);
+  emitBinOp(
+    ref cx, byteDiff, "sub", PTR_INT_TYPE,
+    Operand.Temp { id: leftInt }, Operand.Temp { id: rightInt }
+  );
+
+  const width = pointeeSize(ref cx, expr.childA);
+  if (width <= 1) {
+    out = Operand.Temp { id: byteDiff };
+    return "";
+  }
+  const dest = freshTemp(cx.e);
+  emitBinOp(
+    ref cx, dest, "sdiv", PTR_INT_TYPE,
+    Operand.Temp { id: byteDiff }, Operand.Imm { value: uint64(width) }
+  );
+  out = Operand.Temp { id: dest };
+  return "";
+}

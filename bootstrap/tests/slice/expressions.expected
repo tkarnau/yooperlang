@@ -6,4 +6,5 @@ true || side():
 true && side():
   side ran
 a=0 b=1 c=1
+elementCompound=1161
 exit=0

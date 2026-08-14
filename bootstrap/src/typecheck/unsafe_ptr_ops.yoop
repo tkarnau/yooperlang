@@ -1,0 +1,227 @@
+module typecheck;
+
+// `unsafe_ptr.cast<T>(p)`, `.toInt(p)`, `.fromInt<T>(n)` and `.toArray<T>(p, n)`
+// - what each one is, and what each one refuses.
+//
+// All four are gated on `import.unsafe;` the way the pointer TYPE is: they
+// exist only to hand memory to C, and letting one through in a file that never
+// said so would be the gate bypassed by one character.
+//
+// The shapes, and every one of them is the reference's:
+//
+//   cast<T>(p)       p must be a pointer; the answer is `unsafe_ptr<T>`. This
+//                    is the ONLY way back from the opaque `unsafe_ptr` to a
+//                    pointee, which is what `*p` needs
+//   toInt(p)         p must be a pointer; the answer is `uintptr`, which on
+//                    LP64 is `uint64`
+//   fromInt<T>(n)    n must be an integer; the answer is `unsafe_ptr<T>`
+//   toArray<T>(p, n) p must be `unsafe_ptr<T>` EXACTLY - not some other
+//                    pointee, because the resulting `T[]` will index by T's
+//                    width - and n must be an integer. The answer is `T[]`, a
+//                    borrowing view over memory nothing here owns.
+
+import { AST, ASTNode, ASTNodeKind, nodeAt } from "../ast";
+import { TokenTags, tagSpelling } from "../lex";
+import { NodeId } from "../ast";
+import * as str from "std/core/strings.yoop";
+import { UNSAFE_PTR_OP_CAST, UNSAFE_PTR_OP_TO_INT, UNSAFE_PTR_OP_FROM_INT,
+  UNSAFE_PTR_OP_TO_ARRAY } from "../parse";
+
+export function checkUnsafePtrOp(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  expr: ASTNode,
+  ref scope: LocalScope
+): TypeId {
+  if (!tm.unsafeAllowed) {
+    reportError(
+      ref prog,
+      `'unsafe_ptr.${expr.name}' takes a raw pointer and requires 'import.unsafe;' at module top`,
+      expr.sourceLoc
+    );
+    return TYPE_ERROR_ID;
+  }
+
+  if (str.stringEq(expr.name, UNSAFE_PTR_OP_TO_INT)) {
+    const operand = checkExpr(ref prog, ref tm, ref ast, expr.childA, TYPE_ERROR_ID, ref scope);
+    if (!requirePointerOperand(ref prog, expr, operand)) {
+      return TYPE_ERROR_ID;
+    }
+    return primTypeId(PrimKind.UINT64);
+  }
+
+  const target = resolveTypeAnnotation(ref prog, ref tm, ref ast, expr.childB);
+  if (target == TYPE_ERROR_ID) {
+    return TYPE_ERROR_ID;
+  }
+
+  if (str.stringEq(expr.name, UNSAFE_PTR_OP_FROM_INT)) {
+    // The operand is checked AGAINST usize, which is what pins a bare literal
+    // to an integer rather than leaving it untyped.
+    const operand = checkExpr(
+      ref prog, ref tm, ref ast, expr.childA, primTypeId(PrimKind.USIZE), ref scope
+    );
+    if (operand != TYPE_ERROR_ID && !isIntPrimType(ref prog, operand)) {
+      reportError(
+        ref prog,
+        `unsafe_ptr.fromInt expects an integer argument, got ${formatType(ref prog, operand)}`,
+        expr.sourceLoc
+      );
+      return TYPE_ERROR_ID;
+    }
+    return internUnsafePtr(ref prog, target);
+  }
+
+  const operand = checkExpr(ref prog, ref tm, ref ast, expr.childA, TYPE_ERROR_ID, ref scope);
+  if (!requirePointerOperand(ref prog, expr, operand)) {
+    return TYPE_ERROR_ID;
+  }
+
+  if (str.stringEq(expr.name, UNSAFE_PTR_OP_CAST)) {
+    return internUnsafePtr(ref prog, target);
+  }
+
+  // toArray. The pointee has to MATCH the element type rather than merely be a
+  // pointer: the view indexes by the element's width, so a mismatch would walk
+  // the buffer at the wrong stride. `unsafe_ptr.cast` first is the spelling for
+  // a deliberate reinterpret, and the message says so.
+  if (pointeeOf(ref prog, operand) != target) {
+    reportError(
+      ref prog,
+      `unsafe_ptr.toArray<${formatType(ref prog, target)}> expects unsafe_ptr<${formatType(ref prog, target)}>, got ${formatType(ref prog, operand)} - use unsafe_ptr.cast first if a reinterpret is intended`,
+      expr.sourceLoc
+    );
+    return TYPE_ERROR_ID;
+  }
+  const length = checkExpr(
+    ref prog, ref tm, ref ast, expr.childC, primTypeId(PrimKind.USIZE), ref scope
+  );
+  if (length != TYPE_ERROR_ID && !isIntPrimType(ref prog, length)) {
+    reportError(
+      ref prog,
+      `unsafe_ptr.toArray expects an integer length, got ${formatType(ref prog, length)}`,
+      expr.sourceLoc
+    );
+    return TYPE_ERROR_ID;
+  }
+  return internArray(ref prog, target);
+}
+
+function requirePointerOperand(ref prog: Program, expr: ASTNode, operand: TypeId): bool {
+  if (operand == TYPE_ERROR_ID) {
+    return false;
+  }
+  if (!isUnsafePtrType(ref prog, operand)) {
+    reportError(
+      ref prog,
+      `unsafe_ptr.${expr.name} expects an unsafe_ptr<T>, got ${formatType(ref prog, operand)}`,
+      expr.sourceLoc
+    );
+    return false;
+  }
+  return true;
+}
+
+// The pointee of an `unsafe_ptr<T>`, or TYPE_ERROR_ID for the opaque one - the
+// reserved none-id it carries reads as "no pointee" everywhere else too.
+function pointeeOf(ref prog: Program, id: TypeId): TypeId {
+  switch (typeAt(ref prog, id)) {
+    case Type.UnsafePtr { pointee: p }: { return p; }
+    default: { return TYPE_ERROR_ID; }
+  }
+}
+
+// ----- pointer ARITHMETIC ---------------------------------------------------
+//
+// C's rules, which are the reference's:
+//
+//   ptr + int   ->  ptr    advanced by that many ELEMENTS, not bytes
+//   int + ptr   ->  ptr    the same, written the other way round
+//   ptr - int   ->  ptr
+//   ptr - ptr   ->  int64  the ELEMENT difference, and only for one pointee
+//
+// The OPAQUE `unsafe_ptr` is refused throughout: it has no pointee, so there is
+// no element width to step by and "advance by 2" has no answer. The message
+// says what to do about it, because `unsafe_ptr.cast<T>(p)` is the whole fix.
+//
+// Ordered comparison (`p < q`) is NOT here, and is not here in the reference
+// either.
+
+// True when this operator and this pair of operands is a pointer arithmetic
+// question at all. Asked before the ordinary "both sides must agree" rule,
+// because pointer arithmetic is exactly the case where they do not.
+export function isPointerArith(
+  ref prog: Program,
+  op: TokenTags,
+  left: TypeId,
+  right: TypeId
+): bool {
+  if (op != TokenTags.PLUS && op != TokenTags.MINUS) {
+    return false;
+  }
+  return isUnsafePtrType(ref prog, left) || isUnsafePtrType(ref prog, right);
+}
+
+// The result type, or TYPE_ERROR_ID with a diagnostic already reported.
+export function checkPointerArith(
+  ref prog: Program,
+  expr: ASTNode,
+  left: TypeId,
+  right: TypeId
+): TypeId {
+  const leftPointee = pointeeOf(ref prog, left);
+  const rightPointee = pointeeOf(ref prog, right);
+  const leftIsPtr = isUnsafePtrType(ref prog, left);
+  const rightIsPtr = isUnsafePtrType(ref prog, right);
+
+  if ((leftIsPtr && leftPointee == TYPE_ERROR_ID) ||
+      (rightIsPtr && rightPointee == TYPE_ERROR_ID)) {
+    reportError(
+      ref prog,
+      `cannot do arithmetic on an opaque "unsafe_ptr" - it has no element width; use 'unsafe_ptr.cast<T>(p)' first to spell out the pointee`,
+      expr.sourceLoc
+    );
+    return TYPE_ERROR_ID;
+  }
+
+  if (leftIsPtr && rightIsPtr) {
+    if (expr.operator != TokenTags.MINUS) {
+      reportError(ref prog, "two pointers can be subtracted, not added", expr.sourceLoc);
+      return TYPE_ERROR_ID;
+    }
+    if (leftPointee != rightPointee) {
+      reportError(
+        ref prog,
+        `cannot subtract ${formatType(ref prog, right)} from ${formatType(ref prog, left)} - the pointees differ, so there is no element size to divide by`,
+        expr.sourceLoc
+      );
+      return TYPE_ERROR_ID;
+    }
+    return primTypeId(PrimKind.INT64);
+  }
+
+  // One side is a pointer and the other has to be an integer.
+  let other = left;
+  if (leftIsPtr) {
+    other = right;
+  }
+  if (!isIntPrimType(ref prog, other)) {
+    reportError(
+      ref prog,
+      `operator "${tagSpelling(expr.operator)}" on a pointer takes an integer offset, got ${formatType(ref prog, other)}`,
+      expr.sourceLoc
+    );
+    return TYPE_ERROR_ID;
+  }
+  // `2 - p` is not a thing: the offset can lead an addition and never a
+  // subtraction, which is C's rule and the reference's.
+  if (!leftIsPtr && expr.operator == TokenTags.MINUS) {
+    reportError(ref prog, "an integer minus a pointer is not defined", expr.sourceLoc);
+    return TYPE_ERROR_ID;
+  }
+  if (leftIsPtr) {
+    return left;
+  }
+  return right;
+}

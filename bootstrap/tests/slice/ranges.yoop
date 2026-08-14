@@ -1,0 +1,82 @@
+// `a..b` - the range operator.
+//
+// It is SUGAR, not a loop form: `a..b` lowers to a call to `exclusive` in
+// std/core/range.yoop, and `Range` is an ordinary userland type implementing
+// `Iterable<usize>`. So the loop that walks one is the same `for ... in` any
+// other iterator gets, and neither the typechecker nor codegen learns a rule.
+//
+// Three things worth an executable fixture rather than a parse test:
+//
+//   - a Range is a VALUE. Binding it, passing it and walking it twice all
+//     work, and walking it twice gives the same elements both times (the loop
+//     owns a COPY of the iterator).
+//   - `..` binds looser than arithmetic, so `1..n - 1` is `1..(n - 1)` and not
+//     `(1..n) - 1`.
+//   - the loop body's `{` is NOT a variant payload. `for i in 0..xs.len {`
+//     ends the iterable on an `a.b` path, which is exactly the shape a
+//     constructor payload opens with, and reading it that way swallows the
+//     body.
+//
+// A slice's bounds use the same token and stay a slice: `xs[1..3]` is a view,
+// not an index by a Range. That is a precedence rule, and it is here because
+// nothing else in the tree exercises both spellings side by side.
+
+import * as rng from "std/core/range.yoop";
+
+function sumOf(r: rng.Range): int32 {
+  let total: int32 = 0;
+  for i in r {
+    total = total + int32(i);
+  }
+  return total;
+}
+
+function main(): int32 {
+  const xs: int32[] = [10, 20, 30, 40];
+
+  for i in 0..xs.len {
+    printf("xs[%zu]=%d\n", i, xs[i]);
+  }
+
+  // Looser than arithmetic: 1..(xs.len - 1).
+  for i in 1..xs.len - 1 {
+    printf("mid %zu\n", i);
+  }
+
+  // Empty and INVERTED ranges both yield nothing rather than wrapping.
+  for i in 0..0 {
+    printf("never\n");
+  }
+  for i in 3..1 {
+    printf("never\n");
+  }
+
+  // A value: bound, measured, walked twice, and passed on.
+  const rows = 0..3;
+  printf("count=%zu sum=%d\n", rng.count(ref rows), sumOf(rows));
+  for i in rows {
+    printf("a%zu\n", i);
+  }
+  for i in rows {
+    printf("b%zu\n", i);
+  }
+
+  // The lowering target by name is the same thing the operator produces.
+  for i in rng.exclusive(0, 2) {
+    printf("e%zu\n", i);
+  }
+
+  // `break` and `continue` reach the right blocks through the iterator
+  // lowering, which is not the array one.
+  for i in 0..100 {
+    if (i == 1) { continue; }
+    if (i == 3) { break; }
+    printf("k%zu\n", i);
+  }
+
+  // The same token, and still a SLICE: the bound is parsed at range
+  // precedence, so the `..` closes it rather than being folded into it.
+  const view: int32[] = xs[1..3];
+  printf("slice.len=%zu %d %d\n", view.len, view[0], view[1]);
+  return 0;
+}

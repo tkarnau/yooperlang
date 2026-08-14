@@ -1,0 +1,89 @@
+// The four `Task<T>` intrinsics, and the std AUTOLOAD that makes `task` a kind
+// this file never has to import.
+//
+// Note what is NOT here: any `import { task, pooled } from "std/core/kinds.yoop"`.
+// Those kinds are declared in std source, and the compiler pulls `core/kinds.yoop`
+// into every module graph whether anything named it or not - so `task quick(...)`
+// resolves with no import at all. task_spawn.yoop writes the import out; this
+// one deliberately does not, and both have to work.
+//
+// The std here is the stub in `task_intrinsics.std/` beside this file, for the
+// same reason task_spawn.yoop has one: the real std needs more of the language
+// than a fixture about four lowerings should drag in. Every string below goes
+// through a plain printf format rather than a template literal - the two
+// compilers render a template handed DIRECTLY to printf differently, and with a
+// stub std root the reference has no `stringConcatAll` to build one with.
+//
+// What each intrinsic is asserted on:
+//
+//   isDone      polled BEFORE and AFTER a join. Before is not asserted (a fast
+//              task may well have finished already, and a fixture must not
+//              depend on the scheduler's timing); after a `waitUntil` reported
+//              Done it MUST be 1, and that is what is printed.
+//   waitUntil   both outcomes. `quick` finishes long before a one-second
+//              deadline, and `slow` is still sleeping when a 20ms one passes.
+//              The two arms carry different payloads, which is what makes this
+//              a real three-case variant rather than a boolean.
+//   armComplete off a worker thread, where the contract is 1 = "no current
+//              task, block instead". `main` is not a task, so 1 is the right
+//              answer and any other one means the runtime lost track of who is
+//              running.
+//   cancel      flagged BEFORE the task is joined, and `waitUntil` reports
+//              Cancelled rather than Done. Advisory, so `neverPicked` may well
+//              run anyway - the assertion is about what the WAITER observes.
+//
+// Timing note: `slow` sleeps 400ms against a 20ms deadline, which is a 20x
+// margin. Nothing here asserts how long anything took.
+
+import * as conc from "std/core/concurrency.yoop";
+import { WaitResult } from "std/core/concurrency.yoop";
+
+extern "C" from "stdio.h" {
+  function printf(fmt: string, ...): int32;
+}
+
+task quick(x: int32): int32 {
+  return x * 2;
+}
+
+task slow(x: int32): int32 {
+  conc.sleepMs(400);
+  return x;
+}
+
+task neverPicked(x: int32): int32 {
+  conc.sleepMs(400);
+  return x;
+}
+
+function main(): int32 {
+  pooled a = quick(21);
+  const deadline: uint64 = conc.nowNs() + 1000000000;
+  switch (conc.waitUntil(a, deadline)) {
+    case WaitResult.Done { value: v }: { printf("quick done=%d\n", v); }
+    case WaitResult.Timeout: { printf("quick timed out\n"); }
+    case WaitResult.Cancelled: { printf("quick cancelled\n"); }
+  }
+  printf("quick isDone=%d\n", conc.isDone(a));
+
+  pooled b = slow(7);
+  const soon: uint64 = conc.nowNs() + 20000000;
+  switch (conc.waitUntil(b, soon)) {
+    case WaitResult.Done { value: v }: { printf("slow done=%d\n", v); }
+    case WaitResult.Timeout: { printf("slow timed out\n"); }
+    case WaitResult.Cancelled: { printf("slow cancelled\n"); }
+  }
+
+  // Off a worker, so there is no current task to arm on behalf of.
+  printf("arm off worker=%d\n", conc.armComplete(b));
+
+  pooled c = neverPicked(9);
+  conc.cancel(c);
+  const later: uint64 = conc.nowNs() + 1000000000;
+  switch (conc.waitUntil(c, later)) {
+    case WaitResult.Done { value: v }: { printf("cancelled task done=%d\n", v); }
+    case WaitResult.Timeout: { printf("cancelled task timed out\n"); }
+    case WaitResult.Cancelled: { printf("cancelled task cancelled\n"); }
+  }
+  return 0;
+}

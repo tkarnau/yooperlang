@@ -1,0 +1,45 @@
+// The concurrency half of std/core/kinds.yoop, and nothing else.
+//
+// A STUB, on purpose: the real file also carries `disposable`, `ephemeral` and
+// `owned`, and every one of those drags in machinery this fixture is not about.
+// The four kinds below are copied CLAUSE for clause from std/core/kinds.yoop,
+// because those clauses are what both compilers match on - `pausable` makes a
+// function a coroutine, `provides Task` makes its call site a spawn, and
+// `refcounted` versus `mustCall` is what picks a handle's storage.
+//
+// The two traits are here for the same reason: the JS reference decides whether
+// a kind can apply to a `Task<T>` by the traits it REQUIRES, so a `pooled`
+// missing `requires Shared` would silently stop being a handle binding there.
+
+export trait Shared {
+    function retain(ref self): void;
+    function release(ref self): void;
+}
+
+export trait Joinable<T> {
+    function join(ref self): T;
+}
+
+export kind async {
+    appliesTo function;
+    pausable;
+}
+
+export kind task {
+    appliesTo function;
+    pausable;
+    provides Task;
+}
+
+export kind joined {
+    appliesTo binding;
+    requires Joinable;
+    mustCall join beforeScopeEnd;
+    mustNotEscape scope;
+}
+
+export kind pooled {
+    appliesTo binding parameter field;
+    requires Shared;
+    refcounted retain release;
+}

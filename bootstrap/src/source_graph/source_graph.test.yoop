@@ -16,6 +16,7 @@ import { suite, test, Case } from "std/test.yoop";
 import * as fs from "std/fs.yoop";
 import * as str from "std/core/strings.yoop";
 import { Vec }, * as vec from "std/core/vec.yoop";
+import { Map }, * as map from "std/collections/map.yoop";
 import { disposable } from "std/core/kinds.yoop";
 import { LoadGraphResult, ModuleGraph, loadModuleGraph, moduleIdFor } from "../source_graph";
 
@@ -215,6 +216,65 @@ suite function stdImportsResolveAgainstTheGivenRoot(): void {
       case LoadGraphResult.Ok { value: graph }: {
         theory.isSuccessful = false;
         theory.detail = "a std import resolved with no std root at all";
+      }
+    }
+  }
+}
+
+// The std AUTOLOAD: two modules join every graph whether or not anything
+// imported them, because the language moved `async` / `task` / `disposable` out
+// of the compiler and into std source. A kind is reached by NAME from a
+// graph-wide registry, so being IN the graph is the whole requirement.
+suite function stdModulesAreAutoloadedIntoEveryGraph(): void {
+  const stubRoot = fixture("graph", "autoload.std");
+
+  switch (loadModuleGraph(fixture("graph", "autoload_entry.yoop"), stubRoot)) {
+    case LoadGraphResult.Err { error: e }: {
+      let test theory: Case = t.asserts("an entry importing nothing still loads") {
+        theory.isSuccessful = false;
+        theory.detail = `loading the autoload fixture against ${stubRoot} failed: ${e}`;
+      }
+    }
+    case LoadGraphResult.Ok { value: graph }: {
+      let test theory: Case = t.asserts("an entry importing nothing gets two modules beside it") {
+        theory.isSuccessful = graph.modules.len == 3;
+        theory.detail = `the autoload fixture produced ${graph.modules.len} modules, wanted 3`;
+      }
+
+      // Order is the point, not an accident: the autoloads walk BEFORE the
+      // entry so they precede every user module topologically, and traits.yoop
+      // walks after kinds.yoop because it USES a kind kinds.yoop declares.
+      let test theory: Case = t.asserts("kinds is first, traits second, the entry last") {
+        const first = vec.vecGet(ref graph.modules, 0);
+        const second = vec.vecGet(ref graph.modules, 1);
+        theory.isSuccessful = str.stringIndexOf(vec.vecGet(ref first.files, 0).absPath, "kinds.yoop") < vec.vecGet(ref first.files, 0).absPath.len
+          && str.stringIndexOf(vec.vecGet(ref second.files, 0).absPath, "traits.yoop") < vec.vecGet(ref second.files, 0).absPath.len
+          && graph.entryIndex == 2;
+        theory.detail = `entryIndex is ${graph.entryIndex}`;
+      }
+
+      // Recorded by BASE NAME, which is what a later reader asks for - the
+      // path is the graph layer's business and nobody else's.
+      let test theory: Case = t.asserts("each autoload records its module id under its base name") {
+        theory.isSuccessful = map.mapContainsKey(ref graph.autoLoadModuleIds, "kinds")
+          && map.mapContainsKey(ref graph.autoLoadModuleIds, "traits");
+        theory.detail = `recorded ${graph.autoLoadModuleIds.len} autoload id(s), wanted kinds and traits`;
+      }
+    }
+  }
+
+  // No std root is not an error, it is a graph with no std in it. Every
+  // source_graph and codegen test passes "" and would otherwise start failing
+  // for a reason that has nothing to do with what it tests.
+  let test theory: Case = t.asserts("an empty std root autoloads nothing and does not fail") {
+    switch (loadModuleGraph(fixture("graph", "autoload_entry.yoop"), "")) {
+      case LoadGraphResult.Err { error: e }: {
+        theory.isSuccessful = false;
+        theory.detail = `an empty std root turned into an error: ${e}`;
+      }
+      case LoadGraphResult.Ok { value: graph }: {
+        theory.isSuccessful = graph.modules.len == 1 && graph.autoLoadModuleIds.len == 0;
+        theory.detail = `got ${graph.modules.len} module(s) and ${graph.autoLoadModuleIds.len} autoload id(s)`;
       }
     }
   }

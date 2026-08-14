@@ -46,6 +46,46 @@ export function emitTaskRelease(ref cx: Cx, handle: Operand): void {
   emitRuntimeCall1(ref cx, "yoop_task_release", handle);
 }
 
+//   call void @yoop_task_cancel(ptr %t3)
+//
+// Set the handle's cancel flag and wake anything waiting on it. Advisory: a
+// running step is not interrupted, it observes the flag at its next park.
+export function emitTaskCancel(ref cx: Cx, handle: Operand): void {
+  emitRuntimeCall1(ref cx, "yoop_task_cancel", handle);
+}
+
+//   %t4 = call i32 @yoop_task_is_done(ptr %t3)
+//
+// 1 when the handle's state byte says finished, 0 otherwise. One atomic load in
+// the runtime; it never parks, which is what makes it usable as a loop guard.
+export function emitTaskIsDone(ref cx: Cx, dest: usize, handle: Operand): void {
+  emitRuntimeCallInt1(ref cx, dest, "yoop_task_is_done", handle);
+}
+
+//   %t4 = call i32 @yoop_task_arm_complete(ptr %t3)
+//
+// Register the CURRENT task to be made runnable when `handle` finishes, then
+// return: 0 armed, 1 no current task, 2 already done, -1 the arm failed.
+export function emitTaskArmComplete(ref cx: Cx, dest: usize, handle: Operand): void {
+  emitRuntimeCallInt1(ref cx, dest, "yoop_task_arm_complete", handle);
+}
+
+//   %t5 = call i32 @yoop_task_wait_until_ns(ptr %t3, i64 %t4)
+//
+// The BOUNDED join. Blocks like `yoop_task_wait` but gives up at the deadline,
+// and reports which of the three things happened: 0 done, 1 timed out, 2
+// cancelled. The deadline is a monotonic reading, so `nowNs() + d` is the shape.
+export function emitTaskWaitUntilNs(ref cx: Cx, dest: usize, handle: Operand, deadline: Operand): void {
+  startInstr(ref cx);
+  temp(ref cx, dest);
+  part(ref cx, " = call i32 @yoop_task_wait_until_ns(ptr ");
+  operand(ref cx, handle);
+  part(ref cx, ", i64 ");
+  operand(ref cx, deadline);
+  part(ref cx, ")");
+  endInstr(ref cx);
+}
+
 //   call void @yoop_task_settle(ptr %ts)
 //
 // The end of one task STEP. The runtime decides there whether the coroutine
@@ -197,6 +237,21 @@ export function emitSetCoroOps(ref cx: Cx): void {
 function emitRuntimeCall1(ref cx: Cx, name: string, arg: Operand): void {
   startInstr(ref cx);
   part(ref cx, "call void @");
+  part(ref cx, name);
+  part(ref cx, "(ptr ");
+  operand(ref cx, arg);
+  part(ref cx, ")");
+  endInstr(ref cx);
+}
+
+//   %t4 = call i32 @yoop_task_is_done(ptr %t3)
+//
+// The result-returning twin of emitRuntimeCall1. Every runtime predicate over a
+// handle answers with a C `int`, so the type is fixed here rather than passed.
+function emitRuntimeCallInt1(ref cx: Cx, dest: usize, name: string, arg: Operand): void {
+  startInstr(ref cx);
+  temp(ref cx, dest);
+  part(ref cx, " = call i32 @");
   part(ref cx, name);
   part(ref cx, "(ptr ");
   operand(ref cx, arg);

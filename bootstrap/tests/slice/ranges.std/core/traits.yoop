@@ -1,0 +1,16 @@
+// The Iterable half of std/core/traits.yoop, and nothing else.
+//
+// A STUB, on purpose: the real file needs Display, Into and WithContext, and
+// what this fixture is about is the `for ... in` lowering rather than the
+// trait's home. The two declarations below are copied SHAPE for shape from
+// std/core/traits.yoop, because that shape is what both compilers match on -
+// a `next` returning a two-case variant with `Yield { value: T }` and `Done`.
+
+export variant IterStep<T> {
+    Yield { value: T },
+    Done,
+}
+
+export trait Iterable<T> {
+    function next(ref self): IterStep<T>;
+}

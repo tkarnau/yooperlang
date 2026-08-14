@@ -58,6 +58,19 @@ export type ParserState implements SelfLexing propagates<disposable> {
   // that ever reads this, so every other parse site sees the tokens as they
   // are. Same trick, same reason, as the JS reference's pendingGtFromRshift.
   pendingGt: bool,
+  // True once this FILE has written an `a..b` anywhere in it. The range
+  // lowering needs a namespace import of std/core/range.yoop, and only a file
+  // that used one should pay for pulling that module into the graph. See
+  // range.yoop.
+  usedRange: bool,
+  // True while the RHS of a `for x in <expr> {` is being parsed. The iterable
+  // runs right up to the body's `{`, so an `a.b` path at the end of it would
+  // otherwise swallow that brace as a variant PAYLOAD - `for i in 0..xs.len {`
+  // reads `xs.len { ... }` as `Enum.Case { ... }`. Inside the RHS a `{` only
+  // starts a payload when it LOOKS like one, which is `{ <name> :` and is
+  // something no block can be. Same flag, same rule, as the reference's
+  // inForInIterExpr.
+  inForInIterExpr: bool,
   function buildSourcedNode(ref self, astNodeKind: ASTNodeKind): ASTNode {
     // Node loc is the CURRENT token's start (self.pos tracks where the NEXT
     // lex begins, which is past the current token).

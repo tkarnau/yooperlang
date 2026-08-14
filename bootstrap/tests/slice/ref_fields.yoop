@@ -93,6 +93,15 @@ function main(): int {
   bumpInner(ref o.mid.inner, 3);
   bumpInner(ref o.mid.inner, 3);
   printf("nested=%d\n", o.mid.inner.n);
+
+  // The same path bottoming out in an array ELEMENT rather than in a name. An
+  // element HAS an address, so the walk starts from a gep on the descriptor's
+  // data pointer instead of from a slot and the rest is unchanged. A borrow and
+  // a WRITE both go through it, which is what keeps the two in step.
+  let os: Outer[] = [{ mid: { inner: { n: 1 } } }, { mid: { inner: { n: 5 } } }];
+  bumpInner(ref os[1].mid.inner, 4);
+  os[0].mid.inner.n = 9;
+  printf("elem=%d,%d\n", os[0].mid.inner.n, os[1].mid.inner.n);
   return 0;
 }
 
