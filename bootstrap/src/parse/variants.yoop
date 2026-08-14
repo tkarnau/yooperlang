@@ -76,11 +76,13 @@ export function parseVariantDecl(ref ps: ParserState): Result<NodeId, ParsingErr
 
 // One `Case { field: T, ... }` or a bare `Case`.
 //
-//   name                    the case's name
+//   name                    the case's name, which may be a RESERVED WORD - a
+//                           case name is metadata and the keyword's grammar
+//                           role does not reach a variant body
 //   own childIds run        its FIELD_DECLs, empty for a payload-less case
 function parseVariantCase(ref ps: ParserState): Result<NodeId, ParsingError> {
   let node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.VARIANT_CASE);
-  node.name = parseIdentAsName(ref ps)?;
+  node.name = parseIdentOrKeywordAsName(ref ps)?;
 
   if (SelfLexing.peek(ref ps).tag != TokenTags.LCURLY) {
     return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
@@ -123,7 +125,10 @@ export function parseVariantPattern(ref ps: ParserState): Result<NodeId, Parsing
   node.childB = SelfLexing.pushNode(ref ps, base);
 
   SelfLexing.expect(ref ps, TokenTags.DOT)?;
-  node.name = parseIdentAsName(ref ps)?;
+  // The case NAME, which the declaration was free to spell with a reserved
+  // word, so the pattern has to be able to write it back. The VARIANT name on
+  // the left of the `.` is an ordinary identifier and stays one.
+  node.name = parseIdentOrKeywordAsName(ref ps)?;
 
   if (SelfLexing.peek(ref ps).tag == TokenTags.LCURLY) {
     node.childA = parsePatternFields(ref ps)?;
@@ -159,7 +164,10 @@ function parsePatternFields(ref ps: ParserState): Result<NodeId, ParsingError> {
     SelfLexing.peek(ref ps).tag != TokenTags.EOF
   ) {
     let field = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.STRUCT_LITERAL_FIELD);
-    field.name = parseIdentAsName(ref ps)?;
+    // The FIELD name mirrors the declaration and may be a reserved word; the
+    // BINDING below is a new local in the arm's scope and may not, because
+    // there a keyword would shadow a grammar role. Same split as the reference.
+    field.name = parseIdentOrKeywordAsName(ref ps)?;
 
     let binding = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.IDENT);
     if (SelfLexing.peek(ref ps).tag == TokenTags.COLON) {

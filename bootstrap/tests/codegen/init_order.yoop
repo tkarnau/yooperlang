@@ -1,0 +1,18 @@
+// Two MODULES, each with a module-level `let` that has to be initialized at run
+// time. `main` calls both init functions, and the order has to be the module
+// graph's topological one: `derived` reads `base`, so the leaf's init must have
+// run first or the entry reads a zero.
+//
+// The two module names share no prefix on purpose - the test finds each call by
+// its module's mangling prefix, and `seedmod_` matching `init_order_` would
+// make the assertion meaningless.
+//
+// Read by bootstrap/src/codegen/codegen.test.yoop; it is never run.
+
+import { base, lift } from "./seedmod.yoop";
+
+let derived: int32 = lift(base);
+
+function main(): int32 {
+  return derived;
+}

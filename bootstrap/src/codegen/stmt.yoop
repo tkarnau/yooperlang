@@ -58,8 +58,10 @@ export function emitBlock(
     i += 1;
   }
 
-  // Fell out the bottom: this scope's bindings are done with.
-  err = emitScopeDisposals(ref cx, disposeScopeDepth(cx.disposes) - 1);
+  // Fell out the bottom: this scope's bindings are done with. The BLOCK is the
+  // exit site pass D keyed its answers by, so a binding disposed by hand
+  // earlier in it is skipped here.
+  err = emitScopeDisposals(ref cx, disposeScopeDepth(cx.disposes) - 1, blockId);
   disposePopScope(cx.disposes);
   localsPopBlock(cx.locals);
 }
@@ -75,7 +77,7 @@ export function emitStatement(
   switch (stmt.kind) {
     case ASTNodeKind.RETURN_STATEMENT: {
       terminated = true;
-      return emitReturn(ref cx, stmt, retTy);
+      return emitReturn(ref cx, stmt, stmtId, retTy);
     }
 
     // `expr;` and `_ = expr;` alike. The value is discarded; the instructions
@@ -138,7 +140,7 @@ export function emitStatement(
       const target = innermostBreakable(ref cx);
       // Everything between here and that frame is being left, so it is
       // disposed. The reference does NOT do this - see dispose_stack.yoop.
-      const err = emitUnwindTo(ref cx, target.scopeDepth);
+      const err = emitUnwindTo(ref cx, target.scopeDepth, stmtId);
       if (err.len > 0) {
         return err;
       }
@@ -154,7 +156,7 @@ export function emitStatement(
         return internalError("continue outside a loop reached", "codegen");
       }
       const loop = innermostLoop(ref cx);
-      const cerr = emitUnwindTo(ref cx, loop.scopeDepth);
+      const cerr = emitUnwindTo(ref cx, loop.scopeDepth, stmtId);
       if (cerr.len > 0) {
         return cerr;
       }
@@ -167,9 +169,9 @@ export function emitStatement(
   }
 }
 
-function emitReturn(ref cx: Cx, stmt: ASTNode, retTy: string): string {
+function emitReturn(ref cx: Cx, stmt: ASTNode, stmtId: NodeId, retTy: string): string {
   if (stmt.childA == 0) {
-    const verr = emitUnwindTo(ref cx, 0);
+    const verr = emitUnwindTo(ref cx, 0, stmtId);
     if (verr.len > 0) {
       return verr;
     }
@@ -181,6 +183,13 @@ function emitReturn(ref cx: Cx, stmt: ASTNode, retTy: string): string {
       return "";
     }
     emitSchedulerShutdown(ref cx);
+    // A bare `return;` out of a `void` main is still C's "exit 0" - the
+    // function's emitted signature says i32 whatever the source said. See
+    // Cx.voidMain.
+    if (cx.voidMain) {
+      emitRetMainZero(ref cx);
+      return "";
+    }
     emitRetVoid(ref cx);
     return "";
   }
@@ -192,7 +201,7 @@ function emitReturn(ref cx: Cx, stmt: ASTNode, retTy: string): string {
   if (err.len > 0) {
     return err;
   }
-  const uerr = emitUnwindTo(ref cx, 0);
+  const uerr = emitUnwindTo(ref cx, 0, stmtId);
   if (uerr.len > 0) {
     return uerr;
   }

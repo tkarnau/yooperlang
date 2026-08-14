@@ -44,7 +44,8 @@ import { disposable } from "std/core/kinds.yoop";
 import { Result } from "std/core/types.yoop";
 import { AST, ASTNode, ASTNodeKind, NodeId, childAt, declOf, nodeAt } from "../ast";
 import { ModuleGraph, Module } from "../source_graph";
-import { Program, TypedModule, DECL_NONE_ID, funcInstanceAt, TYPE_VOID_ID } from "../typecheck";
+import { Program, TypedModule, DECL_NONE_ID, funcInstanceAt, TYPE_VOID_ID, TYPE_ERROR_ID,
+  isIntPrimType } from "../typecheck";
 
 // Hands back the finished IR as a Text. The caller owns it and its allocator
 // reclaims it - a `string` here would be a malloc the size of the whole module.
@@ -161,7 +162,7 @@ export function codegenProgram(ref prog: Program, ref graph: ModuleGraph): Resul
 function emitModule(ref e: Emitter, ref prog: Program, ref tm: TypedModule, m: Module): string {
   let f: usize = 0;
   while (f < m.files.len) {
-    const err = emitFile(ref e, ref prog, ref tm, m, vec.vecGet(ref m.files, f).root);
+    const err = emitFile(ref e, ref prog, ref tm, m, vec.vecGet(ref m.files, f).root, f);
     if (err.len > 0) {
       return err;
     }
@@ -178,8 +179,18 @@ function emitFile(
   ref prog: Program,
   ref tm: TypedModule,
   m: Module,
-  root: NodeId
+  root: NodeId,
+  fileIndex: usize
 ): string {
+  // The file's own init function, if its module-level `let`s owe one. First,
+  // because it is the one definition here whose CALLER (`main`) may be in any
+  // module, and emitting it beside the file that declared the globals is what
+  // keeps the store in the same arena as the initializer. See module_init.yoop.
+  const initErr = emitModuleInitFn(ref e, ref prog, ref tm, m, root, fileIndex);
+  if (initErr.len > 0) {
+    return initErr;
+  }
+
   const programNode = nodeAt(ref m.ast, root);
   let i: usize = 0;
   while (i < programNode.childCount) {
@@ -373,6 +384,7 @@ function emitFunction(
     fnRet: TYPE_VOID_ID,
     coro: noCoroFrame(),
     inMain: false,
+    voidMain: false,
   };
 
   beginFunctionBuffers(ref e);
@@ -395,12 +407,16 @@ function emitFunction(
   if (isMethod) {
     symbol = methodDefinitionSymbol(ref cx, declNode);
   }
-  // The ENTRY POINT of a program that has a task in it. `main` is where the
-  // worker pool is started, where the coroutine trampolines are handed over,
-  // and where it is all torn down again - see the scheduler prologue below and
-  // the shutdown in emitReturn.
-  cx.inMain = e.hasTasks && !isMethod && instance == NO_FUNC_INSTANCE &&
+  // The C ENTRY POINT. Asked once and read twice, because the two readers want
+  // different things from it: the scheduler's lifetime is `main` in a program
+  // that has a task, and the exit status is `main` however the program is
+  // built.
+  const isMain = !isMethod && instance == NO_FUNC_INSTANCE &&
     symbol.home.len == 0 && text.equals(symbol.name, MAIN_SYMBOL);
+  // `main` is where the worker pool is started, where the coroutine
+  // trampolines are handed over, and where it is all torn down again - see the
+  // scheduler prologue below and the shutdown in emitReturn.
+  cx.inMain = e.hasTasks && isMain;
 
   // An `async` function is a COROUTINE: it returns a handle rather than its
   // result, takes a caller-owned slot to write the result into, and carries
@@ -408,6 +424,16 @@ function emitFunction(
   let isCoro = funcIsAsync(ref cx, declNode.name);
   if (isMethod) {
     isCoro = methodIsAsync(ref cx, declNode);
+  }
+
+  // `function main(): void` is emitted with C's entry-point signature - see
+  // Cx.voidMain. `retTy` keeps saying `void`, because that is still what the
+  // BODY returns and what `?` and the coroutine trailer read; only the two
+  // places that spell the `ret` know the difference.
+  cx.voidMain = isMain && !isCoro && text.equals(retTy, "void");
+  let signatureRetTy = retTy;
+  if (cx.voidMain) {
+    signatureRetTy = MAIN_EXIT_TYPE;
   }
   if (isCoro) {
     const derr = declareCoroIntrinsics(ref e);
@@ -419,11 +445,16 @@ function emitFunction(
     emitParamPrologue(ref cx, ref params);
     openCoroBody(ref cx);
   } else {
-    emitFunctionOpen(ref cx, symbol.home, symbol.name, retTy, ref params);
+    emitFunctionOpen(ref cx, symbol.home, symbol.name, signatureRetTy, ref params);
     emitParamPrologue(ref cx, ref params);
   }
   if (cx.inMain) {
     emitSchedulerPrologue(ref cx);
+  }
+  // Every module's run-time initializers, before a line of user code and after
+  // the scheduler exists - an initializer may spawn. See module_init.yoop.
+  if (isMain) {
+    emitModuleInitCalls(ref cx);
   }
 
   let err = "";
@@ -464,7 +495,11 @@ function emitFunction(
       if (cx.inMain) {
         emitRuntimeShutdown(ref cx);
       }
-      emitRetVoid(ref cx);
+      if (cx.voidMain) {
+        emitRetMainZero(ref cx);
+      } else {
+        emitRetVoid(ref cx);
+      }
     } else {
       return internalError("no return on some path out of", declNode.name);
     }
@@ -490,6 +525,11 @@ function emitSchedulerPrologue(ref cx: Cx): void {
 
 // The C entry point's name, which mangle.yoop keeps unmangled.
 const MAIN_SYMBOL: string = "main";
+
+// What C's entry point returns. A yoop `main` may be declared `int32`, in which
+// case this is what `llvmType` already says; a `void` one is emitted with this
+// signature anyway and hands back 0. See Cx.voidMain.
+export const MAIN_EXIT_TYPE: string = "i32";
 
 // childB is the parameter NODE_LIST. Their types come from pass D's decoration,
 // which took them from the signature pass C resolved.
@@ -556,6 +596,11 @@ function declNodeHasMethods(ref ast: AST, declNode: ASTNode): bool {
 //
 // Before any function body, because a body may read one - and unlike a local,
 // a global has no declaration point inside the code that uses it.
+//
+// This walk is also where each file's INIT function is noted, in the order
+// `main` will call them: the modules arrive topologically ordered, so recording
+// them as they go past is what gives a module's initializer the guarantee that
+// everything it imported is already stored. See module_init.yoop.
 function emitModuleGlobals(ref e: Emitter, ref prog: Program, ref graph: ModuleGraph): void {
   let i: usize = 0;
   while (i < graph.modules.len) {
@@ -563,35 +608,79 @@ function emitModuleGlobals(ref e: Emitter, ref prog: Program, ref graph: ModuleG
     let tm = vec.vecGet(ref prog.modules, i);
     let f: usize = 0;
     while (f < m.files.len) {
-      const programNode = nodeAt(ref m.ast, vec.vecGet(ref m.files, f).root);
-      let d: usize = 0;
-      while (d < programNode.childCount) {
-        const declNode = nodeAt(ref m.ast, declOf(ref m.ast, childAt(ref m.ast, programNode, d)));
-        if (declNode.kind == ASTNodeKind.LET_DECL) {
-          emitOneModuleGlobal(ref e, ref prog, ref tm, declNode);
-        }
-        d += 1;
-      }
+      emitFileGlobals(ref e, ref prog, ref tm, ref m.ast, vec.vecGet(ref m.files, f).root, f);
       f += 1;
     }
     i += 1;
   }
 }
 
+// One source file's module-level `let`s.
+function emitFileGlobals(
+  ref e: Emitter,
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  root: NodeId,
+  fileIndex: usize
+): void {
+  const programNode = nodeAt(ref ast, root);
+  let needsInit = false;
+  let d: usize = 0;
+  while (d < programNode.childCount) {
+    const declNode = nodeAt(ref ast, declOf(ref ast, childAt(ref ast, programNode, d)));
+    if (declNode.kind == ASTNodeKind.LET_DECL) {
+      if (emitOneModuleGlobal(ref e, ref prog, ref tm, ref ast, declNode)) {
+        needsInit = true;
+      }
+    }
+    d += 1;
+  }
+  if (needsInit) {
+    noteModuleInit(ref e, tm.moduleId, fileIndex);
+  }
+}
+
+// True when this global's value has to be STORED at run time rather than baked
+// into the definition emitted here.
 function emitOneModuleGlobal(
   ref e: Emitter,
   ref prog: Program,
   ref tm: TypedModule,
+  ref ast: AST,
   declNode: ASTNode
-): void {
-  switch (map.mapGet(ref tm.names, declNode.name)) {
-    case Option.None: { }
+): bool {
+  const declared = moduleGlobalTypeId(ref prog, ref tm, declNode.name);
+  if (declared == TYPE_ERROR_ID) {
+    return false;
+  }
+  const ty = llvmType(ref prog, declared);
+  if (moduleGlobalNeedsStore(ref prog, ref ast, declNode, declared)) {
+    emitGlobalZeroed(ref e, tm.moduleId, declNode.name, ty);
+    return true;
+  }
+  // A baked VALUE is an integer and nothing else - see moduleGlobalIsBaked - so
+  // the symbol's own `intVal` is the whole initializer. Anything else that got
+  // here has no initializer at all, and zero is precisely what that means; it
+  // takes the zeroinitializer form because a struct or an array descriptor has
+  // no immediate to write.
+  if (!isIntPrimType(ref prog, declared)) {
+    emitGlobalZeroed(ref e, tm.moduleId, declNode.name, ty);
+    return false;
+  }
+  emitGlobalVariable(ref e, tm.moduleId, declNode.name, ty, moduleGlobalIntValue(ref prog, ref tm, declNode.name));
+  return false;
+}
+
+// The integer a baked global rides on. Its own lookup rather than one that also
+// hands back the type, because only this one caller wants it.
+function moduleGlobalIntValue(ref prog: Program, ref tm: TypedModule, name: string): int64 {
+  switch (map.mapGet(ref tm.names, name)) {
+    case Option.None: { return 0; }
     case Option.Some { value: symId }: {
       switch (symbolAt(ref prog, symId)) {
-        case Symbol.Global { typeId: t, intVal: v }: {
-          emitGlobalVariable(ref e, tm.moduleId, declNode.name, llvmType(ref prog, t), v);
-        }
-        default: { }
+        case Symbol.Global { typeId: t, intVal: v }: { return v; }
+        default: { return 0; }
       }
     }
   }

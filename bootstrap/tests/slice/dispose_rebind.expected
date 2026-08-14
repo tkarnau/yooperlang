@@ -1,0 +1,24 @@
+rebind once:
+  open 1
+  close 1
+  open 2
+  body
+  close 2
+rebind twice:
+  open 10
+  close 10
+  open 11
+  close 11
+  open 12
+  body
+  close 12
+rebind without closing:
+  open 20
+  open 21
+  body
+  close 21
+field write:
+  open 30
+  close 30
+  body
+exit=0

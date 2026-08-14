@@ -3421,6 +3421,13 @@ function codegenWithModuleId(
 
   let currentReturnType = null;
   let inMainFn = false;
+  // True while emitting a `main` DECLARED void. C's entry point returns an
+  // int, so a void `main` is emitted as `define i32 @main()` and every exit
+  // out of it hands back 0 - which is what C says a missing `return` in
+  // `main` means. `define void @main()` is ABI-illegal: nothing writes the
+  // return register, so the process exit status is whatever the last call
+  // happened to leave in it. Consumed at the same `ret` sites inMainFn is.
+  let voidMainFn = false;
   // Non-null while emitting an `async` function body. Carries the shared
   // trailer labels every `return` and every `await` branches to, so the
   // suspend/cleanup blocks exist exactly once per coroutine.
@@ -3960,7 +3967,16 @@ function codegenWithModuleId(
     // caller's own suspends. Void-returning async functions still take
     // the (unused) slot so there is one ABI rather than two.
     const isAsyncFn = !!node.isAsync;
-    const llvmRet = isAsyncFn ? "ptr" : llvmType(node.resolvedType);
+    // A `main` written `void` is emitted with C's entry-point return type.
+    // See voidMainFn above for why, and the two `ret i32 0` sites below for
+    // what it costs.
+    const prevVoidMain = voidMainFn;
+    voidMainFn = inMainFn && !isAsyncFn && isVoidReturn(node.resolvedType);
+    const llvmRet = isAsyncFn
+      ? "ptr"
+      : voidMainFn
+        ? "i32"
+        : llvmType(node.resolvedType);
     const paramParts = params.map(
       (p) => `${llvmType(p.resolvedType)} %${p.name}.arg`,
     );
@@ -4057,7 +4073,7 @@ function codegenWithModuleId(
       const last = fnLines[fnLines.length - 1].trim();
       if (!last.startsWith("ret")) {
         if (inMainFn) fnLines.push("  call void @yoop_runtime_shutdown()");
-        fnLines.push("  ret void");
+        fnLines.push(voidMainFn ? "  ret i32 0" : "  ret void");
       }
     } else if (!blockIsTerminated(fnLines)) {
       // Non-void body left an open tail block (e.g. an exhaustive `switch`
@@ -4070,6 +4086,7 @@ function codegenWithModuleId(
     finalizeFnDbg(fnLines, subprogramRef, node.sourceLoc, prologueEnd);
     lines.push(...fnLines);
     inMainFn = prevInMain;
+    voidMainFn = prevVoidMain;
     currentCoro = prevCoro;
     currentSubprogram = prevSubprogram;
   }
@@ -6727,7 +6744,8 @@ function codegenWithModuleId(
             fnLines.push(`  br label %${currentCoro.finalLabel}`);
           } else {
             if (inMainFn) fnLines.push("  call void @yoop_runtime_shutdown()");
-            fnLines.push("  ret void");
+            // A bare `return;` in a void `main` is still C's "exit 0".
+            fnLines.push(voidMainFn ? "  ret i32 0" : "  ret void");
           }
         } else {
           const r = emitExpr(node.value, fnLines);

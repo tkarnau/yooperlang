@@ -824,6 +824,181 @@ suite function fromFnNullsCtxAndEmitsOneShimPerTarget(): void {
   }
 }
 
+// C's entry point returns an int, so a `main` written `void` is emitted as
+// `define i32 @main()` and every way out of it hands back 0 - which is what C
+// says a missing `return` in `main` means. `define void @main()` is ABI-illegal
+// and its bug is invisible in the IR: no `ret` value means nothing writes the
+// return register, so the exit status is whatever the last call left there.
+suite function aVoidMainCarriesCsEntryPointSignature(): void {
+  let test theory: Case = t.asserts("a void main is `define i32 @main()` returning 0") {
+    disposable e: Emitted = emitSource("function main(): void { }");
+    const ir = text.view(ref e.ir);
+    theory.isSuccessful = occurrences(ir, "define i32 @main() {") == 1 &&
+      occurrences(ir, "ret i32 0") == 1 &&
+      occurrences(ir, "define void @main") == 0;
+    theory.detail = `codegen said "${e.error}"; a void main did not get C's signature`;
+  }
+
+  // The other way out. Two sites emit a `ret` for a void function and both have
+  // to agree with the signature, because `ret void` in a function returning i32
+  // does not verify.
+  let test theory: Case = t.asserts("an explicit `return;` in a void main returns 0 too") {
+    disposable e: Emitted = emitSource("function main(): void { return; }");
+    const ir = text.view(ref e.ir);
+    theory.isSuccessful = occurrences(ir, "define i32 @main() {") == 1 &&
+      occurrences(ir, "ret i32 0") == 1 &&
+      occurrences(ir, "ret void") == 0;
+    theory.detail = `codegen said "${e.error}"; the early return still says void`;
+  }
+
+  let test theory: Case = t.asserts("an ordinary void function is untouched") {
+    disposable e: Emitted = emitSource(
+      "function f(): void { return; } function main(): int32 { f(); return 0; }"
+    );
+    const ir = text.view(ref e.ir);
+    theory.isSuccessful = occurrences(ir, "define void @test__f() {") == 1 &&
+      occurrences(ir, "ret void") == 1;
+    theory.detail = `codegen said "${e.error}"; the entry point's signature leaked into an ordinary function`;
+  }
+
+  let test theory: Case = t.asserts("a main DECLARED int32 is unchanged") {
+    disposable e: Emitted = emitSource("function main(): int32 { return 7; }");
+    const ir = text.view(ref e.ir);
+    theory.isSuccessful = occurrences(ir, "define i32 @main() {") == 1 &&
+      occurrences(ir, "ret i32 7") == 1;
+    theory.detail = `codegen said "${e.error}"`;
+  }
+}
+
+// A module-level `let` whose initializer is not a compile-time integer. An LLVM
+// global's initializer is a constant, so the global starts zeroed and its real
+// value is stored by a function synthesized for the file - which `main` calls
+// before any user code. See module_init.yoop.
+suite function aModuleGlobalWithARunTimeInitializer(): void {
+  let test theory: Case = t.asserts("an integer literal is still baked, with no init function") {
+    disposable e: Emitted = emitSource(
+      "let n: int32 = 5;\nfunction main(): int32 { return n; }"
+    );
+    const ir = text.view(ref e.ir);
+    theory.isSuccessful = occurrences(ir, "@test__n = internal global i32 5, align 8") == 1 &&
+      occurrences(ir, "module_init") == 0;
+    theory.detail = `codegen said "${e.error}"; the cheap case grew a function`;
+  }
+
+  let test theory: Case = t.asserts("a CALL initializer zeroes the global and stores at run time") {
+    disposable e: Emitted = emitSource(
+      "function five(): int32 { return 5; }\nlet n: int32 = five();\nfunction main(): int32 { return n; }"
+    );
+    const ir = text.view(ref e.ir);
+    theory.isSuccessful =
+      occurrences(ir, "@test__n = internal global i32 zeroinitializer, align 8") == 1 &&
+      occurrences(ir, "define internal void @test__module_init0() {") == 1 &&
+      occurrences(ir, "call i32 @test__five()") == 1 &&
+      occurrences(ir, "store i32 %t1, ptr @test__n") == 1 &&
+      occurrences(ir, "call void @test__module_init0()") == 1;
+    theory.detail = `codegen said "${e.error}"; the run-time initializer is not emitted`;
+  }
+
+  // An array literal's payload would ordinarily be an `alloca` in the enclosing
+  // function, and the init function's frame is gone the instant it returns. So
+  // the payload is a module DATUM and what is stored is the constant descriptor
+  // pointing at it - one datum per declaration, so two same-valued arrays do
+  // not share writable storage.
+  let test theory: Case = t.asserts("an array literal's payload is a module datum, not a stack slot") {
+    disposable e: Emitted = emitSource(
+      "let xs: int32[] = [1, 2];\nlet ys: int32[] = [1, 2];\nfunction main(): int32 { return xs[0] + ys[1]; }"
+    );
+    const ir = text.view(ref e.ir);
+    theory.isSuccessful =
+      occurrences(ir, "@.arr.0 = internal global [2 x i32] [i32 1, i32 2], align 8") == 1 &&
+      occurrences(ir, "@.arr.1 = internal global [2 x i32] [i32 1, i32 2], align 8") == 1 &&
+      occurrences(ir, "store { ptr, i64 } { ptr @.arr.0, i64 2 }, ptr @test__xs") == 1 &&
+      occurrences(ir, "store { ptr, i64 } { ptr @.arr.1, i64 2 }, ptr @test__ys") == 1 &&
+      occurrences(ir, "alloca [2 x i32]") == 0;
+    theory.detail = `codegen said "${e.error}"; the module array literal went to the stack`;
+  }
+
+  let test theory: Case = t.asserts("a non-literal ELEMENT is refused BY NAME") {
+    disposable e: Emitted = emitSource(
+      "function five(): int32 { return 5; }\nlet xs: int32[] = [five(), 2];\nfunction main(): int32 { return xs[0]; }"
+    );
+    theory.isSuccessful = e.error.len > 0 &&
+      text.contains(e.error, "module-level array literal") &&
+      text.contains(e.error, "\"xs\"");
+    theory.detail = `codegen said "${e.error}"; a dangling payload was emitted instead of a refusal`;
+  }
+}
+
+// The ORDER `main` calls them in is the module graph's topological order, which
+// is what makes an initializer that reads an imported global mean something.
+// Two MODULES, so a single source literal cannot pose the question.
+suite function moduleInitsRunInTopologicalOrder(): void {
+  let test theory: Case = t.asserts("the imported module's init is called first") {
+    disposable e: Emitted = emitFixture("init_order.yoop");
+    const ir = text.view(ref e.ir);
+    const leaf = text.indexOfFrom(ir, "call void @seedmod_", 0);
+    const entry = text.indexOfFrom(ir, "call void @init_order_", 0);
+    theory.isSuccessful = leaf < ir.len && entry < ir.len && leaf < entry;
+    theory.detail = `codegen said "${e.error}"; the leaf's init is at ${leaf} and the entry's at ${entry}`;
+  }
+}
+
+// ----- unions ----------------------------------------------------------------
+//
+// The union's whole mechanism is which INSTRUCTION a field access becomes, and
+// that is invisible to a slice fixture: an extractvalue on the wrong aggregate
+// happens to give the right answer for the first field of a same-width type. So
+// the shape is asserted on the IR text and the BEHAVIOUR in
+// bootstrap/tests/slice/unions.yoop.
+
+const UNION_SRC: string = "type Bytes4 { b0: uint8, b1: uint8, b2: uint8, b3: uint8, }\nunion Word { word: uint32, wide: uint64, bytes: Bytes4, }\nfunction main(): int32 { let w: Word = { word: 7 }; w.bytes.b0 = 1; return int32(w.bytes.b1); }\n";
+
+suite function aUnionIsAByteBufferAddressedAtTheFieldsType(): void {
+  let test theory: Case = t.asserts("the type definition is one byte buffer, sized by the widest field") {
+    disposable e: Emitted = emitSource(UNION_SRC);
+    // The module PREFIX on the name is the mangler's business and is asserted
+    // elsewhere, so the needle stops at the decl name.
+    theory.isSuccessful =
+      occurrences(text.view(ref e.ir), "__Word = type { [8 x i8] }") == 1 &&
+      occurrences(text.view(ref e.ir), "%union.") >= 1;
+    theory.detail = `codegen said "${e.error}"; the union type definition is not an 8-byte buffer`;
+  }
+
+  let test theory: Case = t.asserts("the literal stores at the FIELD's width, not the union's") {
+    disposable e: Emitted = emitSource(UNION_SRC);
+    const ir = text.view(ref e.ir);
+    // `{ word: 7 }` is a uint32. A store spelled `i64` would write eight bytes
+    // for a four-byte field, and a store spelled at the union's own type would
+    // not typecheck against an i32 operand at all.
+    theory.isSuccessful = occurrences(ir, "store i32 7, ptr %sc.") == 1;
+    theory.detail = `codegen said "${e.error}"; the union literal did not store at the field's width`;
+  }
+
+  let test theory: Case = t.asserts("a field READ is a load at the union's address, never an extractvalue on it") {
+    disposable e: Emitted = emitSource(UNION_SRC);
+    const ir = text.view(ref e.ir);
+    // The read of `w.bytes` loads the Channels-shaped struct out of the union's
+    // own address; only the LAST step, picking `.b1` out of that struct, is an
+    // extractvalue, and it is on the struct rather than on the union.
+    theory.isSuccessful =
+      occurrences(ir, "__Bytes4, ptr %t") == 2 &&
+      occurrences(ir, "= extractvalue %union.") == 0 &&
+      occurrences(ir, "= load %struct.") == 1;
+    theory.detail = `codegen said "${e.error}"; the union field read did not go through its address`;
+  }
+
+  let test theory: Case = t.asserts("a field WRITE geps the union's address with no index added") {
+    disposable e: Emitted = emitSource(UNION_SRC);
+    const ir = text.view(ref e.ir);
+    // Two of them: one for the write, one for the read. Both address member 0,
+    // which is the only member a union has, and both start from `w`'s own slot.
+    theory.isSuccessful =
+      occurrences(ir, "__Word, ptr %w.2.addr, i32 0, i32 0") == 2 &&
+      occurrences(ir, "getelementptr inbounds %union.") == 2;
+    theory.detail = `codegen said "${e.error}"; the union field address is not the union's own`;
+  }
+}
+
 function emitSource(src: string): Emitted propagates<disposable> {
   // Not disposed, matching typecheck.test.yoop: a ModuleGraph owns the arena
   // every later layer borrows from, and a test process exits before the leak

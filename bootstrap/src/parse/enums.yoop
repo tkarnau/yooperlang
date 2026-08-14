@@ -96,7 +96,9 @@ function parseEnumUnderlying(ref ps: ParserState): Result<NodeId, ParsingError> 
 
 // One `NAME` or `NAME <value-expression>`.
 //
-//   name        the case's name
+//   name        the case's name, which may be a RESERVED WORD - a case name is
+//               metadata, and `enum Kind { type, union }` reads exactly as a
+//               C header's enumerators do
 //   childA      the value expression, or 0 for an implicit one
 //
 // The value ENDS where the expression ends, so a short list of terminators is
@@ -109,7 +111,7 @@ function parseEnumUnderlying(ref ps: ParserState): Result<NodeId, ParsingError> 
 // token in expression" rather than as whatever is really wrong with the method.
 function parseEnumCase(ref ps: ParserState): Result<NodeId, ParsingError> {
   let node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.ENUM_CASE);
-  node.name = parseIdentAsName(ref ps)?;
+  node.name = parseIdentOrKeywordAsName(ref ps)?;
 
   const next = SelfLexing.peek(ref ps).tag;
   if (next == TokenTags.COMMA || next == TokenTags.RCURLY ||

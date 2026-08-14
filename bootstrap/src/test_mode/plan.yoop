@@ -1,0 +1,130 @@
+module test_mode;
+
+/*
+  Deciding whether an invocation is a test run, and preparing it.
+
+  Two ways in, both the reference's:
+
+    yoopiler_boot --test <dir-or-file>   every .test.yoop file below the path
+    yoopiler_boot foo.test.yoop          the in-file `import.test;` flag
+
+  The second is the concrete payoff of the in-file flag. A test module has no
+  `main`, so without it, pointing the compiler straight at one is just an error.
+
+  What comes out is a TestPlan: where the run is rooted, what the synthetic
+  entry is called, and its SOURCE. Nothing here loads a graph or compiles
+  anything - main.yoop takes it from there.
+*/
+
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { Text }, * as text from "std/core/text.yoop";
+import * as fs from "std/fs.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import { Result } from "std/core/types.yoop";
+import { AST, isTestModuleProgram } from "../ast";
+import { parse } from "../parse";
+
+export type TestPlan propagates<disposable> {
+  isTestRun: bool,           // false means "compile this the ordinary way"
+  rootDir: string,
+  entryPath: string,         // where the synthetic entry is REGISTERED, not written
+  entrySource: Vec<uint8>,
+  suiteCount: usize,
+  fileCount: usize,
+  error: string,             // "" when the plan is usable
+}
+
+// `explicit` is whether `--test` was written; `target` is the path beside it,
+// or the entry file for the shorthand. An empty target with `--test` means the
+// current directory.
+export function planTestRun(explicit: bool, target: string): TestPlan propagates<disposable> {
+  let plan: TestPlan = {
+    isTestRun: false,
+    rootDir: "",
+    entryPath: "",
+    entrySource: vec.vecNew(0),
+    suiteCount: 0,
+    fileCount: 0,
+    error: "",
+  };
+
+  disposable files: Vec<string> = vec.vecNew(8);
+  if (explicit) {
+    let at = target;
+    if (at.len == 0) {
+      at = ".";
+    }
+    if (!fs.exists(at)) {
+      plan.isTestRun = true;
+      plan.error = `--test: path not found: ${at}`;
+      return plan;
+    }
+    const abs = fs.normalizePath(at);
+    if (fs.statPath(abs).isDir) {
+      plan.rootDir = abs;
+      disposable found: Vec<string> = discoverTestFiles(abs);
+      vec.vecExtendFrom(ref files, vec.vecAsArray(ref found));
+      if (files.len == 0) {
+        plan.isTestRun = true;
+        plan.error = `--test: no *${TEST_FILE_SUFFIX} files found under ${abs}`;
+        return plan;
+      }
+    } else {
+      plan.rootDir = fs.dirName(abs);
+      vec.vecPush(ref files, abs);
+    }
+  } else {
+    // The shorthand. Both tests have to pass: the NAME says which files are
+    // worth opening, and the FLAG inside says the file meant it.
+    if (!isTestFileName(target) || !fs.exists(target)) {
+      return plan;
+    }
+    const abs = fs.normalizePath(target);
+    if (!isTestModuleFile(abs)) {
+      return plan;
+    }
+    plan.rootDir = fs.dirName(abs);
+    vec.vecPush(ref files, abs);
+  }
+
+  plan.isTestRun = true;
+  disposable collected: SuiteCollection = collectSuites(ref files, plan.rootDir);
+  if (collected.error.len > 0) {
+    plan.error = collected.error;
+    return plan;
+  }
+  if (collected.suiteCount == 0) {
+    plan.error = `--test: found ${collected.files.len} test file(s) but no suites - a suite is a top-level function carrying the \`suite\` kind: \`suite function myBehavior(): void { ... }\``;
+    return plan;
+  }
+
+  plan.fileCount = collected.files.len;
+  plan.suiteCount = collected.suiteCount;
+  plan.entryPath = entryPathFor(plan.rootDir);
+
+  // The Text is the builder and the Vec is what the graph OWNS: a SourceFile
+  // keeps the bytes its spans point into, so the entry's source has to outlive
+  // this function in a shape the loader takes.
+  disposable src: Text = generateEntrySource(ref collected.files);
+  plan.entrySource = vec.vecFromArray(text.bytes(ref src));
+  return plan;
+}
+
+// True when `absPath` parses as a module declaring `import.test;`.
+//
+// A file that fails to parse answers false, deliberately: the ordinary pipeline
+// is about to open the same file and will report the error against real source,
+// which is a better diagnostic than anything this could say.
+export function isTestModuleFile(absPath: string): bool {
+  disposable src: fs.ReadFileResult = fs.readFile(absPath);
+  if (src.error.len > 0) {
+    return false;
+  }
+  switch (parse(vec.vecAsArray(ref src.data))) {
+    case Result.Err { error: e }: { return false; }
+    case Result.Ok { value: parsed }: {
+      disposable ast: AST = parsed;
+      return isTestModuleProgram(ref ast, ast.root);
+    }
+  }
+}

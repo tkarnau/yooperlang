@@ -59,7 +59,9 @@ export function emitScopedBinding(
   // `return` unwinds to 0 and a `break` unwinds to the loop, and both pass
   // through here.
   if (!bodyTerminated) {
-    const derr = emitScopeDisposals(ref cx, disposeScopeDepth(cx.disposes) - 1);
+    // The DECLARATION is the exit site here: it is the node that owns this
+    // scope, and the one pass D keyed a manual dispose inside the block by.
+    const derr = emitScopeDisposals(ref cx, disposeScopeDepth(cx.disposes) - 1, stmtId);
     if (derr.len > 0) {
       disposePopScope(cx.disposes);
       localsPopBlock(cx.locals);
@@ -99,14 +101,16 @@ export function emitKindRegion(
   // what makes two of them in a row unwind in reverse: they are two entries in
   // one scope, exactly like two `disposable` bindings.
   if (stmt.childB == 0) {
-    return recordDisposal(ref cx, TEMP_SLOT_NAME, slot.id,
+    // declNode 0: the subject is ANONYMOUS, so there is no name a hand-written
+    // call could reach it by and nothing that could discharge it early.
+    return recordDisposal(ref cx, TEMP_SLOT_NAME, slot.id, 0,
       resolvedTypeAt(ref cx, stmtId), method);
   }
 
   // Its own scope, holding just the subject, so the block's own disposables
   // unwind INSIDE it and the region's call comes last.
   disposePushScope(cx.disposes);
-  const rerr = recordDisposal(ref cx, TEMP_SLOT_NAME, slot.id,
+  const rerr = recordDisposal(ref cx, TEMP_SLOT_NAME, slot.id, 0,
     resolvedTypeAt(ref cx, stmtId), method);
   if (rerr.len > 0) {
     disposePopScope(cx.disposes);
@@ -123,7 +127,7 @@ export function emitKindRegion(
 
   // A body that terminated already unwound this scope on its way out.
   if (!bodyTerminated) {
-    const derr = emitScopeDisposals(ref cx, disposeScopeDepth(cx.disposes) - 1);
+    const derr = emitScopeDisposals(ref cx, disposeScopeDepth(cx.disposes) - 1, stmtId);
     if (derr.len > 0) {
       disposePopScope(cx.disposes);
       return derr;

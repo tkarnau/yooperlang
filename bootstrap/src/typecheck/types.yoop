@@ -65,10 +65,22 @@ export type GenericInst propagates<disposable> {
   args: Vec<TypeId>,
 }
 
+// `carriedKind` is the kind a field's ANNOTATION names by prefix, as in
+// `handle: disposable FileHandle`, or "" for the ordinary case. It is not the
+// same question as "does this field's TYPE propagate a kind": a type that
+// implements `Disposable` outright propagates nothing, and the field is how the
+// obligation gets said out loud. `propagatedFieldsOf` counts both spellings, so
+// the slot has to ride on the field rather than being re-derived from the type.
+//
+// Only a plain type name carries one. A prefix on an array or a `ref` is not
+// read, because the disposal call would then be on the WRAPPER, and a `dispose`
+// on an array is not a thing - such a field simply supplies nothing, and the
+// existing named refusal reports it.
 @derive(display)
 export type Field {
   name: string,
   typeId: TypeId,
+  carriedKind: string,
 }
 
 // One case of a tagged `variant`. `ordinal` is the stable 0-indexed

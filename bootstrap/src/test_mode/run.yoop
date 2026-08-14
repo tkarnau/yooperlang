@@ -1,0 +1,74 @@
+module test_mode;
+
+// Running the freshly-linked test binary, and where it lives while it does.
+//
+// yoop has no process API yet, so this reaches for libc's `system` exactly as
+// link/clang.yoop does for clang. The one thing that matters beyond "it ran" is
+// the EXIT CODE: std/test.yoop returns the failure count from `main`, so the
+// number has to survive the trip back out of the wait status.
+//
+// The binary goes in the system temp directory rather than the tree. It is an
+// artifact of the RUN, not of the project, and dropping an executable beside
+// the sources would be a surprise - worse, `--test <a module directory>` would
+// leave a file inside a directory module.
+
+import { Text }, * as text from "std/core/text.yoop";
+import { Vec }, * as vec from "std/core/vec.yoop";
+import * as fs from "std/fs.yoop";
+import * as env from "std/env.yoop";
+import { disposable } from "std/core/kinds.yoop";
+
+extern "C" from "stdlib.h" {
+  function system(cmd: string): int32;
+}
+
+extern "C" from "unistd.h" {
+  function getpid(): int32;
+}
+
+// Where this run's test binary goes. The pid is in the name so two `--test`
+// runs at once do not link over each other's output.
+export function testBinaryPath(): string {
+  return `${env.getOr("TMPDIR", "/tmp")}/yoopiler_boot_tests_${getpid()}`;
+}
+
+// Run `exePath`, forwarding the extra positionals as suite-name FILTERS - which
+// is what std/test.yoop reads its argv for. Returns the process exit code.
+export function runTestBinary(exePath: string, ref filters: Vec<string>): int32 {
+  disposable cmd: Text = text.make(256);
+  text.push(ref cmd, "\"");
+  text.push(ref cmd, exePath);
+  text.push(ref cmd, "\"");
+  let i: usize = 0;
+  while (i < filters.len) {
+    text.push(ref cmd, " \"");
+    text.push(ref cmd, vec.vecGet(ref filters, i));
+    text.push(ref cmd, "\"");
+    i += 1;
+  }
+  return exitCodeOf(system(text.view(ref cmd)));
+}
+
+// A wait status, as the exit code the shell would report.
+//
+// `system` hands back what `waitpid` produced, not what the child returned: the
+// exit code is the SECOND byte, and the low seven bits hold a signal number
+// when the child died on one. A test binary that segfaults has no failure count
+// to report, so it answers 1 - failed, and the reason is on stdout above.
+function exitCodeOf(status: int32): int32 {
+  if (status < 0) {
+    return 1;
+  }
+  if ((status & 127) != 0) {
+    return 1;
+  }
+  return (status >> 8) & 255;
+}
+
+// Remove the binary and the `.ll` beside it. Neither is a diagnostic anybody
+// reads once the run has printed, and leaving them accumulates one pair per
+// invocation in the temp directory.
+export function removeTestArtifacts(exePath: string): void {
+  _ = fs.deleteFile(exePath);
+  _ = fs.deleteFile(`${exePath}.ll`);
+}

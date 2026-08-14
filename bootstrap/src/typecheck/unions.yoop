@@ -1,0 +1,212 @@
+module typecheck;
+
+/*
+  `union` - the untagged, overlapping-memory aggregate.
+
+  A union is the one nominal type whose fields do not sit BESIDE each other:
+  every one of them starts at byte 0 and the whole thing is as big as the
+  largest. So it shares a struct's DECLARATION shape (a run of `name: Type`) and
+  none of a struct's layout, which is why the lookups below are separate
+  functions rather than a `Type.Union` case bolted onto `lookupField`. A caller
+  that reached a union through the struct path would get a field POSITION back,
+  and a position is exactly the thing a union does not have.
+
+  Nothing here enforces which field is "live". C does not either; the whole
+  point of the construct is that the writer knows and the compiler does not.
+
+  Pass A registers a shell and pass C fills it, the same discipline every other
+  nominal type follows - see NominalDecl.populated.
+*/
+
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { Map }, * as map from "std/collections/map.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import * as str from "std/core/strings.yoop";
+import { AST, ASTNode, ASTNodeKind, NodeId, childAt, nodeAt } from "../ast";
+
+// ----- pass A ---------------------------------------------------------------
+
+// The NAME resolves now, the fields are pass C's. A field can name a struct
+// declared further down the file - `union Color { channels: Channels }` does -
+// so nothing here may resolve an annotation.
+export function registerUnionShell(
+  ref prog: Program,
+  ref tm: TypedModule,
+  declNode: ASTNode,
+  moduleId: ModuleId,
+  exported: bool
+): void {
+  const shellId = internType(ref prog, Type.Union {
+    decl: { name: declNode.name, module: moduleId, populated: false,
+            propagatesKind: "" },
+    fields: vec.vecNew(0),
+  });
+  bindName(ref prog, ref tm, declNode, Symbol.Union { typeId: shellId }, exported);
+}
+
+// ----- pass C ---------------------------------------------------------------
+
+// The fields, resolved into the shell pass A interned. `setType` re-sets the
+// same arena slot rather than interning a second one, so a sibling file that
+// captured the shell while resolving its own signature sees the filled version
+// - that is the regression `examples/pass/dir_module_shell_order` exists for.
+export function fillUnionFields(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  declNode: ASTNode,
+  moduleId: ModuleId
+): void {
+  const typeId = unionShellOf(ref prog, ref tm, declNode);
+  if (typeId == TYPE_ERROR_ID) {
+    return;
+  }
+
+  let fields: Vec<Field> = vec.vecNew(declNode.childCount);
+  let f: usize = 0;
+  while (f < declNode.childCount) {
+    const fieldNode = nodeAt(ref ast, childAt(ref ast, declNode, f));
+    if (fieldNode.kind != ASTNodeKind.FIELD_DECL) {
+      f += 1;
+      continue;
+    }
+    // `carriedKind` is filled the same way a struct's fields are (item 5.18),
+    // though nothing reads it for a union yet: propagated disposal is a
+    // per-field obligation and a union has no idea which field is live. Filling
+    // it keeps every `Field` construction site uniform rather than leaving one
+    // that silently defaults.
+    vec.vecPush(ref fields, {
+      name: fieldNode.name,
+      typeId: resolveTypeAnnotation(ref prog, ref tm, ref ast, fieldNode.childA),
+      carriedKind: carriedKindNameOf(ref ast, fieldNode.childA),
+    });
+    f += 1;
+  }
+
+  setType(ref prog, typeId, Type.Union {
+    decl: { name: declNode.name, module: moduleId, populated: true,
+            propagatesKind: "" },
+    fields: fields,
+  });
+}
+
+// The shell pass A bound this decl's name to, or TYPE_ERROR_ID when pass A
+// already refused it and said why.
+function unionShellOf(ref prog: Program, ref tm: TypedModule, declNode: ASTNode): TypeId {
+  const symId = lookupOwnName(ref tm, declNode.name);
+  if (symId == SYMBOL_NONE_ID) {
+    return TYPE_ERROR_ID;
+  }
+  switch (symbolAt(ref prog, symId)) {
+    case Symbol.Union { typeId: t }: { return t; }
+    default: { return TYPE_ERROR_ID; }
+  }
+}
+
+// ----- the questions everything downstream asks -----------------------------
+
+export function isUnionType(ref prog: Program, id: TypeId): bool {
+  switch (typeAt(ref prog, id)) {
+    case Type.Union { decl: d, fields: f }: { return true; }
+    default: { return false; }
+  }
+}
+
+// A union's field by name. Shaped like `FieldLookup` so a caller can hold one
+// answer whichever kind of aggregate it came from, and carrying `index` for the
+// same reason `lookupField` does - it is the DECLARATION position, which the
+// diagnostics use. It is emphatically not an offset: every field is at 0.
+export function lookupUnionField(ref prog: Program, unionType: TypeId, name: string): FieldLookup {
+  switch (typeAt(ref prog, unionType)) {
+    case Type.Union { decl: d, fields: f }: {
+      let i: usize = 0;
+      while (i < f.len) {
+        const field = vec.vecGet(ref f, i);
+        if (str.stringEq(field.name, name)) {
+          return { index: i, typeId: field.typeId, found: true };
+        }
+        i += 1;
+      }
+      return { index: 0, typeId: TYPE_ERROR_ID, found: false };
+    }
+    default: { return { index: 0, typeId: TYPE_ERROR_ID, found: false }; }
+  }
+}
+
+// The declared name, for a diagnostic that has the TypeId and not the decl.
+export function unionDeclNameOf(ref prog: Program, id: TypeId): string {
+  switch (typeAt(ref prog, id)) {
+    case Type.Union { decl: d, fields: f }: { return d.name; }
+    default: { return ""; }
+  }
+}
+
+// The module a union was declared in, which is what its LLVM type name is
+// qualified by so two modules may each declare a `Color`.
+export function unionModuleOf(ref prog: Program, id: TypeId): ModuleId {
+  switch (typeAt(ref prog, id)) {
+    case Type.Union { decl: d, fields: f }: { return d.module; }
+    default: { return 0; }
+  }
+}
+
+// ----- pass D ---------------------------------------------------------------
+
+// `let c: Color = { rgba: 0xAABBCCDD };`
+//
+// A union literal is spelled exactly like a struct literal, and the ONE thing
+// that differs is the field count: a struct literal must name every field, a
+// union literal must name exactly one. Naming two would be two values written
+// over each other, and which one survived would depend on emission order.
+export function checkUnionLiteral(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  expr: ASTNode,
+  unionType: TypeId,
+  ref scope: LocalScope
+): TypeId {
+  let given: usize = 0;
+  if (expr.childA != 0) {
+    const list = nodeAt(ref ast, expr.childA);
+    given = list.childCount;
+    let i: usize = 0;
+    while (i < list.childCount) {
+      const fieldId = childAt(ref ast, list, i);
+      const fieldNode = nodeAt(ref ast, fieldId);
+      const found = lookupUnionField(ref prog, unionType, fieldNode.name);
+      if (!found.found) {
+        reportError(
+          ref prog,
+          `union "${unionDeclNameOf(ref prog, unionType)}" has no field "${fieldNode.name}"`,
+          fieldNode.sourceLoc
+        );
+        checkExpr(ref prog, ref tm, ref ast, fieldNode.childA, TYPE_ERROR_ID, ref scope);
+        i += 1;
+        continue;
+      }
+      // Codegen stores the value AS THIS FIELD'S TYPE, which is the whole
+      // mechanism - the union's own LLVM type is a byte buffer and says nothing
+      // about how to write into it. So the field node carries the type.
+      vec.vecSet(ref tm.resolvedTypes, fieldId, found.typeId);
+      const got = checkExpr(ref prog, ref tm, ref ast, fieldNode.childA, found.typeId, ref scope);
+      if (got != TYPE_ERROR_ID && !typeAccepts(ref prog, found.typeId, got)) {
+        reportError(
+          ref prog,
+          `field "${fieldNode.name}" expects ${formatType(ref prog, found.typeId)}, found ${formatType(ref prog, got)}`,
+          fieldNode.sourceLoc
+        );
+      }
+      i += 1;
+    }
+  }
+
+  if (given != 1) {
+    reportError(
+      ref prog,
+      `a union literal initializes exactly one field - "${unionDeclNameOf(ref prog, unionType)}" was given ${given}`,
+      expr.sourceLoc
+    );
+  }
+  return unionType;
+}

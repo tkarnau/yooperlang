@@ -56,6 +56,9 @@ export function recordTaskCleanup(ref d: DisposeStack, name: string, slot: usize
   disposeRecord(ref d, {
     name: name,
     slot: slot,
+    // 0: there is no method a hand-written call could make, so nothing can
+    // discharge a handle's obligation early.
+    declNode: 0,
     ownerType: TYPE_ERROR_ID,
     method: "",
     viaField: false,

@@ -1,0 +1,46 @@
+// `function main(): void` and its EXIT STATUS.
+//
+// C's entry point returns an int, and C says a missing `return` in `main`
+// means 0 - so a `void` main is emitted as `define i32 @main()` and every way
+// out of it hands back 0. `define void @main()` is ABI-illegal, and the bug it
+// hides is silent: nothing writes the return register, so the process exit
+// status is whatever the last call happened to leave in it. Both compilers used
+// to emit it, and both exited with the LENGTH of the line printed last, because
+// printf's result was the last thing in that register.
+//
+// The `exit=0` in the .expected IS the assertion, and the last line printed
+// below is deliberately long so a compiler that gets this wrong is off by a lot
+// rather than by nothing. The unreachable early `return;` is a second
+// assertion, and clang makes it: `ret void` in a function returning i32 does
+// not verify, so a compiler that fixed only the fall-out-the-bottom would fail
+// to BUILD this rather than fail to run it.
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+// A void function that is NOT main still ends in `ret void`, both when it runs
+// off the end and when it returns explicitly. Nothing about the entry point's
+// signature leaks into an ordinary one.
+function shout(n: int32): void {
+    printf("shout %d\n", n);
+    return;
+}
+
+function quiet(): void {
+    printf("quiet\n");
+}
+
+function one(): int32 {
+    return 1;
+}
+
+function main(): void {
+    shout(3);
+    quiet();
+    if (one() > 100) {
+        printf("not taken\n");
+        return;
+    }
+    printf("a last line long enough that its length could not be mistaken for a zero\n");
+}

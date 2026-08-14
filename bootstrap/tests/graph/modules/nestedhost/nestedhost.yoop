@@ -1,0 +1,3 @@
+module nestedhost;
+// A module inside the root that illegally carries a `modules/` of its own.
+export function hosted(): int32 { return 7; }

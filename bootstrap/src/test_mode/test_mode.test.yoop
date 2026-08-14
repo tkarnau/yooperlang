@@ -1,0 +1,316 @@
+// Tests for the `test_mode` module - the driver's `--test` half.
+//
+// Everything here is checkable without producing a binary, which is what makes
+// it unit-testable at all: discovery is a directory walk, collection is a
+// parse, and entry synthesis is text. What those three produce TOGETHER is only
+// observable by running a test binary, and that is the end-to-end fixture in
+// bootstrap/tests/slice/ plus the two examples/testing/ trees.
+//
+// Fixtures live in bootstrap/tests/testmode/ and testmode_bad/ and are reached
+// by PATH, so both documented working directories are tried - see `fixtureDir`
+// at the bottom, the same arrangement source_graph's tests use.
+
+import.test;
+import * as t from "std/test.yoop";
+import { suite, test, Case } from "std/test.yoop";
+import * as fs from "std/fs.yoop";
+import * as str from "std/core/strings.yoop";
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { Text }, * as text from "std/core/text.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import {
+  SuiteCollection, TEST_FILE_SUFFIX, collectSuites, discoverTestFiles,
+  entryPathFor, generateEntrySource, isSkippedDirName, isTestFileName,
+  isTestModuleFile, relativeTo
+} from "../test_mode";
+
+// Suite order IS report order, so an unsorted walk would renumber a run every
+// time the filesystem felt like handing entries back differently.
+suite function discoveryIsSortedAndRecursive(): void {
+  disposable found: Vec<string> = discoverTestFiles(fixtureDir("testmode"));
+
+  let test theory: Case = t.asserts("every .test.yoop below the root is found, and nothing else") {
+    theory.isSuccessful = found.len == 3;
+    theory.detail = `found ${found.len} file(s), wanted 3: ${joined(ref found)}`;
+  }
+
+  let test theory: Case = t.asserts("the order is lexicographic, so a subdirectory sorts by its whole path") {
+    theory.isSuccessful = found.len == 3
+      && endsWith(vec.vecGet(ref found, 0), "alpha.test.yoop")
+      && endsWith(vec.vecGet(ref found, 1), "nested/beta.test.yoop")
+      && endsWith(vec.vecGet(ref found, 2), "zeta.test.yoop");
+    theory.detail = `got ${joined(ref found)}`;
+  }
+
+  // `plain.yoop` sits beside the three and is not a test file. Discovery is by
+  // NAME, and this is the half of that rule nothing else pins.
+  let test theory: Case = t.asserts("a .yoop file that is not a .test.yoop is not discovered") {
+    theory.isSuccessful = !anyContains(ref found, "plain.yoop");
+    theory.detail = `got ${joined(ref found)}`;
+  }
+}
+
+// A `.git` directory full of packfiles is not a test tree, and neither is a
+// build output directory. The walk skips both by name.
+suite function discoverySkipsDotAndBuildDirectories(): void {
+  disposable found: Vec<string> = discoverTestFiles(fixtureDir("testmode"));
+
+  let test theory: Case = t.asserts("a test file inside a dot-directory is not walked into") {
+    theory.isSuccessful = !anyContains(ref found, ".hidden");
+    theory.detail = `got ${joined(ref found)}`;
+  }
+
+  let test theory: Case = t.asserts("the four build output directories are skipped by name") {
+    theory.isSuccessful = isSkippedDirName("node_modules")
+      && isSkippedDirName("dist")
+      && isSkippedDirName("build")
+      && isSkippedDirName("target");
+    theory.detail = "one of node_modules/dist/build/target was not on the skip list";
+  }
+
+  let test theory: Case = t.asserts("anything starting with a dot is skipped, whatever it is called") {
+    theory.isSuccessful = isSkippedDirName(".git") && isSkippedDirName(".hidden");
+    theory.detail = "a dot-directory was walked into";
+  }
+
+  let test theory: Case = t.asserts("an ordinary directory name is not skipped") {
+    theory.isSuccessful = !isSkippedDirName("nested") && !isSkippedDirName("src");
+    theory.detail = "an ordinary directory was skipped";
+  }
+}
+
+suite function aTestFileIsRecognizedByItsWholeSuffix(): void {
+  let test theory: Case = t.asserts("the suffix is the whole `.test.yoop`") {
+    theory.isSuccessful = isTestFileName(`alpha${TEST_FILE_SUFFIX}`)
+      && isTestFileName(`/a/b/alpha${TEST_FILE_SUFFIX}`);
+    theory.detail = "a well formed test file name was not recognized";
+  }
+
+  let test theory: Case = t.asserts("a plain .yoop file is not one") {
+    theory.isSuccessful = !isTestFileName("alpha.yoop") && !isTestFileName("test.yoop");
+    theory.detail = "`test.yoop` or `alpha.yoop` was taken for a test file";
+  }
+
+  // The shorter-than-the-suffix case is its own arm: the slice underneath would
+  // otherwise be asked for a negative start.
+  let test theory: Case = t.asserts("a name shorter than the suffix is not one") {
+    theory.isSuccessful = !isTestFileName("a.yoop") && !isTestFileName("");
+    theory.detail = "a short name was taken for a test file";
+  }
+}
+
+// Collection is SYNTACTIC - it takes every kind-prefixed top-level function
+// without resolving what the kind means, because typecheck cannot run until the
+// entry module exists and the entry module needs these names.
+suite function collectionTakesEveryKindPrefixedTopLevelFunction(): void {
+  disposable one: Vec<string> = oneFile("testmode", `alpha${TEST_FILE_SUFFIX}`);
+  disposable got: SuiteCollection = collectSuites(ref one, fixtureDir("testmode"));
+
+  let test theory: Case = t.asserts("both suites are taken, in declaration order") {
+    theory.isSuccessful = got.error.len == 0 && got.suiteCount == 2
+      && suiteNameIs(ref got, 0, 0, "addsOne")
+      && suiteNameIs(ref got, 0, 1, "addsTwo");
+    theory.detail = `error="${got.error}", ${got.suiteCount} suite(s): ${suiteNames(ref got)}`;
+  }
+
+  // A top-level function with no kind prefix is an ordinary helper. Taking one
+  // would put a name in the table that the entry cannot call.
+  let test theory: Case = t.asserts("a plain top-level function is not a suite") {
+    theory.isSuccessful = !suiteNamesInclude(ref got, "helper");
+    theory.detail = `collected ${suiteNames(ref got)}`;
+  }
+}
+
+// An author may write `export suite function` by hand, and the driver adds the
+// same wrapper to everyone else's. Collection has to see through it either way.
+suite function collectionSeesThroughAnExportWrapper(): void {
+  disposable one: Vec<string> = oneFile("testmode", `zeta${TEST_FILE_SUFFIX}`);
+  disposable got: SuiteCollection = collectSuites(ref one, fixtureDir("testmode"));
+
+  let test theory: Case = t.asserts("an exported suite is collected like any other") {
+    theory.isSuccessful = got.error.len == 0 && got.suiteCount == 1
+      && suiteNameIs(ref got, 0, 0, "zetaBehaves");
+    theory.detail = `error="${got.error}", ${got.suiteCount} suite(s): ${suiteNames(ref got)}`;
+  }
+}
+
+// The NAME says which files are worth opening; the FLAG inside says the file
+// meant it. Both have to hold, and the failure names the missing line.
+suite function aTestFileWithoutTheFlagIsRefusedByName(): void {
+  disposable one: Vec<string> = oneFile("testmode_bad", "no_flag.test.yoop");
+  disposable got: SuiteCollection = collectSuites(ref one, fixtureDir("testmode_bad"));
+
+  let test theory: Case = t.asserts("collection refuses it and names `import.test;`") {
+    theory.isSuccessful = contains(got.error, "import.test;");
+    theory.detail = `error was "${got.error}"`;
+  }
+
+  let test theory: Case = t.asserts("the shorthand's own test agrees with it") {
+    theory.isSuccessful = isTestModuleFile(fixture("testmode", `alpha${TEST_FILE_SUFFIX}`))
+      && !isTestModuleFile(fixture("testmode_bad", "no_flag.test.yoop"));
+    theory.detail = "the `import.test;` probe disagreed with collection";
+  }
+}
+
+// The generated entry is what everything below the driver actually compiles, so
+// its SHAPE is the contract: an alias per suite, a table, and a parallel list of
+// labels.
+suite function theGeneratedEntryIsATableAndItsLabels(): void {
+  disposable files: Vec<string> = discoverTestFiles(fixtureDir("testmode"));
+  disposable got: SuiteCollection = collectSuites(ref files, fixtureDir("testmode"));
+  disposable src: Text = generateEntrySource(ref got.files);
+  const out = text.view(ref src);
+
+  // By NAME under a positional alias, never through a namespace: two test files
+  // may each declare a `setup`, and the alias is what keeps them apart.
+  let test theory: Case = t.asserts("each suite is imported by name under a positional alias") {
+    theory.isSuccessful = contains(out, "import { addsOne as suite0 }")
+      && contains(out, "import { addsTwo as suite1 }")
+      && contains(out, "import { betaBehaves as suite2 }")
+      && contains(out, "import { zetaBehaves as suite3 }");
+    theory.detail = out;
+  }
+
+  let test theory: Case = t.asserts("the table is a function-value array in the same order") {
+    theory.isSuccessful = contains(out, "const fns: (() => void)[] = [suite0, suite1, suite2, suite3];");
+    theory.detail = out;
+  }
+
+  // The label is what a running suite is announced under, so the path in it is
+  // relative to the search root rather than absolute.
+  let test theory: Case = t.asserts("the labels are `<relative path>:<suite>`") {
+    theory.isSuccessful = contains(out, `"alpha${TEST_FILE_SUFFIX}:addsOne"`)
+      && contains(out, `"nested/beta${TEST_FILE_SUFFIX}:betaBehaves"`);
+    theory.detail = out;
+  }
+
+  let test theory: Case = t.asserts("the harness is reached through a namespace and handed both lists") {
+    theory.isSuccessful = contains(out, `import * as harness from "std/test.yoop";`)
+      && contains(out, "return harness.runAll(fns, names);");
+    theory.detail = out;
+  }
+}
+
+suite function theEntryIsRegisteredInTheSearchRoot(): void {
+  let test theory: Case = t.asserts("the entry path is the root plus the generated basename") {
+    const got = entryPathFor("/a/b");
+    theory.isSuccessful = str.stringEq(got, "/a/b/yoopiler_generated_test_entry.yoop");
+    theory.detail = `entryPathFor("/a/b") gave "${got}"`;
+  }
+
+  let test theory: Case = t.asserts("a path under the root loses the root and the separator") {
+    theory.isSuccessful = str.stringEq(relativeTo("/a/b", "/a/b/c/d.yoop"), "c/d.yoop");
+    theory.detail = `got "${relativeTo("/a/b", "/a/b/c/d.yoop")}"`;
+  }
+
+  // Nothing in a normal run reaches this, but a label pointing at a path that
+  // is not there at all is worse than a long one.
+  let test theory: Case = t.asserts("a path outside the root is kept whole") {
+    theory.isSuccessful = str.stringEq(relativeTo("/a/b", "/x/y.yoop"), "/x/y.yoop");
+    theory.detail = `got "${relativeTo("/a/b", "/x/y.yoop")}"`;
+  }
+}
+
+// ----- helpers ---------------------------------------------------------------
+
+function contains(haystack: string, needle: string): bool {
+  return str.stringIndexOf(haystack, needle) < haystack.len;
+}
+
+function endsWith(s: string, suffix: string): bool {
+  if (s.len < suffix.len) {
+    return false;
+  }
+  return contains(s, suffix);
+}
+
+function anyContains(ref paths: Vec<string>, needle: string): bool {
+  let i: usize = 0;
+  while (i < paths.len) {
+    if (contains(vec.vecGet(ref paths, i), needle)) {
+      return true;
+    }
+    i += 1;
+  }
+  return false;
+}
+
+function joined(ref paths: Vec<string>): string {
+  disposable out: Text = text.make(128);
+  let i: usize = 0;
+  while (i < paths.len) {
+    if (i > 0) {
+      text.push(ref out, ", ");
+    }
+    text.push(ref out, vec.vecGet(ref paths, i));
+    i += 1;
+  }
+  return `${text.view(ref out)}`;
+}
+
+function oneFile(dir: string, name: string): Vec<string> propagates<disposable> {
+  let paths: Vec<string> = vec.vecNew(1);
+  vec.vecPush(ref paths, fixture(dir, name));
+  return paths;
+}
+
+function suiteNameIs(ref got: SuiteCollection, fileIndex: usize, suiteIndex: usize, want: string): bool {
+  if (fileIndex >= got.files.len) {
+    return false;
+  }
+  let file = vec.vecGet(ref got.files, fileIndex);
+  if (suiteIndex >= file.suites.len) {
+    return false;
+  }
+  return str.stringEq(vec.vecGet(ref file.suites, suiteIndex), want);
+}
+
+function suiteNamesInclude(ref got: SuiteCollection, want: string): bool {
+  let f: usize = 0;
+  while (f < got.files.len) {
+    let file = vec.vecGet(ref got.files, f);
+    let s: usize = 0;
+    while (s < file.suites.len) {
+      if (str.stringEq(vec.vecGet(ref file.suites, s), want)) {
+        return true;
+      }
+      s += 1;
+    }
+    f += 1;
+  }
+  return false;
+}
+
+function suiteNames(ref got: SuiteCollection): string {
+  disposable out: Text = text.make(128);
+  let f: usize = 0;
+  while (f < got.files.len) {
+    let file = vec.vecGet(ref got.files, f);
+    let s: usize = 0;
+    while (s < file.suites.len) {
+      text.push(ref out, vec.vecGet(ref file.suites, s));
+      text.push(ref out, " ");
+      s += 1;
+    }
+    f += 1;
+  }
+  return `${text.view(ref out)}`;
+}
+
+// Fixtures are reached by path, which is the one thing here that depends on
+// where the test was run from. Both documented working directories are tried.
+function fixtureDir(dir: string): string {
+  const fromRepoRoot = `bootstrap/tests/${dir}`;
+  if (fs.exists(fromRepoRoot)) {
+    return fromRepoRoot;
+  }
+  const fromBootstrap = `tests/${dir}`;
+  if (fs.exists(fromBootstrap)) {
+    return fromBootstrap;
+  }
+  return fromRepoRoot;
+}
+
+function fixture(dir: string, name: string): string {
+  return `${fixtureDir(dir)}/${name}`;
+}

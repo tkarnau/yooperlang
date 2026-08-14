@@ -94,6 +94,14 @@ export function emitStructFieldWrite(ref cx: Cx, target: ASTNode, targetId: Node
 export function emitFieldAddress(ref cx: Cx, target: ASTNode, ref addr: usize): string {
   const baseNode = nodeAt(cx.ast, target.childA);
 
+  // A UNION base first, because every branch below adds a field INDEX to the
+  // base's address and a union has none to add: all of its fields are at byte
+  // 0. See union.yoop for what that costs (a load spelled at the field's type
+  // rather than an extractvalue) and why it cannot be an extension of this.
+  if (isUnionAt(ref cx, target.childA)) {
+    return emitUnionFieldAddress(ref cx, target, ref addr);
+  }
+
   // A BORROWED base is already an address - that is what a `ref T` operand is -
   // so there is no slot to gep from and no load to do. `cx.e.usesPrintf = true`
   // is the shape: `cx.e` is a `ref Emitter`, and the field lives in whatever

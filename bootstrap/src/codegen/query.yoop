@@ -23,7 +23,7 @@ import { Program, TypedModule, TypeId, Type, Symbol, symbolAt, typeAt, TYPE_VOID
   DeclId, DECL_NONE_ID, GenericSort, derefType, lookupMethod, methodSymbolName,
   anyOpenArg, findFuncInstance, funcTypeIsAsync,
   nominalModuleOf, isValueEnumType, lookupEnumCase,
-  IterableWalk, iterableWalkOf, isUnsafePtrType, sizeOfType } from "../typecheck";
+  IterableWalk, iterableWalkOf, isUnsafePtrType, sizeOfType, isUnionType } from "../typecheck";
 import { ASTNode, childAt, nodeAt } from "../ast";
 
 // ----- the typecheck boundary ----------------------------------------------
@@ -333,6 +333,15 @@ export function fieldPositionOf(ref cx: Cx, baseId: NodeId, fieldName: string): 
 // assignment paths tell a struct from an array.
 export function isStructAt(ref cx: Cx, nodeId: NodeId): bool {
   return isStructType(cx.prog, derefType(cx.prog, resolvedTypeAt(ref cx, nodeId)));
+}
+
+// True when the node resolved to a UNION. Asked ahead of `isStructAt` wherever
+// both could match, because a union answers false to it and would otherwise
+// fall through to a path that computes a field POSITION - the one thing a union
+// does not have. Deref'd for the same reason isStructAt is: a borrowed union
+// reaches the same fields.
+export function isUnionAt(ref cx: Cx, nodeId: NodeId): bool {
+  return isUnionType(cx.prog, derefType(cx.prog, resolvedTypeAt(ref cx, nodeId)));
 }
 
 // The generic-function DeclId a name binds to, or DECL_NONE_ID when the name is

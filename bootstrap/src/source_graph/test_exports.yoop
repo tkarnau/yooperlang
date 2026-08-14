@@ -1,0 +1,51 @@
+module source_graph;
+
+/*
+  Giving a test module's suites their `export` wrapper.
+
+  A suite is written `suite function addsNumbers(): void { ... }` with no
+  `export`, because a file that exists only to hold tests should not have to
+  carry the ceremony. But `--test` generates an entry module that imports each
+  one BY NAME, and an import resolves against exports. So the driver adds the
+  wrapper the author did not write.
+
+  WHERE it is added is the whole content of this file. It has to happen while
+  the module is still being built, in `addFile`, for the reason the derive
+  expansion is there: typecheck borrows the graph and reads a Module BY VALUE,
+  so a node grafted after the load lands in a copy and nothing above ever sees
+  it. Doing it here also means the arena is a thing this code owns - pushing a
+  node onto a Vec somebody else is holding a copy of would reallocate under
+  them.
+
+  Idempotent: an author who DID write `export` has an EXPORT_DECL in the body
+  already, and a wrapper is only ever put around a bare FUNCTION_DECL.
+*/
+
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { AST, ASTNodeKind, NodeId, childAt, createASTNode, nodeAt } from "../ast";
+
+// Wrap every kind-prefixed top-level function of the PROGRAM at `root` in an
+// EXPORT_DECL, in place.
+//
+// "Carries a kind" is FUNCTION_DECL.childE being non-zero - the KIND_PREFIX
+// list - rather than a name to match, which is what keeps this from having to
+// know that a suite is spelled `suite`. Collection makes the same test, on the
+// same slot, for the same reason (see test_mode/collect.yoop).
+export function exportSuiteFunctions(ref ast: AST, root: NodeId): void {
+  // A COPY of the PROGRAM node, taken once: its childStart/childCount describe
+  // a run in `childIds` that this loop never resizes, so it stays correct while
+  // `nodes` grows underneath.
+  const program = nodeAt(ref ast, root);
+  let i: usize = 0;
+  while (i < program.childCount) {
+    const childId = childAt(ref ast, program, i);
+    const child = nodeAt(ref ast, childId);
+    if (child.kind == ASTNodeKind.FUNCTION_DECL && child.childE != 0) {
+      let wrapper = createASTNode(ASTNodeKind.EXPORT_DECL, child.sourceLoc);
+      wrapper.childA = childId;
+      vec.vecPush(ref ast.nodes, wrapper);
+      vec.vecSet(ref ast.childIds, program.childStart + i, ast.nodes.len - 1);
+    }
+    i += 1;
+  }
+}

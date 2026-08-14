@@ -111,6 +111,34 @@ check on a change, and say so when you do.
 - `npm test` - all tests (unit + e2e). Currently 1267 tests, ~50s.
 - `npm run test:unit` - fast, no clang.
 - `npm run test:e2e` - full pipeline, requires `clang` on PATH.
+- **If the machine feels slow after a day of suite runs, look for ORPHANS before
+  rebooting:**
+
+      ps -eo pid,ppid,pcpu,etime,args | awk '$2==1 && $3>5 && /clang|yoopiler|dump_tokens|yoop[-_]|stage[0-9]|\/prog$|_bs$|_js$/'
+
+  A `ppid` of 1 means the parent is gone. Every child the suites and the probes
+  start now goes through [src/testProc.js](src/testProc.js), carries a deadline,
+  and is killed as a TREE, so this should stay empty; anything in it is a bug
+  there or in the probes' `limit_run`. Deliberately, none of those children are
+  `detached` - a detached child SURVIVES the group kill a Ctrl-C or a tool
+  timeout sends, which is the opposite of what is wanted. Deadlines are
+  overridable per suite (`YOOP_SLICE_RUN_TIMEOUT_MS`, `YOOP_E2E_RUN_TIMEOUT_MS`,
+  `YOOP_E2E_CLANG_TIMEOUT_MS`, `YOOP_PARITY_DUMP_TIMEOUT_MS`,
+  `YOOP_SELFHOST_TIMEOUT_MS`, `YOOP_PROBE_COMPILE_LIMIT`, `YOOP_PROBE_RUN_LIMIT`).
+- **The `dwarf:` e2e tests need macOS to have authorized DEBUGGING.** Until it
+  has, `lldb -o run` blocks forever on an authorization prompt nobody can answer,
+  and the two tests that LAUNCH a debuggee (rather than only resolving symbols)
+  burn their whole deadline and fail. It is neither a compiler bug nor a harness
+  bug: a trivial `int main(){return 0;}` hangs exactly the same way, which is the
+  one-line check worth running first.
+
+      cd /tmp && printf 'int main(){return 0;}\n' > t.c && clang -g -o t t.c
+      perl -e 'alarm 25; exec("lldb","-o","run","-o","quit","--batch","/tmp/t")'
+
+  If that prints `Process ... exited with status = 0`, lldb is fine and a dwarf
+  failure is real. Note `DevToolsSecurity -status` is NOT the signal - it read
+  "disabled" both before and after authorization here, while the tests went from
+  hanging to passing in 1.9s. Answering the GUI prompt once is what unblocks it.
 - Compile one file: `node src/yoopiler.js path/to/file.yoop -o out`.
 - Driver entry: [src/yoopiler.js](src/yoopiler.js). End-user invocation is
   `yoopiler_alpha <entry.yoop>` (the `bin` name in package.json); the entry file

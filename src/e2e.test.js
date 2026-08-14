@@ -7,7 +7,12 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { execFileSync, spawn, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
+
+// Every child this file starts goes through here: deadline on all of them,
+// process-TREE kills so a compiler's clang or a driver's test binary cannot
+// survive its parent, and a tracked set that an interrupted run takes down.
+import { runProc, trackChild, stopChild } from "./testProc.js";
 
 import { parse } from "./jsyooparser/parser.js";
 import { typecheckSource, typecheckProgram } from "./jsyooptypecheck/typecheck.js";
@@ -73,51 +78,48 @@ const E2E_CONCURRENCY = Number(process.env.YOOP_E2E_CONCURRENCY)
 // installed - masking the real reason, which is that clang drives the MSVC
 // target with -gcodeview and therefore emits CodeView rather than DWARF.
 // Getting a debugger working on Windows is deferred; see the porting notes.
+// Memoized: this used to re-probe on every DWARF test, which is three `which`
+// processes per run for an answer that cannot change mid-suite.
+let dwarfSkipMemo;
 function dwarfSkipReason() {
+  if (dwarfSkipMemo !== undefined) return dwarfSkipMemo;
   if (process.platform === "win32") {
-    return "debug info on the MSVC target is CodeView, not DWARF";
+    dwarfSkipMemo = "debug info on the MSVC target is CodeView, not DWARF";
+    return dwarfSkipMemo;
   }
-  const probe = spawnSync("which", ["lldb"], { encoding: "utf8" });
-  return probe.status === 0 ? null : "lldb not on PATH";
+  const probe = spawnSync("which", ["lldb"], {
+    encoding: "utf8",
+    timeout: 10000,
+    killSignal: "SIGKILL",
+  });
+  dwarfSkipMemo = probe.status === 0 ? null : "lldb not on PATH";
+  return dwarfSkipMemo;
 }
 
-// Run a child process and resolve with its output - the async twin of
-// spawnSync, and the reason these helpers can overlap at all.
-//
-// A non-zero exit is NOT an error here: plenty of fixtures assert on a failing
-// exit code, so the status is data. Only a spawn failure resolves with a null
-// status, matching what spawnSync reports.
-function runProc(cmd, args, opts = {}) {
-  return new Promise((resolve) => {
-    const child = spawn(cmd, args, {
-      env: opts.env ?? process.env,
-      cwd: opts.cwd,
-      timeout: opts.timeout ?? 30000,
-    });
-    let stdout = "";
-    let stderr = "";
-    child.stdout.on("data", (d) => { stdout += d; });
-    child.stderr.on("data", (d) => { stderr += d; });
-    child.on("error", () => resolve({ stdout, stderr, status: null }));
-    child.on("close", (code) => resolve({ stdout, stderr, status: code }));
-  });
-}
+// How long a compiled fixture gets to run before it is treated as hung. These
+// programs print a few lines and exit; the ones that could genuinely wedge are
+// the concurrency-runtime fixtures (task / wait_until / cancel) and the two
+// that bind a socket, and for those a bounded kill is the difference between a
+// named failure and a process still running an hour later.
+const RUN_TIMEOUT_MS = Number(process.env.YOOP_E2E_RUN_TIMEOUT_MS) || 30000;
+
+// clang gets its own, longer deadline: a cold link on a loaded machine is slow,
+// but it is not five minutes slow, and clang had NO deadline at all before -
+// one wedged link used to sit on a core until the machine was rebooted.
+const CLANG_TIMEOUT_MS = Number(process.env.YOOP_E2E_CLANG_TIMEOUT_MS) || 180000;
 
 // Compile a file with clang, asynchronously. Rejects with clang's stderr
 // attached so a compile failure reads the way execFileSync's throw did.
-function runClangAsync(args) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(resolveClang(), args, { env: clangEnv() });
-    let stderr = "";
-    child.stderr.on("data", (d) => { stderr += d; });
-    child.on("error", reject);
-    child.on("close", (code) => {
-      if (code === 0) return resolve();
-      const err = new Error(`clang exited ${code}\n${stderr}`);
-      err.stderr = stderr;
-      reject(err);
-    });
+async function runClangAsync(args) {
+  const r = await runProc(resolveClang(), args, {
+    env: clangEnv(),
+    timeout: CLANG_TIMEOUT_MS,
   });
+  if (r.code === 0) return;
+  const how = r.timedOut ? `never finished (killed after ${CLANG_TIMEOUT_MS}ms)` : `exited ${r.code}`;
+  const err = new Error(`clang ${how}\n${r.stderr}`);
+  err.stderr = r.stderr;
+  throw err;
 }
 
 async function runFixture(relPath, opts = {}) {
@@ -154,7 +156,7 @@ async function runFixture(relPath, opts = {}) {
   ];
   await runClangAsync(clangArgs);
   const env = opts.env ? { ...process.env, ...opts.env } : process.env;
-  const result = await runProc(binPath, [], { env, timeout: opts.timeoutMs ?? 30000 });
+  const result = await runProc(binPath, [], { env, timeout: opts.timeoutMs ?? RUN_TIMEOUT_MS });
   return { stdout: result.stdout, stderr: result.stderr, exitCode: result.status };
 }
 
@@ -181,7 +183,7 @@ async function runFixtureWithAsset(yoopRelPath, assetRelPath, assetDestName) {
     ...windowsClangArgs(),
   ];
   await runClangAsync(clangArgs);
-  const result = await runProc(binPath, [], { cwd: tmpDir });
+  const result = await runProc(binPath, [], { cwd: tmpDir, timeout: RUN_TIMEOUT_MS });
   return { stdout: result.stdout, exitCode: result.status };
 }
 
@@ -1769,7 +1771,7 @@ async function runFixtureEntry(relPath, opts = {}) {
   // helper server bound, a path to a generated file.
   const result = await runProc(binPath, opts.args ?? [], {
     env,
-    timeout: opts.timeoutMs ?? 30000,
+    timeout: opts.timeoutMs ?? RUN_TIMEOUT_MS,
   });
   return {
     stdout: result.stdout,
@@ -1796,7 +1798,7 @@ function tlsSkipReason() {
   const res = spawnSync(
     resolveClang(),
     [src, "-o", out, ...librarySearchArgs(), ...lowerLinkFlag("ssl"), ...windowsClangArgs()],
-    { encoding: "utf8", env: clangEnv() },
+    { encoding: "utf8", env: clangEnv(), timeout: CLANG_TIMEOUT_MS, killSignal: "SIGKILL" },
   );
   fs.rmSync(dir, { recursive: true, force: true });
   tlsSkipMemo = res.status === 0 ? null : "OpenSSL headers/libraries not found";
@@ -1806,24 +1808,36 @@ function tlsSkipReason() {
 // Start the throwaway Node HTTPS server and wait for it to report its port.
 // Binds port 0 so this cannot collide with anything, which is what lets the
 // e2e suite keep running tests concurrently.
+// It is TRACKED (see src/testProc.js): this is the one child in the file that
+// deliberately outlives the call that started it, so it is the one that most
+// needs a run-interrupted-by-Ctrl-C to still take it down. Its stderr is
+// drained too - a helper nobody reads from blocks on a full pipe.
 function startTlsServer() {
   const script = path.join(repoRoot, "examples/pass/https_client/testdata/tls_server.mjs");
-  const child = spawn(process.execPath, [script], { stdio: ["ignore", "pipe", "pipe"] });
+  const child = trackChild(process.execPath, [script]);
   return new Promise((resolve, reject) => {
     let buf = "";
     const timer = setTimeout(() => {
-      child.kill("SIGKILL");
+      stopChild(child);
       reject(new Error("tls_server.mjs did not report a port in time"));
     }, 15000);
+    child.stderr.on("data", () => {});
     child.stdout.on("data", (d) => {
       buf += d;
       const m = buf.match(/^PORT (\d+)/m);
       if (m) {
         clearTimeout(timer);
-        resolve({ port: Number(m[1]), stop: () => child.kill("SIGKILL") });
+        resolve({ port: Number(m[1]), stop: () => stopChild(child) });
       }
     });
-    child.on("error", (e) => { clearTimeout(timer); reject(e); });
+    child.on("error", (e) => { clearTimeout(timer); stopChild(child); reject(e); });
+    // The server exiting on its own is still a failure to report a port, and
+    // without this the promise would sit unsettled until the suite gave up.
+    child.on("exit", (code, signal) => {
+      clearTimeout(timer);
+      stopChild(child);
+      reject(new Error(`tls_server.mjs exited (code ${code}, signal ${signal}) before reporting a port`));
+    });
   });
 }
 
@@ -2360,10 +2374,13 @@ describe("e2e: Phase 13.C @derive(display)", { concurrency: E2E_CONCURRENCY }, (
     if (skip) { t.skip(skip); return; }
     // lldb needs real debug info in the binary, so this one opts into -g.
     const { binPath } = await runFixtureEntry("examples/pass/runtime_linked/main.yoop", { debug: true });
-    const out = spawnSync(
+    // Through runProc, not spawnSync: `--batch` runs the DEBUGGEE as a
+    // grandchild, and only a tree kill can reach one of those if lldb wedges.
+    // spawnSync could not have killed it, and had no deadline either.
+    const out = await runProc(
       "lldb",
       ["-o", "image lookup -n main -v", "-o", "quit", "--batch", binPath],
-      { encoding: "utf8" },
+      { timeout: RUN_TIMEOUT_MS },
     );
     const text = (out.stdout ?? "") + (out.stderr ?? "");
     assert.match(text, /main\.yoop/, `lldb output had no .yoop reference:\n${text}`);
@@ -2409,7 +2426,7 @@ describe("e2e: Phase 13.C @derive(display)", { concurrency: E2E_CONCURRENCY }, (
     if (skip) { t.skip(skip); return; }
     // lldb needs real debug info in the binary, so this one opts into -g.
     const { binPath } = await runFixtureEntry("examples/pass/dwarf_locals/main.yoop", { debug: true });
-    const out = spawnSync(
+    const out = await runProc(
       "lldb",
       [
         "-o", "breakpoint set --file main.yoop --line 38",
@@ -2422,7 +2439,7 @@ describe("e2e: Phase 13.C @derive(display)", { concurrency: E2E_CONCURRENCY }, (
         "--batch",
         binPath,
       ],
-      { encoding: "utf8" },
+      { timeout: RUN_TIMEOUT_MS },
     );
     const text = (out.stdout ?? "") + (out.stderr ?? "");
     // Struct fields are walked, not shown as an opaque blob.
@@ -2447,10 +2464,10 @@ describe("e2e: Phase 13.C @derive(display)", { concurrency: E2E_CONCURRENCY }, (
     if (skip) { t.skip(skip); return; }
     // lldb needs real debug info in the binary, so this one opts into -g.
     const { binPath } = await runFixtureEntry("examples/pass/dwarf_locals/main.yoop", { debug: true });
-    const out = spawnSync(
+    const out = await runProc(
       "lldb",
       ["-o", "b manhattan", "-o", "run", "-o", "p *p", "-o", "quit", "--batch", binPath],
-      { encoding: "utf8" },
+      { timeout: RUN_TIMEOUT_MS },
     );
     const text = (out.stdout ?? "") + (out.stderr ?? "");
     assert.match(text, /\(Point\) \{\s*\n\s*x = 3\s*\n\s*y = 4/, text);
@@ -4669,17 +4686,28 @@ describe("e2e: fail fixtures fail at the right stage with the right message", { 
 // the driver's --test mode: discovery, the synthetic entry module, the
 // temp-dir executable, and the exit code. See plans/testing-via-kinds.md.
 describe("e2e: --test mode runs *.test.yoop suites through std/test.yoop", { concurrency: E2E_CONCURRENCY }, () => {
-  function runTestMode(relDir, extraArgs = []) {
-    const result = spawnSync(
-      process.execPath,
-      [path.join(repoRoot, "src/yoopiler.js"), "--test", path.join(repoRoot, relDir), ...extraArgs],
-      { encoding: "utf8", cwd: repoRoot, timeout: 120000 },
-    );
-    return { stdout: result.stdout ?? "", stderr: result.stderr ?? "", exitCode: result.status };
+  // These are the deepest process trees in the suite and the ones most worth
+  // getting right: node runs the driver, the driver runs clang, and then the
+  // driver RUNS THE COMPILED TEST BINARY with inherited stdio. spawnSync's
+  // `timeout` killed the node in the middle of that and left the other two
+  // running - and because the binary still held the inherited pipe, spawnSync
+  // itself did not even return. runProc kills the whole group instead.
+  async function runTestMode(relDir, extraArgs = []) {
+    const result = await runDriver([
+      "--test", path.join(repoRoot, relDir), ...extraArgs,
+    ]);
+    return { stdout: result.stdout, stderr: result.stderr, exitCode: result.status };
   }
 
-  it("runs every suite in a passing test module and exits 0", () => {
-    const { stdout, exitCode } = runTestMode("examples/testing/pass");
+  function runDriver(args) {
+    return runProc(process.execPath, [path.join(repoRoot, "src/yoopiler.js"), ...args], {
+      cwd: repoRoot,
+      timeout: 120000,
+    });
+  }
+
+  it("runs every suite in a passing test module and exits 0", async () => {
+    const { stdout, exitCode } = await runTestMode("examples/testing/pass");
     assert.equal(exitCode, 0, `expected exit 0, got ${exitCode}\n${stdout}`);
     // TAP: one line per case, in declaration order, grouped by suite.
     assert.match(stdout, /# strange_add\.test\.yoop:addsStrangelyWhenFirstIsTwoModFive/);
@@ -4690,8 +4718,8 @@ describe("e2e: --test mode runs *.test.yoop suites through std/test.yoop", { con
     assert.match(stdout, /# 3 passed, 0 failed/);
   });
 
-  it("reports the detail string on failure and exits with the failure count", () => {
-    const { stdout, exitCode } = runTestMode("examples/testing/fail");
+  it("reports the detail string on failure and exits with the failure count", async () => {
+    const { stdout, exitCode } = await runTestMode("examples/testing/fail");
     assert.equal(exitCode, 2, `expected exit 2 (two failures), got ${exitCode}\n${stdout}`);
     assert.match(stdout, /^ok 1 - passes$/m);
     assert.match(stdout, /^not ok 2 - fails with detail$/m);
@@ -4703,63 +4731,50 @@ describe("e2e: --test mode runs *.test.yoop suites through std/test.yoop", { con
     assert.match(stdout, /# 1 passed, 2 failed/);
   });
 
-  it("filters suites by a name substring passed after the path", () => {
-    const { stdout, exitCode } = runTestMode("examples/testing/pass", ["addsPlainly"]);
+  it("filters suites by a name substring passed after the path", async () => {
+    const { stdout, exitCode } = await runTestMode("examples/testing/pass", ["addsPlainly"]);
     assert.equal(exitCode, 0);
     assert.match(stdout, /^ok 1 - adds plainly when a % 5 is not 2$/m);
     assert.doesNotMatch(stdout, /adds an extra 1/);
     assert.match(stdout, /# 1 passed, 0 failed/);
   });
 
-  it("leaves no executable behind in the source tree", () => {
-    runTestMode("examples/testing/pass");
+  it("leaves no executable behind in the source tree", async () => {
+    await runTestMode("examples/testing/pass");
     const strays = fs
       .readdirSync(path.join(repoRoot, "examples/testing/pass"))
       .filter((f) => !f.endsWith(".yoop"));
     assert.deepEqual(strays, [], `--test left files behind: ${strays.join(", ")}`);
   });
 
-  it("runs a single test file directly, with no --test flag (the import.test; payoff)", () => {
+  it("runs a single test file directly, with no --test flag (the import.test; payoff)", async () => {
     // A test module has no `main`, so without the in-file flag this would be a
     // compile error rather than a test run.
-    const result = spawnSync(
-      process.execPath,
-      [
-        path.join(repoRoot, "src/yoopiler.js"),
-        path.join(repoRoot, "examples/testing/pass/strange_add.test.yoop"),
-      ],
-      { encoding: "utf8", cwd: repoRoot, timeout: 120000 },
-    );
+    const result = await runDriver([
+      path.join(repoRoot, "examples/testing/pass/strange_add.test.yoop"),
+    ]);
     assert.equal(result.status, 0, `expected exit 0, got ${result.status}\n${result.stdout}`);
     assert.match(result.stdout, /# 3 passed, 0 failed/);
   });
 
-  it("rejects a *.test.yoop that forgot import.test;", () => {
+  it("rejects a *.test.yoop that forgot import.test;", async () => {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "yoop_testmode_"));
     fs.writeFileSync(
       path.join(tmp, "unflagged.test.yoop"),
       'import { suite } from "std/test.yoop";\nsuite function nope(): void {}\n',
     );
-    const result = spawnSync(
-      process.execPath,
-      [path.join(repoRoot, "src/yoopiler.js"), "--test", tmp],
-      { encoding: "utf8", cwd: repoRoot, timeout: 120000 },
-    );
+    const result = await runDriver(["--test", tmp]);
     assert.equal(result.status, 1);
     assert.match(result.stderr, /does not declare 'import\.test;'/);
   });
 
-  it("reports a suite signature mismatch at the suite, not inside generated code", () => {
+  it("reports a suite signature mismatch at the suite, not inside generated code", async () => {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "yoop_testmode_"));
     fs.writeFileSync(
       path.join(tmp, "badsig.test.yoop"),
       'import.test;\nimport { suite } from "std/test.yoop";\nsuite function nope(n: int32): void {}\n',
     );
-    const result = spawnSync(
-      process.execPath,
-      [path.join(repoRoot, "src/yoopiler.js"), "--test", tmp],
-      { encoding: "utf8", cwd: repoRoot, timeout: 120000 },
-    );
+    const result = await runDriver(["--test", tmp]);
     assert.equal(result.status, 1);
     assert.match(result.stderr, /carries kind 'suite' and must match/);
     // The generated entry's cascade must be suppressed - a diagnostic pointing
@@ -4768,17 +4783,13 @@ describe("e2e: --test mode runs *.test.yoop suites through std/test.yoop", { con
     assert.match(result.stderr, /typecheck failed \(1 error\)/);
   });
 
-  it("rejects a kind prefix whose kind is not enumerable into \"suites\"", () => {
+  it("rejects a kind prefix whose kind is not enumerable into \"suites\"", async () => {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "yoop_testmode_"));
     fs.writeFileSync(
       path.join(tmp, "wrongkind.test.yoop"),
       'import.test;\nimport { disposable } from "std/core/kinds.yoop";\ndisposable function nope(): void {}\n',
     );
-    const result = spawnSync(
-      process.execPath,
-      [path.join(repoRoot, "src/yoopiler.js"), "--test", tmp],
-      { encoding: "utf8", cwd: repoRoot, timeout: 120000 },
-    );
+    const result = await runDriver(["--test", tmp]);
     assert.equal(result.status, 1);
     assert.match(result.stderr, /cannot prefix a function declaration/);
   });
@@ -4787,8 +4798,8 @@ describe("e2e: --test mode runs *.test.yoop suites through std/test.yoop", { con
   // `*.test.yoop` is excluded from a directory module's source files, so the
   // test file is its own module and imports the module under test by the same
   // "modules/math" path a consumer writes.
-  it("runs a module's own tests from inside its modules/ directory", () => {
-    const { stdout, exitCode } = runTestMode("examples/modules_demo");
+  it("runs a module's own tests from inside its modules/ directory", async () => {
+    const { stdout, exitCode } = await runTestMode("examples/modules_demo");
     assert.equal(exitCode, 0, `expected exit 0, got ${exitCode}\n${stdout}`);
     assert.match(stdout, /^ok 1 - mean of 1 and 2 rounds up to 2$/m);
     assert.match(stdout, /^ok 5 - snapping rounds each component to the nearest 10$/m);

@@ -32,7 +32,7 @@ import { Vec }, * as vec from "std/core/vec.yoop";
 import { disposable } from "std/core/kinds.yoop";
 import { Option } from "std/core/types.yoop";
 import * as str from "std/core/strings.yoop";
-import { AST, ASTNode, childAt, nodeAt } from "../ast";
+import { AST, ASTNode, ASTNodeKind, NodeId, childAt, nodeAt } from "../ast";
 
 // One field of a propagating type that owes a cleanup call.
 export type PropagatedField {
@@ -55,6 +55,32 @@ export function propagatedKindNameOf(ref ast: AST, declNode: ASTNode): string {
   return nodeAt(ref ast, childAt(ref ast, list, 0)).name;
 }
 
+// The kind an ANNOTATION names by prefix, or "". `handle: disposable FileHandle`
+// gives "disposable"; a bare `handle: FileHandle` gives "".
+//
+// Read at pass C, which is the one place the annotation node and its KIND_PREFIX
+// list are both in hand - by pass D the field is a `Field` and the arena that
+// held its syntax belongs to another module.
+//
+// Only TYPE_ANNOTATION_TYPE_NAME is read. A prefix on a `ref` or an array
+// wrapper is deliberately not, for the reason on `Field.carriedKind`.
+export function carriedKindNameOf(ref ast: AST, annotId: NodeId): string {
+  if (annotId == 0) {
+    return "";
+  }
+  const annot = nodeAt(ref ast, annotId);
+  if (annot.kind != ASTNodeKind.TYPE_ANNOTATION_TYPE_NAME || annot.childB == 0) {
+    return "";
+  }
+  const list = nodeAt(ref ast, annot.childB);
+  if (list.childCount == 0) {
+    return "";
+  }
+  // The FIRST prefix that asks wins, the same rule codegen's
+  // `disposeMethodOfPrefixes` already applies to a declaration's prefixes.
+  return nodeAt(ref ast, childAt(ref ast, list, 0)).name;
+}
+
 // The kind a nominal type propagates, or "".
 export function propagatedKindOf(ref prog: Program, typeId: TypeId): string {
   switch (typeAt(ref prog, typeId)) {
@@ -71,7 +97,13 @@ export function propagatedKindOf(ref prog: Program, typeId: TypeId): string {
 // True when `typeId` propagates a kind whose `mustCall` is `method`. This is
 // what makes `disposable e: Emitter` legal without an `Emitter.dispose`.
 export function propagatesMustCall(ref prog: Program, typeId: TypeId, method: string): bool {
-  const kindName = propagatedKindOf(ref prog, typeId);
+  return kindMustCallIs(ref prog, propagatedKindOf(ref prog, typeId), method);
+}
+
+// True when the kind named `kindName` is the one whose `mustCall` is `method`.
+// The shared tail of the two questions a field can answer with: its TYPE
+// propagates the kind, or its ANNOTATION carries it.
+export function kindMustCallIs(ref prog: Program, kindName: string, method: string): bool {
   if (kindName.len == 0) {
     return false;
   }
@@ -94,7 +126,12 @@ export function propagatedFieldsOf(
       let i: usize = 0;
       while (i < f.len) {
         const field = vec.vecGet(ref f, i);
-        if (propagatesMustCall(ref prog, field.typeId, method)) {
+        // TWO spellings, and the second is why `carriedKind` exists. `Text`
+        // PROPAGATES disposable, so its own type answers. `FileHandle`
+        // implements `Disposable` outright and propagates nothing, so the field
+        // says it: `handle: disposable FileHandle`. The reference counts both.
+        if (propagatesMustCall(ref prog, field.typeId, method)
+            || kindMustCallIs(ref prog, field.carriedKind, method)) {
           vec.vecPush(ref out, { name: field.name, index: i, fieldType: field.typeId });
         }
         i += 1;
@@ -120,7 +157,15 @@ export function propagatedDisposeProblem(
   while (i < fields.len) {
     const field = vec.vecGet(ref fields, i);
     if (lookupMethod(ref prog, field.fieldType, method) == TYPE_ERROR_ID) {
-      return `field "${field.name}" propagates it too, and the bootstrap does not chain propagated disposal through a second level`;
+      // Two ways to be here and they are different mistakes, so they get
+      // different messages. A field that qualified by PROPAGATING wants a
+      // second level of chaining, which is unbuilt. A field that qualified by
+      // CARRYING the kind in its annotation is claiming something its type
+      // cannot do, which is a bad annotation rather than a missing feature.
+      if (propagatesMustCall(ref prog, field.fieldType, method)) {
+        return `field "${field.name}" propagates it too, and the bootstrap does not chain propagated disposal through a second level`;
+      }
+      return `field "${field.name}" carries the kind in its annotation, but ${formatType(ref prog, field.fieldType)} has no "${method}" method`;
     }
     i += 1;
   }

@@ -1,0 +1,4 @@
+module lib;
+// The INNER modules root, at bootstrap/tests/graph/nearer/modules/.
+// Same import path as the outer one, and the nearer root must win.
+export function whichRoot(): int32 { return 2; }

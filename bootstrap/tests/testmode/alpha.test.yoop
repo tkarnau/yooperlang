@@ -1,0 +1,11 @@
+// Fixture for the test_mode discovery and collection tests. Never RUN - only
+// parsed, so its suites do nothing.
+import.test;
+import { suite, test, Case } from "std/test.yoop";
+
+suite function addsOne(): void { }
+
+suite function addsTwo(): void { }
+
+// Not a suite: no kind prefix, so syntactic collection must not take it.
+function helper(): void { }

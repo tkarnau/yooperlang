@@ -1,0 +1,106 @@
+module test_mode;
+
+/*
+  Reading each test file and taking its suite NAMES.
+
+  Collection is SYNTACTIC, and it has to be. Resolving what a kind enumerates
+  into needs typecheck; typecheck needs the entry module; the entry module needs
+  the names collected here. The cycle is broken by taking every kind-prefixed
+  top-level function and letting the ordinary passes reject anything whose kind
+  turns out not to be a suite - which is safe, because a kind-prefixed top-level
+  FUNCTION has no other meaning in the grammar.
+
+  The file is parsed into an arena of its OWN, thrown away as soon as the names
+  are out of it. That is a second parse of every test file (the module graph
+  parses it again when it loads), and it is deliberate: the alternative is a
+  graph that cannot be built until the entry exists and an entry that cannot be
+  written until the graph is built.
+*/
+
+import { Vec }, * as vec from "std/core/vec.yoop";
+import * as fs from "std/fs.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import { Result } from "std/core/types.yoop";
+import { AST, ASTNodeKind, childAt, declOf, nodeAt, isTestModuleProgram } from "../ast";
+import { parse } from "../parse";
+
+// One test file and the suites it declares, in declaration order.
+export type SuiteFile propagates<disposable> {
+  absPath: string,
+  relPath: string,           // what a suite is LABELED with, relative to the root
+  suites: Vec<string>,
+}
+
+// What a whole discovery pass found. `error` is "" when the collection is
+// usable and otherwise is the whole complaint - one bad file stops the run,
+// because a test suite silently missing is worse than a run that refuses.
+export type SuiteCollection propagates<disposable> {
+  files: Vec<SuiteFile>,
+  suiteCount: usize,
+  error: string,
+}
+
+export function collectSuites(ref paths: Vec<string>, rootDir: string): SuiteCollection propagates<disposable> {
+  let out: SuiteCollection = { files: vec.vecNew(paths.len), suiteCount: 0, error: "" };
+  let i: usize = 0;
+  while (i < paths.len) {
+    const absPath = vec.vecGet(ref paths, i);
+    let suites: Vec<string> = vec.vecNew(8);
+    const err = collectSuitesOf(absPath, ref suites);
+    if (err.len > 0) {
+      out.error = err;
+      return out;
+    }
+    out.suiteCount += suites.len;
+    vec.vecPush(ref out.files, {
+      absPath: absPath,
+      relPath: relativeTo(rootDir, absPath),
+      suites: suites,
+    });
+    i += 1;
+  }
+  return out;
+}
+
+// Parse one file and append its suite names. Returns "" on success.
+function collectSuitesOf(absPath: string, ref out: Vec<string>): string {
+  disposable src: fs.ReadFileResult = fs.readFile(absPath);
+  if (src.error.len > 0) {
+    return `${absPath}: ${src.error}`;
+  }
+  switch (parse(vec.vecAsArray(ref src.data))) {
+    case Result.Err { error: pe }: {
+      return `${absPath}:${pe.sourceLoc.line + 1}:${pe.sourceLoc.column}: ${pe.rawMessage}`;
+    }
+    case Result.Ok { value: parsed }: {
+      disposable ast: AST = parsed;
+      // The flag is what makes a file a test MODULE, and the name is only how
+      // it was found. A file named *.test.yoop without it has no `main` and no
+      // suites either, so compiling it would fail somewhere less obvious.
+      if (!isTestModuleProgram(ref ast, ast.root)) {
+        return `${absPath} is named *${TEST_FILE_SUFFIX} but does not declare 'import.test;' - add it as the first line, or rename the file if it is not a test module`;
+      }
+      appendKindPrefixedFunctionNames(ref ast, ref out);
+      return "";
+    }
+  }
+}
+
+// Every top-level function carrying a kind prefix, looking through an `export`
+// wrapper the author may have written by hand.
+//
+// FUNCTION_DECL.childE is the KIND_PREFIX list, and 0 means there was none - so
+// "carries a kind" is one comparison rather than a name to match against. That
+// is the point of collecting syntactically: this pass never has to know that
+// the kind is spelled `suite`.
+function appendKindPrefixedFunctionNames(ref ast: AST, ref out: Vec<string>): void {
+  const program = nodeAt(ref ast, ast.root);
+  let i: usize = 0;
+  while (i < program.childCount) {
+    const decl = nodeAt(ref ast, declOf(ref ast, childAt(ref ast, program, i)));
+    if (decl.kind == ASTNodeKind.FUNCTION_DECL && decl.childE != 0) {
+      vec.vecPush(ref out, decl.name);
+    }
+    i += 1;
+  }
+}

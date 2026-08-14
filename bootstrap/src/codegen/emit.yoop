@@ -68,6 +68,11 @@ export type Emitter propagates<disposable> {
   // function have to share one define - a second is an invalid redefinition
   // rather than a duplicate. See instr_vtable.yoop.
   fromFnShims: Map<string, bool>,
+  // The `@<mod>__module_init<N>` functions this program owes, in the order
+  // `main` has to call them. Filled by the globals pre-pass, which walks the
+  // graph in TOPOLOGICAL order, so a module's globals are already stored by the
+  // time an importing module's initializer reads one. See module_init.yoop.
+  moduleInits: Vec<string>,
 }
 
 export function emitterNew(): Emitter propagates<disposable> {
@@ -75,6 +80,7 @@ export function emitterNew(): Emitter propagates<disposable> {
   // and there is no turbofish.
   let constOps: Map<uint64, Operand> = map.mapNew(0, map.uint64KeyOps());
   let fromFnShims: Map<string, bool> = map.mapNew(0, map.stringKeyOps());
+  let moduleInits: Vec<string> = vec.vecNew(0);
   return {
     globals: text.make(1024),
     body: text.make(8192),
@@ -92,6 +98,7 @@ export function emitterNew(): Emitter propagates<disposable> {
     hasTasks: false,
     usesTaskIntrinsics: false,
     fromFnShims: fromFnShims,
+    moduleInits: moduleInits,
   };
 }
 
@@ -204,6 +211,12 @@ export function llvmType(ref prog: Program, rawId: TypeId): string {
     // then one function pointer per slot. Named for the same reason a struct is.
     case Type.VTable { decl: d, forTrait: ft, fields: f, methodOrder: mo }: {
       return vtableLlvmName(moduleIdOf(ref prog, d.module), d.name);
+    }
+    // A union is `{ [N x i8] }` - a byte BUFFER rather than a field list,
+    // because the fields overlap and LLVM has no type that says so. Every
+    // access reinterprets that buffer at the field's own type; see union.yoop.
+    case Type.Union { decl: d, fields: f }: {
+      return unionLlvmName(moduleIdOf(ref prog, d.module), d.name);
     }
     default: { return "ptr"; }
   }

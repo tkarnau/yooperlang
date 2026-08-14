@@ -123,6 +123,76 @@ suite function aDirectoryModuleIsOneModuleOfSeveralFiles(): void {
   }
 }
 
+// The `modules/` import root. The whole feature is WHICH `modules` directory
+// answers, so that is what these assert: the walk starts at the importing
+// file's own directory and the FIRST root it meets wins.
+//
+// Both fixtures import the same path, `modules/lib`, and the two libs differ
+// only in what `whichRoot` returns - so the resolved root is observable as an
+// exit code rather than as a path a test would have to spell out.
+suite function theModulesRootIsTheNearestOneAtOrAboveTheImporter(): void {
+  switch (loadModuleGraph(fixture("graph", "modules_far.yoop"), "")) {
+    case LoadGraphResult.Err { error: e }: {
+      let test theory: Case = t.asserts("an entry beside a modules root resolves against it") {
+        theory.isSuccessful = false;
+        theory.detail = `loading modules_far.yoop failed: ${e}`;
+      }
+    }
+    case LoadGraphResult.Ok { value: graph }: {
+      let test theory: Case = t.asserts("an entry beside a modules root resolves against it") {
+        theory.isSuccessful = graph.modules.len == 2;
+        theory.detail = `the graph holds ${graph.modules.len} modules, wanted 2 (lib and the entry)`;
+      }
+
+      // The walk STARTS at the importing file's own directory, which is what
+      // makes a program with `modules/` beside its entry file work at all.
+      let lib = vec.vecGet(ref graph.modules, 0);
+      let test theory: Case = t.asserts("the root beside the entry is the one that answered") {
+        const wanted = "tests/graph/modules/lib";
+        theory.isSuccessful = str.stringIndexOf(lib.dir, wanted) < lib.dir.len;
+        theory.detail = `resolved to "${lib.dir}", wanted a path through "${wanted}"`;
+      }
+    }
+  }
+
+  // Two levels below the nearer root and three below the outer one. Continuing
+  // the walk past the first hit would let an unrelated `modules/` further up
+  // answer, so the nearer one winning IS the safety property.
+  switch (loadModuleGraph(fixture("graph", "nearer/deep/modules_near.yoop"), "")) {
+    case LoadGraphResult.Err { error: e }: {
+      let test theory: Case = t.asserts("the NEAREST root wins over one further up") {
+        theory.isSuccessful = false;
+        theory.detail = `loading nearer/deep/modules_near.yoop failed: ${e}`;
+      }
+    }
+    case LoadGraphResult.Ok { value: graph }: {
+      let lib = vec.vecGet(ref graph.modules, 0);
+      let test theory: Case = t.asserts("the NEAREST root wins over one further up") {
+        const wanted = "tests/graph/nearer/modules/lib";
+        theory.isSuccessful = str.stringIndexOf(lib.dir, wanted) < lib.dir.len;
+        theory.detail = `resolved to "${lib.dir}", wanted the nearer root at "${wanted}"`;
+      }
+    }
+  }
+
+  // One copy of a name per program: a module under a modules root may not carry
+  // a root of its own. Two copies would link fine and then mismatch as
+  // "Value is not assignable to Value", which is why this is refused rather
+  // than left to convention.
+  let test theory: Case = t.asserts("a module carrying its OWN modules root is refused by name") {
+    theory.isSuccessful = loadFails("modules_nested.yoop", "carries its own");
+    theory.detail = `wanted a nested-root diagnostic, got: ${loadError("graph", "modules_nested.yoop")}`;
+  }
+
+  // A miss inside the root that answered is a better error than a hit outside
+  // it, so the message has to say WHICH root was searched - there may be
+  // several on the path and only one was consulted.
+  let test theory: Case = t.asserts("a miss names the modules root that was searched") {
+    theory.isSuccessful = loadFails("modules_missing.yoop", "searched the modules root");
+    theory.detail = `wanted a searched-root diagnostic, got: ${loadError("graph", "modules_missing.yoop")}`;
+  }
+}
+
 suite function importingTheWrongThingNamesTheRightForm(): void {
   // The module is the unit, so naming one of its files suggests you get only
   // that file. Say which form works instead of silently loading the directory.
