@@ -24,16 +24,13 @@ module codegen;
 
 import { Vec }, * as vec from "std/core/vec.yoop";
 import { disposable } from "std/core/kinds.yoop";
-import { ASTNode, NodeId, childAt, nodeAt } from "../ast";
+import { ASTNode, childAt, nodeAt } from "../ast";
 
-export function emitSwitch(ref cx: Cx, stmt: ASTNode, retTy: string, ref terminated: bool): string {
+export function emitSwitch(ref cx: Cx, stmt: ASTNode, retTy: string, ref terminated: bool): EmitResult {
   terminated = false;
 
   let scrut: Operand = Operand.None;
-  const serr = emitExpr(ref cx, stmt.childA, ref scrut);
-  if (serr.len > 0) {
-    return serr;
-  }
+  emitExpr(ref cx, stmt.childA, ref scrut)?;
   const valueTy = typeOf(ref cx, stmt.childA);
   const overVariant = isVariantAt(ref cx, stmt.childA);
   // A value enum dispatches on the scrutinee ITSELF - its values are integers of
@@ -108,8 +105,8 @@ export function emitSwitch(ref cx: Cx, stmt: ASTNode, retTy: string, ref termina
   switchPush(ref cx, endLabel);
   let allTerminated = stmt.childCount > 0;
   let a: usize = 0;
-  let armErr = "";
-  while (a < stmt.childCount && armErr.len == 0) {
+  let armErr: EmitResult = EmitResult.Ok;
+  while (a < stmt.childCount && !emitFailed(armErr)) {
     const arm = nodeAt(cx.ast, childAt(cx.ast, stmt, a));
     emitLabel(ref cx, vec.vecGet(ref armLabels, a));
 
@@ -122,10 +119,10 @@ export function emitSwitch(ref cx: Cx, stmt: ASTNode, retTy: string, ref termina
       armErr = emitArmBindings(ref cx, arm, scrutSlotId);
     }
 
-    if (armErr.len == 0) {
+    if (!emitFailed(armErr)) {
       let armTerminated = false;
       emitBlock(ref cx, arm.childB, retTy, ref armTerminated, ref armErr);
-      if (armErr.len == 0 && !armTerminated) {
+      if (!emitFailed(armErr) && !armTerminated) {
         allTerminated = false;
         emitBr(ref cx, endLabel);
       }
@@ -138,7 +135,7 @@ export function emitSwitch(ref cx: Cx, stmt: ASTNode, retTy: string, ref termina
   // the branch to the join.
   const brokeToJoin = innermostBreakable(ref cx).sawBreak;
   loopPop(ref cx);
-  if (armErr.len > 0) {
+  if (emitFailed(armErr)) {
     return armErr;
   }
 
@@ -154,10 +151,10 @@ export function emitSwitch(ref cx: Cx, stmt: ASTNode, retTy: string, ref termina
   // join is reached after all and its label has to exist.
   if (allTerminated && !brokeToJoin && defaultLabel != endLabel) {
     terminated = true;
-    return "";
+    return EmitResult.Ok;
   }
   emitLabel(ref cx, endLabel);
-  return "";
+  return EmitResult.Ok;
 }
 
 // The `<ty> <value>, label %Lk` lines - one per pattern, so several patterns can
@@ -209,13 +206,13 @@ function patternOperand(pattern: ASTNode): Operand {
 // The payload bindings for whichever pattern reached this arm. Pass D allows
 // several patterns to share an arm only when none of them binds, so taking the
 // FIRST is not a choice - it is the only one that can bind anything.
-function emitArmBindings(ref cx: Cx, arm: ASTNode, scrutSlotId: usize): string {
+function emitArmBindings(ref cx: Cx, arm: ASTNode, scrutSlotId: usize): EmitResult {
   if (arm.flagA || arm.childA == 0) {
-    return "";
+    return EmitResult.Ok;
   }
   const patterns = nodeAt(cx.ast, arm.childA);
   if (patterns.childCount == 0) {
-    return "";
+    return EmitResult.Ok;
   }
   const patternId = childAt(cx.ast, patterns, 0);
   return emitPatternBindings(ref cx, nodeAt(cx.ast, patternId), patternId, scrutSlotId);

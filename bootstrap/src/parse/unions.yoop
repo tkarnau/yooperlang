@@ -53,10 +53,7 @@ export function parseUnionDecl(ref ps: ParserState): Result<NodeId, ParsingError
 
   SelfLexing.expect(ref ps, TokenTags.LCURLY)?;
   disposable fieldIds: Vec<NodeId> = vec.vecNew(4);
-  while (
-    SelfLexing.peek(ref ps).tag != TokenTags.RCURLY &&
-    SelfLexing.peek(ref ps).tag != TokenTags.EOF
-  ) {
+  while (untilClosing(ref ps, TokenTags.RCURLY)) {
     // Named rather than left to parseFieldDecl, which would report a missing
     // `:` after the word `function` and say nothing about unions.
     if (SelfLexing.peek(ref ps).tag == TokenTags.FUNCTION) {
@@ -83,10 +80,7 @@ export function parseUnionDecl(ref ps: ParserState): Result<NodeId, ParsingError
     )};
   }
 
-  const start: usize = ps.ast.childIds.len;
-  vec.vecExtendFrom(ref ps.ast.childIds, vec.vecAsArray(ref fieldIds));
-  node.childStart = start;
-  node.childCount = fieldIds.len;
+  spliceChildren(ref ps, ref node, ref fieldIds);
 
   return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
 }

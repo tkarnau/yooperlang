@@ -21,8 +21,7 @@ module parse;
 import { Result } from "std/core/types.yoop";
 import { Vec }, * as vec from "std/core/vec.yoop";
 import { disposable } from "std/core/kinds.yoop";
-import * as str from "std/core/strings.yoop";
-import { AST, NodeId, ASTNodeKind, childAt, nodeAt } from "../ast";
+import { NodeId, ASTNodeKind } from "../ast";
 import { TokenTags, tagName, posToSourceLocation } from "../lex";
 import { ParsingError } from "../diagnostics";
 
@@ -157,23 +156,6 @@ function atKindPrefixIdent(ref ps: ParserState): bool {
       return tok.tag == TokenTags.IDENT || tok.tag == TokenTags.FUNCTION;
     }
   }
-}
-
-// Whether any prefix in a KIND_PREFIX list is named `name`. What pass A uses to
-// find `async` and `task` without the parser having to know either word.
-export function kindPrefixesInclude(ref ast: AST, listId: NodeId, name: string): bool {
-  if (listId == 0) {
-    return false;
-  }
-  const list = nodeAt(ref ast, listId);
-  let i: usize = 0;
-  while (i < list.childCount) {
-    if (str.stringEq(nodeAt(ref ast, childAt(ref ast, list, i)).name, name)) {
-      return true;
-    }
-    i += 1;
-  }
-  return false;
 }
 
 // ----- the propagates clause -------------------------------------------------

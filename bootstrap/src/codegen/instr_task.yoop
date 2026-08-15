@@ -194,15 +194,10 @@ export function emitGepTaskField(
   baseName: string,
   index: usize
 ): void {
-  startInstr(ref cx);
-  temp(ref cx, dest);
-  part(ref cx, " = getelementptr inbounds ");
-  part(ref cx, structTy);
-  part(ref cx, ", ptr %");
+  gepFieldHead(ref cx, dest, structTy);
+  part(ref cx, "%");
   part(ref cx, baseName);
-  part(ref cx, ", i32 0, i32 ");
-  num(ref cx, index);
-  endInstr(ref cx);
+  gepFieldTail(ref cx, index);
 }
 
 //   call void @yoop_runtime_init()

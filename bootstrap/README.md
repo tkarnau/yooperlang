@@ -39,7 +39,17 @@ a shared header file.
                        module ids, finding the std root, and the std AUTOLOAD
                        (which two modules join every graph, and in what order).
                        Also where the derive expansion is RUN - see load.yoop
-      typecheck/       layer 3: ids, Type, Symbol, Program, the passes;
+      typecheck/       layer 3: ids, Type, Symbol, Program, the passes.
+                       pass_a/b/c walk DECLARATIONS and pass_d walks BODIES,
+                       and that line is what context.yoop draws: a body check
+                       takes one `ref cx: Cx` (tables, decoration, arena,
+                       scope) the way codegen's walk does, while the
+                       declaration passes keep their own parameters because
+                       there is no scope during one.
+                       pass_d.yoop is the DRIVER only; the walk it starts is
+                       the check_*.yoop files beside it, one per shape of
+                       thing being checked - stmt, expr, call, qualified,
+                       access, literal, loop, switch.
                        async.yoop is `await` coloring, task.yoop the spawn's
                        half - `Task<T>`, the binding forms, `wait`;
                        vtable*.yoop is type ERASURE - what a vtable's slots are
@@ -2292,6 +2302,30 @@ is what keeps it readable at a glance and testable in isolation.
 **Pass the `Cx`, not five arguments.** `context.yoop` bundles the emitter,
 program, typed module, AST, and locals behind `ref` fields, so signatures stay
 short and the one argument that actually varies is visible.
+
+**Failures are `EmitResult`, and they propagate with `?`.** An emit function
+returns `EmitResult.Ok` or `EmitResult.Err { message }` - never a bare string.
+Reaching an `Err` means a pass ABOVE let something through, since every mistake
+the user could make was reported by typecheck long before codegen ran.
+
+    emitExpr(ref cx, argId, ref value)?;
+
+The `Ok` case carries no payload, because these functions produce their result
+through a `ref out` parameter rather than through the return. That is what makes
+the call above a statement.
+
+It was a bare `string` with `""` meaning success until 2026-08-14, propagated by
+102 hand-written four-line blocks. `""` is an ordinary string, so a check written
+against the wrong local, or testing the length the wrong way round, was not a
+type error anywhere in the layer.
+
+Eighteen sites still test the outcome by hand, with `emitFailed(err)`, and they
+are all the same shape: a walk holding a SCOPE it has to pop on the way out
+(`emitBlock` and the region and loop forms around it), where returning through
+`?` would leave the dispose and locals stacks unwound. There is exactly one
+DELIBERATE discard, written `_ = emitConcatParts(...)` in `try_forms.yoop`, in a
+helper that is total by design - written that way so it reads as a decision
+rather than an oversight.
 
 **No template literals on an emit path** - one malloc per instruction that
 nothing frees. See section 3.1 of [../docs/writing_yoop.md](../docs/writing_yoop.md).

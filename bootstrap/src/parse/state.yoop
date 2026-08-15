@@ -14,11 +14,9 @@ module parse;
 import { Result, Option } from "std/core/types.yoop";
 import { disposable } from "std/core/kinds.yoop";
 import { Vec }, * as vec from "std/core/vec.yoop";
-import * as Log from "std/log.yoop";
 
 import { AST, ASTNode, ASTNodeKind, NodeId, createASTNode } from "../ast";
-import { TokenTags, tagName, Token, LexedVal, LexTables, createLexedVal, lexNext,
-  posToSourceLocation } from "../lex";
+import { TokenTags, tagName, Token, LexedVal, LexTables, lexNext, posToSourceLocation } from "../lex";
 import { SourceLocation, ParsingError } from "../diagnostics";
 
 // What a parse function hands back: the NodeId it appended to the arena, or the
@@ -40,6 +38,42 @@ export trait SelfLexing {
 
 export function peekLengthUsize(ref pState: ParserState): Option<usize> {
   return Option.Some { value: usize(SelfLexing.peek(ref pState).length) };
+}
+
+// True while the cursor is inside a run that ends at `closer`.
+//
+// Every bracketed list in the parser walks until its closing token OR end of
+// file, and the EOF half is the part that matters: without it an unterminated
+// `{` spins forever instead of raising, because `peek` at EOF keeps handing back
+// EOF. The loop does not report anything - the `expect(closer)` after it does,
+// which is what makes the diagnostic point at the closer rather than at EOF.
+//
+// Seventeen sites spelled this out as a five-line condition that called `peek`
+// twice per iteration.
+export function untilClosing(ref ps: ParserState, closer: TokenTags): bool {
+  const t = SelfLexing.peek(ref ps).tag;
+  return t != closer && t != TokenTags.EOF;
+}
+
+// Point `node` at a run of children in the arena's one flat `childIds` table.
+//
+// The scratch-Vec-then-splice build pattern, and the reason it exists: a list's
+// length is not known until it has been parsed, but `childStart`/`childCount`
+// index into a table SHARED by every node. So children are collected into a
+// local Vec first and copied in as one contiguous run at the end - a partial
+// splice would interleave with the runs a nested parse appended in the meantime.
+//
+// Thirteen parse sites wrote these three lines out by hand. The ORDER is the
+// part worth having in one place: `childStart` has to be read BEFORE the extend,
+// and a version that reads it after points the node at the end of its own run,
+// which parses without complaint and then walks nothing.
+//
+// `buildListNode` is the sibling for the other case - a slot that HOLDS a list
+// (`node.childB = ...`) rather than a node that IS one.
+export function spliceChildren(ref ps: ParserState, ref node: ASTNode, ref ids: Vec<NodeId>): void {
+  node.childStart = ps.ast.childIds.len;
+  vec.vecExtendFrom(ref ps.ast.childIds, vec.vecAsArray(ref ids));
+  node.childCount = ids.len;
 }
 
 export type ParserState implements SelfLexing propagates<disposable> {

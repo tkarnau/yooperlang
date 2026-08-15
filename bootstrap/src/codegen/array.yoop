@@ -12,15 +12,12 @@ module codegen;
 // reference has the same property ("no copy - the array borrows the underlying
 // memory"); a heap-allocating form is a separate feature.
 
-import { Vec }, * as vec from "std/core/vec.yoop";
-import { ASTNode, ASTNodeKind, NodeId, childAt, nodeAt } from "../ast";
+import { ASTNode, NodeId, childAt, nodeAt } from "../ast";
 import { Type, typeAt } from "../typecheck";
-import { Option } from "std/core/types.yoop";
-import { disposable } from "std/core/kinds.yoop";
 
 // `[a, b, c]` - store each element into the backing slot, then build the
 // descriptor that points at it.
-export function emitArrayLiteral(ref cx: Cx, expr: ASTNode, exprId: NodeId, ref out: Operand): string {
+export function emitArrayLiteral(ref cx: Cx, expr: ASTNode, exprId: NodeId, ref out: Operand): EmitResult {
   const elemTy = elementLlvmType(ref cx, exprId);
   let count: usize = 0;
   if (expr.childA != 0) {
@@ -35,10 +32,7 @@ export function emitArrayLiteral(ref cx: Cx, expr: ASTNode, exprId: NodeId, ref 
     while (i < count) {
       const elemId = childAt(cx.ast, list, i);
       let value: Operand = Operand.None;
-      const err = emitExpr(ref cx, elemId, ref value);
-      if (err.len > 0) {
-        return err;
-      }
+      emitExpr(ref cx, elemId, ref value)?;
       const addr = freshTemp(cx.e);
       emitGepArrayBaseAt(ref cx, addr, count, elemTy, store.id, i);
       emitStoreToPtr(ref cx, elemTy, value, addr);
@@ -54,73 +48,55 @@ export function emitArrayLiteral(ref cx: Cx, expr: ASTNode, exprId: NodeId, ref 
   const withLen = freshTemp(cx.e);
   emitInsertValueTemp(ref cx, withLen, withData, "i64", Operand.Imm { value: uint64(count) }, 1);
   out = Operand.Temp { id: withLen };
-  return "";
+  return EmitResult.Ok;
 }
 
 // `xs[i]` - step the data pointer, then load.
-export function emitIndexRead(ref cx: Cx, expr: ASTNode, exprId: NodeId, ref out: Operand): string {
+export function emitIndexRead(ref cx: Cx, expr: ASTNode, exprId: NodeId, ref out: Operand): EmitResult {
   let addr: usize = 0;
-  const err = emitElementAddress(ref cx, expr, exprId, ref addr);
-  if (err.len > 0) {
-    return err;
-  }
+  emitElementAddress(ref cx, expr, exprId, ref addr)?;
   const elemTy = typeOf(ref cx, exprId);
   const dest = freshTemp(cx.e);
   emitLoadFromPtr(ref cx, dest, elemTy, addr);
   out = Operand.Temp { id: dest };
-  return "";
+  return EmitResult.Ok;
 }
 
 // `xs[i] = v` - the same address, then store.
-export function emitIndexWrite(ref cx: Cx, target: ASTNode, targetId: NodeId, value: Operand): string {
+export function emitIndexWrite(ref cx: Cx, target: ASTNode, targetId: NodeId, value: Operand): EmitResult {
   let addr: usize = 0;
-  const err = emitElementAddress(ref cx, target, targetId, ref addr);
-  if (err.len > 0) {
-    return err;
-  }
+  emitElementAddress(ref cx, target, targetId, ref addr)?;
   emitStoreToPtr(ref cx, typeOf(ref cx, targetId), value, addr);
-  return "";
+  return EmitResult.Ok;
 }
 
 // `xs.ptr` - field 0 of the descriptor, the data pointer.
-export function emitArrayPtr(ref cx: Cx, expr: ASTNode, ref out: Operand): string {
+export function emitArrayPtr(ref cx: Cx, expr: ASTNode, ref out: Operand): EmitResult {
   let base: Operand = Operand.None;
-  const err = emitExprValue(ref cx, expr.childA, ref base);
-  if (err.len > 0) {
-    return err;
-  }
+  emitExprValue(ref cx, expr.childA, ref base)?;
   const dest = freshTemp(cx.e);
   emitExtractValue(ref cx, dest, ARRAY_DESCRIPTOR, base, 0);
   out = Operand.Temp { id: dest };
-  return "";
+  return EmitResult.Ok;
 }
 
 // `xs.len` - field 1 of the descriptor.
-export function emitArrayLen(ref cx: Cx, expr: ASTNode, ref out: Operand): string {
+export function emitArrayLen(ref cx: Cx, expr: ASTNode, ref out: Operand): EmitResult {
   let base: Operand = Operand.None;
-  const err = emitExprValue(ref cx, expr.childA, ref base);
-  if (err.len > 0) {
-    return err;
-  }
+  emitExprValue(ref cx, expr.childA, ref base)?;
   const dest = freshTemp(cx.e);
   emitExtractValue(ref cx, dest, ARRAY_DESCRIPTOR, base, 1);
   out = Operand.Temp { id: dest };
-  return "";
+  return EmitResult.Ok;
 }
 
 // The address of `xs[i]`, shared by the read and the write so the two cannot
 // disagree about how an element is located.
-export function emitElementAddress(ref cx: Cx, expr: ASTNode, exprId: NodeId, ref addr: usize): string {
+export function emitElementAddress(ref cx: Cx, expr: ASTNode, exprId: NodeId, ref addr: usize): EmitResult {
   let base: Operand = Operand.None;
-  const berr = emitExprValue(ref cx, expr.childA, ref base);
-  if (berr.len > 0) {
-    return berr;
-  }
+  emitExprValue(ref cx, expr.childA, ref base)?;
   let index: Operand = Operand.None;
-  const ierr = emitExpr(ref cx, expr.childB, ref index);
-  if (ierr.len > 0) {
-    return ierr;
-  }
+  emitExpr(ref cx, expr.childB, ref index)?;
 
   const dataPtr = freshTemp(cx.e);
   emitExtractValue(ref cx, dataPtr, ARRAY_DESCRIPTOR, base, 0);
@@ -131,7 +107,7 @@ export function emitElementAddress(ref cx: Cx, expr: ASTNode, exprId: NodeId, re
     typeOf(ref cx, expr.childB), index
   );
   addr = elemAddr;
-  return "";
+  return EmitResult.Ok;
 }
 
 // The LLVM element type of an array-typed node.
@@ -156,29 +132,20 @@ function elementLlvmType(ref cx: Cx, exprId: NodeId): string {
 // the same operation - this is the syntax for it. An omitted start is 0 and an
 // omitted end is the base's own length, which is the one thing the syntax
 // cannot say and codegen already has.
-export function emitSlice(ref cx: Cx, expr: ASTNode, exprId: NodeId, ref out: Operand): string {
+export function emitSlice(ref cx: Cx, expr: ASTNode, exprId: NodeId, ref out: Operand): EmitResult {
   let base: Operand = Operand.None;
-  const berr = emitExprValue(ref cx, expr.childA, ref base);
-  if (berr.len > 0) {
-    return berr;
-  }
+  emitExprValue(ref cx, expr.childA, ref base)?;
   const data = freshTemp(cx.e);
   emitExtractValue(ref cx, data, ARRAY_DESCRIPTOR, base, 0);
 
   let start: Operand = Operand.Imm { value: 0 };
   if (expr.childB != 0) {
-    const serr = emitExpr(ref cx, expr.childB, ref start);
-    if (serr.len > 0) {
-      return serr;
-    }
+    emitExpr(ref cx, expr.childB, ref start)?;
   }
 
   let end: Operand = Operand.None;
   if (expr.childC != 0) {
-    const eerr = emitExpr(ref cx, expr.childC, ref end);
-    if (eerr.len > 0) {
-      return eerr;
-    }
+    emitExpr(ref cx, expr.childC, ref end)?;
   } else {
     const len = freshTemp(cx.e);
     emitExtractValue(ref cx, len, ARRAY_DESCRIPTOR, base, 1);
@@ -196,7 +163,7 @@ export function emitSlice(ref cx: Cx, expr: ASTNode, exprId: NodeId, ref out: Op
   const withLen = freshTemp(cx.e);
   emitInsertValueTemp(ref cx, withLen, withData, "i64", Operand.Temp { id: count }, 1);
   out = Operand.Temp { id: withLen };
-  return "";
+  return EmitResult.Ok;
 }
 
 // `s.len` on a STRING - one strlen.
@@ -205,15 +172,12 @@ export function emitSlice(ref cx: Cx, expr: ASTNode, exprId: NodeId, ref out: Op
 //
 // A string is a NUL-terminated pointer with no length beside it, so unlike an
 // array's `.len` there is no field to project - the length has to be measured.
-export function emitStringLen(ref cx: Cx, expr: ASTNode, ref out: Operand): string {
+export function emitStringLen(ref cx: Cx, expr: ASTNode, ref out: Operand): EmitResult {
   let base: Operand = Operand.None;
-  const err = emitExprValue(ref cx, expr.childA, ref base);
-  if (err.len > 0) {
-    return err;
-  }
+  emitExprValue(ref cx, expr.childA, ref base)?;
   cx.e.usesStringBuilder = true;
   const dest = freshTemp(cx.e);
   emitStrlen(ref cx, dest, base);
   out = Operand.Temp { id: dest };
-  return "";
+  return EmitResult.Ok;
 }

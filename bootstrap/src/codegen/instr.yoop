@@ -16,7 +16,7 @@ module codegen;
 //   * Appends piece by piece. A template literal here would be one malloc per
 //     instruction (docs/writing_yoop.md 3.1).
 
-import { Text }, * as text from "std/core/text.yoop";
+import * as text from "std/core/text.yoop";
 import { Vec }, * as vec from "std/core/vec.yoop";
 
 // ----- terminators ---------------------------------------------------------

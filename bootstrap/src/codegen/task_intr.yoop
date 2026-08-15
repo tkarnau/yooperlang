@@ -36,39 +36,33 @@ import { TypeId, TYPE_ERROR_ID, lookupVariantCase, variantCaseFieldAt } from "..
 
 // `cancel(h)` - flag the handle and wake its waiters. Advisory: a step already
 // running is not interrupted, it observes the flag when it next parks.
-export function emitCancelIntrinsic(ref cx: Cx, expr: ASTNode, ref out: Operand): string {
+export function emitCancelIntrinsic(ref cx: Cx, expr: ASTNode, ref out: Operand): EmitResult {
   let handle: Operand = Operand.None;
-  const err = emitIntrinsicArg(ref cx, expr, 0, ref handle);
-  if (err.len > 0) {
-    return err;
-  }
+  emitIntrinsicArg(ref cx, expr, 0, ref handle)?;
   cx.e.usesTaskIntrinsics = true;
   emitTaskCancel(ref cx, handle);
   out = Operand.None;
-  return "";
+  return EmitResult.Ok;
 }
 
 // `isDone(h)` - 1 or 0, and never a park. This is what lets `awaitTask` re-test
 // after a wake instead of trusting that the wake meant anything.
-export function emitIsDoneIntrinsic(ref cx: Cx, expr: ASTNode, ref out: Operand): string {
+export function emitIsDoneIntrinsic(ref cx: Cx, expr: ASTNode, ref out: Operand): EmitResult {
   return emitHandlePredicate(ref cx, expr, true, ref out);
 }
 
 // `armComplete(h)` - register THIS task for a wake when `h` finishes. The
 // caller suspends itself afterwards; arming and parking are deliberately two
 // steps, because a task may arm on several handles before it parks once.
-export function emitArmCompleteIntrinsic(ref cx: Cx, expr: ASTNode, ref out: Operand): string {
+export function emitArmCompleteIntrinsic(ref cx: Cx, expr: ASTNode, ref out: Operand): EmitResult {
   return emitHandlePredicate(ref cx, expr, false, ref out);
 }
 
 // The shared half of the two int-returning ones: evaluate the handle, call,
 // hand back the i32.
-function emitHandlePredicate(ref cx: Cx, expr: ASTNode, isDone: bool, ref out: Operand): string {
+function emitHandlePredicate(ref cx: Cx, expr: ASTNode, isDone: bool, ref out: Operand): EmitResult {
   let handle: Operand = Operand.None;
-  const err = emitIntrinsicArg(ref cx, expr, 0, ref handle);
-  if (err.len > 0) {
-    return err;
-  }
+  emitIntrinsicArg(ref cx, expr, 0, ref handle)?;
   cx.e.usesTaskIntrinsics = true;
   const dest = freshTemp(cx.e);
   if (isDone) {
@@ -77,7 +71,7 @@ function emitHandlePredicate(ref cx: Cx, expr: ASTNode, isDone: bool, ref out: O
     emitTaskArmComplete(ref cx, dest, handle);
   }
   out = Operand.Temp { id: dest };
-  return "";
+  return EmitResult.Ok;
 }
 
 // `waitUntil(h, deadline_ns)` - the bounded join.
@@ -101,13 +95,11 @@ export function emitWaitUntilIntrinsic(
   expr: ASTNode,
   exprId: NodeId,
   ref out: Operand
-): string {
+): EmitResult {
   let handle: Operand = Operand.None;
   let deadline: Operand = Operand.None;
-  const e1 = emitIntrinsicArg(ref cx, expr, 0, ref handle);
-  if (e1.len > 0) { return e1; }
-  const e2 = emitIntrinsicArg(ref cx, expr, 1, ref deadline);
-  if (e2.len > 0) { return e2; }
+  emitIntrinsicArg(ref cx, expr, 0, ref handle)?;
+  emitIntrinsicArg(ref cx, expr, 1, ref deadline)?;
   cx.e.usesTaskIntrinsics = true;
 
   const resultType = resolvedTypeAt(ref cx, exprId);
@@ -152,7 +144,7 @@ export function emitWaitUntilIntrinsic(
   const value = freshTemp(cx.e);
   emitLoadFromSlot(ref cx, value, resultTy, TEMP_SLOT_NAME, slot.id);
   out = Operand.Temp { id: value };
-  return "";
+  return EmitResult.Ok;
 }
 
 // One arm's tag store. Every arm writes one and only the `Done` arm writes

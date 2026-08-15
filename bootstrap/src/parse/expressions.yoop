@@ -543,10 +543,7 @@ function parseCallArgs(ref ps: ParserState): Result<NodeId, ParsingError> {
   SelfLexing.expect(ref ps, TokenTags.LPAREN)?;
 
   disposable ids: Vec<NodeId> = vec.vecNew(4);
-  while (
-    SelfLexing.peek(ref ps).tag != TokenTags.RPAREN &&
-    SelfLexing.peek(ref ps).tag != TokenTags.EOF
-  ) {
+  while (untilClosing(ref ps, TokenTags.RPAREN)) {
     vec.vecPush(ref ids, parseExpression(ref ps, 0)?);
     if (SelfLexing.peek(ref ps).tag == TokenTags.COMMA) {
       SelfLexing.advance(ref ps)?;
@@ -577,10 +574,7 @@ function parseArrayElements(ref ps: ParserState): Result<NodeId, ParsingError> {
   SelfLexing.expect(ref ps, TokenTags.LBRACKET)?;
 
   disposable ids: Vec<NodeId> = vec.vecNew(4);
-  while (
-    SelfLexing.peek(ref ps).tag != TokenTags.RBRACKET &&
-    SelfLexing.peek(ref ps).tag != TokenTags.EOF
-  ) {
+  while (untilClosing(ref ps, TokenTags.RBRACKET)) {
     vec.vecPush(ref ids, parseExpression(ref ps, 0)?);
     if (SelfLexing.peek(ref ps).tag == TokenTags.COMMA) {
       SelfLexing.advance(ref ps)?;
@@ -603,10 +597,7 @@ function parseStructLiteralFields(ref ps: ParserState): Result<NodeId, ParsingEr
   SelfLexing.expect(ref ps, TokenTags.LCURLY)?;
 
   disposable ids: Vec<NodeId> = vec.vecNew(4);
-  while (
-    SelfLexing.peek(ref ps).tag != TokenTags.RCURLY &&
-    SelfLexing.peek(ref ps).tag != TokenTags.EOF
-  ) {
+  while (untilClosing(ref ps, TokenTags.RCURLY)) {
     let field = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.STRUCT_LITERAL_FIELD);
     field.name = parseIdentOrKeywordAsName(ref ps)?;
     SelfLexing.expect(ref ps, TokenTags.COLON)?;

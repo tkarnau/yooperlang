@@ -257,10 +257,7 @@ export function parseTypeDecl(ref ps: ParserState): Result<NodeId, ParsingError>
   // indirection is only for a kind's SECOND list (see arena.yoop).
   SelfLexing.expect(ref ps, TokenTags.LCURLY)?;
   disposable fieldIds: Vec<NodeId> = vec.vecNew(4);
-  while (
-    SelfLexing.peek(ref ps).tag != TokenTags.RCURLY &&
-    SelfLexing.peek(ref ps).tag != TokenTags.EOF
-  ) {
+  while (untilClosing(ref ps, TokenTags.RCURLY)) {
     // Fields and METHODS share the run. Splitting them here would mean two
     // lists on a node that has one, and every later pass already switches on
     // the member's kind anyway.
@@ -278,10 +275,7 @@ export function parseTypeDecl(ref ps: ParserState): Result<NodeId, ParsingError>
   }
   SelfLexing.expect(ref ps, TokenTags.RCURLY)?;
 
-  const fieldStart: usize = ps.ast.childIds.len;
-  vec.vecExtendFrom(ref ps.ast.childIds, vec.vecAsArray(ref fieldIds));
-  node.childStart = fieldStart;
-  node.childCount = fieldIds.len;
+  spliceChildren(ref ps, ref node, ref fieldIds);
 
   return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
 }
@@ -424,10 +418,7 @@ function parseFunctionTypeAnnotation(ref ps: ParserState): Result<NodeId, Parsin
   const loc = posToSourceLocation(ps.src, ps.pos, 1);
 
   disposable ids: Vec<NodeId> = vec.vecNew(2);
-  while (
-    SelfLexing.peek(ref ps).tag != TokenTags.RPAREN &&
-    SelfLexing.peek(ref ps).tag != TokenTags.EOF
-  ) {
+  while (untilClosing(ref ps, TokenTags.RPAREN)) {
     vec.vecPush(ref ids, parseFunctionParam(ref ps)?);
     if (SelfLexing.peek(ref ps).tag == TokenTags.COMMA) {
       SelfLexing.advance(ref ps)?;

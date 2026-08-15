@@ -7,7 +7,7 @@ module codegen;
 // carrying a sample of its output, and making no decisions - the caller has
 // already worked out that a union's field index is always zero.
 
-import { Text }, * as text from "std/core/text.yoop";
+import * as text from "std/core/text.yoop";
 
 // The one member of a union's LLVM type: the byte buffer everything overlays.
 // Index 0, always, which is what makes the two geps below constants.

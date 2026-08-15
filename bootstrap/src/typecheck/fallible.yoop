@@ -28,10 +28,10 @@ module typecheck;
 */
 
 import { Vec }, * as vec from "std/core/vec.yoop";
-import { Map }, * as map from "std/collections/map.yoop";
+import * as map from "std/collections/map.yoop";
 import { disposable } from "std/core/kinds.yoop";
 import * as str from "std/core/strings.yoop";
-import { AST, ASTNode, NodeId, nodeAt } from "../ast";
+import { NodeId, nodeAt } from "../ast";
 
 const OK_CASE: string = "Ok";
 const ERR_CASE: string = "Err";
@@ -113,28 +113,22 @@ function payloadTypeOf(ref prog: Program, t: TypeId, ordinal: usize, fieldCount:
 // The result type is the operand's Ok payload, not the enclosing function's:
 // `?` unwraps what it was handed. That is why a function returning
 // `Result<bool, E>` can `?` a `Result<int32, E>` and get an int32.
-export function checkTryOp(
-  ref prog: Program,
-  ref tm: TypedModule,
-  ref ast: AST,
-  exprId: NodeId,
-  ref scope: LocalScope
-): TypeId {
-  const expr = nodeAt(ref ast, exprId);
+export function checkTryOp(ref cx: Cx, exprId: NodeId): TypeId {
+  const expr = nodeAt(cx.ast, exprId);
 
   // No expectation is passed down. The operand's type is what decides the
   // whole thing, and an expectation here would be about the UNWRAPPED value -
   // pinning `Result<int32, E>` to an `int32` annotation is not a thing.
-  const operand = checkExpr(ref prog, ref tm, ref ast, expr.childA, TYPE_ERROR_ID, ref scope);
+  const operand = checkExpr(ref cx, expr.childA, TYPE_ERROR_ID);
   if (operand == TYPE_ERROR_ID) {
     return TYPE_ERROR_ID;
   }
 
-  const got = fallibleShapeOf(ref prog, operand);
+  const got = fallibleShapeOf(cx.prog, operand);
   if (!got.isFallible) {
     reportError(
-      ref prog,
-      `'?' applied to non-fallible type ${formatType(ref prog, operand)} - only variants with exactly an Ok and an Err case are fallible`,
+      cx.prog,
+      `'?' applied to non-fallible type ${formatType(cx.prog, operand)} - only variants with exactly an Ok and an Err case are fallible`,
       expr.sourceLoc
     );
     return TYPE_ERROR_ID;
@@ -147,14 +141,14 @@ export function checkTryOp(
   // `main`, or in anything else returning a plain value, where bare `?` is
   // refused outright.
   if (expr.childC != 0) {
-    return checkTryHandler(ref prog, ref tm, ref ast, exprId, expr, ref got, ref scope);
+    return checkTryHandler(ref cx, exprId, expr, ref got);
   }
 
-  const want = fallibleShapeOf(ref prog, prog.currentReturn);
+  const want = fallibleShapeOf(cx.prog, cx.prog.currentReturn);
   if (!want.isFallible) {
     reportError(
-      ref prog,
-      `'?' is only legal inside a function that returns a fallible variant (Ok/Err); "${prog.currentFn}" returns ${formatType(ref prog, prog.currentReturn)}`,
+      cx.prog,
+      `'?' is only legal inside a function that returns a fallible variant (Ok/Err); "${cx.prog.currentFn}" returns ${formatType(cx.prog, cx.prog.currentReturn)}`,
       expr.sourceLoc
     );
     return TYPE_ERROR_ID;
@@ -166,8 +160,8 @@ export function checkTryOp(
   // one clause covers the same-shape and cross-shape cases together, and
   // `tryIntoUses` is deliberately not consulted when a context is present.
   if (expr.childB != 0) {
-    checkExpr(ref prog, ref tm, ref ast, expr.childB, TYPE_ERROR_ID, ref scope);
-    if (!checkTryContext(ref prog, ref tm, ref ast, exprId, expr, ref got, ref want)) {
+    checkExpr(ref cx, expr.childB, TYPE_ERROR_ID);
+    if (!checkTryContext(cx.prog, cx.tm, cx.ast, exprId, expr, ref got, ref want)) {
       return TYPE_ERROR_ID;
     }
     return got.okType;
@@ -178,11 +172,11 @@ export function checkTryOp(
   // type, and it runs in the failure branch - so the cost is nothing at all on
   // the success path, which is what makes it worth having rather than making
   // every caller write the wrapping out.
-  if (!typeAccepts(ref prog, want.errType, got.errType)) {
-    if (!errorConvertsInto(ref prog, got.errType, want.errType)) {
+  if (!typeAccepts(cx.prog, want.errType, got.errType)) {
+    if (!errorConvertsInto(cx.prog, got.errType, want.errType)) {
       reportError(
-        ref prog,
-        `'?' cannot propagate Err of ${formatType(ref prog, got.errType)} into a function returning Err of ${formatType(ref prog, want.errType)} - the two error types have to match, or the first has to implement Into<${formatType(ref prog, want.errType)}>`,
+        cx.prog,
+        `'?' cannot propagate Err of ${formatType(cx.prog, got.errType)} into a function returning Err of ${formatType(cx.prog, want.errType)} - the two error types have to match, or the first has to implement Into<${formatType(cx.prog, want.errType)}>`,
         expr.sourceLoc
       );
       return TYPE_ERROR_ID;
@@ -190,7 +184,7 @@ export function checkTryOp(
     // Recorded rather than re-derived: codegen has both types in hand and could
     // compare them, but "these differ" and "these differ AND a conversion was
     // found" are not the same fact, and only pass D established the second.
-    map.mapInsert(ref tm.tryIntoUses, uint64(exprId), true);
+    map.mapInsert(ref cx.tm.tryIntoUses, uint64(exprId), true);
   }
 
   return got.okType;

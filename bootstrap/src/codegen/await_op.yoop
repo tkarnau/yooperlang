@@ -46,14 +46,14 @@ module codegen;
 // than each await inventing its own.
 
 import { Vec }, * as vec from "std/core/vec.yoop";
-import { Map }, * as map from "std/collections/map.yoop";
-import { Text }, * as text from "std/core/text.yoop";
+import * as map from "std/collections/map.yoop";
+import * as text from "std/core/text.yoop";
 import { disposable } from "std/core/kinds.yoop";
 import { ASTNode, ASTNodeKind, NodeId, nodeAt, childAt, kindName } from "../ast";
 import * as str from "std/core/strings.yoop";
 import { Option } from "std/core/types.yoop";
 
-export function emitAwait(ref cx: Cx, expr: ASTNode, exprId: NodeId, ref out: Operand): string {
+export function emitAwait(ref cx: Cx, expr: ASTNode, exprId: NodeId, ref out: Operand): EmitResult {
   // Pass D proved both of these, so reaching either means a coloring rule was
   // let through rather than that a program is wrong.
   if (!cx.coro.active) {
@@ -75,7 +75,7 @@ export function emitAwait(ref cx: Cx, expr: ASTNode, exprId: NodeId, ref out: Op
   if (isSuspendNowCall(ref cx, call)) {
     emitBareSuspend(ref cx);
     out = Operand.None;
-    return "";
+    return EmitResult.Ok;
   }
 
   const resultTy = typeOf(ref cx, exprId);
@@ -83,15 +83,12 @@ export function emitAwait(ref cx: Cx, expr: ASTNode, exprId: NodeId, ref out: Op
 
   let hdl: usize = 0;
   let slotId: usize = 0;
-  const err = emitAsyncCall(ref cx, call, expr.childA, resultTy, isVoid, ref hdl, ref slotId);
-  if (err.len > 0) {
-    return err;
-  }
+  emitAsyncCall(ref cx, call, expr.childA, resultTy, isVoid, ref hdl, ref slotId)?;
   emitDriveLoop(ref cx, hdl);
 
   if (isVoid) {
     out = Operand.None;
-    return "";
+    return EmitResult.Ok;
   }
   const loaded = freshTemp(cx.e);
   emitLoad(ref cx, loaded, resultTy, TEMP_SLOT_NAME, slotId);
@@ -100,7 +97,7 @@ export function emitAwait(ref cx: Cx, expr: ASTNode, exprId: NodeId, ref out: Op
   // orders it the same way.
   emitCoroDestroy(ref cx, Operand.Temp { id: hdl });
   out = Operand.Temp { id: loaded };
-  return "";
+  return EmitResult.Ok;
 }
 
 // The call half: the same argument lowering an ordinary call gets, plus the
@@ -119,7 +116,7 @@ function emitAsyncCall(
   isVoid: bool,
   ref hdl: usize,
   ref slotId: usize
-): string {
+): EmitResult {
   // An INDIRECT async call through a function-typed FIELD or a local holding a
   // function value is refused BY NAME rather than emitted. Asked FIRST, so the
   // refusal does not arrive after half a call has been written into the
@@ -147,25 +144,16 @@ function emitAsyncCall(
       case Option.Some { value: idx }: { slotIndex = idx; }
       case Option.None: { }
     }
-    const lerr = emitVtableSlotLoad(ref cx, call, slotIndex, ref ctx, ref fnPtr);
-    if (lerr.len > 0) {
-      return lerr;
-    }
+    emitVtableSlotLoad(ref cx, call, slotIndex, ref ctx, ref fnPtr)?;
     vec.vecPush(ref args, { ty: "ptr", value: Operand.Temp { id: ctx } });
-    const aerr = emitDispatchArgs(ref cx, call, ref args);
-    if (aerr.len > 0) {
-      return aerr;
-    }
+    emitDispatchArgs(ref cx, call, ref args)?;
   } else if (call.childA != 0) {
     const list = nodeAt(cx.ast, call.childA);
     let i: usize = 0;
     while (i < list.childCount) {
       const argId = childAt(cx.ast, list, i);
       let value: Operand = Operand.None;
-      const err = emitExpr(ref cx, argId, ref value);
-      if (err.len > 0) {
-        return err;
-      }
+      emitExpr(ref cx, argId, ref value)?;
       vec.vecPush(ref args, { ty: typeOf(ref cx, argId), value: value });
       i += 1;
     }
@@ -185,14 +173,14 @@ function emitAsyncCall(
   hdl = freshTemp(cx.e);
   if (throughVtable) {
     emitCallIndirect(ref cx, hdl, "ptr", fnPtr, ref args);
-    return "";
+    return EmitResult.Ok;
   }
   // `callId` is the CALL node's own id, not the `await`'s: a trait-method
   // receiver and a generic instantiation are both recorded against the call,
   // which is where pass D put them.
   const callee = calleeSymbol(ref cx, call, callId);
   emitCall(ref cx, hdl, "ptr", callee.home, callee.name, ref args);
-  return "";
+  return EmitResult.Ok;
 }
 
 // The drive loop and the suspend that makes this frame a coroutine too.

@@ -144,7 +144,7 @@ export function parseBlock(ref ps: ParserState): ParsingResult {
 
   // parse rest of statements
   disposable ids: Vec<NodeId> = vec.vecNew(4);
-  while (SelfLexing.peek(ref ps).tag != TokenTags.RCURLY && SelfLexing.peek(ref ps).tag != TokenTags.EOF) {
+  while (untilClosing(ref ps, TokenTags.RCURLY)) {
     // eat statements and add to body...
     vec.vecPush(ref ids, parseStatement(ref ps)?);
   }
@@ -302,18 +302,12 @@ function parseSwitchStatement(ref ps: ParserState): ParsingResult {
   SelfLexing.expect(ref ps, TokenTags.LCURLY)?;
 
   disposable armIds: Vec<NodeId> = vec.vecNew(4);
-  while (
-    SelfLexing.peek(ref ps).tag != TokenTags.RCURLY &&
-    SelfLexing.peek(ref ps).tag != TokenTags.EOF
-  ) {
+  while (untilClosing(ref ps, TokenTags.RCURLY)) {
     vec.vecPush(ref armIds, parseSwitchArm(ref ps)?);
   }
   SelfLexing.expect(ref ps, TokenTags.RCURLY)?;
 
-  const armStart: usize = ps.ast.childIds.len;
-  vec.vecExtendFrom(ref ps.ast.childIds, vec.vecAsArray(ref armIds));
-  node.childStart = armStart;
-  node.childCount = armIds.len;
+  spliceChildren(ref ps, ref node, ref armIds);
 
   return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
 }

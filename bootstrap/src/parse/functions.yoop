@@ -5,7 +5,7 @@ module parse;
 import { Result } from "std/core/types.yoop";
 import { Vec }, * as vec from "std/core/vec.yoop";
 import { disposable } from "std/core/kinds.yoop";
-import { NodeId, ASTNodeKind, nodeAt } from "../ast";
+import { NodeId, ASTNodeKind } from "../ast";
 import { TokenTags, posToSourceLocation } from "../lex";
 import { ParsingError } from "../diagnostics";
 

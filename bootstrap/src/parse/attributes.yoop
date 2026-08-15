@@ -50,10 +50,7 @@ export function parseAttribute(ref ps: ParserState): Result<NodeId, ParsingError
   disposable argIds: Vec<NodeId> = vec.vecNew(1);
   if (SelfLexing.peek(ref ps).tag == TokenTags.LPAREN) {
     SelfLexing.advance(ref ps)?;
-    while (
-      SelfLexing.peek(ref ps).tag != TokenTags.RPAREN &&
-      SelfLexing.peek(ref ps).tag != TokenTags.EOF
-    ) {
+    while (untilClosing(ref ps, TokenTags.RPAREN)) {
       vec.vecPush(ref argIds, parseExpression(ref ps, 0)?);
       if (SelfLexing.peek(ref ps).tag != TokenTags.COMMA) {
         break;
@@ -65,10 +62,7 @@ export function parseAttribute(ref ps: ParserState): Result<NodeId, ParsingError
 
   node.childA = parseAttributeTarget(ref ps, node.name)?;
 
-  const start: usize = ps.ast.childIds.len;
-  vec.vecExtendFrom(ref ps.ast.childIds, vec.vecAsArray(ref argIds));
-  node.childStart = start;
-  node.childCount = argIds.len;
+  spliceChildren(ref ps, ref node, ref argIds);
 
   const id = SelfLexing.pushNode(ref ps, node);
   checkAttribute(ref ps, id, nameLoc)?;

@@ -22,7 +22,7 @@ module typecheck;
 // value, and it reads the same AST rather than being handed a copy - which is
 // what keeps the two from disagreeing about what a literal means.
 
-import { AST, ASTNode, ASTNodeKind, NodeId, childAt, nodeAt } from "../ast";
+import { AST, ASTNodeKind, NodeId, childAt, nodeAt } from "../ast";
 import { TokenTags } from "../lex";
 
 // Whether `exprId` is a constant of type `declared`, and therefore inlinable.

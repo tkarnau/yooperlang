@@ -28,14 +28,12 @@ module codegen;
 // decide whether a store is owed, and the two cannot drift.
 
 import { Vec }, * as vec from "std/core/vec.yoop";
-import { Map }, * as map from "std/collections/map.yoop";
+import * as map from "std/collections/map.yoop";
 import { Option } from "std/core/types.yoop";
-import { Text }, * as text from "std/core/text.yoop";
 import { disposable } from "std/core/kinds.yoop";
 import { AST, ASTNode, ASTNodeKind, NodeId, childAt, declOf, nodeAt } from "../ast";
 import { Module } from "../source_graph";
-import { Program, TypedModule, Symbol, symbolAt, TypeId, TYPE_ERROR_ID, TYPE_VOID_ID,
-  arrayElementOf, moduleGlobalIsBaked } from "../typecheck";
+import { Program, TypedModule, Symbol, symbolAt, TypeId, TYPE_ERROR_ID, TYPE_VOID_ID, arrayElementOf, moduleGlobalIsBaked } from "../typecheck";
 
 // The symbol one source file's init function is defined under. One per FILE
 // rather than per module, because a directory module's files are separate
@@ -86,7 +84,7 @@ export function moduleGlobalTypeId(ref prog: Program, ref tm: TypedModule, name:
 }
 
 // One source file's init function, or nothing when it owes none. Returns "" on
-// success, else the internal error that stopped it.
+// Ok, else the internal error that stopped it.
 //
 // It gets its own Cx for the same reason a function body does: the stores are
 // ordinary instructions, so they need locals, a temp counter and the two
@@ -99,9 +97,9 @@ export function emitModuleInitFn(
   m: Module,
   root: NodeId,
   fileIndex: usize
-): string {
+): EmitResult {
   if (!fileHasModuleInit(ref prog, ref tm, ref m.ast, root)) {
-    return "";
+    return EmitResult.Ok;
   }
 
   disposable locals: FnLocals = localsNew();
@@ -126,17 +124,14 @@ export function emitModuleInitFn(
   while (d < programNode.childCount) {
     const declNode = nodeAt(cx.ast, declOf(cx.ast, childAt(cx.ast, programNode, d)));
     if (declNode.kind == ASTNodeKind.LET_DECL) {
-      const err = emitModuleGlobalStore(ref cx, declNode);
-      if (err.len > 0) {
-        return err;
-      }
+      emitModuleGlobalStore(ref cx, declNode)?;
     }
     d += 1;
   }
 
   emitRetVoid(ref cx);
   emitFunctionClose(ref cx);
-  return "";
+  return EmitResult.Ok;
 }
 
 // `call void @main_0__module_init0()`, once per init function the program owes,
@@ -175,22 +170,19 @@ function fileHasModuleInit(ref prog: Program, ref tm: TypedModule, ref ast: AST,
 //
 //   %t1 = call %struct.m__Point @m__origin()
 //   store %struct.m__Point %t1, ptr @m__ORIGIN
-function emitModuleGlobalStore(ref cx: Cx, declNode: ASTNode): string {
+function emitModuleGlobalStore(ref cx: Cx, declNode: ASTNode): EmitResult {
   const declared = moduleGlobalTypeId(cx.prog, cx.tm, declNode.name);
   if (declared == TYPE_ERROR_ID) {
-    return "";
+    return EmitResult.Ok;
   }
   if (!moduleGlobalNeedsStore(cx.prog, cx.ast, declNode, declared)) {
-    return "";
+    return EmitResult.Ok;
   }
 
   let value: Operand = Operand.None;
-  const err = moduleGlobalOperand(ref cx, declNode, declared, ref value);
-  if (err.len > 0) {
-    return err;
-  }
+  moduleGlobalOperand(ref cx, declNode, declared, ref value)?;
   emitStoreGlobal(ref cx, llvmType(cx.prog, declared), value, cx.tm.moduleId, declNode.name);
-  return "";
+  return EmitResult.Ok;
 }
 
 // What to store. Ordinarily this is the initializer lowered like any other
@@ -212,7 +204,7 @@ function moduleGlobalOperand(
   declNode: ASTNode,
   declared: TypeId,
   ref out: Operand
-): string {
+): EmitResult {
   const elem = arrayElementOf(cx.prog, declared);
   const init = nodeAt(cx.ast, declNode.childB);
   if (elem != TYPE_ERROR_ID && init.kind == ASTNodeKind.ARRAY_LITERAL) {
@@ -223,7 +215,7 @@ function moduleGlobalOperand(
       );
     }
     out = arrayConstOperand(cx.e, cx.prog, cx.ast, declNode.childB, elem);
-    return "";
+    return EmitResult.Ok;
   }
   return emitExpr(ref cx, declNode.childB, ref out);
 }

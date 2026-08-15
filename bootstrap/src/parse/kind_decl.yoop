@@ -32,8 +32,7 @@ module parse;
 import { Result } from "std/core/types.yoop";
 import { Vec }, * as vec from "std/core/vec.yoop";
 import { disposable } from "std/core/kinds.yoop";
-import * as str from "std/core/strings.yoop";
-import { AST, ASTNode, NodeId, ASTNodeKind, childAt, nodeAt } from "../ast";
+import { ASTNode, NodeId, ASTNodeKind } from "../ast";
 import { TokenTags, tagName, posToSourceLocation } from "../lex";
 import { ParsingError } from "../diagnostics";
 
@@ -66,18 +65,12 @@ export function parseKindDecl(ref ps: ParserState): Result<NodeId, ParsingError>
 
   SelfLexing.expect(ref ps, TokenTags.LCURLY)?;
   disposable ids: Vec<NodeId> = vec.vecNew(4);
-  while (
-    SelfLexing.peek(ref ps).tag != TokenTags.RCURLY &&
-    SelfLexing.peek(ref ps).tag != TokenTags.EOF
-  ) {
+  while (untilClosing(ref ps, TokenTags.RCURLY)) {
     vec.vecPush(ref ids, parseKindClause(ref ps)?);
   }
   SelfLexing.expect(ref ps, TokenTags.RCURLY)?;
 
-  const start: usize = ps.ast.childIds.len;
-  vec.vecExtendFrom(ref ps.ast.childIds, vec.vecAsArray(ref ids));
-  node.childStart = start;
-  node.childCount = ids.len;
+  spliceChildren(ref ps, ref node, ref ids);
   return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
 }
 
@@ -91,10 +84,7 @@ function parseKindParams(ref ps: ParserState): Result<NodeId, ParsingError> {
   const loc = posToSourceLocation(ps.src, ps.pos, 1);
 
   disposable ids: Vec<NodeId> = vec.vecNew(2);
-  while (
-    SelfLexing.peek(ref ps).tag != TokenTags.RPAREN &&
-    SelfLexing.peek(ref ps).tag != TokenTags.EOF
-  ) {
+  while (untilClosing(ref ps, TokenTags.RPAREN)) {
     vec.vecPush(ref ids, parseFunctionParam(ref ps)?);
     if (SelfLexing.peek(ref ps).tag == TokenTags.COMMA) {
       SelfLexing.advance(ref ps)?;
@@ -124,17 +114,11 @@ function parseKindParams(ref ps: ParserState): Result<NodeId, ParsingError> {
 function parseKindComposition(ref ps: ParserState, node: ASTNode): Result<NodeId, ParsingError> {
   let guard = node;
   disposable ids: Vec<NodeId> = vec.vecNew(2);
-  while (
-    SelfLexing.peek(ref ps).tag != TokenTags.SEMICOLON &&
-    SelfLexing.peek(ref ps).tag != TokenTags.EOF
-  ) {
+  while (untilClosing(ref ps, TokenTags.SEMICOLON)) {
     const tag = SelfLexing.peek(ref ps).tag;
     if (tag == TokenTags.LCURLY) {
       SelfLexing.advance(ref ps)?;
-      while (
-        SelfLexing.peek(ref ps).tag != TokenTags.RCURLY &&
-        SelfLexing.peek(ref ps).tag != TokenTags.EOF
-      ) {
+      while (untilClosing(ref ps, TokenTags.RCURLY)) {
         vec.vecPush(ref ids, parseKindClause(ref ps)?);
       }
       SelfLexing.expect(ref ps, TokenTags.RCURLY)?;
@@ -153,10 +137,7 @@ function parseKindComposition(ref ps: ParserState, node: ASTNode): Result<NodeId
   }
   SelfLexing.expect(ref ps, TokenTags.SEMICOLON)?;
 
-  const start: usize = ps.ast.childIds.len;
-  vec.vecExtendFrom(ref ps.ast.childIds, vec.vecAsArray(ref ids));
-  guard.childStart = start;
-  guard.childCount = ids.len;
+  spliceChildren(ref ps, ref guard, ref ids);
   return Result.Ok { value: SelfLexing.pushNode(ref ps, guard) };
 }
 

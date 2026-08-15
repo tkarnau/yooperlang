@@ -16,11 +16,11 @@ module lex;
 // scan_tables.yoop's header explains why, and `lexTablesNew` is the init every
 // caller runs once.
 
-import * as vec, { Vec } from "std/core/vec.yoop";
+import { Vec }, * as vec from "std/core/vec.yoop";
 import * as bytes from "std/core/bytes.yoop";
 import * as intr from "std/core/intrinsics.yoop";
 import { Result } from "std/core/types.yoop";
-import { Disposable, disposable } from "std/core/kinds.yoop";
+import { disposable } from "std/core/kinds.yoop";
 import { Display, Into } from "std/core/traits.yoop";
 import { ParsingError } from "../diagnostics";
 

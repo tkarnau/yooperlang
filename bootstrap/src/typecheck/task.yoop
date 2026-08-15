@@ -33,7 +33,7 @@ module typecheck;
 //     mustCall join beforeScopeEnd   -> JOINED: stack handle, joined at scope end
 //     no prefix, annotated `T`       -> IMMEDIATE: spawn and join in one statement
 
-import { Map }, * as map from "std/collections/map.yoop";
+import * as map from "std/collections/map.yoop";
 import { Option } from "std/core/types.yoop";
 import * as str from "std/core/strings.yoop";
 import { AST, ASTNode, ASTNodeKind, NodeId, nodeAt, childAt } from "../ast";
@@ -205,29 +205,23 @@ export function declIsTaskBody(ref tm: TypedModule, declNode: ASTNode): bool {
 //
 // An `async` function that is not a task may write `wait` freely: std's
 // `awaitTask` ends in one, as the fallback for being called off a worker.
-export function checkWait(
-  ref prog: Program,
-  ref tm: TypedModule,
-  ref ast: AST,
-  expr: ASTNode,
-  ref scope: LocalScope
-): TypeId {
-  const operandType = checkExpr(ref prog, ref tm, ref ast, expr.childA, TYPE_ERROR_ID, ref scope);
+export function checkWait(ref cx: Cx, expr: ASTNode): TypeId {
+  const operandType = checkExpr(ref cx, expr.childA, TYPE_ERROR_ID);
   if (operandType == TYPE_ERROR_ID) {
     return TYPE_ERROR_ID;
   }
-  const result = taskResultOf(ref prog, operandType);
+  const result = taskResultOf(cx.prog, operandType);
   if (result == TYPE_ERROR_ID) {
     reportError(
-      ref prog,
-      `"wait" joins a Task<T> handle, and this operand is ${formatType(ref prog, operandType)}`,
+      cx.prog,
+      `"wait" joins a Task<T> handle, and this operand is ${formatType(cx.prog, operandType)}`,
       expr.sourceLoc
     );
     return TYPE_ERROR_ID;
   }
-  if (prog.currentIsTask) {
+  if (cx.prog.currentIsTask) {
     reportError(
-      ref prog,
+      cx.prog,
       `"wait" is not allowed inside a task body - it would block this task's worker thread. Use "await" on an async call instead, which suspends the task and hands the worker back`,
       expr.sourceLoc
     );

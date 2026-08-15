@@ -16,12 +16,11 @@ module codegen;
 // A literal is built the same way the JS reference builds one: alloca, fill each
 // field in place, then load the whole thing out as a value.
 
-import { Vec }, * as vec from "std/core/vec.yoop";
 import { Option } from "std/core/types.yoop";
 import { ASTNode, ASTNodeKind, NodeId, childAt, nodeAt } from "../ast";
 
 // `{ x: 1, y: 2 }`
-export function emitStructLiteral(ref cx: Cx, expr: ASTNode, exprId: NodeId, ref out: Operand): string {
+export function emitStructLiteral(ref cx: Cx, expr: ASTNode, exprId: NodeId, ref out: Operand): EmitResult {
   const structTy = typeOf(ref cx, exprId);
   const store = declareAnonSlot(ref cx, structTy);
 
@@ -33,10 +32,7 @@ export function emitStructLiteral(ref cx: Cx, expr: ASTNode, exprId: NodeId, ref
       const fieldNode = nodeAt(cx.ast, fieldId);
 
       let value: Operand = Operand.None;
-      const err = emitExpr(ref cx, fieldNode.childA, ref value);
-      if (err.len > 0) {
-        return err;
-      }
+      emitExpr(ref cx, fieldNode.childA, ref value)?;
 
       // Fields are stored by POSITION, which is what the struct's declaration
       // order fixes. A literal may list them in any order.
@@ -51,16 +47,13 @@ export function emitStructLiteral(ref cx: Cx, expr: ASTNode, exprId: NodeId, ref
   const dest = freshTemp(cx.e);
   emitLoadFromSlot(ref cx, dest, structTy, TEMP_SLOT_NAME, store.id);
   out = Operand.Temp { id: dest };
-  return "";
+  return EmitResult.Ok;
 }
 
 // `p.x` - one extractvalue on the struct value.
-export function emitStructFieldRead(ref cx: Cx, expr: ASTNode, ref out: Operand): string {
+export function emitStructFieldRead(ref cx: Cx, expr: ASTNode, ref out: Operand): EmitResult {
   let base: Operand = Operand.None;
-  const err = emitExprValue(ref cx, expr.childA, ref base);
-  if (err.len > 0) {
-    return err;
-  }
+  emitExprValue(ref cx, expr.childA, ref base)?;
   // `pointeeTypeOf`, not `typeOf`: emitExprValue already opened a borrowed base,
   // so the operand in hand is the struct itself whatever the node's type says.
   const structTy = pointeeTypeOf(ref cx, expr.childA);
@@ -68,20 +61,17 @@ export function emitStructFieldRead(ref cx: Cx, expr: ASTNode, ref out: Operand)
   const dest = freshTemp(cx.e);
   emitExtractValue(ref cx, dest, structTy, base, pos);
   out = Operand.Temp { id: dest };
-  return "";
+  return EmitResult.Ok;
 }
 
 // `p.x = v` - the address of the field in the binding's own slot, then a store.
 // Pass D already refused any base that is not a named binding, which is what
 // makes the slot lookup below total.
-export function emitStructFieldWrite(ref cx: Cx, target: ASTNode, targetId: NodeId, value: Operand): string {
+export function emitStructFieldWrite(ref cx: Cx, target: ASTNode, targetId: NodeId, value: Operand): EmitResult {
   let addr: usize = 0;
-  const err = emitFieldAddress(ref cx, target, ref addr);
-  if (err.len > 0) {
-    return err;
-  }
+  emitFieldAddress(ref cx, target, ref addr)?;
   emitStoreToPtr(ref cx, typeOf(ref cx, targetId), value, addr);
-  return "";
+  return EmitResult.Ok;
 }
 
 // The address of `base.field`, where `base` is a named binding OR another field
@@ -91,7 +81,7 @@ export function emitStructFieldWrite(ref cx: Cx, target: ASTNode, targetId: Node
 //
 // Shared by a field WRITE and by `ref base.field`, so a store and a borrow
 // cannot disagree about where a field lives.
-export function emitFieldAddress(ref cx: Cx, target: ASTNode, ref addr: usize): string {
+export function emitFieldAddress(ref cx: Cx, target: ASTNode, ref addr: usize): EmitResult {
   const baseNode = nodeAt(cx.ast, target.childA);
 
   // A UNION base first, because every branch below adds a field INDEX to the
@@ -111,17 +101,14 @@ export function emitFieldAddress(ref cx: Cx, target: ASTNode, ref addr: usize): 
   // a field read itself and the two answers differ.
   if (isRefAt(ref cx, target.childA)) {
     let basePtr: Operand = Operand.None;
-    const err = emitExpr(ref cx, target.childA, ref basePtr);
-    if (err.len > 0) {
-      return err;
-    }
+    emitExpr(ref cx, target.childA, ref basePtr)?;
     const dest = freshTemp(cx.e);
     emitGepFieldOfAddr(
       ref cx, dest, pointeeTypeOf(ref cx, target.childA), basePtr,
       fieldPositionOf(ref cx, target.childA, target.name)
     );
     addr = dest;
-    return "";
+    return EmitResult.Ok;
   }
 
   // An ARRAY ELEMENT base has no slot either, and its address is a different
@@ -130,33 +117,27 @@ export function emitFieldAddress(ref cx: Cx, target: ASTNode, ref addr: usize): 
   // case below does; only the first step differs.
   if (baseNode.kind == ASTNodeKind.INDEX_EXPRESSION) {
     let elemPtr: usize = 0;
-    const err = emitElementAddress(ref cx, baseNode, target.childA, ref elemPtr);
-    if (err.len > 0) {
-      return err;
-    }
+    emitElementAddress(ref cx, baseNode, target.childA, ref elemPtr)?;
     const dest = freshTemp(cx.e);
     emitGepFieldOfPtr(
       ref cx, dest, typeOf(ref cx, target.childA), elemPtr,
       fieldPositionOf(ref cx, target.childA, target.name)
     );
     addr = dest;
-    return "";
+    return EmitResult.Ok;
   }
 
   // A nested base has no slot of its own; its ADDRESS is what the outer gep
   // starts from, so compute that first and then step one field further in.
   if (baseNode.kind == ASTNodeKind.FIELD_ACCESS) {
     let basePtr: usize = 0;
-    const err = emitFieldAddress(ref cx, baseNode, ref basePtr);
-    if (err.len > 0) {
-      return err;
-    }
+    emitFieldAddress(ref cx, baseNode, ref basePtr)?;
     const outerTy = typeOf(ref cx, target.childA);
     const outerPos = fieldPositionOf(ref cx, target.childA, target.name);
     const outerDest = freshTemp(cx.e);
     emitGepFieldOfPtr(ref cx, outerDest, outerTy, basePtr, outerPos);
     addr = outerDest;
-    return "";
+    return EmitResult.Ok;
   }
 
   switch (lookupLocal(cx.locals, baseNode.name)) {
@@ -169,7 +150,7 @@ export function emitFieldAddress(ref cx: Cx, target: ASTNode, ref addr: usize): 
       const dest = freshTemp(cx.e);
       emitGepField(ref cx, dest, structTy, baseNode.name, slotInfo.id, pos);
       addr = dest;
-      return "";
+      return EmitResult.Ok;
     }
   }
 }

@@ -25,7 +25,6 @@ module typecheck;
 
 import { Vec }, * as vec from "std/core/vec.yoop";
 import { Map }, * as map from "std/collections/map.yoop";
-import { disposable } from "std/core/kinds.yoop";
 import { AST, ASTNode, ASTNodeKind, childAt, nodeAt } from "../ast";
 
 // ----- pass A ---------------------------------------------------------------
