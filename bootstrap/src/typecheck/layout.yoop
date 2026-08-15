@@ -15,7 +15,6 @@ module typecheck;
 */
 
 import { Vec }, * as vec from "std/core/vec.yoop";
-import { disposable } from "std/core/kinds.yoop";
 
 // A pointer, and therefore also a `string`, a `ref T` and an `unsafe_ptr`.
 const POINTER_SIZE: usize = 8;

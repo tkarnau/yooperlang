@@ -103,30 +103,24 @@ export function checkCallColoring(
 //
 // The operand is checked with NO expectation: a coroutine's return type is its
 // own, and there is nothing an untyped literal would pin to from here.
-export function checkAwait(
-  ref prog: Program,
-  ref tm: TypedModule,
-  ref ast: AST,
-  expr: ASTNode,
-  ref scope: LocalScope
-): TypeId {
+export function checkAwait(ref cx: Cx, expr: ASTNode): TypeId {
   // Rule 1. Ambient rather than threaded, for the same reason `?` reads the
   // enclosing return type that way: an `await` may sit at any depth of an
   // expression, and every helper in between would otherwise carry the flag.
-  if (!prog.currentIsAsync) {
+  if (!cx.prog.currentIsAsync) {
     reportError(
-      ref prog,
-      `"await" is only legal inside a function carrying a pausable kind such as \`async\`, and "${prog.currentFn}" carries none`,
+      cx.prog,
+      `"await" is only legal inside a function carrying a pausable kind such as \`async\`, and "${cx.prog.currentFn}" carries none`,
       expr.sourceLoc
     );
   }
-  const operand = nodeAt(ref ast, expr.childA);
+  const operand = nodeAt(cx.ast, expr.childA);
   // Rule 2, the SYNTACTIC half. `await x` on a binding, or on anything that is
   // not a call, has no coroutine to drive - the reference refuses it for that
   // reason rather than treating it as a no-op.
   if (operand.kind != ASTNodeKind.CALL_EXPRESSION) {
     reportError(
-      ref prog,
+      cx.prog,
       `"await" takes a CALL to an async function, and this operand is ${kindName(operand.kind)}`,
       expr.sourceLoc
     );
@@ -134,14 +128,14 @@ export function checkAwait(
   }
   // The handoff. Taken by the very next CALL_EXPRESSION checkExpr reaches,
   // which is this operand.
-  prog.awaitPending = true;
-  const resultType = checkExpr(ref prog, ref tm, ref ast, expr.childA, TYPE_ERROR_ID, ref scope);
-  prog.awaitPending = false;
+  cx.prog.awaitPending = true;
+  const resultType = checkExpr(ref cx, expr.childA, TYPE_ERROR_ID);
+  cx.prog.awaitPending = false;
   // Rule 2, the TYPE half. `asyncCalls` was stamped by checkCallColoring, which
   // is the one place the callee's resolved signature is in hand.
-  if (!map.mapContainsKey(ref tm.asyncCalls, uint64(expr.childA))) {
+  if (!map.mapContainsKey(ref cx.tm.asyncCalls, uint64(expr.childA))) {
     reportError(
-      ref prog,
+      cx.prog,
       `"await" takes a call to a function carrying a pausable kind, and "${operand.name}" is an ordinary function - drop the "await"`,
       expr.sourceLoc
     );

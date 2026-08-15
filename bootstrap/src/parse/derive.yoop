@@ -24,7 +24,7 @@ module parse;
 // matters here because a file's imports are recorded by index into it.
 
 import { Result } from "std/core/types.yoop";
-import { Vec }, * as vec from "std/core/vec.yoop";
+import * as vec from "std/core/vec.yoop";
 import { Text }, * as txt from "std/core/text.yoop";
 import { disposable } from "std/core/kinds.yoop";
 import * as str from "std/core/strings.yoop";

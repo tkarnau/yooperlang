@@ -14,11 +14,10 @@ module codegen;
 */
 
 import { Vec }, * as vec from "std/core/vec.yoop";
-import { Map }, * as map from "std/collections/map.yoop";
+import * as map from "std/collections/map.yoop";
 import { disposable } from "std/core/kinds.yoop";
 import { ASTNode, NodeId, nodeAt } from "../ast";
-import { TypeId, TYPE_VOID_ID, FallibleShape, moduleIdOf, nominalModuleOf,
-  methodSymbolName } from "../typecheck";
+import { TypeId, TYPE_VOID_ID, FallibleShape, moduleIdOf, nominalModuleOf, methodSymbolName } from "../typecheck";
 
 // ----- `expr? "context"` -----------------------------------------------------
 
@@ -53,7 +52,7 @@ function emitContextPayload(
 ): usize {
   let context: Operand = Operand.None;
   const err = emitExpr(ref cx, contextOf(ref cx, exprId), ref context);
-  if (err.len > 0) {
+  if (emitFailed(err)) {
     // The context is a string or template literal and nothing else - the parser
     // accepts no other shape there - so neither can fail to emit. Falling back
     // to an empty note keeps this total rather than growing an error channel
@@ -84,7 +83,14 @@ function emitContextConcat(ref cx: Cx, context: Operand, errAddr: usize): usize 
   vec.vecPush(ref parts, Operand.Temp { id: errValue });
 
   let joined: Operand = Operand.None;
-  emitConcatParts(ref cx, ref parts, ref joined);
+  // DISCARDED deliberately, and written `_ =` so it reads that way. This helper
+  // is total for the reason given above - it returns a temp id and has no error
+  // channel - so a failure here falls back the same way the context expression's
+  // does: `joined` stays `Operand.None`, the `default` arm below takes it, and
+  // the error propagates uncontexted rather than not at all. Until this file was
+  // converted the call was a bare statement, which read as an oversight and was
+  // indistinguishable from one.
+  _ = emitConcatParts(ref cx, ref parts, ref joined);
   switch (joined) {
     case Operand.Temp { id: t }: { return t; }
     default: { return errValue; }
@@ -127,7 +133,7 @@ function emitTryHandler(
   operandTy: string,
   slotId: usize,
   ref got: FallibleShape
-): string {
+): EmitResult {
   localsPushBlock(cx.locals);
   if (got.errType != TYPE_VOID_ID) {
     const errTy = llvmType(cx.prog, got.errType);
@@ -141,10 +147,10 @@ function emitTryHandler(
   }
 
   let terminated = false;
-  let err = "";
+  let err: EmitResult = EmitResult.Ok;
   emitBlock(ref cx, expr.childC, llvmType(cx.prog, cx.fnRet), ref terminated, ref err);
   localsPopBlock(cx.locals);
-  if (err.len > 0) {
+  if (emitFailed(err)) {
     return err;
   }
   // Unreachable on well-formed input - pass D refused a block that falls
@@ -153,7 +159,7 @@ function emitTryHandler(
   if (!terminated) {
     emitUnreachable(ref cx);
   }
-  return "";
+  return EmitResult.Ok;
 }
 
 // `WithContext<T>`'s only member, reached the same way and for the same reason.

@@ -999,6 +999,51 @@ suite function aUnionIsAByteBufferAddressedAtTheFieldsType(): void {
   }
 }
 
+// A codegen refusal raised DEEP in the walk still reaches the driver, with its
+// message intact.
+//
+// Codegen's failures travel as `EmitResult` (see context.yoop) and propagate
+// with `?`. The extern-conflict suites above already cover a refusal raised one
+// frame below `codegenProgram`; this one covers the long path, where the refusal
+// is raised inside a module-global's initializer walk and has several `?` frames
+// to cross before it becomes the driver's `Result.Err`.
+//
+// A module-level `let` whose array literal holds a CALL is the trigger: pass D
+// accepts it (the initializer is an ordinary expression that runs at module-init
+// time), and codegen refuses it, because an array constant's payload is a module
+// datum and only a constant can go in one.
+const DEEP_REFUSAL_SRC: string =
+  "function f(): int32 { return 7; }\nlet xs: int32[] = [f(), 2];\nfunction main(): int32 { return xs[1]; }\n";
+
+suite function aDeepCodegenRefusalReachesTheDriver(): void {
+  let test theory: Case = t.asserts("typecheck accepts it, so the refusal is codegen's own") {
+    let graph: ModuleGraph = graphOfSource(DEEP_REFUSAL_SRC);
+    disposable prog: Program = typecheckProgram(ref graph);
+    theory.isSuccessful = prog.diagnostics.len == 0;
+    theory.detail = `pass D refused it first, so this no longer tests the codegen path (${prog.diagnostics.len} diagnostics)`;
+  }
+  let test theory: Case = t.asserts("codegen refuses rather than emitting IR") {
+    disposable e: Emitted = emitSource(DEEP_REFUSAL_SRC);
+    theory.isSuccessful = e.error.len > 0;
+    theory.detail = "codegen accepted a module-level array literal with a call in it";
+  }
+  let test theory: Case = t.asserts("the message survives every `?` frame it crossed") {
+    disposable e: Emitted = emitSource(DEEP_REFUSAL_SRC);
+    theory.isSuccessful = text.contains(e.error, "module-level array literal")
+      && text.contains(e.error, "\"xs\"")
+      && text.contains(e.error, "not supported by the bootstrap codegen yet");
+    theory.detail = `the refusal reads "${e.error}"; propagation must not replace or truncate it`;
+  }
+  // The other half, and the one a bad Ok case would break silently: a program
+  // with nothing wrong with it must not read as a failure. `EmitResult.Ok`
+  // carries no payload, so an Ok mistaken for an Err would abort every compile.
+  let test theory: Case = t.asserts("the Ok case is not mistaken for a failure") {
+    disposable e: Emitted = emitSource("function main(): int32 { return 1; }\n");
+    theory.isSuccessful = e.error.len == 0 && text.view(ref e.ir).len > 0;
+    theory.detail = `a well-formed program was refused: "${e.error}"`;
+  }
+}
+
 function emitSource(src: string): Emitted propagates<disposable> {
   // Not disposed, matching typecheck.test.yoop: a ModuleGraph owns the arena
   // every later layer borrows from, and a test process exits before the leak

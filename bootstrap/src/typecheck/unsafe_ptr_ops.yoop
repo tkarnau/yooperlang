@@ -20,23 +20,15 @@ module typecheck;
 //                    width - and n must be an integer. The answer is `T[]`, a
 //                    borrowing view over memory nothing here owns.
 
-import { AST, ASTNode, ASTNodeKind, nodeAt } from "../ast";
+import { ASTNode } from "../ast";
 import { TokenTags, tagSpelling } from "../lex";
-import { NodeId } from "../ast";
 import * as str from "std/core/strings.yoop";
-import { UNSAFE_PTR_OP_CAST, UNSAFE_PTR_OP_TO_INT, UNSAFE_PTR_OP_FROM_INT,
-  UNSAFE_PTR_OP_TO_ARRAY } from "../parse";
+import { UNSAFE_PTR_OP_CAST, UNSAFE_PTR_OP_TO_INT, UNSAFE_PTR_OP_FROM_INT } from "../parse";
 
-export function checkUnsafePtrOp(
-  ref prog: Program,
-  ref tm: TypedModule,
-  ref ast: AST,
-  expr: ASTNode,
-  ref scope: LocalScope
-): TypeId {
-  if (!tm.unsafeAllowed) {
+export function checkUnsafePtrOp(ref cx: Cx, expr: ASTNode): TypeId {
+  if (!cx.tm.unsafeAllowed) {
     reportError(
-      ref prog,
+      cx.prog,
       `'unsafe_ptr.${expr.name}' takes a raw pointer and requires 'import.unsafe;' at module top`,
       expr.sourceLoc
     );
@@ -44,14 +36,14 @@ export function checkUnsafePtrOp(
   }
 
   if (str.stringEq(expr.name, UNSAFE_PTR_OP_TO_INT)) {
-    const operand = checkExpr(ref prog, ref tm, ref ast, expr.childA, TYPE_ERROR_ID, ref scope);
-    if (!requirePointerOperand(ref prog, expr, operand)) {
+    const operand = checkExpr(ref cx, expr.childA, TYPE_ERROR_ID);
+    if (!requirePointerOperand(cx.prog, expr, operand)) {
       return TYPE_ERROR_ID;
     }
     return primTypeId(PrimKind.UINT64);
   }
 
-  const target = resolveTypeAnnotation(ref prog, ref tm, ref ast, expr.childB);
+  const target = resolveTypeAnnotation(cx.prog, cx.tm, cx.ast, expr.childB);
   if (target == TYPE_ERROR_ID) {
     return TYPE_ERROR_ID;
   }
@@ -60,52 +52,56 @@ export function checkUnsafePtrOp(
     // The operand is checked AGAINST usize, which is what pins a bare literal
     // to an integer rather than leaving it untyped.
     const operand = checkExpr(
-      ref prog, ref tm, ref ast, expr.childA, primTypeId(PrimKind.USIZE), ref scope
+      ref cx,
+      expr.childA,
+      primTypeId(PrimKind.USIZE)
     );
-    if (operand != TYPE_ERROR_ID && !isIntPrimType(ref prog, operand)) {
+    if (operand != TYPE_ERROR_ID && !isIntPrimType(cx.prog, operand)) {
       reportError(
-        ref prog,
-        `unsafe_ptr.fromInt expects an integer argument, got ${formatType(ref prog, operand)}`,
+        cx.prog,
+        `unsafe_ptr.fromInt expects an integer argument, got ${formatType(cx.prog, operand)}`,
         expr.sourceLoc
       );
       return TYPE_ERROR_ID;
     }
-    return internUnsafePtr(ref prog, target);
+    return internUnsafePtr(cx.prog, target);
   }
 
-  const operand = checkExpr(ref prog, ref tm, ref ast, expr.childA, TYPE_ERROR_ID, ref scope);
-  if (!requirePointerOperand(ref prog, expr, operand)) {
+  const operand = checkExpr(ref cx, expr.childA, TYPE_ERROR_ID);
+  if (!requirePointerOperand(cx.prog, expr, operand)) {
     return TYPE_ERROR_ID;
   }
 
   if (str.stringEq(expr.name, UNSAFE_PTR_OP_CAST)) {
-    return internUnsafePtr(ref prog, target);
+    return internUnsafePtr(cx.prog, target);
   }
 
   // toArray. The pointee has to MATCH the element type rather than merely be a
   // pointer: the view indexes by the element's width, so a mismatch would walk
   // the buffer at the wrong stride. `unsafe_ptr.cast` first is the spelling for
   // a deliberate reinterpret, and the message says so.
-  if (pointeeOf(ref prog, operand) != target) {
+  if (pointeeOf(cx.prog, operand) != target) {
     reportError(
-      ref prog,
-      `unsafe_ptr.toArray<${formatType(ref prog, target)}> expects unsafe_ptr<${formatType(ref prog, target)}>, got ${formatType(ref prog, operand)} - use unsafe_ptr.cast first if a reinterpret is intended`,
+      cx.prog,
+      `unsafe_ptr.toArray<${formatType(cx.prog, target)}> expects unsafe_ptr<${formatType(cx.prog, target)}>, got ${formatType(cx.prog, operand)} - use unsafe_ptr.cast first if a reinterpret is intended`,
       expr.sourceLoc
     );
     return TYPE_ERROR_ID;
   }
   const length = checkExpr(
-    ref prog, ref tm, ref ast, expr.childC, primTypeId(PrimKind.USIZE), ref scope
+    ref cx,
+    expr.childC,
+    primTypeId(PrimKind.USIZE)
   );
-  if (length != TYPE_ERROR_ID && !isIntPrimType(ref prog, length)) {
+  if (length != TYPE_ERROR_ID && !isIntPrimType(cx.prog, length)) {
     reportError(
-      ref prog,
-      `unsafe_ptr.toArray expects an integer length, got ${formatType(ref prog, length)}`,
+      cx.prog,
+      `unsafe_ptr.toArray expects an integer length, got ${formatType(cx.prog, length)}`,
       expr.sourceLoc
     );
     return TYPE_ERROR_ID;
   }
-  return internArray(ref prog, target);
+  return internArray(cx.prog, target);
 }
 
 function requirePointerOperand(ref prog: Program, expr: ASTNode, operand: TypeId): bool {

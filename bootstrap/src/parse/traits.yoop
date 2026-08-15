@@ -30,7 +30,7 @@ import { Vec }, * as vec from "std/core/vec.yoop";
 import { disposable } from "std/core/kinds.yoop";
 import * as str from "std/core/strings.yoop";
 import { NodeId, ASTNodeKind, childAt, nodeAt } from "../ast";
-import { TokenTags, tagName, posToSourceLocation } from "../lex";
+import { TokenTags, posToSourceLocation } from "../lex";
 import { ParsingError } from "../diagnostics";
 
 // The parameter name that means "the receiver". Not a keyword - it lexes as an
@@ -52,18 +52,12 @@ export function parseTraitDecl(ref ps: ParserState): Result<NodeId, ParsingError
 
   SelfLexing.expect(ref ps, TokenTags.LCURLY)?;
   disposable ids: Vec<NodeId> = vec.vecNew(4);
-  while (
-    SelfLexing.peek(ref ps).tag != TokenTags.RCURLY &&
-    SelfLexing.peek(ref ps).tag != TokenTags.EOF
-  ) {
+  while (untilClosing(ref ps, TokenTags.RCURLY)) {
     vec.vecPush(ref ids, parseMethodSig(ref ps, node.name, node.childA)?);
   }
   SelfLexing.expect(ref ps, TokenTags.RCURLY)?;
 
-  const start: usize = ps.ast.childIds.len;
-  vec.vecExtendFrom(ref ps.ast.childIds, vec.vecAsArray(ref ids));
-  node.childStart = start;
-  node.childCount = ids.len;
+  spliceChildren(ref ps, ref node, ref ids);
 
   return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
 }
@@ -132,10 +126,7 @@ function parseMethodParams(
   const loc = posToSourceLocation(ps.src, ps.pos, 1);
 
   disposable ids: Vec<NodeId> = vec.vecNew(4);
-  while (
-    SelfLexing.peek(ref ps).tag != TokenTags.RPAREN &&
-    SelfLexing.peek(ref ps).tag != TokenTags.EOF
-  ) {
+  while (untilClosing(ref ps, TokenTags.RPAREN)) {
     vec.vecPush(ref ids, parseMethodParam(ref ps, ownerName, ownerTypeParams)?);
     if (SelfLexing.peek(ref ps).tag == TokenTags.COMMA) {
       SelfLexing.advance(ref ps)?;
@@ -218,10 +209,7 @@ export function parseVtableDecl(ref ps: ParserState): Result<NodeId, ParsingErro
 
   SelfLexing.expect(ref ps, TokenTags.LCURLY)?;
   disposable ids: Vec<NodeId> = vec.vecNew(4);
-  while (
-    SelfLexing.peek(ref ps).tag != TokenTags.RCURLY &&
-    SelfLexing.peek(ref ps).tag != TokenTags.EOF
-  ) {
+  while (untilClosing(ref ps, TokenTags.RCURLY)) {
     vec.vecPush(ref ids, parseFieldDecl(ref ps)?);
     if (SelfLexing.peek(ref ps).tag == TokenTags.COMMA) {
       SelfLexing.advance(ref ps)?;
@@ -229,10 +217,7 @@ export function parseVtableDecl(ref ps: ParserState): Result<NodeId, ParsingErro
   }
   SelfLexing.expect(ref ps, TokenTags.RCURLY)?;
 
-  const start: usize = ps.ast.childIds.len;
-  vec.vecExtendFrom(ref ps.ast.childIds, vec.vecAsArray(ref ids));
-  node.childStart = start;
-  node.childCount = ids.len;
+  spliceChildren(ref ps, ref node, ref ids);
   return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
 }
 

@@ -24,16 +24,12 @@ import { disposable } from "std/core/kinds.yoop";
 import { Result } from "std/core/types.yoop";
 import { Text }, * as text from "std/core/text.yoop";
 
-import {
-  loadModuleGraph, loadModuleGraphFromSource, LoadGraphResult, discoverStdRoot
-} from "./source_graph";
+import { loadModuleGraph, loadModuleGraphFromSource, LoadGraphResult, discoverStdRoot } from "./source_graph";
 import { typecheckProgram, Program } from "./typecheck";
 import { Severity, formatLocation } from "./diagnostics";
 import { codegenProgram } from "./codegen";
 import { linkExecutable, writeIrFile } from "./link";
-import {
-  TestPlan, planTestRun, testBinaryPath, runTestBinary, removeTestArtifacts
-} from "./test_mode";
+import { TestPlan, planTestRun, testBinaryPath, runTestBinary, removeTestArtifacts } from "./test_mode";
 
 const USAGE: string = "usage: yoopiler_boot <entry.yoop> [-o <out>] [--emit-ir]\n       yoopiler_boot --test <dir-or-file> [filter...]";
 

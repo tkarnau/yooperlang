@@ -15,9 +15,7 @@ module typecheck;
   and the findings that shaped them are in bootstrap/README.md under `?`.
 */
 
-import { Vec }, * as vec from "std/core/vec.yoop";
-import { Map }, * as map from "std/collections/map.yoop";
-import { disposable } from "std/core/kinds.yoop";
+import * as map from "std/collections/map.yoop";
 import { AST, ASTNode, NodeId } from "../ast";
 
 // `expr? "context"` - decide HOW the note reaches the outgoing error, and
@@ -80,38 +78,35 @@ function checkTryContext(
 // The result is still the operand's Ok payload: on the path where execution
 // carries on, the `?` unwrapped what it was handed exactly as a bare one does.
 function checkTryHandler(
-  ref prog: Program,
-  ref tm: TypedModule,
-  ref ast: AST,
+  ref cx: Cx,
   exprId: NodeId,
   expr: ASTNode,
-  ref got: FallibleShape,
-  ref scope: LocalScope
+  ref got: FallibleShape
 ): TypeId {
-  scopePush(ref scope);
+  scopePush(cx.scope);
   if (got.errType == TYPE_VOID_ID) {
     // Reported against the binding rather than left undeclared, which would
     // surface as a confusing "unknown name" at the first use inside the block.
     reportError(
-      ref prog,
+      cx.prog,
       `'?' handler binds "${expr.name}", but the Err case carries no payload - there is nothing to bind`,
       expr.sourceLoc
     );
-  } else if (!scopeDeclare(ref scope, expr.name, got.errType, false)) {
+  } else if (!scopeDeclare(cx.scope, expr.name, got.errType, false)) {
     reportError(
-      ref prog,
+      cx.prog,
       `"${expr.name}" is already declared in this scope`,
       expr.sourceLoc
     );
   }
-  checkBlock(ref prog, ref tm, ref ast, expr.childC, prog.currentReturn, ref scope);
-  scopePop(ref scope);
+  checkBlock(ref cx, expr.childC);
+  scopePop(cx.scope);
 
   // Asked AFTER the block is checked, so a `switch` inside it has already been
   // proved exhaustive-or-defaulted and `alwaysDiverges` does not have to re-ask.
-  if (!alwaysDiverges(ref ast, expr.childC)) {
+  if (!alwaysDiverges(cx.ast, expr.childC)) {
     reportError(
-      ref prog,
+      cx.prog,
       `'?' handler block must not fall through - every path has to leave via return, break or continue (it runs INSTEAD of producing a value, so there is nothing for execution to carry forward)`,
       expr.sourceLoc
     );

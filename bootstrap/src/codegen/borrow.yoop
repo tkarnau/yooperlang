@@ -16,7 +16,7 @@ module codegen;
 //     because a READ wants the value and a WRITE wants the address, and pass D
 //     cannot see which one a base is under.
 
-import { NodeId, ASTNode, nodeAt } from "../ast";
+import { NodeId, nodeAt } from "../ast";
 import { Option } from "std/core/types.yoop";
 
 // Emits `exprId` as a plain VALUE: the borrow is opened when the node holds one.
@@ -26,16 +26,13 @@ import { Option } from "std/core/types.yoop";
 // The base positions call this instead of `emitExpr`, which is what makes
 // `srcRef.len` read the length out of the borrowed descriptor rather than out
 // of the pointer itself.
-export function emitExprValue(ref cx: Cx, exprId: NodeId, ref out: Operand): string {
-  const err = emitExpr(ref cx, exprId, ref out);
-  if (err.len > 0) {
-    return err;
-  }
+export function emitExprValue(ref cx: Cx, exprId: NodeId, ref out: Operand): EmitResult {
+  emitExpr(ref cx, exprId, ref out)?;
   if (!isRefAt(ref cx, exprId)) {
-    return "";
+    return EmitResult.Ok;
   }
   emitOpenBorrow(ref cx, pointeeTypeOf(ref cx, exprId), ref out);
-  return "";
+  return EmitResult.Ok;
 }
 
 //   %t7 = load %struct.Emitter, ptr %t6
@@ -60,7 +57,7 @@ export function emitOpenBorrow(ref cx: Cx, pointeeTy: string, ref out: Operand):
 // recorded the node in `tm.reborrowUses`. Reached BEFORE the ordinary
 // expression walk, since the load that walk would emit is the thing being
 // skipped rather than something to undo.
-export function emitForwardBorrow(ref cx: Cx, exprId: NodeId, ref out: Operand): string {
+export function emitForwardBorrow(ref cx: Cx, exprId: NodeId, ref out: Operand): EmitResult {
   const expr = nodeAt(cx.ast, exprId);
   switch (lookupLocal(cx.locals, expr.name)) {
     case Option.None: {
@@ -68,7 +65,7 @@ export function emitForwardBorrow(ref cx: Cx, exprId: NodeId, ref out: Operand):
     }
     case Option.Some { value: slotInfo }: {
       out = Operand.SlotAddr { name: expr.name, id: slotInfo.id };
-      return "";
+      return EmitResult.Ok;
     }
   }
 }

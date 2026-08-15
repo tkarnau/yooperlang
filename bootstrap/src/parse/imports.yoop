@@ -20,7 +20,7 @@ module parse;
 // source path is decoded and interned into the arena's string pool (`strId`) so
 // the module graph reads a real path rather than re-slicing the source bytes.
 
-import { Result, Option } from "std/core/types.yoop";
+import { Result } from "std/core/types.yoop";
 import { Vec }, * as vec from "std/core/vec.yoop";
 import { disposable } from "std/core/kinds.yoop";
 import { NodeId, ASTNodeKind } from "../ast";
@@ -66,10 +66,7 @@ export function parseImportDecl(ref ps: ParserState): Result<NodeId, ParsingErro
 
   // The specifiers are this node's OWN run, spliced after every child is built
   // (a child parse can append runs of its own, so a partial splice interleaves).
-  const start: usize = ps.ast.childIds.len;
-  vec.vecExtendFrom(ref ps.ast.childIds, vec.vecAsArray(ref specifiers));
-  node.childStart = start;
-  node.childCount = specifiers.len;
+  spliceChildren(ref ps, ref node, ref specifiers);
 
   return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
 }

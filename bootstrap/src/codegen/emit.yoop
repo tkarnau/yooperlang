@@ -11,8 +11,7 @@ import { Vec }, * as vec from "std/core/vec.yoop";
 import { Map }, * as map from "std/collections/map.yoop";
 import { Text }, * as text from "std/core/text.yoop";
 import { disposable } from "std/core/kinds.yoop";
-import { Type, TypeId, PrimKind, Program, moduleIdOf, typeAt, TYPE_VOID_ID,
-  enumUnderlyingOf } from "../typecheck";
+import { Type, TypeId, PrimKind, Program, moduleIdOf, typeAt, TYPE_VOID_ID, enumUnderlyingOf } from "../typecheck";
 
 export type Emitter propagates<disposable> {
   globals: Text,        // constants and declares, emitted first
@@ -102,28 +101,9 @@ export function emitterNew(): Emitter propagates<disposable> {
   };
 }
 
-export function emitLine(ref e: Emitter, line: string): void {
-  text.push(ref e.fn, line);
-  text.pushByte(ref e.fn, 10);
-}
-
 export function emitGlobal(ref e: Emitter, line: string): void {
   text.push(ref e.globals, line);
   text.pushByte(ref e.globals, 10);
-}
-
-// The whole point of Text: an instruction is appended piece by piece with no
-// intermediate string, so emitting IR allocates only when a buffer grows.
-export function emitPart(ref e: Emitter, part: string): void {
-  text.push(ref e.fn, part);
-}
-
-export function emitUint(ref e: Emitter, v: usize): void {
-  text.pushUint(ref e.fn, uint64(v));
-}
-
-export function endLine(ref e: Emitter): void {
-  text.pushByte(ref e.fn, 10);
 }
 
 // A fresh block label number, unique within the function.

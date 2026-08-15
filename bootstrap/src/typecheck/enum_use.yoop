@@ -23,8 +23,6 @@ module typecheck;
 */
 
 import { Vec }, * as vec from "std/core/vec.yoop";
-import { disposable } from "std/core/kinds.yoop";
-import * as str from "std/core/strings.yoop";
 import { AST, ASTNode, ASTNodeKind, NodeId, childAt, nodeAt } from "../ast";
 import { TokenTags, tagSpelling } from "../lex";
 

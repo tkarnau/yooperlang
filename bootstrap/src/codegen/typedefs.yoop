@@ -7,14 +7,13 @@ module codegen;
 // declared struct, not per construct encountered.
 
 import { Vec }, * as vec from "std/core/vec.yoop";
-import { Text }, * as text from "std/core/text.yoop";
-import { Map }, * as map from "std/collections/map.yoop";
+import * as text from "std/core/text.yoop";
+import * as map from "std/collections/map.yoop";
 import { Option } from "std/core/types.yoop";
 import { disposable } from "std/core/kinds.yoop";
 import { AST, ASTNode, ASTNodeKind, childAt, declOf, nodeAt } from "../ast";
-import { Module, ModuleGraph } from "../source_graph";
-import { Program, TypedModule, Type, TypeId, Field, VariantCase, Symbol, moduleIdOf, symbolAt,
-  typeAt, variantPayloadSize, unionPayloadSize, isOpenInstance } from "../typecheck";
+import { ModuleGraph } from "../source_graph";
+import { Program, TypedModule, Type, TypeId, Field, VariantCase, Symbol, moduleIdOf, symbolAt, typeAt, variantPayloadSize, unionPayloadSize, isOpenInstance } from "../typecheck";
 
 // `%struct.Point = type { i32, i32 }` for every struct the program declared.
 //
@@ -141,9 +140,9 @@ function emitVariantTypeDefs(
 // with a user's `extern malloc` exactly as two user externs collide with each
 // other.
 //
-// Returns "" on success, or the refusal when two declarations of one name
+// Ok on success, or the refusal when two declarations of one name
 // disagree about the signature.
-export function emitExternDeclares(ref e: Emitter, ref prog: Program, ref graph: ModuleGraph): string {
+export function emitExternDeclares(ref e: Emitter, ref prog: Program, ref graph: ModuleGraph): EmitResult {
   let i: usize = 0;
   while (i < graph.modules.len) {
     const m = vec.vecGet(ref graph.modules, i);
@@ -159,10 +158,7 @@ export function emitExternDeclares(ref e: Emitter, ref prog: Program, ref graph:
         // defines. Harmless while nothing calls it, which is why it went
         // unnoticed, but it is not a declaration of anything.
         if (declNode.kind == ASTNodeKind.EXTERN_BLOCK && !declNode.flagA) {
-          const err = emitOneBlocksDeclares(ref e, ref prog, ref tm, ref m.ast, declNode);
-          if (err.len > 0) {
-            return err;
-          }
+          emitOneBlocksDeclares(ref e, ref prog, ref tm, ref m.ast, declNode)?;
         }
         d += 1;
       }
@@ -170,7 +166,7 @@ export function emitExternDeclares(ref e: Emitter, ref prog: Program, ref graph:
     }
     i += 1;
   }
-  return "";
+  return EmitResult.Ok;
 }
 
 function emitOneBlocksDeclares(
@@ -179,7 +175,7 @@ function emitOneBlocksDeclares(
   ref tm: TypedModule,
   ref ast: AST,
   blockNode: ASTNode
-): string {
+): EmitResult {
   let i: usize = 0;
   while (i < blockNode.childCount) {
     const externNode = nodeAt(ref ast, childAt(ref ast, blockNode, i));
@@ -193,15 +189,12 @@ function emitOneBlocksDeclares(
     disposable params: Vec<string> = vec.vecNew(4);
     let variadic = false;
     const ret = externSignature(ref prog, ref tm, externNode.name, ref params, ref variadic);
-    const err = externDeclare(
+    externDeclare(
       ref e, externNode.name, ret, vec.vecAsArray(ref params), variadic
-    );
-    if (err.len > 0) {
-      return err;
-    }
+    )?;
     i += 1;
   }
-  return "";
+  return EmitResult.Ok;
 }
 
 // The Func pass C filled for an extern, split into the three things a

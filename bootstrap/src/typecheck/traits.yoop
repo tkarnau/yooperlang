@@ -26,7 +26,6 @@ import { Vec }, * as vec from "std/core/vec.yoop";
 import { Map, MapIter, MapEntry }, * as map from "std/collections/map.yoop";
 import { disposable } from "std/core/kinds.yoop";
 import { Option } from "std/core/types.yoop";
-import * as str from "std/core/strings.yoop";
 import { AST, ASTNode, ASTNodeKind, NodeId, childAt, nodeAt } from "../ast";
 
 // The trait a module-level name refers to, or TYPE_ERROR_ID when it is not one.
