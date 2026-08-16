@@ -45,6 +45,7 @@
     "lsp": "node src/lsp/server.js",
     "build:sea": "node scripts/build_sea.mjs",
     "package": "node scripts/package_release.mjs",
+    "package:boot": "node scripts/package_bootstrap.mjs",
     "gen:index": "node scripts/gen_std_index.mjs"
   },
   "devDependencies": {
