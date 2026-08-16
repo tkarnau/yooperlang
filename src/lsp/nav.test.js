@@ -444,6 +444,53 @@ function distance(p: Point): int32 {
     const fieldNames = (point.children ?? []).map((c) => c.name);
     assert.deepEqual(fieldNames.sort(), ["x", "y"]);
   });
+
+  // An extern block used to contribute NOTHING to the outline. A file that is
+  // all extern - std/core/intrinsics.yoop, std/net/socket_ffi.yoop, the sdl.yoop
+  // under examples/playground/nebula_arena - came back with zero symbols, and a
+  // mixed file listed only its non-extern half. FFI signatures are exactly what
+  // one goes hunting for by name, so hiding them was the wrong default.
+  it("emits an extern block as one entry holding its signatures", () => {
+    const src = `extern "C" from library "SDL2" {
+    type SDL_Window;
+    function SDL_Init(flags: uint32): c_int;
+    function SDL_Quit(): void;
+}
+function main(): int32 {
+    return 0;
+}
+`;
+    const { mod, src: text } = analyzeFixture(src);
+    const symbols = collectDocumentSymbols(mod.ast, text);
+    const names = symbols.map((s) => s.name);
+    assert.ok(names.includes("main"), `expected main in ${names}`);
+
+    // Named for its SOURCE, which is what tells two blocks in one file apart -
+    // the ABI is "C" almost everywhere and so distinguishes nothing.
+    const block = symbols.find((s) => s.name.includes("SDL2"));
+    assert.ok(block, `expected an extern entry naming SDL2 in ${names}`);
+
+    const kids = (block.children ?? []).map((c) => c.name).sort();
+    assert.deepEqual(kids, ["SDL_Init", "SDL_Quit", "SDL_Window"]);
+
+    // An extern TYPE is a type, not a function - the outline icons differ and
+    // `SDL_Window` is a handle, not something callable.
+    const win = block.children.find((c) => c.name === "SDL_Window");
+    const init = block.children.find((c) => c.name === "SDL_Init");
+    assert.notEqual(win.kind, init.kind, "extern type and extern function should differ in kind");
+  });
+
+  it("emits a header-sourced extern block too", () => {
+    const src = `extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+`;
+    const { mod, src: text } = analyzeFixture(src);
+    const symbols = collectDocumentSymbols(mod.ast, text);
+    const block = symbols.find((s) => s.name.includes("stdio.h"));
+    assert.ok(block, `expected an extern entry naming stdio.h in ${symbols.map((s) => s.name)}`);
+    assert.deepEqual((block.children ?? []).map((c) => c.name), ["printf"]);
+  });
 });
 
 // modules-as-directories: the LSP has to keep working when the file under the

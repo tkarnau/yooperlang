@@ -15,6 +15,14 @@ typedef struct yoop_mutex  yoop_mutex_t;
 typedef struct yoop_cond   yoop_cond_t;
 typedef struct yoop_thread yoop_thread_t;
 
+// Return values of yoop_runtime_platform (yoop_runtime.c), mirrored by
+// `Platform` in std/runtime.yoop. Numbered explicitly and never reordered:
+// these cross the C ABI into yoop, so the VALUES are the contract.
+#define YOOP_PLATFORM_UNKNOWN 0
+#define YOOP_PLATFORM_LINUX   1
+#define YOOP_PLATFORM_MACOS   2
+#define YOOP_PLATFORM_WINDOWS 3
+
 // init / shutdown - both idempotent.
 void yoop_runtime_init(void);
 void yoop_runtime_shutdown(void);

@@ -16,6 +16,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { keywordTagList } from "../jsyooplexer/lexer.js";
+
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const grammarPath = path.join(
   repoRoot,
@@ -159,6 +161,48 @@ describe("vscode grammar", () => {
         );
       });
     }
+  });
+
+  // The drift guard. Every one of the above pins a rule that EXISTS; none of
+  // them notices a keyword that has no rule at all, which is a silent failure
+  // in the same way and was a live one: `null` had no rule anywhere in the
+  // grammar, and `in` (the `for x in xs` separator) had none either. Both are
+  // plain reserved words in the lexer, so both read as undifferentiated
+  // identifiers in the editor.
+  //
+  // Matching a literal word in some pattern is a deliberately weak assertion -
+  // it says a keyword is ACCOUNTED FOR, not that its rule is contextually
+  // right. The cases above are where correctness-of-context is pinned, and
+  // they only work on rules someone remembered to write.
+  it("every lexer keyword is named by some grammar rule", () => {
+    const g = loadGrammar();
+    const words = new Set();
+    const walk = (node) => {
+      if (!node || typeof node !== "object") return;
+      if (Array.isArray(node)) {
+        node.forEach(walk);
+        return;
+      }
+      for (const key of ["match", "begin", "end"]) {
+        if (typeof node[key] !== "string") continue;
+        // After JSON.parse a pattern like "\\bself\\b" is the string \bself\b,
+        // so the single-character escapes have to be blanked before scanning -
+        // otherwise \bself\b scans as the one word "bself" and every anchored
+        // keyword looks absent.
+        const cleaned = node[key].replace(/\\[a-zA-Z]/g, " ");
+        for (const m of cleaned.matchAll(/[A-Za-z_][A-Za-z0-9_]*/g)) {
+          words.add(m[0]);
+        }
+      }
+      Object.values(node).forEach(walk);
+    };
+    walk(g);
+
+    const missing = Object.keys(keywordTagList)
+      .filter((k) => k !== "__proto__")
+      .filter((k) => !words.has(k))
+      .sort();
+    assert.deepEqual(missing, [], `keywords with no rule in the grammar: ${missing.join(", ")}`);
   });
 
   it("no longer colours `kind` or `library` via the bare declaration-keyword rule", () => {

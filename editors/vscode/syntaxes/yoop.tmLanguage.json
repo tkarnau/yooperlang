@@ -179,7 +179,8 @@
         },
         {
           "name": "keyword.control.yoop",
-          "match": "\\b(if|else|while|for|break|continue|return|case|switch|default)\\b"
+          "comment": "`in` is the iteration form's separator (`for x in xs`, as opposed to the counted `for (`). It is a reserved word in the lexer, so colouring it unconditionally cannot shadow a user identifier.",
+          "match": "\\b(if|else|while|for|in|break|continue|return|case|switch|default)\\b"
         },
         {
           "name": "keyword.declaration.yoop",
@@ -191,8 +192,8 @@
         },
         {
           "name": "storage.modifier.kind.yoop",
-          "comment": "Kinds declared in std (std/core/kinds.yoop, std/test.yoop).",
-          "match": "\\b(disposable|ephemeral|task|async|joined|pooled|test|suite)\\b"
+          "comment": "Kinds declared in std (std/core/kinds.yoop, std/test.yoop). `owned` needs to be named here rather than left to the structural rule below, because it is the one that appears in TYPE position - `function stringFromBytesUnchecked(buf: uint8[]): owned string` in std/core/intrinsics.yoop - where there is no `name:`/`name(` following it to match against. std/db/sqlite declares a `transaction` kind too; it is deliberately NOT here, being outside this list's stated core+test scope and a likely user identifier in the very code that would use it.",
+          "match": "\\b(disposable|ephemeral|task|async|joined|pooled|owned|test|suite)\\b"
         },
         {
           "name": "storage.modifier.kind.yoop",
@@ -251,6 +252,11 @@
           "match": "\\b(true|false)\\b"
         },
         {
+          "name": "constant.language.null.yoop",
+          "comment": "`null` is a lexer keyword (TokenTags.null) and the only spelling of a null pointer - std/fs.yoop's `if (f == null)` and std/core/cancel/ffi.yoop's `{ p: null }` are both this. It was the one keyword in keywordTagList with no rule here at all.",
+          "match": "\\bnull\\b"
+        },
+        {
           "name": "variable.language.self.yoop",
           "match": "\\bself\\b"
         },
@@ -264,7 +270,8 @@
       "patterns": [
         {
           "name": "support.type.primitive.yoop",
-          "match": "\\b(int8|int16|int32|int64|uint8|uint16|uint32|uint64|float32|float64|usize|isize|int|float|bool|char|string|void)\\b"
+          "comment": "The `c_*` half is Phase 8.B's C-portable integer aliases (C_ALIASES_LP64 in src/jsyooptypecheck/types.js). They resolve to primitives for every downstream purpose, and every `extern \"C\"` block in the tree is written in them, but they were reading as plain identifiers here.",
+          "match": "\\b(int8|int16|int32|int64|uint8|uint16|uint32|uint64|float32|float64|usize|isize|int|float|bool|char|string|void|c_short|c_ushort|c_int|c_uint|c_long|c_ulong|c_size_t|c_ssize_t)\\b"
         },
         {
           "name": "entity.name.type.yoop",

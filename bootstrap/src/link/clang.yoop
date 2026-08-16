@@ -25,6 +25,23 @@ extern "C" from "stdlib.h" {
   function system(cmd: string): c_int;
 }
 
+// Which platform we are building for. The reference reads `process.platform`;
+// this is the bootstrap's equivalent, and the three rules below that used to be
+// unconditional are the reason it exists. Values mirror YOOP_PLATFORM_* in
+// runtime/yoop_runtime.h - see yoop_runtime_platform there for why an int.
+//
+// Declared here rather than reached for through std/runtime.yoop deliberately:
+// that module is not in the bootstrap's import graph today, and the bootstrap
+// has to COMPILE everything it imports. Adding a module to the self-hosting
+// graph to read one integer is a much larger bet than one extern line.
+extern "C" from "yoop_runtime" {
+  function yoop_runtime_platform(): c_int;
+}
+
+export const PLATFORM_LINUX: c_int = 1;
+export const PLATFORM_MACOS: c_int = 2;
+export const PLATFORM_WINDOWS: c_int = 3;
+
 // Writes `ir` to `irPath`. Returns "" on success or a human-readable error.
 //
 // Split out of `linkExecutable` for `--emit-ir`, which wants the first half of
@@ -90,6 +107,7 @@ export function linkExecutable(
   // `-L` and `-I` BEFORE the `-l` names: clang resolves a library against the
   // search path in effect, and a `-l` ahead of its `-L` finds nothing.
   pushSearchPaths(ref cmd);
+  pushRuntimeLibraries(ref cmd);
   pushLinkLibraries(ref cmd, ref linkLibraries);
 
   const rc = system(text.view(ref cmd));
@@ -99,15 +117,50 @@ export function linkExecutable(
   return "";
 }
 
+// The libraries EVERY program links, whatever its source names. Mirrors
+// `runtimeLinkFlags` in src/runtimeBuild.js.
+//
+// `m` is Linux-only, and not as an optimization - it is the only platform where
+// libm is a separate library at all. glibc keeps the math functions in libm.so,
+// so codegen lowering a float `%` to a `fmod` call links with "undefined
+// reference to fmod" without it. macOS and Windows fold the math functions into
+// the one C library every link already gets, and Windows has no `m` to name:
+// asking for it there is a hard "cannot open input file 'm.lib'".
+//
+// `pthread` goes on both POSIX platforms for parity with the reference, even
+// though a current glibc no longer needs it (2.34 merged libpthread into libc)
+// and macOS never did. It costs nothing on either and is what an older glibc
+// wants.
+// Takes the platform rather than reading it, so a test can assert all three on
+// whichever machine it happens to run on. `collectSearchPaths` is split from
+// `pushSearchPaths` in search_paths.yoop for the same reason: a rule that
+// varies by platform is exactly the rule a one-platform test cannot cover.
+export function pushRuntimeLibrariesFor(ref cmd: Text, platform: c_int): void {
+  if (platform == PLATFORM_WINDOWS) {
+    return;
+  }
+  text.push(ref cmd, " -lpthread");
+  if (platform == PLATFORM_LINUX) {
+    text.push(ref cmd, " -lm");
+  }
+}
+
+function pushRuntimeLibraries(ref cmd: Text): void {
+  pushRuntimeLibrariesFor(ref cmd, yoop_runtime_platform());
+}
+
 // `-lm`, `-framework OpenGL`, and the OpenSSL pair.
 //
 // Three rules, and all three are the reference's (`lowerLinkFlag` in
 // src/toolchain.js) so a program links the same way under either compiler:
 //
 //   * `framework:NAME` is an APPLE linker concept and lowers to
-//     `-framework NAME`. It is dropped everywhere else, which the bootstrap
-//     cannot do yet because it has no platform check - so it is emitted, and
-//     that is a known gap rather than a decision.
+//     `-framework NAME` there. Off Apple it drops, with one exception:
+//     `framework:OpenGL` names the platform's OpenGL and every platform has
+//     one, so it becomes `-lopengl32` on Windows and `-lGL` on Linux. This used
+//     to be emitted unconditionally, because the bootstrap had no way to ask
+//     what it was building for; `yoop_runtime_platform` is that way, and closes
+//     the gap the comment here used to describe.
 //   * `ssl` and `crypto` each mean BOTH. libssl is the protocol and libcrypto
 //     is everything underneath it, and libssl cannot link without it; making a
 //     user name both would be a papercut whose failure mode is a wall of
@@ -123,10 +176,7 @@ function pushLinkLibraries(ref cmd: Text, ref libs: Vec<string>): void {
   while (i < libs.len) {
     const name = vec.vecGet(ref libs, i);
     if (str.stringStartsWith(name, FRAMEWORK_PREFIX)) {
-      text.push(ref cmd, " -framework ");
-      // The name after the prefix, pushed BYTE by byte: `stringSlice` returns a
-      // Result whose Ok is a fresh malloc, and a link line is not worth one.
-      pushFrom(ref cmd, name, FRAMEWORK_PREFIX.len);
+      pushFramework(ref cmd, name);
     } else if (str.stringEq(name, "ssl") || str.stringEq(name, "crypto")) {
       text.push(ref cmd, " -lssl -lcrypto");
     } else {
@@ -135,6 +185,39 @@ function pushLinkLibraries(ref cmd: Text, ref libs: Vec<string>): void {
     }
     i += 1;
   }
+}
+
+// One `framework:NAME` name, lowered for the platform being built for.
+//
+// Apple gets the real thing. Windows gets `opengl32` for OpenGL and nothing for
+// anything else, since every other framework name really is Apple's. Linux
+// drops the lot: it has no framework concept, and passing `-framework` to a GNU
+// ld is an "unrecognized option" rather than something it ignores.
+// Platform passed in rather than read, for the reason given on
+// `pushRuntimeLibrariesFor`.
+export function pushFrameworkFor(ref cmd: Text, name: string, platform: c_int): void {
+  if (platform == PLATFORM_MACOS) {
+    text.push(ref cmd, " -framework ");
+    // The name after the prefix, pushed BYTE by byte: `stringSlice` returns a
+    // Result whose Ok is a fresh malloc, and a link line is not worth one.
+    pushFrom(ref cmd, name, FRAMEWORK_PREFIX.len);
+    return;
+  }
+  // OpenGL is the one framework name that means something off Apple, because
+  // every platform has an OpenGL: opengl32 on Windows, libGL on Linux. Every
+  // other framework name really is Apple's and drops.
+  if (!str.stringEq(name, "framework:OpenGL")) {
+    return;
+  }
+  if (platform == PLATFORM_WINDOWS) {
+    text.push(ref cmd, " -lopengl32");
+  } else if (platform == PLATFORM_LINUX) {
+    text.push(ref cmd, " -lGL");
+  }
+}
+
+function pushFramework(ref cmd: Text, name: string): void {
+  pushFrameworkFor(ref cmd, name, yoop_runtime_platform());
 }
 
 const FRAMEWORK_PREFIX: string = "framework:";

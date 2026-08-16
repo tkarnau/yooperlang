@@ -55,8 +55,19 @@ export const RUNTIME_SOURCES = [
   path.resolve(runtimeDir, "yoop_atomic.c"),
 ];
 
+// Libraries EVERY program links, independent of what its source names.
+//
+// `m` is Linux-only on purpose, and it is not an optimization to leave it off
+// elsewhere - it is the only platform where libm is a separate library at all.
+// glibc keeps the math functions in libm.so, so codegen lowering a float `%` to
+// a `fmod` call produces "undefined reference to fmod" without it. macOS and
+// Windows both fold the math functions into the one C library every link
+// already gets (libSystem / the MSVC CRT), and Windows has no `m` to name -
+// naming it there is a hard "cannot open input file 'm.lib'", which is why
+// lowerLinkFlag drops the name when a program asks for it by hand.
 export function runtimeLinkFlags() {
-  return process.platform === "win32" ? [] : ["pthread"];
+  if (process.platform === "win32") return [];
+  return process.platform === "linux" ? ["pthread", "m"] : ["pthread"];
 }
 
 // Extra C translation units a program needs because of the libraries IT names

@@ -30,7 +30,10 @@ cancel_token io_deadline io_cancel io_fd_conflict"
 for t in $TESTS; do
     bin="$OUT/yoop_test_$t"
     echo "[build] $t"
-    $CC -std=c11 -O0 -g -Wall -Wextra -Werror -pthread \
+    # gnu11, not c11 - see the note in src/runtimeC.test.js. Strict ISO C hides
+    # glibc's pthread_condattr_setclock / CLOCK_MONOTONIC, which yoop_platform.h
+    # needs, so the c11 spelling fails to build on Linux.
+    $CC -std=gnu11 -O0 -g -Wall -Wextra -Werror -pthread \
         $RUNTIME_SRCS "$HERE/$t.c" \
         $LINK_FLAGS -o "$bin"
     echo "[run]   $t"
