@@ -184,3 +184,16 @@ check on a change, and say so when you do.
 - `npm run build:sea` / `npm run package` - standalone binary and release zip.
   See [docs/compiler_internals.md](docs/compiler_internals.md) for the dist
   layout and what adding a non-JS data file requires.
+- `npm run package:boot` - the same idea for the SELF-HOSTED compiler: builds
+  the three stages, refuses to package unless stage2 and stage3 are
+  byte-identical, stages `bin/` beside `lib/std` and `lib/runtime`, and proves
+  the layout by compiling and running hello.yoop with the packaged binary and
+  no `YOOP_STD_ROOT` set. Output is `dist/yoopiler-boot-<version>-<platform>.tar.gz`.
+- CI is [.github/workflows/ci.yml](.github/workflows/ci.yml): ubuntu-latest,
+  bootstrap Yoop tests then `npm test` on every push and PR, and a release of
+  the bootstrap compiler (via `package:boot`) when a `v*` tag is pushed.
+  `scripts/ci_local.sh {quick,test,release,shell}` runs those same steps in a
+  Linux container against the working tree, which is the only way to check the
+  half of CI a mac cannot: `quick` compiles the C runtime under clang 18's
+  `-Werror` and builds the bootstrap, `test` is the whole job. Add `--amd64`
+  for the runner's architecture (correct, and qemu-slow).
