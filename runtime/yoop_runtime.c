@@ -1011,6 +1011,35 @@ int yoop_runtime_cpu_count(void) {
     return yoop_cpu_count();
 }
 
+// Which platform this runtime was COMPILED for. See YOOP_PLATFORM_* in
+// yoop_runtime.h for the values.
+//
+// This exists so the bootstrap compiler can build a link line the way
+// src/toolchain.js does. The reference reads `process.platform`; the bootstrap
+// is a native binary with no equivalent, and the link module says so in a
+// comment ("the bootstrap cannot do that yet because it has no platform
+// check") next to two rules it was getting wrong as a result - emitting
+// `-framework` off Apple, and having no way to add Linux's `-lm`.
+//
+// An int rather than a string keeps the yoop-side binding to a plain `c_int`
+// and sidesteps the question of who owns a returned `const char*`.
+//
+// Host and target are the same thing here: nothing in the tree
+// cross-compiles, and the runtime is built by the same clang that links the
+// program. If cross-compilation ever lands this becomes a property of the
+// target rather than a fact about the runtime binary, and moves accordingly.
+int yoop_runtime_platform(void) {
+#if defined(_WIN32)
+    return YOOP_PLATFORM_WINDOWS;
+#elif defined(__APPLE__)
+    return YOOP_PLATFORM_MACOS;
+#elif defined(__linux__)
+    return YOOP_PLATFORM_LINUX;
+#else
+    return YOOP_PLATFORM_UNKNOWN;
+#endif
+}
+
 // Once the pool is spawned `n_workers` is the truth; before that, the
 // target is what the pool WILL be.
 int yoop_runtime_worker_count(void) {

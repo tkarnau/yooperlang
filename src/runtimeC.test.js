@@ -33,7 +33,17 @@ function buildAndRun(name) {
   execFileSync(
     resolveClang(),
     [
-      "-std=c11",
+      // gnu11, not c11. yoop_platform.h reaches for pthread_condattr_setclock
+      // and CLOCK_MONOTONIC, which glibc only declares once a feature-test
+      // macro asks for POSIX 2001 - and `-std=c11` requests STRICT ISO C,
+      // which switches glibc's default exposure off. macOS headers are not
+      // gated that way, so the strict spelling only ever failed on Linux.
+      //
+      // gnu11 is also what the runtime is actually built with everywhere else:
+      // no other call site passes -std at all, so they get clang's gnu17
+      // default. This suite pinning strict ISO meant it compiled the runtime in
+      // a mode the runtime is never shipped in, which is the real defect.
+      "-std=gnu11",
       "-O0",
       "-g",
       "-Wall",

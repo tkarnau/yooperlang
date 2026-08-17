@@ -4,9 +4,13 @@ A systems language with a TypeScript feel - for myself and folks who want to try
 a stab at a systems language attempt that looks like something they are more 
 familiar with.
 
+- **Kinds** - you declare a compile-time rule (`mustCall dispose beforeScopeEnd`,
+  `mustNotEscape scope`, `mustNotShare acrossThreads`) and the compiler enforces
+  it. The language's own `disposable` / `async` / `task` are written this way, in
+  std, not baked into the compiler. See [A taste](#a-taste).
 - No garbage collector, but you can opt in to / build one
 - No classes - structs plus free functions
-- Traits and kinds borrowed from other languages, with user-defined, compile-time syntax requirements
+- Traits for shared behaviour, without inheritance
 - Compiles to LLVM IR and shells out to `clang` to produce a native executable
 
 ("Yooper" is what you call someone from Michigan's Upper Peninsula. The name is a bit of a joke, and so is this language.)
@@ -27,27 +31,61 @@ It's a moving target and a learning project. I'm new to compilers outside of sma
 
 ### dev platform and build target NOTE
 
-Currently it is working mostly for macos, and we need to go through and get a build server or something for all of the other test/build scenarios to ensure this continues working and being testable cross platform. I started writing this on windows and did a couple passes working on it in linux, but a huge amount has been on the macbook in coffee shops and kids' softball tournament downtimes...
+Most of this was written on a macbook in coffee shops and kids' softball
+tournament downtimes, with the occasional pass on windows and linux. macOS
+(arm64 and intel) and linux (x86_64) both build and pass the full suite today;
+windows builds but has not been re-verified as recently.
+
+There is still no build server, so "works on the other two" means "someone ran
+it there recently" rather than "CI says so". Cross-platform bugs here tend to be
+of one shape - a platform that was never wired up, silently contributing
+nothing, rather than doing something visibly wrong. See [Linux setup](#linux-setup)
+for what the linux bring-up needed.
 
 ## A taste
 
+Every language hands you a fixed set of modifiers - `const`, `async`,
+`static`, `mut`. Yooperlang lets you declare your own, and then enforces them
+like type errors.
+
 ```yoop
-trait Greeter {
-    function greet(ref self): int32;
+kind scoped {
+    appliesTo binding parameter;
+    requires Disposable;
+    mustCall dispose beforeScopeEnd;   // it has to be cleaned up
+    mustNotEscape scope;               // and it must not leave
 }
 
+function bad(): FileHandle {
+    scoped a: FileHandle = { fd: 1 };
+    return a;
+}
+```
+
+```text
+examples/fail/scoped_escape_return.yoop:26:13: binding 'a' has kind 'scoped' which forbids escape via return
+   |
+26 |     return a;
+   |             ^
+```
+
+Nothing in the compiler knows what `scoped` is. It reads those four clauses and
+enforces them at every use site - and that is also how the language's own
+vocabulary works. `disposable`, `async`, `task` and `owned` are not keywords.
+They are kinds, declared in [std/core/kinds.yoop](std/core/kinds.yoop) in this
+exact syntax, and you can write your own next to them.
+
+That program is [examples/fail/scoped_escape_return.yoop](examples/fail/scoped_escape_return.yoop),
+and the error above is what the compiler actually prints for it.
+
+The rest reads about how you'd guess:
+
+```yoop
 type Megaphone implements Greeter {
     n: int32,
     function greet(ref self): int32 {
         return self.n * 10;
     }
-}
-
-function main(): int32 {
-    let m: Megaphone = { n: 5 };
-    let loud: int32 = Greeter.greet(ref m);
-    printf(`loud=${loud}\n`);
-    return 0;
 }
 ```
 
@@ -82,6 +120,86 @@ A few environment variables are available when the defaults don't fit:
 - `YOOP_RUNTIME_DIR` - the directory holding the C runtime sources
 
 And `--keep-ir` keeps the generated `.ll` around and prints its path, which is handy when you want to read the IR for a program.
+
+## Linux setup
+
+Everything below is optional except the first line - Node and clang are the
+whole hard requirement, and the rest only matters if you want the graphical
+examples, the editor, or the debugger.
+
+```bash
+# Arch
+sudo pacman -S clang nodejs npm          # required
+sudo pacman -S sdl2 mesa                 # graphical examples
+sudo pacman -S lldb                      # F5 debugging in VS Code
+
+# Debian / Ubuntu
+sudo apt install clang nodejs npm
+sudo apt install libsdl2-dev libgl1-mesa-dev
+sudo apt install lldb
+
+# Fedora
+sudo dnf install clang nodejs npm
+sudo dnf install SDL2-devel mesa-libGL-devel
+sudo dnf install lldb
+```
+
+Node 18 or newer, from your distro or from a version manager (nvm / fnm /
+volta) - the compiler does not care which.
+
+Check it works:
+
+```bash
+node src/yoopiler.js examples/intro/hello.yoop -o /tmp/hello && /tmp/hello
+```
+
+That needs no `npm install`: the compiler itself has zero runtime dependencies.
+`npm install` is only for the test runner and the packaging scripts, so run it
+before `npm test`.
+
+### Graphical examples
+
+`sdl2` and `mesa` above are what [examples/playground/nebula_arena/](examples/playground/nebula_arena/)
+and [examples/playground/shader_demo/](examples/playground/shader_demo/) need.
+Programs name their libraries in the source - `extern "C" from library "SDL2"`
+and `extern "C" from library "framework:OpenGL"` - so there are no flags to pass:
+
+```bash
+node src/yoopiler.js examples/playground/nebula_arena/main.yoop -o /tmp/nebula && /tmp/nebula
+```
+
+`framework:OpenGL` is the portable spelling. It is an Apple concept by origin,
+and it lowers per platform: `-framework OpenGL` on macOS, `-lopengl32` on
+windows, `-lGL` on linux.
+
+### Editor
+
+The VS Code extension is in [editors/vscode/](editors/vscode/) and gives you
+diagnostics, hover, go-to-definition, find-references, rename, completion, and
+an outline:
+
+```bash
+cd editors/vscode && npm install && cd ../..
+ln -s "$PWD/editors/vscode" ~/.vscode/extensions/yoop-lang.yoop-lang-0.1.0
+```
+
+Restart VS Code afterwards - it only scans that directory at startup. Full
+notes, including the debugger, are in [editors/vscode/README.md](editors/vscode/README.md).
+
+### Running the tests
+
+```bash
+npm install       # test runner + packaging deps only
+npm test          # everything: ~1270 tests, needs clang
+npm run test:unit # fast, no clang
+```
+
+The C runtime also has its own suite that runs without Node, and it will use
+`valgrind` for leak checking when one is installed:
+
+```bash
+bash runtime/tests/run_tests.sh
+```
 
 ## Building a standalone binary
 
@@ -121,7 +239,7 @@ A few small, self-contained programs to start with:
 - [examples/intro/](examples/intro/) - tiny, heavily commented starter programs
 - [examples/playground/calculate_primes/](examples/playground/calculate_primes/) - a longer worked example
 - [examples/playground/dynamic_array/](examples/playground/dynamic_array/) - generics and heap allocation
-- installing SDL2 and trying some of the graphical programs
+- [examples/playground/nebula_arena/](examples/playground/nebula_arena/) - a small SDL2 + OpenGL game, once you have those installed (see [Linux setup](#linux-setup))
 
 There are also hundreds of feature fixtures under [examples/pass/](examples/pass/) (programs that should compile) and [examples/fail/](examples/fail/) (programs that should be rejected, used as compiler tests).
 

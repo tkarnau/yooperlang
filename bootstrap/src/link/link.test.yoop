@@ -15,9 +15,12 @@ import.test;
 import * as t from "std/test.yoop";
 import { suite, test, Case } from "std/test.yoop";
 import * as str from "std/core/strings.yoop";
+import { Text }, * as text from "std/core/text.yoop";
 import { Vec }, * as vec from "std/core/vec.yoop";
 import { disposable } from "std/core/kinds.yoop";
 import { collectSearchPaths, glueSources } from "../link";
+import { pushRuntimeLibrariesFor, pushFrameworkFor } from "../link";
+import { PLATFORM_LINUX, PLATFORM_MACOS, PLATFORM_WINDOWS } from "../link";
 
 // `yoop_tls.c` is excluded from the sources every program gets, because it
 // includes <openssl/ssl.h>. It has to come BACK for a program that named
@@ -104,6 +107,94 @@ suite function searchPathsAreOfferedInSearchOrder(): void {
     theory.isSuccessful = allEndWith(ref includes, "/include") || includes.len == 0;
     theory.detail = `${includes.len} include candidate(s), not all ending in /include`;
   }
+}
+
+// The always-on libraries, asserted for all three platforms rather than for
+// whichever one the suite is running on. Both rules here are ones a
+// single-platform test would have said nothing about, and both were WRONG until
+// the bootstrap could ask what it was building for.
+suite function runtimeLibrariesVaryByPlatform(): void {
+  // The regression this pins: codegen lowers a float `%` to a `fmod` call, and
+  // glibc keeps the math functions in a separate libm. Without `-lm` every
+  // float-modulo program on Linux failed to LINK, which is how
+  // bootstrap/tests/slice/floats.yoop failed on a Linux machine while passing
+  // everywhere else.
+  let test theory: Case = t.asserts("Linux gets -lm, because libm is separate there") {
+    disposable cmd: Text = text.make(64);
+    pushRuntimeLibrariesFor(ref cmd, PLATFORM_LINUX);
+    const got = text.view(ref cmd);
+    theory.isSuccessful = contains(got, "-lm") && contains(got, "-lpthread");
+    theory.detail = `got "${got}", wanted -lpthread and -lm`;
+  }
+
+  // macOS folds libm into libSystem. Naming it is harmless there, so this is a
+  // parity assertion with the reference rather than a correctness one.
+  let test theory: Case = t.asserts("macOS gets -lpthread but not -lm") {
+    disposable cmd: Text = text.make(64);
+    pushRuntimeLibrariesFor(ref cmd, PLATFORM_MACOS);
+    const got = text.view(ref cmd);
+    theory.isSuccessful = contains(got, "-lpthread") && !contains(got, "-lm");
+    theory.detail = `got "${got}", wanted -lpthread and no -lm`;
+  }
+
+  // Windows has neither as a nameable library: the math functions and the
+  // threading primitives both live in the CRT, and `-lm` there is a hard
+  // "cannot open input file 'm.lib'" rather than a no-op.
+  let test theory: Case = t.asserts("Windows gets neither") {
+    disposable cmd: Text = text.make(64);
+    pushRuntimeLibrariesFor(ref cmd, PLATFORM_WINDOWS);
+    const got = text.view(ref cmd);
+    theory.isSuccessful = got.len == 0;
+    theory.detail = `got "${got}", wanted nothing at all`;
+  }
+}
+
+// `framework:NAME` is an Apple concept, and used to be emitted unconditionally
+// because the bootstrap had no platform to branch on. Passing `-framework` to a
+// GNU ld is an "unrecognized option", so this was a broken link on Linux for any
+// program that named one.
+suite function frameworksLowerPerPlatform(): void {
+  let test theory: Case = t.asserts("macOS gets the real -framework flag") {
+    disposable cmd: Text = text.make(64);
+    pushFrameworkFor(ref cmd, "framework:OpenGL", PLATFORM_MACOS);
+    theory.isSuccessful = str.stringEq(text.view(ref cmd), " -framework OpenGL");
+    theory.detail = `got "${text.view(ref cmd)}", wanted " -framework OpenGL"`;
+  }
+
+  // Every platform HAS an OpenGL, so the portable spelling has to reach it off
+  // Apple too - opengl32 on Windows, libGL on Linux. Getting this wrong is not
+  // a link line missing a flag, it is ~40 undefined references to
+  // glCreateShader and friends, none of which say "OpenGL".
+  let test theory: Case = t.asserts("Windows maps OpenGL to -lopengl32") {
+    disposable cmd: Text = text.make(64);
+    pushFrameworkFor(ref cmd, "framework:OpenGL", PLATFORM_WINDOWS);
+    theory.isSuccessful = str.stringEq(text.view(ref cmd), " -lopengl32");
+    theory.detail = `got "${text.view(ref cmd)}", wanted " -lopengl32"`;
+  }
+
+  // The one that kept examples/playground/nebula_arena from linking on Linux.
+  let test theory: Case = t.asserts("Linux maps OpenGL to -lGL") {
+    disposable cmd: Text = text.make(64);
+    pushFrameworkFor(ref cmd, "framework:OpenGL", PLATFORM_LINUX);
+    theory.isSuccessful = str.stringEq(text.view(ref cmd), " -lGL");
+    theory.detail = `got "${text.view(ref cmd)}", wanted " -lGL"`;
+  }
+
+  // Any OTHER framework name really is Apple's, so it drops rather than
+  // becoming a `-l` for a library that does not exist.
+  let test theory: Case = t.asserts("a non-OpenGL framework drops off Apple") {
+    disposable cmd: Text = text.make(64);
+    pushFrameworkFor(ref cmd, "framework:Cocoa", PLATFORM_WINDOWS);
+    pushFrameworkFor(ref cmd, "framework:Cocoa", PLATFORM_LINUX);
+    theory.isSuccessful = text.view(ref cmd).len == 0;
+    theory.detail = `got "${text.view(ref cmd)}", wanted nothing at all`;
+  }
+}
+
+// Substring test, since these assert what a link line CONTAINS rather than its
+// exact shape. `stringIndexOf` reports absence as an out-of-range index.
+function contains(haystack: string, needle: string): bool {
+  return str.stringIndexOf(haystack, needle) < haystack.len;
 }
 
 // The position of `needle` in `v`, or `v.len` when it is absent. Same "an

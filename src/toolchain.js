@@ -152,20 +152,30 @@ export const EXE_SUFFIX = process.platform === "win32" ? ".exe" : "";
 // every platform has one. On Windows that is opengl32.lib (plus the entry
 // point loader in runtime/yoop_gl_win32.c, added by glueSourcesForLinkFlags -
 // opengl32.dll exports only GL 1.1, so the .lib alone links a fraction of the
-// API). Any other framework name still drops, since those really are Apple's.
+// API); on Linux it is libGL. Any other framework name still drops, since
+// those really are Apple's.
 //
 // Every other name lowers to `-lNAME`, which clang maps to `NAME.lib` when
 // driving the MSVC linker, so ordinary third-party libraries still work.
 const WINDOWS_IMPLICIT_LIBS = new Set(["m", "pthread"]);
-const WINDOWS_FRAMEWORK_EQUIVALENTS = new Map([["OpenGL", ["-lopengl32"]]]);
+
+// The non-Apple spelling of a framework, where the thing it names exists off
+// Apple at all. Keyed by framework name, then by `process.platform`; a name
+// absent from the table, or present without an entry for this platform, drops.
+//
+// Linux was missing from here until nebula_arena was built on one: OpenGL
+// silently contributed NOTHING to the link line, and the failure surfaced as
+// ~40 undefined references to glCreateShader and friends rather than as
+// anything naming OpenGL. macOS and Windows both resolved it, so the gap was
+// invisible on the two platforms this had been built on.
+const FRAMEWORK_EQUIVALENTS = new Map([
+  ["OpenGL", { win32: ["-lopengl32"], linux: ["-lGL"] }],
+]);
 export function lowerLinkFlag(name) {
   if (name.startsWith("framework:")) {
     const framework = name.slice("framework:".length);
     if (process.platform === "darwin") return ["-framework", framework];
-    if (process.platform === "win32") {
-      return WINDOWS_FRAMEWORK_EQUIVALENTS.get(framework) ?? [];
-    }
-    return [];
+    return FRAMEWORK_EQUIVALENTS.get(framework)?.[process.platform] ?? [];
   }
   if (process.platform === "win32" && WINDOWS_IMPLICIT_LIBS.has(name)) return [];
   // OpenSSL is two libraries and naming either one always means both: libssl

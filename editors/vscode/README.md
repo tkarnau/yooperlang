@@ -12,16 +12,27 @@ The extension depends on `vscode-languageclient` to talk to the server, so insta
 cd editors/vscode
 npm install
 cd ../..
-ln -s "$PWD/editors/vscode" ~/.vscode/extensions/yoop-lang-0.0.1
+ln -s "$PWD/editors/vscode" ~/.vscode/extensions/yoop-lang.yoop-lang-0.1.0
 ```
 
-(Run from the repo root.)
+(Run from the repo root. Restart VS Code afterwards - it only scans the
+extensions directory at startup.)
+
+The directory name follows VS Code's `publisher.name-version` convention, so it
+matches the `publisher` and `version` in `package.json`. Nothing enforces that -
+VS Code reads the real values out of `package.json` - but a name that disagrees
+with them is confusing next to the other entries in that directory.
 
 To uninstall:
 
 ```sh
-rm ~/.vscode/extensions/yoop-lang-0.0.1
+rm ~/.vscode/extensions/yoop-lang.yoop-lang-0.1.0
 ```
+
+On a fresh machine, check the server actually came up: open a `.yoop` file and
+look for **Yoopiler (extension)** in the Output panel's dropdown. Diagnostics
+need nothing but Node; `clang` is only required to build, and `lldb-dap` only to
+debug.
 
 ## What it highlights
 
@@ -46,7 +57,7 @@ Capabilities advertised today:
 - **Find all references** (Shift-F12) - every reference to a local, parameter, top-level function, type / enum / union / trait / kind, struct field, or method. Cross-module references are followed via the typechecker's import resolution. References inside `//` comments, block comments, and string / template-literal text are filtered out.
 - **Rename** (F2) - built on find-references; produces a `WorkspaceEdit` that updates every reference atomically. Rejects invalid identifiers (digits-leading / non-identifier chars) and refuses to rename enum variants (variant ordinals are ABI-significant - see CLAUDE.md Phase 7.5).
 - **Completion** (Ctrl-Space) - suggests locals + parameters in the enclosing function, top-level decls in the current module, imported names, and primitive types. Each suggestion carries a CompletionItemKind icon and a `detail` line with the formatted type when known.
-- **Document symbols** - outline view (Cmd-Shift-O / ⌘-T) lists functions, types, fields, methods, enum variants, and traits.
+- **Document symbols** - outline view (Cmd-Shift-O / ⌘-T) lists functions, types, fields, methods, enum variants, traits, and `extern` blocks. An extern block is one collapsible entry named for its source (`extern library "SDL2"`, `extern "stdio.h"`) holding the signatures it declares, with extern types distinguished from extern functions.
 - **Semantic tokens** - type-aware coloring driven by the typechecker (variables vs. parameters vs. types vs. functions vs. methods vs. enum members vs. namespaces). Replaces the regex-based PascalCase heuristic in the TextMate grammar; the editor blends the two.
 
 Caveats:
@@ -141,4 +152,11 @@ captures `yoopiler` stdout/stderr and the resolved `lldb-dap` path.
 ## Known limitations (highlighting)
 
 - Template-literal interpolation handles one level of nested braces inside `${...}`. Deeply nested object literals inside an interpolation may close the interpolation early visually. This is display-only - the lexer and parser handle arbitrary nesting correctly.
-- PascalCase-as-type and `name(`-as-function are syntactic heuristics, not type-aware. (The LSP doesn't yet feed semantic tokens back to the editor.)
+- PascalCase-as-type and `name(`-as-function are syntactic heuristics, not type-aware. The LSP's semantic tokens do override them where the typechecker knows better (see the capability above); the grammar is what colours a file before the server has answered, and what colours a file that does not typecheck.
+
+The grammar's keyword coverage is pinned by `src/lsp/grammar.test.js`, which
+asserts every entry in the lexer's `keywordTagList` is named by some rule -
+`null` and `in` were both missing until that test was written. `PRIM_TYPES` in
+the completion provider is pinned the same way against the typechecker's
+`primTypeFromName` by `src/lsp/completion.test.js`, which is what caught the
+eight `c_*` aliases going unoffered.

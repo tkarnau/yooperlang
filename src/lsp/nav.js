@@ -1038,6 +1038,45 @@ function symbolFor(decl, src) {
     case ASTNodeKind.KIND_DECL: {
       return { name: inner.name, kind: SymbolKind.Interface, range, selectionRange: selRange };
     }
+    // An `extern "C" from library "SDL2" { ... }` block, as one collapsible
+    // outline entry holding the signatures it declares.
+    //
+    // These were absent entirely. A file that is ALL extern - std/core/
+    // intrinsics.yoop, std/net/socket_ffi.yoop, the `sdl.yoop` in
+    // examples/playground/nebula_arena - had a completely empty outline, and a
+    // mixed file silently listed only its non-extern half (sdl.yoop showed 19
+    // of its 35 declarations). An FFI signature is exactly the kind of thing
+    // one goes looking for by name, so it is a bad thing to hide.
+    //
+    // The block is named for its SOURCE rather than its ABI, because the
+    // source is what distinguishes two blocks in the same file - a header name
+    // or a library name is the useful half, and `abi` is "C" almost everywhere.
+    case ASTNodeKind.EXTERN_BLOCK: {
+      const children = [];
+      for (const d of inner.decls ?? []) {
+        if (!d.sourceLoc || !d.name) continue;
+        const r = offsetToRange(src, d.sourceLoc.pos, d.sourceLoc.length);
+        children.push({
+          name: d.name,
+          kind: d.kind === ASTNodeKind.EXTERN_TYPE_DECL
+            ? SymbolKind.Struct
+            : SymbolKind.Function,
+          range: r,
+          selectionRange: r,
+        });
+      }
+      const source = inner.source?.value;
+      const label = inner.source?.kind === "library"
+        ? `extern library "${source}"`
+        : `extern "${source ?? inner.abi}"`;
+      return {
+        name: label,
+        kind: SymbolKind.Namespace,
+        range,
+        selectionRange: selRange,
+        children,
+      };
+    }
     default:
       return null;
   }

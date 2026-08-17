@@ -48,13 +48,24 @@ const CompletionItemKind = {
 };
 
 // Yoop primitive type names - exposed for completion in type-annotation
-// position. Kept in sync with the lexer/typechecker's primitive set.
+// position. Kept in sync with the lexer/typechecker's primitive set; the
+// `primTypesAreComplete` case in completion.test.js asserts that against
+// `primTypeFromName` rather than trusting this comment.
+//
+// The second group is Phase 8.B's C-portable integer aliases (C_ALIASES_LP64
+// in src/jsyooptypecheck/types.js). They are resolution-time synonyms - the
+// alias IS the target type for typesEqual, assignability and codegen - and
+// every `extern "C"` block in std, the bootstrap and the examples is written
+// in them, so leaving them out meant completion went quiet in exactly the
+// place a C signature is being typed.
 const PRIM_TYPES = [
   "int8", "int16", "int32", "int64",
   "uint8", "uint16", "uint32", "uint64",
   "usize", "isize", "int",
   "float32", "float64", "float",
   "bool", "char", "string", "void",
+  "c_short", "c_ushort", "c_int", "c_uint",
+  "c_long", "c_ulong", "c_size_t", "c_ssize_t",
 ];
 
 const SKIP_FIELDS = new Set([
