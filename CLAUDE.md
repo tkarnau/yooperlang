@@ -192,8 +192,17 @@ check on a change, and say so when you do.
 - CI is [.github/workflows/ci.yml](.github/workflows/ci.yml): ubuntu-latest,
   bootstrap Yoop tests then `npm test` on every push and PR, and a release of
   the bootstrap compiler (via `package:boot`) when a `v*` tag is pushed.
-  `scripts/ci_local.sh {quick,test,release,shell}` runs those same steps in a
-  Linux container against the working tree, which is the only way to check the
-  half of CI a mac cannot: `quick` compiles the C runtime under clang 18's
-  `-Werror` and builds the bootstrap, `test` is the whole job. Add `--amd64`
-  for the runner's architecture (correct, and qemu-slow).
+  `scripts/ci_local.sh {lint,quick,test,release,shell}` runs those same steps
+  against the working tree without a push: `lint` is actionlint plus the job
+  graph act resolves (no container, instant), `quick` compiles the C runtime
+  under clang 18's `-Werror` and builds the bootstrap, `test` is the whole job,
+  `release` is `package:boot` minus the GitHub upload. Everything but `lint`
+  runs in a Linux container built from
+  [.github/ci-local/Dockerfile](.github/ci-local/Dockerfile). On an x86_64
+  Linux host that container is the runner's OS, clang major version and
+  architecture, so a green `test` there is a genuine prediction; from a mac it
+  is the right OS on the wrong architecture unless `--amd64` is passed, which
+  is correct and qemu-slow. Verified green on Linux 2026-08-17: `test` 1296
+  tests 0 fail, `release` packaged and smoke-tested a stage2 tarball.
+  Neither the container nor act can say anything about macOS or Windows;
+  only a runner that IS one can.
