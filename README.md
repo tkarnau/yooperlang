@@ -93,7 +93,7 @@ type Megaphone implements Greeter {
 
 Prerequisites:
 
-- Node.js 18 or newer (no `npm install` needed - the compiler has zero dependencies)
+- Node.js 22 or newer (no `npm install` needed - the compiler has zero dependencies)
 - `clang` on your `PATH` (codegen emits LLVM IR and links it with clang)
 
 Install the compiler, then compile and run a program:
@@ -144,7 +144,7 @@ sudo dnf install SDL2-devel mesa-libGL-devel
 sudo dnf install lldb
 ```
 
-Node 18 or newer, from your distro or from a version manager (nvm / fnm /
+Node 22 or newer, from your distro or from a version manager (nvm / fnm /
 volta) - the compiler does not care which.
 
 Check it works:
