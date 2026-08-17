@@ -134,6 +134,13 @@ export type TypedModule propagates<disposable> {
   // silent miscompile whenever the shapes happen to line up.
   intrinsicNames: Map<string, bool>,
   resolvedTypes: Vec<TypeId>,     // dense decoration, indexed by NodeId (0 = none / infer-later)
+  // (exit site, binding) pairs saying "this binding's scope-end call was
+  // already made by hand on every path reaching that exit". Codegen skips the
+  // matching pending disposal, which is what keeps a hand-written
+  // `Disposable.dispose(ref c)` from being followed by a second one at the
+  // closing brace. See discharge.yoop; a LIST rather than a map because the
+  // answer is empty for whole modules at a time.
+  discharges: Vec<Discharge>,
   // Which monomorphized function a CALL node resolved to, when the callee was
   // generic. Sparse, because most calls are not - the shape program.yoop's
   // header describes for exactly this kind of decoration.
@@ -174,14 +181,22 @@ export type Program propagates<disposable> {
   // same answer - and because it has exactly one writer, `walkFile`.
   currentFile: string,
   // The function pass D is currently inside: its declared return type, and its
-  // name for the diagnostic. Only `?` reads them, and it needs both - the
-  // return type to check the Err against, the name to say whose it is.
+  // name for the diagnostic. Two things read them - `?`, which needs both (the
+  // return type to check the Err against, the name to say whose it is), and the
+  // `return` statement itself.
   //
   // Ambient for the same reason `currentFile` is. The alternative was threading
   // the return type through `checkExpr`, and `?` can sit at any depth of an
   // expression, so that is a new parameter on every one of pass D's expression
   // helpers to answer a question all but one of them ignore. `beginFunction` is
   // the one writer.
+  //
+  // The statement walk USED to thread it as well, as a `retType` parameter on
+  // checkBlock / checkStatement / checkVarDecl / checkForLoop / checkForInLoop /
+  // checkSwitch / checkKindRegion - a second copy of this field that could only
+  // ever hold the same value, since `beginFunction` runs once per body and
+  // nothing inside one rebinds it. The parameter is gone; the one reader takes
+  // it from here.
   currentReturn: TypeId,
   currentFn: string,
   // Whether the body being checked belongs to a function carrying a PAUSABLE
@@ -401,6 +416,7 @@ export function initTypedModule(moduleId: string): TypedModule propagates<dispos
     calleeInstance: calleeInstance,
     calleeReceiver: calleeReceiver,
     resolvedTypes: vec.vecNew(0),
+    discharges: vec.vecNew(0),
     allowsUnsafe: false,
   };
 }

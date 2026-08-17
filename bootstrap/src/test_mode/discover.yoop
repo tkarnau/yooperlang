@@ -1,0 +1,133 @@
+module test_mode;
+
+/*
+  Finding the test files a `--test <path>` run is about.
+
+  Every `.test.yoop` file below a directory, absolute and SORTED. The sort is
+  not cosmetic: suite order IS report order, so an unsorted walk would hand a
+  different TAP numbering back from one run to the next and a diff of two runs
+  would be noise.
+
+  Directories that are never walked: anything whose name starts with `.` (a
+  `.git` full of packfiles is not a test tree), and the four build output
+  directories a checked-out project usually has. Same list as the reference's
+  `SKIP_DIRS` in src/jsyoopdriver/test_mode.js.
+*/
+
+import { Vec }, * as vec from "std/core/vec.yoop";
+import * as fs from "std/fs.yoop";
+import * as str from "std/core/strings.yoop";
+import * as intr from "std/core/intrinsics.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import { Result } from "std/core/types.yoop";
+
+// What makes a file a test file. A NAME rule rather than a content one,
+// because discovery has to decide what to parse before it has parsed anything.
+export const TEST_FILE_SUFFIX: string = ".test.yoop";
+
+// Recursively collect every `.test.yoop` file below `rootDir`, sorted.
+//
+// The paths are built by joining rather than canonicalized one by one: the
+// caller normalizes `rootDir` once, and every path below it is then already
+// canonical unless a symlink stands in the middle - which the import resolver
+// canonicalizes anyway when it loads the file.
+export function discoverTestFiles(rootDir: string): Vec<string> propagates<disposable> {
+  let found: Vec<string> = vec.vecNew(16);
+  walkForTests(rootDir, ref found);
+  sortPaths(ref found);
+  return found;
+}
+
+// One directory: its entries are read to completion BEFORE any recursion, so
+// only one directory handle is open at a time no matter how deep the tree is.
+function walkForTests(dir: string, ref out: Vec<string>): void {
+  disposable names: Vec<string> = vec.vecNew(16);
+  disposable entries: fs.DirIter = fs.openDir(dir);
+  for name in entries {
+    vec.vecPush(ref names, name);
+  }
+
+  let i: usize = 0;
+  while (i < names.len) {
+    const name = vec.vecGet(ref names, i);
+    const full = fs.pathJoin([dir, name]);
+    if (fs.statPath(full).isDir) {
+      if (!isSkippedDirName(name)) {
+        walkForTests(full, ref out);
+      }
+    } else if (isTestFileName(name)) {
+      vec.vecPush(ref out, full);
+    }
+    i += 1;
+  }
+}
+
+// Directories a test walk never descends into.
+export function isSkippedDirName(name: string): bool {
+  if (str.stringStartsWith(name, ".")) {
+    return true;
+  }
+  return str.stringEq(name, "node_modules")
+    || str.stringEq(name, "dist")
+    || str.stringEq(name, "build")
+    || str.stringEq(name, "target");
+}
+
+// True when `name` ends in `.test.yoop`. Works on a bare name or a whole path,
+// since only the tail is read.
+export function isTestFileName(name: string): bool {
+  if (name.len < TEST_FILE_SUFFIX.len) {
+    return false;
+  }
+  switch (str.stringSlice(name, name.len - TEST_FILE_SUFFIX.len, name.len)) {
+    case Result.Ok { value: tail }: { return str.stringEq(tail, TEST_FILE_SUFFIX); }
+    case Result.Err { error: e }: { return false; }
+  }
+}
+
+// Insertion sort, the same choice source_graph/load.yoop makes and for the same
+// reason: `string` implements no `Comparable`, a test tree holds tens of files
+// rather than thousands, and determinism is the whole requirement.
+function sortPaths(ref paths: Vec<string>): void {
+  let i: usize = 1;
+  while (i < paths.len) {
+    const item = vec.vecGet(ref paths, i);
+    let j = i;
+    while (j > 0 && pathLess(item, vec.vecGet(ref paths, j - 1))) {
+      vec.vecSet(ref paths, j, vec.vecGet(ref paths, j - 1));
+      j -= 1;
+    }
+    vec.vecSet(ref paths, j, item);
+    i += 1;
+  }
+}
+
+// Byte-wise `a < b`, the plain lexicographic order.
+export function pathLess(a: string, b: string): bool {
+  const ab = intr.stringAsBytes(a);
+  const bb = intr.stringAsBytes(b);
+  let i: usize = 0;
+  while (i < ab.len && i < bb.len) {
+    if (ab[i] != bb[i]) {
+      return ab[i] < bb[i];
+    }
+    i += 1;
+  }
+  return ab.len < bb.len;
+}
+
+// `abs` with `root` and the separator after it removed - what a suite is
+// LABELED with, so a failure names a path short enough to read. Falls back to
+// the whole path when `abs` is not under `root`.
+export function relativeTo(root: string, abs: string): string {
+  if (root.len == 0 || abs.len <= root.len + 1) {
+    return abs;
+  }
+  if (!str.stringStartsWith(abs, root)) {
+    return abs;
+  }
+  switch (str.stringSlice(abs, root.len + 1, abs.len)) {
+    case Result.Ok { value: rest }: { return rest; }
+    case Result.Err { error: e }: { return abs; }
+  }
+}

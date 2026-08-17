@@ -1,0 +1,70 @@
+// A field that supplies a propagated kind by carrying it in its OWN ANNOTATION,
+// rather than by having a type that propagates the kind.
+//
+// `dispose_propagated.yoop` covers the first spelling: `Pair propagates<tracked>`
+// holds `a: Res`, and `Res` itself propagates the kind, so the field's TYPE is
+// what answers. This file covers the second, which is what
+// `examples/pass/propagates_full` needs:
+//
+//     type Session propagates<disposable> {
+//       handle: disposable FileHandle,
+//     }
+//
+// `FileHandle` implements `Disposable` OUTRIGHT and propagates nothing, so its
+// type answers no. The field says it instead, with a kind prefix. Both spellings
+// count, and `Both` below has one of each so the ordering rule can be checked
+// across the two.
+//
+// The kind, the trait and the two implementers live in ./lib/carried.yoop, and
+// that split is load-bearing rather than tidiness - see the comment there.
+
+import { tracked, Closer, Handle, Res } from "./lib/carried.yoop";
+
+extern "C" from "stdio.h" {
+  function printf(fmt: string, ...): int32;
+}
+
+// Propagates the kind, and its `Handle` field carries it by prefix. `plain`
+// carries nothing and is skipped, the same as in the type-propagating form.
+type Session propagates<tracked> {
+  h: tracked Handle,
+  plain: int,
+}
+
+function simple(): void {
+  tracked s: Session = { h: { id: 1 }, plain: 9 };
+  printf("  body %d\n", s.plain);
+}
+
+// One field of each spelling. The disposal order is still reverse FIELD order,
+// so `byPrefix` closes before `byType` - which is the assertion that the two
+// spellings land in ONE list rather than the carried ones being appended after.
+type Both propagates<tracked> {
+  byType: Res,
+  byPrefix: tracked Handle,
+}
+
+function mixed(): void {
+  tracked b: Both = { byType: { id: 10 }, byPrefix: { id: 11 } };
+  printf("  body\n");
+}
+
+// An early `return` unwinds a carried-kind field exactly as it unwinds any other.
+function earlyExit(): int {
+  tracked s: Session = { h: { id: 20 }, plain: 0 };
+  if (true) {
+    tracked inner: Handle = { id: 21 };
+    return 7;
+  }
+  return 0;
+}
+
+function main(): int {
+  printf("simple:\n");
+  simple();
+  printf("mixed:\n");
+  mixed();
+  printf("early return:\n");
+  printf("  got %d\n", earlyExit());
+  return 0;
+}

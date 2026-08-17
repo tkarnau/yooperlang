@@ -36,8 +36,7 @@ module codegen;
 import { Vec }, * as vec from "std/core/vec.yoop";
 import { disposable } from "std/core/kinds.yoop";
 import { ASTNode, ASTNodeKind, NodeId, childAt, nodeAt } from "../ast";
-import { TemplatePartKind, templatePartKind, primBitWidth, primIsSigned,
-  floatBitWidth, methodSymbolName, nominalModuleOf, moduleIdOf } from "../typecheck";
+import { TemplatePartKind, templatePartKind, primBitWidth, primIsSigned, floatBitWidth, methodSymbolName, nominalModuleOf, moduleIdOf } from "../typecheck";
 
 // Wide enough for any i64 rendering: 20 digits, a sign, and the NUL is 22.
 const INT_DIGITS_CAPACITY: uint64 = 24;
@@ -48,18 +47,18 @@ export function emitTemplateLiteral(
   expr: ASTNode,
   exprId: NodeId,
   ref out: Operand
-): string {
+): EmitResult {
   // No interpolation is just a string literal, and must not allocate - most
   // template literals in real source are one of these.
   if (expr.childCount == 0) {
     out = Operand.StrRef { id: internStringConstant(cx.e, "") };
-    return "";
+    return EmitResult.Ok;
   }
   if (expr.childCount == 1) {
     const only = nodeAt(cx.ast, childAt(cx.ast, expr, 0));
     if (only.kind == ASTNodeKind.STRING_PART) {
       out = Operand.StrRef { id: literalConstantOf(ref cx, only) };
-      return "";
+      return EmitResult.Ok;
     }
   }
 
@@ -69,10 +68,7 @@ export function emitTemplateLiteral(
   let i: usize = 0;
   while (i < expr.childCount) {
     let part: Operand = Operand.None;
-    const err = emitTemplatePart(ref cx, childAt(cx.ast, expr, i), ref part);
-    if (err.len > 0) {
-      return err;
-    }
+    emitTemplatePart(ref cx, childAt(cx.ast, expr, i), ref part)?;
     vec.vecPush(ref parts, part);
     i += 1;
   }
@@ -81,24 +77,21 @@ export function emitTemplateLiteral(
 }
 
 // One part, as a NUL-terminated ptr.
-function emitTemplatePart(ref cx: Cx, partId: NodeId, ref out: Operand): string {
+function emitTemplatePart(ref cx: Cx, partId: NodeId, ref out: Operand): EmitResult {
   const part = nodeAt(cx.ast, partId);
   if (part.kind == ASTNodeKind.STRING_PART) {
     out = Operand.StrRef { id: literalConstantOf(ref cx, part) };
-    return "";
+    return EmitResult.Ok;
   }
 
   let value: Operand = Operand.None;
-  const err = emitExpr(ref cx, part.childA, ref value);
-  if (err.len > 0) {
-    return err;
-  }
+  emitExpr(ref cx, part.childA, ref value)?;
 
   switch (partKindOf(ref cx, part.childA)) {
     // Already a NUL-terminated ptr, which is exactly what a yoop string is.
     case TemplatePartKind.STRING: {
       out = value;
-      return "";
+      return EmitResult.Ok;
     }
     case TemplatePartKind.BOOL: {
       const dest = freshTemp(cx.e);
@@ -110,15 +103,15 @@ function emitTemplatePart(ref cx: Cx, partId: NodeId, ref out: Operand): string 
         internStringConstant(cx.e, "false")
       );
       out = Operand.Temp { id: dest };
-      return "";
+      return EmitResult.Ok;
     }
     case TemplatePartKind.INT: {
       out = emitIntToString(ref cx, part.childA, value);
-      return "";
+      return EmitResult.Ok;
     }
     case TemplatePartKind.FLOAT: {
       out = emitFloatToString(ref cx, part.childA, value);
-      return "";
+      return EmitResult.Ok;
     }
     case TemplatePartKind.DISPLAY: {
       return emitDisplayPart(ref cx, part.childA, value, ref out);
@@ -126,7 +119,7 @@ function emitTemplatePart(ref cx: Cx, partId: NodeId, ref out: Operand): string 
     // Pass D refuses anything else by name, so reaching here is a compiler bug
     // rather than a user error.
     default: {
-      return "codegen: template literal part is not a string, integer, bool or Display";
+      return EmitResult.Err { message: "codegen: template literal part is not a string, integer, bool or Display" };
     }
   }
 }
@@ -148,7 +141,7 @@ function emitTemplatePart(ref cx: Cx, partId: NodeId, ref out: Operand): string 
 // The result is a fresh malloc that nothing frees, exactly like the built
 // string it goes into. That is the allocation behavior of a built string
 // throughout, and the note at the top of this file is where it changes.
-function emitDisplayPart(ref cx: Cx, exprId: NodeId, value: Operand, ref out: Operand): string {
+function emitDisplayPart(ref cx: Cx, exprId: NodeId, value: Operand, ref out: Operand): EmitResult {
   const ownerType = resolvedTypeAt(ref cx, exprId);
   const ty = typeOf(ref cx, exprId);
   const slot = declareAnonSlot(ref cx, ty);
@@ -168,7 +161,7 @@ function emitDisplayPart(ref cx: Cx, exprId: NodeId, value: Operand, ref out: Op
     ref args
   );
   out = Operand.Temp { id: dest };
-  return "";
+  return EmitResult.Ok;
 }
 
 const TO_STRING_METHOD: string = "toString";
@@ -234,7 +227,7 @@ function emitFloatToString(ref cx: Cx, exprId: NodeId, value: Operand): Operand 
 const FLOAT_DIGITS_CAPACITY: uint64 = 32;
 
 // Measure, allocate once, copy each part into place, terminate.
-function emitConcatParts(ref cx: Cx, ref parts: Vec<Operand>, ref out: Operand): string {
+function emitConcatParts(ref cx: Cx, ref parts: Vec<Operand>, ref out: Operand): EmitResult {
   disposable lengths: Vec<usize> = vec.vecNew(parts.len);
   let i: usize = 0;
   while (i < parts.len) {
@@ -284,7 +277,7 @@ function emitConcatParts(ref cx: Cx, ref parts: Vec<Operand>, ref out: Operand):
   emitStoreNulByte(ref cx, end);
 
   out = Operand.Temp { id: dst };
-  return "";
+  return EmitResult.Ok;
 }
 
 function literalConstantOf(ref cx: Cx, part: ASTNode): usize {

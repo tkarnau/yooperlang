@@ -10,20 +10,13 @@ module codegen;
 
 import { Vec }, * as vec from "std/core/vec.yoop";
 import { disposable } from "std/core/kinds.yoop";
-import { Map }, * as map from "std/collections/map.yoop";
+import * as map from "std/collections/map.yoop";
 import { Option } from "std/core/types.yoop";
 import * as str from "std/core/strings.yoop";
 import { NodeId } from "../ast";
 import { PrimKind, instanceAt, floatBitWidth } from "../typecheck";
 import { floatBits, float32Bits } from "../utils";
-import { Program, TypedModule, TypeId, Type, Symbol, symbolAt, typeAt, TYPE_VOID_ID,
-  TYPE_ERROR_ID, primTypeIdOfName, primBitWidth, primIsSigned,
-  lookupField, isStructType, isVariantType, lookupVariantCase, variantCaseFieldNamed,
-  variantModuleIdOf, variantDeclNameOf, funcInstanceAt, genericAt, substitute,
-  DeclId, DECL_NONE_ID, GenericSort, derefType, lookupMethod, methodSymbolName,
-  anyOpenArg, findFuncInstance, funcTypeIsAsync,
-  nominalModuleOf, isValueEnumType, lookupEnumCase,
-  IterableWalk, iterableWalkOf, isUnsafePtrType, sizeOfType } from "../typecheck";
+import { Program, TypedModule, TypeId, Type, Symbol, symbolAt, typeAt, TYPE_VOID_ID, TYPE_ERROR_ID, primTypeIdOfName, primBitWidth, primIsSigned, lookupField, isStructType, isVariantType, lookupVariantCase, variantCaseFieldNamed, variantModuleIdOf, variantDeclNameOf, funcInstanceAt, genericAt, substitute, DeclId, DECL_NONE_ID, GenericSort, derefType, lookupMethod, anyOpenArg, findFuncInstance, funcTypeIsAsync, isValueEnumType, lookupEnumCase, IterableWalk, iterableWalkOf, isUnsafePtrType, sizeOfType, isUnionType } from "../typecheck";
 import { ASTNode, childAt, nodeAt } from "../ast";
 
 // ----- the typecheck boundary ----------------------------------------------
@@ -335,6 +328,15 @@ export function isStructAt(ref cx: Cx, nodeId: NodeId): bool {
   return isStructType(cx.prog, derefType(cx.prog, resolvedTypeAt(ref cx, nodeId)));
 }
 
+// True when the node resolved to a UNION. Asked ahead of `isStructAt` wherever
+// both could match, because a union answers false to it and would otherwise
+// fall through to a path that computes a field POSITION - the one thing a union
+// does not have. Deref'd for the same reason isStructAt is: a borrowed union
+// reaches the same fields.
+export function isUnionAt(ref cx: Cx, nodeId: NodeId): bool {
+  return isUnionType(cx.prog, derefType(cx.prog, resolvedTypeAt(ref cx, nodeId)));
+}
+
 // The generic-function DeclId a name binds to, or DECL_NONE_ID when the name is
 // not one. Takes prog/tm rather than a Cx because the walk asks BEFORE there is
 // a Cx to ask through - it is deciding how many bodies to build one for.
@@ -420,12 +422,6 @@ export function pointeeTypeOf(ref cx: Cx, nodeId: NodeId): string {
   return llvmType(cx.prog, derefType(cx.prog, resolvedTypeAt(ref cx, nodeId)));
 }
 
-// A method's declared return type. Read off the RECEIVER's method table rather
-// than the module namespace, because a method is not a module-level name.
-export function methodReturnTypeOf(ref cx: Cx, declNode: ASTNode): string {
-  return llvmType(cx.prog, methodReturnTypeIdOf(ref cx, declNode));
-}
-
 // The method twin of `returnTypeIdOf`, and needed for the same reason.
 export function methodReturnTypeIdOf(ref cx: Cx, declNode: ASTNode): TypeId {
   const owner = methodOwnerOf(ref cx, declNode);
@@ -477,16 +473,6 @@ export function iterableWalkAt(ref cx: Cx, nodeId: NodeId): IterableWalk {
 
 export function isValueEnumAt(ref cx: Cx, nodeId: NodeId): bool {
   return isValueEnumType(cx.prog, resolvedTypeAt(ref cx, nodeId));
-}
-
-// True when a node is an enum whose values are integers, which is what decides
-// between an immediate and an interned string constant.
-export function isIntBackedEnumAt(ref cx: Cx, nodeId: NodeId): bool {
-  const t = resolvedTypeAt(ref cx, nodeId);
-  if (!isValueEnumType(cx.prog, t)) {
-    return false;
-  }
-  return primBitWidth(cx.prog, t) > 0;
 }
 
 // The case a `Color.Red` or a `case Color.Red:` names, as an operand.

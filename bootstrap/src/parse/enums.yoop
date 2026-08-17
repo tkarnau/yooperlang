@@ -51,10 +51,7 @@ export function parseEnumDecl(ref ps: ParserState): Result<NodeId, ParsingError>
 
   SelfLexing.expect(ref ps, TokenTags.LCURLY)?;
   disposable memberIds: Vec<NodeId> = vec.vecNew(8);
-  while (
-    SelfLexing.peek(ref ps).tag != TokenTags.RCURLY &&
-    SelfLexing.peek(ref ps).tag != TokenTags.EOF
-  ) {
+  while (untilClosing(ref ps, TokenTags.RCURLY)) {
     // A method, not a case. `function` cannot start a case name, so the two
     // members never have to be told apart by anything but the keyword - the
     // same rule a variant body uses, and methods may sit anywhere in the run.
@@ -73,10 +70,7 @@ export function parseEnumDecl(ref ps: ParserState): Result<NodeId, ParsingError>
   // Spliced only now, for the reason a variant's cases are: a method's parameter
   // list appends its own run to the shared pool while it parses, so a partial
   // splice would interleave the two.
-  const start: usize = ps.ast.childIds.len;
-  vec.vecExtendFrom(ref ps.ast.childIds, vec.vecAsArray(ref memberIds));
-  node.childStart = start;
-  node.childCount = memberIds.len;
+  spliceChildren(ref ps, ref node, ref memberIds);
 
   return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
 }
@@ -96,7 +90,9 @@ function parseEnumUnderlying(ref ps: ParserState): Result<NodeId, ParsingError> 
 
 // One `NAME` or `NAME <value-expression>`.
 //
-//   name        the case's name
+//   name        the case's name, which may be a RESERVED WORD - a case name is
+//               metadata, and `enum Kind { type, union }` reads exactly as a
+//               C header's enumerators do
 //   childA      the value expression, or 0 for an implicit one
 //
 // The value ENDS where the expression ends, so a short list of terminators is
@@ -109,7 +105,7 @@ function parseEnumUnderlying(ref ps: ParserState): Result<NodeId, ParsingError> 
 // token in expression" rather than as whatever is really wrong with the method.
 function parseEnumCase(ref ps: ParserState): Result<NodeId, ParsingError> {
   let node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.ENUM_CASE);
-  node.name = parseIdentAsName(ref ps)?;
+  node.name = parseIdentOrKeywordAsName(ref ps)?;
 
   const next = SelfLexing.peek(ref ps).tag;
   if (next == TokenTags.COMMA || next == TokenTags.RCURLY ||

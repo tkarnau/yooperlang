@@ -15,10 +15,22 @@ export function resolveImportPath(
   stdRoot: string
 ): Result<string, string> {
   const isStd = str.stringStartsWith(sourcePath, "std/");
+  const isModules = str.stringStartsWith(sourcePath, MODULES_PATH_PREFIX);
   let joinedPath: string;
+  // The modules root is answered per import from the IMPORTING file's own
+  // directory upward, where std's is discovered once for the whole build. Two
+  // roots with two owners; see modules_root.yoop.
+  let modulesRoot: string = "";
   if (isStd) {
     const rest = str.sliceFrom(sourcePath, 4); // drop "std/", root at stdRoot
     joinedPath = fs.pathJoin([stdRoot, rest]);
+  } else if (isModules) {
+    modulesRoot = findModulesRoot(fs.dirName(importerAbsPath));
+    if (modulesRoot.len == 0) {
+      return Result.Err { error: modulesNotFoundMessage(sourcePath, modulesRoot) };
+    }
+    const rest = str.sliceFrom(sourcePath, 8); // drop "modules/"
+    joinedPath = fs.pathJoin([modulesRoot, rest]);
   } else {
     const isRel = str.stringStartsWith(sourcePath, "./")
       || str.stringStartsWith(sourcePath, "../");
@@ -41,12 +53,24 @@ export function resolveImportPath(
   // with "unable to identify a canonical path" - which reads as a compiler
   // problem rather than as the typo it almost always is.
   if (!fs.exists(joinedPath)) {
+    if (isModules) {
+      return Result.Err { error: modulesNotFoundMessage(sourcePath, modulesRoot) };
+    }
     return Result.Err { error: `cannot resolve import ${sourcePath} from ${importerAbsPath}: file not found` };
   }
 
   const canonicalPath = fs.normalizePath(joinedPath);
   if (canonicalPath.len == 0) {
     return Result.Err { error: `unable to identify a canonical path from ${joinedPath}` };
+  }
+
+  // Checked AFTER canonicalizing, because the nesting question is about where
+  // the file really is rather than about how the import was spelled.
+  if (isModules) {
+    const nested = nestedModulesRootProblem(canonicalPath, modulesRoot);
+    if (nested.len > 0) {
+      return Result.Err { error: `import "${sourcePath}" from ${importerAbsPath} ${nested}` };
+    }
   }
 
   return Result.Ok { value: canonicalPath };

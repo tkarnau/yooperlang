@@ -70,7 +70,7 @@ export function externTableNew(): ExternTable propagates<disposable> {
 // Declare `name` once. Emits the line the first time, does nothing on a
 // COMPATIBLE repeat, and returns the refusal on an incompatible one.
 //
-// Returns "" on success either way, so a caller that has nothing to say about
+// Returns `EmitResult.Ok` either way, so a caller that has nothing to say about
 // a duplicate can just check the length.
 export function externDeclare(
   ref e: Emitter,
@@ -78,11 +78,11 @@ export function externDeclare(
   ret: string,
   params: string[],
   variadic: bool
-): string {
+): EmitResult {
   switch (map.mapGet(ref e.declared.byName, name)) {
     case Option.Some { value: idx }: {
       if (sigMatches(ref e.declared, idx, ret, params, variadic)) {
-        return "";
+        return EmitResult.Ok;
       }
       return externConflict(ref e.declared, idx, name, ret, params, variadic);
     }
@@ -90,7 +90,7 @@ export function externDeclare(
   }
   recordSig(ref e.declared, name, ret, params, variadic);
   emitDeclareLine(ref e, name, ret, params, variadic);
-  return "";
+  return EmitResult.Ok;
 }
 
 // Whether the signature stored at `idx` spells the same LLVM declaration.
@@ -148,12 +148,12 @@ function externConflict(
   ret: string,
   params: string[],
   variadic: bool
-): string {
+): EmitResult {
   disposable had: Text = text.make(48);
   pushStoredSignature(ref had, ref t, idx);
   disposable wanted: Text = text.make(48);
   pushSignature(ref wanted, ret, params, variadic);
-  return `"${name}" is declared twice with different signatures - ${text.view(ref had)} and then ${text.view(ref wanted)}. One LLVM module holds the whole program, so a symbol may be declared in it exactly once`;
+  return EmitResult.Err { message: `"${name}" is declared twice with different signatures - ${text.view(ref had)} and then ${text.view(ref wanted)}. One LLVM module holds the whole program, so a symbol may be declared in it exactly once` };
 }
 
 //   i32 (ptr, ...)

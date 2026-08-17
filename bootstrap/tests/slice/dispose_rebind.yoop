@@ -1,0 +1,88 @@
+// REBINDING a kinded binding after disposing it by hand.
+//
+// This is the pattern std/core/kinds.yoop documents as the informed opt-in for
+// a mutable kinded binding - "dispose the old value before you overwrite it":
+//
+//     let tracked r: Res = open(1);
+//     Closer.close(ref r);      // the OUTGOING value, by hand
+//     r = open(2);              // and now the binding holds a new one
+//
+// The hand-written call answered the value that is gone. What the binding holds
+// AFTER the assignment is something nobody has closed, so the closing brace
+// owes a call again.
+//
+// BOOTSTRAP ONLY. See dispose_rebind.bootonly.
+
+kind tracked {
+  appliesTo binding;
+  requires Closer;
+  mustCall close beforeScopeEnd;
+}
+
+trait Closer {
+  function close(ref self): void;
+}
+
+type Res implements Closer {
+  id: int,
+  function close(ref self): void {
+    printf("  close %d\n", self.id);
+  }
+}
+
+function open(n: int): Res {
+  printf("  open %d\n", n);
+  return { id: n };
+}
+
+// The documented shape: close the outgoing value, then overwrite.
+function rebindOnce(): void {
+  let tracked r: Res = open(1);
+  Closer.close(ref r);
+  r = open(2);
+  printf("  body\n");
+}
+
+// Twice, so the answer is not "the first assignment is special".
+function rebindTwice(): void {
+  let tracked r: Res = open(10);
+  Closer.close(ref r);
+  r = open(11);
+  Closer.close(ref r);
+  r = open(12);
+  printf("  body\n");
+}
+
+// A rebind with no manual call anywhere: the outgoing value leaks, which is
+// what kinds.yoop says it does, and the brace closes what the binding ended up
+// holding. Here so the fixture states both halves of the rule.
+function rebindWithoutClosing(): void {
+  let tracked r: Res = open(20);
+  r = open(21);
+  printf("  body\n");
+}
+
+// Writing a FIELD is not a rebind - the binding holds the same value it did, so
+// the hand-written close still stands and the brace stays silent.
+function fieldWrite(): void {
+  let tracked r: Res = open(30);
+  Closer.close(ref r);
+  r.id = 31;
+  printf("  body\n");
+}
+
+function main(): int {
+  printf("rebind once:\n");
+  rebindOnce();
+
+  printf("rebind twice:\n");
+  rebindTwice();
+
+  printf("rebind without closing:\n");
+  rebindWithoutClosing();
+
+  printf("field write:\n");
+  fieldWrite();
+
+  return 0;
+}

@@ -19,10 +19,7 @@ import { Vec }, * as vec from "std/core/vec.yoop";
 import { disposable } from "std/core/kinds.yoop";
 import { Option } from "std/core/types.yoop";
 import { ASTNode, NodeId, childAt, nodeAt } from "../ast";
-import * as str from "std/core/strings.yoop";
-import { lookupKind, KindInfo, nominalModuleOf, methodSymbolName, moduleIdOf,
-  lookupMethod, TypeId, TYPE_ERROR_ID, PropagatedField, propagatesMustCall,
-  propagatedFieldsOf, propagatedDisposeProblem } from "../typecheck";
+import { lookupKind, nominalModuleOf, methodSymbolName, moduleIdOf, lookupMethod, TypeId, TYPE_ERROR_ID, PropagatedField, propagatesMustCall, propagatedFieldsOf, propagatedDisposeProblem, isDischargedAt } from "../typecheck";
 
 // Record a binding that owes a disposal, if its kind asks for one.
 //
@@ -34,16 +31,16 @@ export function noteDisposable(
   declNode: ASTNode,
   declId: NodeId,
   slot: usize
-): string {
+): EmitResult {
   if (declNode.childC == 0) {
-    return "";
+    return EmitResult.Ok;
   }
   const method = disposeMethodOf(ref cx, declNode);
   if (method.len == 0) {
-    return "";
+    return EmitResult.Ok;
   }
 
-  return recordDisposal(ref cx, declNode.name, slot, resolvedTypeAt(ref cx, declId), method);
+  return recordDisposal(ref cx, declNode.name, slot, declId, resolvedTypeAt(ref cx, declId), method);
 }
 
 // Push whatever `<kind> x: T` owes onto the current dispose scope: one call on
@@ -53,17 +50,21 @@ export function noteDisposable(
 // Both call sites go through here - an ordinary binding and a kind region -
 // because the question "what does this owe" is about the TYPE and neither of
 // them should have to know that propagation exists.
+// `declNode` is the declaration a manual call could have discharged, or 0 for
+// an anonymous region - there is no name to write, so nothing can.
 export function recordDisposal(
   ref cx: Cx,
   name: string,
   slot: usize,
+  declNode: NodeId,
   ownerType: TypeId,
   method: string
-): string {
+): EmitResult {
   if (lookupMethod(cx.prog, ownerType, method) != TYPE_ERROR_ID) {
     disposeRecord(cx.disposes, {
       name: name,
       slot: slot,
+      declNode: declNode,
       ownerType: ownerType,
       method: method,
       viaField: false,
@@ -71,7 +72,7 @@ export function recordDisposal(
       slotType: "",
       taskAction: TASK_ACTION_NONE,
     });
-    return "";
+    return EmitResult.Ok;
   }
 
   // Pass D proved one of these two before codegen ever ran, so a miss here is a
@@ -92,6 +93,7 @@ export function recordDisposal(
     disposeRecord(cx.disposes, {
       name: name,
       slot: slot,
+      declNode: declNode,
       ownerType: field.fieldType,
       method: method,
       viaField: true,
@@ -101,7 +103,7 @@ export function recordDisposal(
     });
     i += 1;
   }
-  return "";
+  return EmitResult.Ok;
 }
 
 // The `mustCall` method the declaration's kind prefixes ask for, or "".
@@ -134,9 +136,14 @@ export function disposeMethodOf(ref cx: Cx, declNode: ASTNode): string {
 //
 // Reverse because a later binding may hold a borrow of an earlier one: a `Text`
 // built into an arena has to go before the arena does.
-export function emitScopeDisposals(ref cx: Cx, depth: usize): string {
+//
+// `exitSite` is the node the unwind is happening AT - the block whose brace this
+// is, the `return` that is leaving, the `?` that is propagating. It is what pass
+// D's discharge table is keyed by, because "already disposed by hand" is a
+// property of the path reaching this point rather than of the binding.
+export function emitScopeDisposals(ref cx: Cx, depth: usize, exitSite: NodeId): EmitResult {
   if (depth >= disposeScopeDepth(cx.disposes)) {
-    return "";
+    return EmitResult.Ok;
   }
   // NOT `disposable`. This is a SHALLOW copy that shares the scope's storage,
   // so disposing it frees a buffer the stack still owns and pops it again a
@@ -146,26 +153,26 @@ export function emitScopeDisposals(ref cx: Cx, depth: usize): string {
   let i: usize = pending.len;
   while (i > 0) {
     i -= 1;
-    const err = emitOneDisposal(ref cx, vec.vecGet(ref pending, i));
-    if (err.len > 0) {
-      return err;
+    const entry = vec.vecGet(ref pending, i);
+    // Already disposed by hand, everywhere that reaches here. Emitting the call
+    // anyway is a double free rather than a duplicate line of output.
+    if (isDischargedAt(cx.tm, exitSite, entry.declNode)) {
+      continue;
     }
+    emitOneDisposal(ref cx, entry)?;
   }
-  return "";
+  return EmitResult.Ok;
 }
 
 // Every scope from the innermost down to `target`, innermost first. What
 // `return` (target 0) and `break` (target = the loop's depth) unwind.
-export function emitUnwindTo(ref cx: Cx, target: usize): string {
+export function emitUnwindTo(ref cx: Cx, target: usize, exitSite: NodeId): EmitResult {
   let depth: usize = disposeScopeDepth(cx.disposes);
   while (depth > target) {
     depth -= 1;
-    const err = emitScopeDisposals(ref cx, depth);
-    if (err.len > 0) {
-      return err;
-    }
+    emitScopeDisposals(ref cx, depth, exitSite)?;
   }
-  return "";
+  return EmitResult.Ok;
 }
 
 // One call:  call void @m__Vec_int32__dispose(ptr %ids.3.addr)
@@ -178,12 +185,12 @@ export function emitUnwindTo(ref cx: Cx, target: usize): string {
 //
 //   %t1 = getelementptr inbounds %struct.c__Emitter, ptr %e.1.addr, i32 0, i32 0
 //   call void @text__Text__dispose(ptr %t1)
-function emitOneDisposal(ref cx: Cx, entry: PendingDispose): string {
+function emitOneDisposal(ref cx: Cx, entry: PendingDispose): EmitResult {
   // A task handle owes the scheduler a join or a release rather than a method
   // call - there is no method to call, since `Task<T>` is a compiler type.
   if (entry.taskAction != TASK_ACTION_NONE) {
     emitTaskCleanup(ref cx, entry);
-    return "";
+    return EmitResult.Ok;
   }
   disposable args: Vec<CallArg> = vec.vecNew(1);
   vec.vecPush(ref args, {
@@ -196,7 +203,7 @@ function emitOneDisposal(ref cx: Cx, entry: PendingDispose): string {
     methodSymbolName(cx.prog, entry.ownerType, entry.method),
     ref args
   );
-  return "";
+  return EmitResult.Ok;
 }
 
 //   %t1 = getelementptr inbounds %struct.c__Emitter, ptr %e.1.addr, i32 0, i32 0

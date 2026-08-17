@@ -1,0 +1,18 @@
+// The LEAF of init_order.yoop's two-module graph.
+//
+// `base` is a module-level `let` whose value comes out of a CALL, so it is
+// stored at run time rather than baked into the LLVM global. The entry module
+// reads it in its OWN initializer, which is what makes the order the two init
+// functions are called in observable.
+//
+// Read by bootstrap/src/codegen/codegen.test.yoop; it is never run.
+
+export function seed(): int32 {
+  return 7;
+}
+
+export function lift(n: int32): int32 {
+  return n + 1;
+}
+
+export let base: int32 = seed();

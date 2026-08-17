@@ -14,9 +14,8 @@ module codegen;
 // Getting either wrong produces IR clang refuses, not a wrong answer, which is
 // the good failure mode.
 
-import { ASTNode, ASTNodeKind, NodeId, nodeAt } from "../ast";
+import { ASTNode, ASTNodeKind, nodeAt } from "../ast";
 import { TokenTags } from "../lex";
-import { Option } from "std/core/types.yoop";
 
 // `if (c) { a } else { b }` becomes three labels and two branches:
 //
@@ -29,13 +28,10 @@ import { Option } from "std/core/types.yoop";
 // terminator per block and rejects a second. When BOTH branches return, the
 // join block is unreachable and is not emitted at all, which is what lets the
 // caller treat the whole `if` as returning.
-export function emitIf(ref cx: Cx, stmt: ASTNode, retTy: string, ref terminated: bool): string {
+export function emitIf(ref cx: Cx, stmt: ASTNode, retTy: string, ref terminated: bool): EmitResult {
   terminated = false;
   let cond: Operand = Operand.None;
-  const cerr = emitExpr(ref cx, stmt.childA, ref cond);
-  if (cerr.len > 0) {
-    return cerr;
-  }
+  emitExpr(ref cx, stmt.childA, ref cond)?;
 
   const hasElse = stmt.childC != 0;
   const thenLabel = freshLabel(cx.e);
@@ -49,10 +45,10 @@ export function emitIf(ref cx: Cx, stmt: ASTNode, retTy: string, ref terminated:
   }
 
   emitLabel(ref cx, thenLabel);
-  let err = "";
+  let err: EmitResult = EmitResult.Ok;
   let thenTerminated = false;
   emitBlock(ref cx, stmt.childB, retTy, ref thenTerminated, ref err);
-  if (err.len > 0) {
+  if (emitFailed(err)) {
     return err;
   }
   if (!thenTerminated) {
@@ -69,7 +65,7 @@ export function emitIf(ref cx: Cx, stmt: ASTNode, retTy: string, ref terminated:
     } else {
       emitBlock(ref cx, stmt.childC, retTy, ref elseTerminated, ref err);
     }
-    if (err.len > 0) {
+    if (emitFailed(err)) {
       return err;
     }
     if (!elseTerminated) {
@@ -81,10 +77,10 @@ export function emitIf(ref cx: Cx, stmt: ASTNode, retTy: string, ref terminated:
   // Otherwise control reaches the join, so the join has to exist.
   if (hasElse && thenTerminated && elseTerminated) {
     terminated = true;
-    return "";
+    return EmitResult.Ok;
   }
   emitLabel(ref cx, endLabel);
-  return "";
+  return EmitResult.Ok;
 }
 
 // `a && b` and `a || b`, which must not evaluate `b` when `a` already decides
@@ -106,14 +102,11 @@ export function emitIf(ref cx: Cx, stmt: ASTNode, retTy: string, ref terminated:
 // The result goes through a stack slot rather than a phi node, which is the same
 // choice locals make - it keeps codegen free of SSA construction, and mem2reg
 // turns it into a phi anyway.
-export function emitShortCircuit(ref cx: Cx, expr: ASTNode, ref out: Operand): string {
+export function emitShortCircuit(ref cx: Cx, expr: ASTNode, ref out: Operand): EmitResult {
   const slotInfo = declareAnonSlot(ref cx, "i1");
 
   let lhs: Operand = Operand.None;
-  const lerr = emitExpr(ref cx, expr.childA, ref lhs);
-  if (lerr.len > 0) {
-    return lerr;
-  }
+  emitExpr(ref cx, expr.childA, ref lhs)?;
   emitStore(ref cx, "i1", lhs, TEMP_SLOT_NAME, slotInfo.id);
 
   const rhsLabel = freshLabel(cx.e);
@@ -126,10 +119,7 @@ export function emitShortCircuit(ref cx: Cx, expr: ASTNode, ref out: Operand): s
 
   emitLabel(ref cx, rhsLabel);
   let rhs: Operand = Operand.None;
-  const rerr = emitExpr(ref cx, expr.childB, ref rhs);
-  if (rerr.len > 0) {
-    return rerr;
-  }
+  emitExpr(ref cx, expr.childB, ref rhs)?;
   emitStore(ref cx, "i1", rhs, TEMP_SLOT_NAME, slotInfo.id);
   emitBr(ref cx, endLabel);
 
@@ -137,5 +127,5 @@ export function emitShortCircuit(ref cx: Cx, expr: ASTNode, ref out: Operand): s
   const dest = freshTemp(cx.e);
   emitLoad(ref cx, dest, "i1", TEMP_SLOT_NAME, slotInfo.id);
   out = Operand.Temp { id: dest };
-  return "";
+  return EmitResult.Ok;
 }

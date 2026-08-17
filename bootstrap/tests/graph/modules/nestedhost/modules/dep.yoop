@@ -1,0 +1,3 @@
+// The illegal nested root. A program holds ONE copy of each module, so a module
+// under a modules root may not carry one.
+export function dep(): int32 { return 8; }

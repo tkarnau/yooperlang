@@ -102,6 +102,19 @@ export function declOf(ref ast: AST, id: NodeId): NodeId {
   }
 }
 
+// A PROGRAM node's `intVal` is the module FLAG WORD. `import.unsafe;` and
+// `import.test;` are module-level flags rather than imports - they bind no
+// name, so the PROGRAM node is the only place they can be recorded - and
+// `flagA` was already spoken for by the first of them. One bit each from here.
+export const PROGRAM_FLAG_TEST: uint64 = 1;
+
+// True when the file declared `import.test;`. A test module has no `main` of
+// its own on purpose: `--test` collects its suites and generates one. See
+// test_mode/.
+export function isTestModuleProgram(ref ast: AST, root: NodeId): bool {
+  return (nodeAt(ref ast, root).intVal & PROGRAM_FLAG_TEST) != 0;
+}
+
 // Whether a top-level child is exported, looking through an attribute - the
 // `export` sits under the `@derive`, so a naive test on the outer node says no
 // for every decorated declaration.

@@ -1,0 +1,302 @@
+module typecheck;
+
+/*
+  "Has this binding's scope-end call already been made BY HAND, on every path
+  that reaches here?"
+
+      disposable c: Conn = { id: 3 };
+      Disposable.dispose(ref c);        // the obligation is answered here
+      printf("after manual dispose\n");
+    }                                  // and nothing is owed at this brace
+
+  Without this the closing brace emits a second `dispose` on a value that was
+  already freed. That is a double free rather than a rendering difference, which
+  is why it lives in the checker instead of being left to the reader.
+
+  The answer is PATH-SENSITIVE, and that is the whole reason this is not a flag
+  on the binding. A `dispose` inside one arm of an `if` answers the obligation on
+  that arm only, so what holds at the join is the INTERSECTION over the paths
+  that reach it - the same merge shape diverge.yoop already does for "does
+  control flow always leave this statement", and it uses diverge.yoop to decide
+  which paths reach at all.
+
+  It lives beside diverge.yoop rather than in codegen because codegen's dispose
+  stack (codegen/dispose_stack.yoop) is purely SYNTACTIC: it knows which
+  bindings are open and how far to unwind, and nothing about what has happened
+  to them. Only a pass that sees the branches as branches can merge over them.
+  What comes out is a list of (exit site, binding) pairs on the TypedModule, and
+  codegen consumes it by skipping an entry rather than computing anything.
+
+  CONSERVATIVE in one direction on purpose. Emitting a scope-end call that was
+  already made is the bug being fixed, but SKIPPING one that was never made is a
+  leak, which is worse. So anything this walk is unsure of answers "not
+  discharged": a loop body (which may run zero times) discards whatever it
+  satisfied, an `if` with no `else` can never discharge, and past the 64th live
+  obligation in one function nothing is recorded at all.
+
+  Two files. This one is what an obligation is, how the satisfied set is kept,
+  and what counts as a discharge; discharge_walk.yoop is the traversal and the
+  merge at each control-flow join.
+*/
+
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { Disposable } from "std/core/kinds.yoop";
+import { Option } from "std/core/types.yoop";
+import * as str from "std/core/strings.yoop";
+import { AST, ASTNode, ASTNodeKind, NodeId, childAt, nodeAt } from "../ast";
+import { Module } from "../source_graph";
+
+// One answer: at the exit site `exit`, the binding declared at `binding` owes
+// nothing, because its `mustCall` method was already called by hand on every
+// path that reaches there.
+//
+// The exit site is the NODE codegen is standing on when it unwinds - a BLOCK at
+// its closing brace, a RETURN / BREAK / CONTINUE statement, the LET_DECL of a
+// binding that owns a block, or a TRY_OP propagating out. The binding is its
+// declaration node, which is what codegen records on the pending entry.
+//
+// `@derive(display)` because TypedModule carries a Vec of these and derives its
+// own dump from every field it has.
+@derive(display)
+export type Discharge {
+  exit: NodeId,
+  binding: NodeId,
+}
+
+// One live scope-end obligation, while the walk is inside its scope.
+type Obligation {
+  binding: NodeId,   // the LET_DECL / CONST_DECL that owes the call
+  name: string,      // what a manual call has to name
+  method: string,    // the `mustCall` method the kind asks for
+}
+
+// The walk's state. `sat` is a BITMASK over `live` - bit i is "obligation i has
+// been discharged on the path being walked".
+//
+// A bitmask rather than a parallel Vec<bool> because snapshot, restore and
+// intersect are then a copy and an `&` with nothing to allocate and nothing to
+// dispose, and an `if` inside an `if` inside a loop needs one of each per level.
+// The cost is a ceiling: an obligation past the 64th live one in a single
+// function is never marked, which reads as "not discharged" and disposes.
+//
+// `propagates<disposable>` because the two Vecs below own storage. Nothing ever
+// takes a `disposable` binding of this - `computeDischarges` disposes them by
+// hand at the end of the one walk that exists - but the clause is what says the
+// obligation is real.
+//
+// The WALK that drives this - which paths reach where, and where the set is
+// snapshotted and intersected - is discharge_walk.yoop.
+type DischargeWalk propagates<disposable> {
+  ast: ref AST,
+  prog: ref Program,
+  tm: ref TypedModule,
+  live: Vec<Obligation>,
+  frames: Vec<usize>,   // where each open frame starts in `live`
+  sat: uint64,
+}
+
+// How many obligations one function may track before the walk stops recording.
+export const DISCHARGE_LIMIT: usize = 64;
+
+// Fill in `tm.discharges` for every function and method body in the module.
+//
+// Called at the end of pass D, once the bodies it describes have been checked -
+// a body that did not check is not going to reach codegen anyway.
+export function computeDischarges(ref prog: Program, ref tm: TypedModule, m: Module): void {
+  vec.vecClear(ref tm.discharges);
+  let w: DischargeWalk = {
+    ast: ref m.ast,
+    prog: prog,
+    tm: tm,
+    live: vec.vecNew(4),
+    frames: vec.vecNew(4),
+    sat: 0,
+  };
+  let f: usize = 0;
+  while (f < m.files.len) {
+    const file = vec.vecGet(ref m.files, f);
+    walkFileBodies(ref w, file.root);
+    f += 1;
+  }
+  Disposable.dispose(ref w.live);
+  Disposable.dispose(ref w.frames);
+}
+
+// True when the binding declared at `bindingId` was already disposed by hand
+// everywhere that reaches `exitId`. Codegen's one question.
+//
+// A linear scan, and deliberately so: a manual dispose of a kinded binding is
+// rare enough that nothing in std, examples or bootstrap/src does it, so this
+// list is empty for whole modules at a time.
+export function isDischargedAt(ref tm: TypedModule, exitId: NodeId, bindingId: NodeId): bool {
+  if (bindingId == 0) {
+    return false;
+  }
+  let i: usize = 0;
+  while (i < tm.discharges.len) {
+    const d = vec.vecGet(ref tm.discharges, i);
+    if (d.exit == exitId && d.binding == bindingId) {
+      return true;
+    }
+    i += 1;
+  }
+  return false;
+}
+
+// ----- what counts as a discharge -----------------------------------------
+
+// `Disposable.dispose(ref c)` - the obligation `c` carries is answered here.
+//
+// Three things have to line up, and each of them is what keeps a call that does
+// NOT discharge from being read as one:
+//
+//   * the call is QUALIFIED (`Trait.method(...)`), because a bare `dispose(c)`
+//     is an ordinary function of that name and there are no inherent methods
+//   * its first argument is `ref <name>` naming a live obligation. A binding
+//     handed over BY VALUE is not a discharge, and neither is a dispose of a
+//     DIFFERENT binding
+//   * the method NAME matches what that binding's kind asked for, so
+//     `Closer.close(ref c)` beside a `mustCall dispose` answers nothing
+function noteManualCall(ref w: DischargeWalk, call: ASTNode): void {
+  if (call.childB == 0) {
+    return;
+  }
+  const target = refArgName(ref w, call);
+  if (target.len == 0) {
+    return;
+  }
+  // Innermost first: an inner binding SHADOWS an outer one of the same name,
+  // and the call names the one in scope.
+  let i: usize = w.live.len;
+  while (i > 0) {
+    i -= 1;
+    const o = vec.vecGet(ref w.live, i);
+    if (str.stringEq(o.name, target) && str.stringEq(o.method, call.name)) {
+      markSat(ref w, i);
+      return;
+    }
+  }
+}
+
+// The binding an assignment overwrote owes its call again. Only a bare NAME
+// target rebinds; `s.field = v` leaves `s` holding the same thing it did.
+function rearmAssigned(ref w: DischargeWalk, targetId: NodeId): void {
+  if (targetId == 0) {
+    return;
+  }
+  const target = nodeAt(w.ast, targetId);
+  if (target.kind != ASTNodeKind.IDENT) {
+    return;
+  }
+  let i: usize = w.live.len;
+  while (i > 0) {
+    i -= 1;
+    const o = vec.vecGet(ref w.live, i);
+    if (str.stringEq(o.name, target.name)) {
+      clearSat(ref w, i);
+      return;
+    }
+  }
+}
+
+// The name behind a leading `ref x` argument, or "" for anything else.
+function refArgName(ref w: DischargeWalk, call: ASTNode): string {
+  if (call.childA == 0) {
+    return "";
+  }
+  const args = nodeAt(w.ast, call.childA);
+  if (args.childCount == 0) {
+    return "";
+  }
+  const first = nodeAt(w.ast, childAt(w.ast, args, 0));
+  if (first.kind != ASTNodeKind.REF_EXPRESSION) {
+    return "";
+  }
+  const operand = nodeAt(w.ast, first.childA);
+  if (operand.kind != ASTNodeKind.IDENT) {
+    return "";
+  }
+  return operand.name;
+}
+
+// The `mustCall` method this declaration's kind prefixes ask for, or "".
+// The FIRST prefix that asks wins, which is the rule codegen's
+// `disposeMethodOf` follows for the same declaration.
+function mustCallMethodOf(ref w: DischargeWalk, declNode: ASTNode): string {
+  if (declNode.childC == 0) {
+    return "";
+  }
+  const list = nodeAt(w.ast, declNode.childC);
+  let i: usize = 0;
+  while (i < list.childCount) {
+    const prefix = nodeAt(w.ast, childAt(w.ast, list, i));
+    switch (lookupKind(w.prog, prefix.name)) {
+      case Option.Some { value: info }: {
+        if (info.disposeMethod.len > 0) {
+          return info.disposeMethod;
+        }
+      }
+      case Option.None: { }
+    }
+    i += 1;
+  }
+  return "";
+}
+
+// ----- the frame stack and the satisfied set ------------------------------
+
+function pushFrame(ref w: DischargeWalk): void {
+  vec.vecPush(ref w.frames, w.live.len);
+}
+
+function popFrame(ref w: DischargeWalk): void {
+  if (w.frames.len == 0) {
+    return;
+  }
+  w.live.len = vec.vecGet(ref w.frames, w.frames.len - 1);
+  w.frames.len -= 1;
+}
+
+// A fresh obligation starts UNSATISFIED, which matters because its bit may
+// still be set from a binding that lived at the same index earlier.
+function addObligation(ref w: DischargeWalk, declId: NodeId, name: string, method: string): void {
+  const at: usize = w.live.len;
+  vec.vecPush(ref w.live, { binding: declId, name: name, method: method });
+  clearSat(ref w, at);
+}
+
+function clearSat(ref w: DischargeWalk, at: usize): void {
+  if (at >= DISCHARGE_LIMIT) {
+    return;
+  }
+  w.sat = w.sat & ~(uint64(1) << uint64(at));
+}
+
+function markSat(ref w: DischargeWalk, at: usize): void {
+  if (at >= DISCHARGE_LIMIT) {
+    return;
+  }
+  w.sat = w.sat | (uint64(1) << uint64(at));
+}
+
+function isSat(ref w: DischargeWalk, at: usize): bool {
+  if (at >= DISCHARGE_LIMIT) {
+    return false;
+  }
+  return (w.sat & (uint64(1) << uint64(at))) != 0;
+}
+
+// Everything satisfied right now, against this exit site. Every OPEN frame is
+// written out, not just the innermost: a `return` unwinds all of them, and an
+// entry codegen never asks about costs a comparison it was going to make
+// anyway.
+function recordExit(ref w: DischargeWalk, exitId: NodeId): void {
+  let i: usize = 0;
+  while (i < w.live.len) {
+    if (isSat(ref w, i)) {
+      const o = vec.vecGet(ref w.live, i);
+      vec.vecPush(ref w.tm.discharges, { exit: exitId, binding: o.binding });
+    }
+    i += 1;
+  }
+}

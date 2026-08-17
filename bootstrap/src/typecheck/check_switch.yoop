@@ -1,0 +1,289 @@
+module typecheck;
+
+// `switch`, its arms, and the exhaustiveness question.
+//
+// Four scrutinee kinds and each has its own rule about what covers everything:
+// an integer needs a default, a bool is covered by `case true` beside
+// `case false` (and may still carry a default), a variant is exhaustive OR has a
+// default and never both, and a string-backed enum is refused.
+//
+// A variant arm also BINDS: its pattern names payload fields into the arm's
+// scope, which is why the arm check needs a Cx and not just the scrutinee type.
+
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import { ASTNode, ASTNodeKind, childAt, nodeAt } from "../ast";
+import { TokenTags } from "../lex";
+// `switch (n) { case 1, 2: {...} default: {...} }` over an integer, or
+// `switch (r) { case Result.Ok { value: v }: {...} ... }` over a variant.
+//
+// The two differ in exactly one way that matters here: an integer switch can
+// never be exhaustive, so `default` is required, while a variant switch is
+// exhaustive when every case appears and then a default would be dead code.
+function checkSwitch(ref cx: Cx, stmt: ASTNode): void {
+  const scrutType = checkExpr(ref cx, stmt.childA, TYPE_ERROR_ID);
+  const overVariant = isVariantType(cx.prog, scrutType);
+  const isEnum = isValueEnumType(cx.prog, scrutType);
+  // A STRING-backed enum has no jump table to build, and says so. Its arms are
+  // still walked as ordinary blocks, but their PATTERNS are not checked at all -
+  // routing them to the integer checker would add "must be literals, not variant
+  // cases" to every arm, so one mistake would produce N diagnostics.
+  const overEnum = isEnum && checkEnumScrutinee(cx.prog, stmt, scrutType);
+  // A BOOL is its own scrutinee kind rather than a one-bit integer. It has
+  // exactly two values, so it is the only non-variant switch that can be
+  // exhaustive without a default - and `case true:` is a pattern an integer
+  // switch must refuse, which a shared "it is an integer" path could not say.
+  const overBool = scrutType == primTypeId(PrimKind.BOOL);
+  if (!isEnum && scrutType != TYPE_ERROR_ID && !overVariant && !overBool &&
+      !isIntPrimType(cx.prog, scrutType)) {
+    reportError(
+      cx.prog,
+      `cannot switch over ${formatType(cx.prog, scrutType)} - the bootstrap typechecker handles integers, bools, enums and variants so far`,
+      stmt.sourceLoc
+    );
+  }
+
+  // Which case ordinals have been matched, so a missing one can be NAMED. The
+  // enum switch carries a second list, of the VALUES matched: two cases may
+  // share a value, and a jump table may not name one twice.
+  disposable covered: Vec<bool> = vec.vecNew(0);
+  disposable seenValues: Vec<int64> = vec.vecNew(0);
+  let caseCount: usize = variantCaseCount(cx.prog, scrutType);
+  if (overEnum) {
+    caseCount = enumCaseCount(cx.prog, scrutType);
+  }
+  // Slot 0 is `false` and slot 1 is `true`, which is the pattern's own value
+  // used as its ordinal - the one scrutinee kind where those two coincide.
+  if (overBool) {
+    caseCount = 2;
+  }
+  let c: usize = 0;
+  while (c < caseCount) {
+    vec.vecPush(ref covered, false);
+    c += 1;
+  }
+
+  let sawDefault = false;
+  let i: usize = 0;
+  while (i < stmt.childCount) {
+    const armId = childAt(cx.ast, stmt, i);
+    const arm = nodeAt(cx.ast, armId);
+
+    // The arm's scope opens BEFORE its patterns are checked, because a variant
+    // pattern declares its payload bindings into it.
+    scopePush(cx.scope);
+    if (arm.flagA) {
+      if (sawDefault) {
+        reportError(cx.prog, "a switch may only have one default arm", arm.sourceLoc);
+      }
+      sawDefault = true;
+    } else if (overVariant) {
+      checkVariantArm(ref cx, arm, scrutType, ref covered);
+    } else if (overEnum) {
+      checkEnumArm(cx.prog, cx.tm, cx.ast, arm, scrutType, ref covered, ref seenValues);
+    } else if (overBool) {
+      checkBoolArm(ref cx, arm, scrutType, ref covered);
+    } else if (!isEnum) {
+      checkArmPatterns(ref cx, arm, scrutType);
+    }
+    // A switch arm is a BREAKABLE scope - see the BREAK_STATEMENT case in
+    // checkStatement. It does not supply a `continue` target, which is why this
+    // is its own counter rather than a bump of `loopDepth`.
+    cx.scope.switchDepth += 1;
+    checkBlock(ref cx, arm.childB);
+    cx.scope.switchDepth -= 1;
+    scopePop(cx.scope);
+    i += 1;
+  }
+
+  if (overVariant) {
+    checkExhaustive(cx.prog, stmt, scrutType, ref covered, sawDefault);
+    return;
+  }
+  if (overEnum) {
+    checkEnumExhaustive(cx.prog, stmt, scrutType, ref covered, sawDefault);
+    return;
+  }
+  if (overBool) {
+    // Exhaustive OR defaulted, and unlike a variant BOTH is allowed - the
+    // reference accepts a default beside both cases, and a bool has so few
+    // values that a redundant default is not worth a diagnostic.
+    if (!sawDefault && !(vec.vecGet(ref covered, 0) && vec.vecGet(ref covered, 1))) {
+      reportError(
+        cx.prog,
+        "switch over bool is not exhaustive - add 'default' or list both true and false",
+        stmt.sourceLoc
+      );
+    }
+    return;
+  }
+  // A string-backed enum reached the refusal above; its arms are checked but
+  // nothing is exhaustive about them, so it must not fall into the integer rule
+  // and collect a second diagnostic.
+  if (isEnum) {
+    return;
+  }
+  if (!sawDefault) {
+    reportError(
+      cx.prog,
+      "a switch over an integer needs a default arm - it cannot be exhaustive",
+      stmt.sourceLoc
+    );
+  }
+}
+
+// Every pattern of one variant arm. Several may share an arm, and each records
+// the case it covers.
+function checkVariantArm(
+  ref cx: Cx,
+  arm: ASTNode,
+  scrutType: TypeId,
+  ref covered: Vec<bool>
+): void {
+  if (arm.childA == 0) {
+    return;
+  }
+  const list = nodeAt(cx.ast, arm.childA);
+  let i: usize = 0;
+  while (i < list.childCount) {
+    const patternId = childAt(cx.ast, list, i);
+    if (nodeAt(cx.ast, patternId).kind != ASTNodeKind.VARIANT_PATTERN) {
+      reportError(
+        cx.prog,
+        `this switch is over ${formatType(cx.prog, scrutType)}, so its patterns must be variant cases, not literals`,
+        nodeAt(cx.ast, patternId).sourceLoc
+      );
+      i += 1;
+      continue;
+    }
+    const ordinal = checkVariantPattern(ref cx, patternId, scrutType);
+    if (ordinal >= 0 && usize(ordinal) < covered.len) {
+      if (vec.vecGet(ref covered, usize(ordinal))) {
+        reportError(
+          cx.prog,
+          `case "${nodeAt(cx.ast, patternId).name}" is matched twice in this switch`,
+          nodeAt(cx.ast, patternId).sourceLoc
+        );
+      }
+      vec.vecSet(ref covered, usize(ordinal), true);
+    }
+    i += 1;
+  }
+}
+
+// A variant switch is exhaustive or it has a default - never neither, and never
+// both. "Never both" is the part worth the diagnostic: a default that can never
+// run is dead code, and usually means a case name is misspelled.
+function checkExhaustive(
+  ref prog: Program,
+  stmt: ASTNode,
+  scrutType: TypeId,
+  ref covered: Vec<bool>,
+  sawDefault: bool
+): void {
+  let missing: usize = 0;
+  let firstMissing: usize = 0;
+  let i: usize = 0;
+  while (i < covered.len) {
+    if (!vec.vecGet(ref covered, i)) {
+      if (missing == 0) {
+        firstMissing = i;
+      }
+      missing += 1;
+    }
+    i += 1;
+  }
+
+  if (missing == 0) {
+    if (sawDefault) {
+      reportError(
+        ref prog,
+        `this switch already covers every case of ${formatType(ref prog, scrutType)}, so the default arm can never run`,
+        stmt.sourceLoc
+      );
+    }
+    return;
+  }
+  if (sawDefault) {
+    return;   // the default covers whatever is left
+  }
+  reportError(
+    ref prog,
+    `this switch does not cover "${variantCaseNameAt(ref prog, scrutType, firstMissing)}" (${missing} case(s) unhandled) - add it, or a default arm`,
+    stmt.sourceLoc
+  );
+}
+
+// Every pattern of one BOOL arm. Each has to be written `true` or `false` -
+// `case 1:` is refused even though the value would match, because the two
+// spellings mean different types and the reference refuses it too - and each
+// records which of the two values it covers.
+function checkBoolArm(
+  ref cx: Cx,
+  arm: ASTNode,
+  scrutType: TypeId,
+  ref covered: Vec<bool>
+): void {
+  if (arm.childA == 0) {
+    return;
+  }
+  const list = nodeAt(cx.ast, arm.childA);
+  let i: usize = 0;
+  while (i < list.childCount) {
+    const patternId = childAt(cx.ast, list, i);
+    const pattern = nodeAt(cx.ast, patternId);
+    if (pattern.kind != ASTNodeKind.LITERAL_PATTERN ||
+        (pattern.operator != TokenTags.TRUE && pattern.operator != TokenTags.FALSE)) {
+      reportError(cx.prog, "pattern must be true or false to match bool", pattern.sourceLoc);
+      i += 1;
+      continue;
+    }
+    const slot: usize = usize(pattern.intVal);
+    if (vec.vecGet(ref covered, slot)) {
+      if (slot == 1) {
+        reportError(cx.prog, "duplicate case value true", pattern.sourceLoc);
+      } else {
+        reportError(cx.prog, "duplicate case value false", pattern.sourceLoc);
+      }
+    }
+    vec.vecSet(ref covered, slot, true);
+    vec.vecSet(ref cx.tm.resolvedTypes, patternId, scrutType);
+    i += 1;
+  }
+}
+
+// Each pattern is decorated with the scrutinee's type, which is what tells
+// codegen the width to emit the case value at.
+function checkArmPatterns(ref cx: Cx, arm: ASTNode, scrutType: TypeId): void {
+  if (arm.childA == 0) {
+    return;
+  }
+  const list = nodeAt(cx.ast, arm.childA);
+  let i: usize = 0;
+  while (i < list.childCount) {
+    const patternId = childAt(cx.ast, list, i);
+    const pattern = nodeAt(cx.ast, patternId);
+    if (pattern.kind == ASTNodeKind.VARIANT_PATTERN) {
+      reportError(
+        cx.prog,
+        "this switch is over an integer, so its patterns must be literals, not variant cases",
+        pattern.sourceLoc
+      );
+      i += 1;
+      continue;
+    }
+    // The other direction of the bool rule above: `true` is not an integer
+    // literal, however much its VALUE looks like one.
+    if (pattern.operator == TokenTags.TRUE || pattern.operator == TokenTags.FALSE) {
+      reportError(
+        cx.prog,
+        `pattern must be an integer literal to match ${formatType(cx.prog, scrutType)}`,
+        pattern.sourceLoc
+      );
+      i += 1;
+      continue;
+    }
+    vec.vecSet(ref cx.tm.resolvedTypes, patternId, scrutType);
+    i += 1;
+  }
+}

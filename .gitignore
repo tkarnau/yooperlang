@@ -15,6 +15,10 @@
 # purpose - it reads as informational next to LICENSE and README - which means
 # the "*" rule above would drop it from every module that ships one.
 !MODULE
+# The local-CI image (scripts/ci_local.sh). Extensionless by docker convention,
+# so the "*" rule dropped it: the script shipped, the file it builds did not,
+# and local CI was broken on any machine but the one it was written on.
+!Dockerfile
 
 # Re-ignore artifacts that DO have an extension (the rules above would keep
 # them otherwise):

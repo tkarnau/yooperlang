@@ -1,0 +1,5 @@
+// In a build output directory, which a test walk never descends into.
+import.test;
+import { suite, test, Case } from "std/test.yoop";
+
+suite function shouldNeverBeFound(): void { }

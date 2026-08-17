@@ -111,6 +111,34 @@ check on a change, and say so when you do.
 - `npm test` - all tests (unit + e2e). Currently 1267 tests, ~50s.
 - `npm run test:unit` - fast, no clang.
 - `npm run test:e2e` - full pipeline, requires `clang` on PATH.
+- **If the machine feels slow after a day of suite runs, look for ORPHANS before
+  rebooting:**
+
+      ps -eo pid,ppid,pcpu,etime,args | awk '$2==1 && $3>5 && /clang|yoopiler|dump_tokens|yoop[-_]|stage[0-9]|\/prog$|_bs$|_js$/'
+
+  A `ppid` of 1 means the parent is gone. Every child the suites and the probes
+  start now goes through [src/testProc.js](src/testProc.js), carries a deadline,
+  and is killed as a TREE, so this should stay empty; anything in it is a bug
+  there or in the probes' `limit_run`. Deliberately, none of those children are
+  `detached` - a detached child SURVIVES the group kill a Ctrl-C or a tool
+  timeout sends, which is the opposite of what is wanted. Deadlines are
+  overridable per suite (`YOOP_SLICE_RUN_TIMEOUT_MS`, `YOOP_E2E_RUN_TIMEOUT_MS`,
+  `YOOP_E2E_CLANG_TIMEOUT_MS`, `YOOP_PARITY_DUMP_TIMEOUT_MS`,
+  `YOOP_SELFHOST_TIMEOUT_MS`, `YOOP_PROBE_COMPILE_LIMIT`, `YOOP_PROBE_RUN_LIMIT`).
+- **The `dwarf:` e2e tests need macOS to have authorized DEBUGGING.** Until it
+  has, `lldb -o run` blocks forever on an authorization prompt nobody can answer,
+  and the two tests that LAUNCH a debuggee (rather than only resolving symbols)
+  burn their whole deadline and fail. It is neither a compiler bug nor a harness
+  bug: a trivial `int main(){return 0;}` hangs exactly the same way, which is the
+  one-line check worth running first.
+
+      cd /tmp && printf 'int main(){return 0;}\n' > t.c && clang -g -o t t.c
+      perl -e 'alarm 25; exec("lldb","-o","run","-o","quit","--batch","/tmp/t")'
+
+  If that prints `Process ... exited with status = 0`, lldb is fine and a dwarf
+  failure is real. Note `DevToolsSecurity -status` is NOT the signal - it read
+  "disabled" both before and after authorization here, while the tests went from
+  hanging to passing in 1.9s. Answering the GUI prompt once is what unblocks it.
 - Compile one file: `node src/yoopiler.js path/to/file.yoop -o out`.
 - Driver entry: [src/yoopiler.js](src/yoopiler.js). End-user invocation is
   `yoopiler_alpha <entry.yoop>` (the `bin` name in package.json); the entry file
@@ -156,3 +184,25 @@ check on a change, and say so when you do.
 - `npm run build:sea` / `npm run package` - standalone binary and release zip.
   See [docs/compiler_internals.md](docs/compiler_internals.md) for the dist
   layout and what adding a non-JS data file requires.
+- `npm run package:boot` - the same idea for the SELF-HOSTED compiler: builds
+  the three stages, refuses to package unless stage2 and stage3 are
+  byte-identical, stages `bin/` beside `lib/std` and `lib/runtime`, and proves
+  the layout by compiling and running hello.yoop with the packaged binary and
+  no `YOOP_STD_ROOT` set. Output is `dist/yoopiler-boot-<version>-<platform>.tar.gz`.
+- CI is [.github/workflows/ci.yml](.github/workflows/ci.yml): ubuntu-latest,
+  bootstrap Yoop tests then `npm test` on every push and PR, and a release of
+  the bootstrap compiler (via `package:boot`) when a `v*` tag is pushed.
+  `scripts/ci_local.sh {lint,quick,test,release,shell}` runs those same steps
+  against the working tree without a push: `lint` is actionlint plus the job
+  graph act resolves (no container, instant), `quick` compiles the C runtime
+  under clang 18's `-Werror` and builds the bootstrap, `test` is the whole job,
+  `release` is `package:boot` minus the GitHub upload. Everything but `lint`
+  runs in a Linux container built from
+  [.github/ci-local/Dockerfile](.github/ci-local/Dockerfile). On an x86_64
+  Linux host that container is the runner's OS, clang major version and
+  architecture, so a green `test` there is a genuine prediction; from a mac it
+  is the right OS on the wrong architecture unless `--amd64` is passed, which
+  is correct and qemu-slow. Verified green on Linux 2026-08-17: `test` 1296
+  tests 0 fail, `release` packaged and smoke-tested a stage2 tarball.
+  Neither the container nor act can say anything about macOS or Windows;
+  only a runner that IS one can.

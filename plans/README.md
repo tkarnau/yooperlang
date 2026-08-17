@@ -21,7 +21,9 @@ Layout:
   fully LANDED. Viewable and still useful when you want the reasoning behind a
   shipped system; just not part of the working set.
 - [completed/](completed/) - per-phase write-ups for everything that shipped
-  (phases 1 through 9, library phases A through D, the 10.x sub-phases).
+  (phases 1 through 9, library phases A through D, the 10.x sub-phases, and the
+  five landed phases of the bootstrap plan plus its probe history, as
+  `bootstrap-completion-*.md`).
 
 ---
 
@@ -62,8 +64,10 @@ types file.
   entry LAST. Each module gets a readable, LLVM-safe id (`mathx_1`) that every
   symbol it defines is mangled against. A module is one file, or a DIRECTORY of
   files that each declare `module <name>;` and share one namespace, one id and
-  one AST arena. Not yet: the `std/` and `modules/` roots, autoloads,
-  side-effect imports - all refused by name.
+  one AST arena. The `std/` root, the `modules/` root and the std autoloads have
+  all landed since (items 2.13 and 5.19 in
+  [bootstrap-completion.md](bootstrap-completion.md)); side-effect imports are
+  still refused by name.
 - **Layer 1 - lex**: WORKING AND AT PARITY. `npm run test:parity` diffs the
   bootstrap token stream against the JS lexer's over 557 real source files.
   Getting there found three bugs: `0o755` lexed base-2, 14 words were promoted
@@ -88,9 +92,9 @@ types file.
   prefixed forms (`async fetch(...)`, `type X c_layout { ... }`), `propagates`
   clauses, char literals, function types, raw pointers with `null`, vtable
   declarations, array slices, bitwise operators, and address-of / dereference.
-  Not yet: unions, `await`,
-  `contains` clauses, type-parameter bounds - each a named "not
-  supported yet" refusal rather than a mis-parse.
+  `await` and type-parameter bounds have landed since (items 3.3 and 1.6), as
+  have reserved words in name-only positions (5.15). Still refused BY NAME
+  rather than mis-parsed: `union` (item 5.13) and `contains` clauses.
 - **Layer 3 - typecheck**: IN PROGRESS. The interned Type/Symbol/Program model
   is built, with pass A (shells + redeclaration + exports), pass B (imports and
   namespaces), pass C (function signatures, struct fields) and a thin pass D
@@ -627,6 +631,15 @@ where it should read 5.
 
 ## Where the bootstrap stands on self-hosting
 
+**SUPERSEDED, and kept because the chain below is a good record of how the
+blockers fell. The bootstrap SELF-HOSTS as of 2026-08-13:** the JS reference
+builds stage1, stage1 builds stage2, stage2 builds stage3, and stage2 and stage3
+are byte-identical as binaries and as emitted `.ll`. That is item 4.2 in
+[completed/bootstrap-completion-phase-4.md](completed/bootstrap-completion-phase-4.md),
+and `npm run test:selfhost` asserts it on every run. Everything from here to the
+end of this section is the measurement that got us there, not the current state -
+[bootstrap-completion.md](bootstrap-completion.md) carries that.
+
 The closure - the 16 std files `bootstrap/src` imports - compiles completely.
 What remains before the bootstrap can compile ITSELF is its own source, and that
 has now been MEASURED rather than guessed at, the same way the std closure was.
@@ -935,6 +948,12 @@ two parsers can be diffed.
   reference's INTERPRETER and `@precompile` are deliberately out of scope:
   comptime comes back later and comes back self-hosted, where it can introspect
   the source while compiling and back a REPL.
+- [ci-and-releases.md](ci-and-releases.md) - **initial thoughts, nothing built.**
+  The workflow for iterating on a compiler that compiles itself (the seed
+  problem and the staging rule it forces), a cross-platform CI matrix, and what
+  a release is CALLED - SemVer build metadata carrying the platform plus
+  independent `std/` and `runtime/` versions. Written the day the bootstrap
+  finished so the decisions get made deliberately.
 - [bootstrap-pipeline-contracts.md](bootstrap-pipeline-contracts.md) -
   **north star.** Pins the data shape that crosses each layer boundary in the
   self-hosting compiler (arena + NodeId AST, side-table decoration,

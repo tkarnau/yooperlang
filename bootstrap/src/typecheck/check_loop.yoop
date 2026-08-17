@@ -1,0 +1,176 @@
+module typecheck;
+
+// The two loop forms.
+//
+// They are two different lowerings rather than one with a variation, and the
+// difference starts here: a C-style `for` has a COUNTER whose type has to be
+// worked out from the condition, and a `for x in` has an ELEMENT type that comes
+// off the iterable - from the array's element type, or from what `next` returns
+// for an `Iterable<T>`.
+//
+// Both open a scope of their own for the head, which is what makes
+// `let i = 99; for (let i = 0; ...) {}` two bindings.
+
+import * as vec from "std/core/vec.yoop";
+import { ASTNode, ASTNodeKind, NodeId, nodeAt } from "../ast";
+import { Option } from "std/core/types.yoop";
+// `for (let i = 0; i < n; i = i + 1) { ... }`
+//
+// The counter lives in a scope of its OWN, wrapped around the body: it is
+// visible to the condition, the step and the body, but not after the loop. When
+// the init only steps an outer counter (`for (i = 0; ...)`) that name must
+// already exist.
+function checkForLoop(ref cx: Cx, stmt: ASTNode, stmtId: NodeId): void {
+  scopePush(cx.scope);
+
+  let counterType: TypeId = TYPE_ERROR_ID;
+  if (stmt.childA != 0) {
+    counterType = resolveTypeAnnotation(cx.prog, cx.tm, cx.ast, stmt.childA);
+  } else if (nodeAt(cx.ast, stmt.childB).kind == ASTNodeKind.INT_LITERAL) {
+    // An untyped literal initializer takes its type from the CONDITION, which
+    // is what makes the idiomatic `for (let i = 0; i < xs.len; ...)` work: `i`
+    // becomes usize so it can be compared against a length and used as an
+    // index. Without this the literal would default to int32 and every such
+    // loop would be a width mismatch. Same rule as the JS reference's
+    // counterTypeFromCondition.
+    counterType = counterTypeFromCondition(ref cx, stmt.childC);
+  }
+  const initType = checkExpr(ref cx, stmt.childB, counterType);
+  if (counterType == TYPE_ERROR_ID) {
+    counterType = initType;   // inferred from the initializer
+  } else if (initType != TYPE_ERROR_ID && initType != counterType) {
+    reportError(cx.prog, `initializer does not match the declared type of "${stmt.name}"`, stmt.sourceLoc);
+  }
+
+  if (stmt.flagA) {
+    // Declared with `let` by construction - the parser refuses `const` here,
+    // because a counter that cannot be stepped is not a counter.
+    if (!scopeDeclare(cx.scope, stmt.name, counterType, true)) {
+      reportError(cx.prog, `"${stmt.name}" is already declared in this function`, stmt.sourceLoc);
+    }
+  } else {
+    // Stepping an existing counter: it has to exist, and it decides the type.
+    switch (scopeLookup(cx.scope, stmt.name)) {
+      case Option.Some { value: t }: { counterType = t; }
+      case Option.None: {
+        reportError(cx.prog, `unknown name "${stmt.name}"`, stmt.sourceLoc);
+      }
+    }
+  }
+  vec.vecSet(ref cx.tm.resolvedTypes, stmtId, counterType);
+
+  checkCondition(ref cx, stmt.childC);
+
+  const stepType = checkExpr(ref cx, stmt.childD, counterType);
+  if (stepType != TYPE_ERROR_ID && counterType != TYPE_ERROR_ID && stepType != counterType) {
+    reportError(cx.prog, `for-loop step does not match the type of "${stmt.name}"`, stmt.sourceLoc);
+  }
+
+  cx.scope.loopDepth += 1;
+  checkBlock(ref cx, stmt.childE);
+  cx.scope.loopDepth -= 1;
+
+  scopePop(cx.scope);
+}
+
+// `for x in xs { ... }` - walk an array.
+//
+// The loop variable is bound to the ELEMENT type, which is the whole reason it
+// takes no annotation. The statement node is decorated with that element type,
+// because codegen needs it to size the loop variable's slot and to step the
+// data pointer, and it has nowhere else to read it from.
+//
+// Only arrays are walked so far. A type implementing `Iterable<T>` is the other
+// form, and it is refused BY NAME here rather than reported as "not an array" -
+// the difference matters, because one is a missing feature and the other is a
+// mistake.
+function checkForInLoop(ref cx: Cx, stmt: ASTNode, stmtId: NodeId): void {
+  const iterableType = checkExpr(ref cx, stmt.childA, TYPE_ERROR_ID);
+  const elemType = forInElementType(ref cx, stmt, iterableType);
+  vec.vecSet(ref cx.tm.resolvedTypes, stmtId, elemType);
+
+  // The loop variable is scoped to the loop, and shadowing an outer name is a
+  // redeclaration the same way any other binding would be.
+  scopePush(cx.scope);
+  // Immutable: the loop variable is a COPY of the element, so assigning to it
+  // writes to something discarded at the end of the iteration. Refusing says
+  // that, where allowing it silently does nothing.
+  if (!scopeDeclare(cx.scope, stmt.name, elemType, false)) {
+    reportError(cx.prog, `"${stmt.name}" is already declared in this function`, stmt.sourceLoc);
+  }
+
+  cx.scope.loopDepth += 1;
+  checkBlock(ref cx, stmt.childB);
+  cx.scope.loopDepth -= 1;
+  scopePop(cx.scope);
+}
+
+// What one step of `for x in <expr>` yields, or TYPE_ERROR_ID with a
+// diagnostic. Split out so the two refusals read as the two different things
+// they are.
+function forInElementType(ref cx: Cx, stmt: ASTNode, iterableType: TypeId): TypeId {
+  // The expression already failed and said so; a second diagnostic here would
+  // only be noise.
+  if (iterableType == TYPE_ERROR_ID) {
+    return TYPE_ERROR_ID;
+  }
+  switch (typeAt(cx.prog, derefType(cx.prog, iterableType))) {
+    case Type.Array { elem: e }: { return e; }
+    default: { }
+  }
+
+  // A type implementing `Iterable<T>` walks through its own `next`, which is a
+  // static dispatch on a concrete receiver - see typecheck/iterable.yoop. The
+  // ELEMENT type is whatever `Yield` carries.
+  const iterated = derefType(cx.prog, iterableType);
+  const walk = iterableWalkOf(cx.prog, iterated);
+  if (walk.ok) {
+    return walk.elemType;
+  }
+  if (walk.claimsIterable) {
+    reportError(
+      cx.prog,
+      `"${formatType(cx.prog, iterated)}" implements Iterable, but its "next" must return an IterStep-shaped variant - the two cases "Yield { value: T }" and "Done"`,
+      stmt.sourceLoc
+    );
+    return TYPE_ERROR_ID;
+  }
+  reportError(
+    cx.prog,
+    `cannot walk a value of type "${formatType(cx.prog, iterated)}" - "for ... in" needs an array or a type implementing Iterable<T>`,
+    stmt.sourceLoc
+  );
+  return TYPE_ERROR_ID;
+}
+
+// The integer type a comparison in the loop condition implies for the counter,
+// or TYPE_ERROR_ID when it implies nothing.
+//
+// Both sides are probed with diagnostics SUPPRESSED, because the counter is not
+// declared yet - reading it here legitimately fails, and that failure is what
+// identifies which side is the informative one. The real check runs afterwards
+// and reports for real, so one mistake still produces one diagnostic.
+function counterTypeFromCondition(ref cx: Cx, condId: NodeId): TypeId {
+  if (condId == 0) {
+    return TYPE_ERROR_ID;
+  }
+  const cond = nodeAt(cx.ast, condId);
+  if (cond.kind != ASTNodeKind.BINARY_EXPRESSION || !isComparison(cond.operator)) {
+    return TYPE_ERROR_ID;
+  }
+
+  const savedCount = cx.prog.diagnostics.len;
+  const lhs = checkExpr(ref cx, cond.childA, TYPE_ERROR_ID);
+  const rhs = checkExpr(ref cx, cond.childB, TYPE_ERROR_ID);
+  // Diagnostic is a plain struct with no owned storage, so dropping the tail
+  // frees nothing and leaks nothing.
+  cx.prog.diagnostics.len = savedCount;
+
+  if (isIntPrimType(cx.prog, rhs)) {
+    return rhs;
+  }
+  if (isIntPrimType(cx.prog, lhs)) {
+    return lhs;
+  }
+  return TYPE_ERROR_ID;
+}

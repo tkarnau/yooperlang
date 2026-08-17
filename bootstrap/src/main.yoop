@@ -4,11 +4,16 @@
   The self-hosted yooperlang compiler.
 
     yoopiler_boot <entry.yoop> [-o <out>] [--emit-ir]
+    yoopiler_boot --test <dir-or-file> [filter...]
 
   Runs the whole pipeline - module graph, lex, parse, typecheck, codegen, link -
   and produces an executable. The language subset it accepts is small and grows
   from the bottom up; anything outside it is refused BY NAME rather than
   mis-compiled. bootstrap/README.md has the current subset.
+
+  `--test` is the same pipeline with a generated entry module in front of it:
+  find the test files, collect their suites, write a `main` that hands the table
+  to std/test.yoop, and RUN what comes out. See test_mode/.
 */
 
 import * as log from "std/log.yoop";
@@ -19,16 +24,20 @@ import { disposable } from "std/core/kinds.yoop";
 import { Result } from "std/core/types.yoop";
 import { Text }, * as text from "std/core/text.yoop";
 
-import { loadModuleGraph, LoadGraphResult, discoverStdRoot } from "./source_graph";
+import { loadModuleGraph, loadModuleGraphFromSource, LoadGraphResult, discoverStdRoot } from "./source_graph";
 import { typecheckProgram, Program } from "./typecheck";
 import { Severity, formatLocation } from "./diagnostics";
 import { codegenProgram } from "./codegen";
 import { linkExecutable, writeIrFile } from "./link";
+import { TestPlan, planTestRun, testBinaryPath, runTestBinary, removeTestArtifacts } from "./test_mode";
 
-const USAGE: string = "usage: yoopiler_boot <entry.yoop> [-o <out>] [--emit-ir]";
+const USAGE: string = "usage: yoopiler_boot <entry.yoop> [-o <out>] [--emit-ir]\n       yoopiler_boot --test <dir-or-file> [filter...]";
 
 function main(): int {
-  const cli = parseCommandLine();
+  // Extra positionals are suite-name FILTERS in a test run and an error in an
+  // ordinary one, so they are collected either way and judged after the scan.
+  disposable extras: Vec<string> = vec.vecNew(2);
+  const cli = parseCommandLine(ref extras);
   if (cli.error.len > 0) {
     log.error(cli.error);
     log.error(USAGE);
@@ -39,7 +48,55 @@ function main(): int {
   // the layer that RESOLVES paths never has to probe for a directory.
   const stdRoot = discoverStdRoot(env.argAt(0));
 
-  switch (loadModuleGraph(cli.entry, stdRoot)) {
+  // Not `disposable`: on a test run the plan's source bytes are MOVED into the
+  // graph, which keeps them for as long as the AST's spans point into them.
+  let plan: TestPlan = planTestRun(cli.test, cli.entry);
+  if (plan.isTestRun) {
+    if (plan.error.len > 0) {
+      log.error(plan.error);
+      return 1;
+    }
+    return runTests(ref plan, stdRoot, ref extras);
+  }
+
+  return compileGraph(loadModuleGraph(cli.entry, stdRoot), cli.out, cli.emitIr);
+}
+
+// Discover, generate, compile, run. The compile is the ORDINARY one - there is
+// no test-mode typechecker and no second codegen path, only an entry module
+// nobody wrote.
+//
+// The binary is an artifact of the run rather than of the project, so `-o` does
+// not name it: it goes to the temp directory and is removed on the way out.
+// Its EXIT CODE is the failure count std/test.yoop returned, and it becomes
+// ours, which is what lets CI gate on the command directly.
+function runTests(ref plan: TestPlan, stdRoot: string, ref filters: Vec<string>): int {
+  log.info(`test: ${plan.suiteCount} suite(s) in ${plan.fileCount} file(s)`);
+  const exePath = testBinaryPath();
+  const built = compileGraph(
+    loadModuleGraphFromSource(plan.entrySource, plan.entryPath, stdRoot),
+    exePath,
+    false
+  );
+  if (built != 0) {
+    // A build that got as far as clang and stopped there still left a `.ll`
+    // behind. Nobody is going to go looking for it under a pid-named path in
+    // the temp directory, so it goes the same way a successful run's does.
+    removeTestArtifacts(exePath);
+    return built;
+  }
+  const code = runTestBinary(exePath, ref filters);
+  removeTestArtifacts(exePath);
+  return code;
+}
+
+// Everything above layer 0: typecheck a loaded graph, emit its IR, and link it.
+// Returns the process exit code.
+//
+// Split out of `main` so an ordinary compile and a test run share it rather
+// than each carrying a copy of the same five failure paths.
+function compileGraph(loaded: LoadGraphResult, outPath: string, emitIr: bool): int {
+  switch (loaded) {
     case LoadGraphResult.Err { error: e }: {
       log.error(`${e}`);
       return 1;
@@ -61,14 +118,14 @@ function main(): int {
         case Result.Ok { value: out }: {
           log.info("llvm IR: ok");
           disposable irText: Text = out.ir;
-          disposable irPath: Text = text.fromString(cli.out);
+          disposable irPath: Text = text.fromString(outPath);
           text.push(ref irPath, ".ll");
           disposable libs: Vec<string> = out.linkLibraries;
 
           // --emit-ir stops HERE, one step short of clang. The `.ll` is written
           // where a linking run would have written it, so the two modes leave
           // the same artifact behind and only the executable is missing.
-          if (cli.emitIr) {
+          if (emitIr) {
             const writeErr = writeIrFile(ref irText, text.view(ref irPath));
             if (writeErr.len > 0) {
               log.error(writeErr);
@@ -79,14 +136,14 @@ function main(): int {
           }
 
           const linkErr = linkExecutable(
-            ref irText, text.view(ref irPath), cli.out, out.needsRuntime,
+            ref irText, text.view(ref irPath), outPath, out.needsRuntime,
             ref libs, env.argAt(0)
           );
           if (linkErr.len > 0) {
             log.error(linkErr);
             return 1;
           }
-          log.info(`compiled: ${cli.out}`);
+          log.info(`compiled: ${outPath}`);
           return 0;
         }
       }
@@ -100,6 +157,7 @@ type CliArgs {
   entry: string,
   out: string,
   emitIr: bool,
+  test: bool,
   error: string,
 }
 
@@ -114,9 +172,15 @@ type CliArgs {
   (its `--keep-ir` keeps a temp copy of the IR and still links). It exists
   because most of what compiles a corpus file only wants to know whether
   codegen succeeded, and the link is the expensive half.
+
+  `--test` takes at most ONE positional, the path to search, and everything
+  after it is a suite-name filter rather than a second input file. So the extra
+  positionals are collected unconditionally and what they MEAN is decided once
+  the whole line has been read - a `--test` written after its path would
+  otherwise be refused by the flag that has not been seen yet.
 */
-function parseCommandLine(): CliArgs {
-  let args: CliArgs = { entry: "", out: "a.out", emitIr: false, error: "" };
+function parseCommandLine(ref extras: Vec<string>): CliArgs {
+  let args: CliArgs = { entry: "", out: "a.out", emitIr: false, test: false, error: "" };
   const argc = env.argCount();
   let i: int32 = 1;
   while (i < argc) {
@@ -131,19 +195,28 @@ function parseCommandLine(): CliArgs {
     } else if (str.stringEq(a, "--emit-ir")) {
       args.emitIr = true;
       i += 1;
+    } else if (str.stringEq(a, "--test")) {
+      args.test = true;
+      i += 1;
     } else if (str.stringStartsWith(a, "-")) {
       args.error = `unknown option ${a}`;
       return args;
     } else {
-      if (args.entry.len > 0) {
-        args.error = `more than one input file: ${a}`;
-        return args;
+      if (args.entry.len == 0) {
+        args.entry = a;
+      } else {
+        vec.vecPush(ref extras, a);
       }
-      args.entry = a;
       i += 1;
     }
   }
-  if (args.entry.len == 0) {
+  if (!args.test && extras.len > 0) {
+    args.error = `more than one input file: ${vec.vecGet(ref extras, 0)}`;
+    return args;
+  }
+  // `--test` with no path means the current directory, so only an ordinary
+  // compile needs one named.
+  if (!args.test && args.entry.len == 0) {
     args.error = "no input file";
   }
   return args;

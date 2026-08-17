@@ -15,7 +15,6 @@ module typecheck;
 */
 
 import { Vec }, * as vec from "std/core/vec.yoop";
-import { disposable } from "std/core/kinds.yoop";
 
 // A pointer, and therefore also a `string`, a `ref T` and an `unsafe_ptr`.
 const POINTER_SIZE: usize = 8;
@@ -34,6 +33,11 @@ export function sizeOfType(ref prog: Program, rawId: TypeId): usize {
     case Type.Array { elem: e }: { return POINTER_SIZE * 2; }
     case Type.Struct { decl: d, fields: f, methods: mm, implementsTraits: it, generic: g }: {
       return sizeOfFields(ref prog, ref f);
+    }
+    // Every field of a union starts at byte 0, so there is nothing to add up:
+    // the size is the LARGEST field's, and that is the whole layout.
+    case Type.Union { decl: d, fields: f }: {
+      return unionPayloadSize(ref prog, id);
     }
     case Type.Variant { decl: d, cases: cs, methods: mm, implementsTraits: it, generic: g }: {
       // The emitted shape: a 4-byte tag then the payload, rounded to the tag's
@@ -61,6 +65,12 @@ export function alignOfType(ref prog: Program, rawId: TypeId): usize {
     case Type.Struct { decl: d, fields: f, methods: mm, implementsTraits: it, generic: g }: {
       return alignOfFields(ref prog, ref f);
     }
+    // The same answer a struct of the same fields gives, and for the same
+    // reason: whatever is widest decides, whether the fields sit beside each
+    // other or on top of each other.
+    case Type.Union { decl: d, fields: f }: {
+      return alignOfFields(ref prog, ref f);
+    }
     case Type.Variant { decl: d, cases: cs, methods: mm, implementsTraits: it, generic: g }: {
       return 4;
     }
@@ -83,6 +93,28 @@ export function variantPayloadSize(ref prog: Program, variantType: TypeId): usiz
       while (i < cs.len) {
         let c = vec.vecGet(ref cs, i);
         const size = sizeOfFields(ref prog, ref c.fields);
+        if (size > biggest) {
+          biggest = size;
+        }
+        i += 1;
+      }
+      return biggest;
+    }
+    default: { return 1; }
+  }
+}
+
+// The `[N x i8]` a union is emitted as: the largest field, since they all start
+// at byte 0. Never 0, for the same reason a variant's payload never is - a
+// `[0 x i8]` is legal and pointless, and the parser already refuses the empty
+// union that would produce one.
+export function unionPayloadSize(ref prog: Program, unionType: TypeId): usize {
+  switch (typeAt(ref prog, unionType)) {
+    case Type.Union { decl: d, fields: f }: {
+      let biggest: usize = 1;
+      let i: usize = 0;
+      while (i < f.len) {
+        const size = sizeOfType(ref prog, vec.vecGet(ref f, i).typeId);
         if (size > biggest) {
           biggest = size;
         }

@@ -16,8 +16,10 @@ import { Option } from "std/core/types.yoop";
 import { disposable } from "std/core/kinds.yoop";
 import { ASTNodeKind, childAt, nodeAt } from "../ast";
 import { Module, ModuleGraph, LoadModuleResult, moduleFromSource, singleModuleGraph } from "../source_graph";
-import { Program, TypedModule, Symbol, Type, TypeId, TYPE_ERROR_ID, symbolAt,
-  lookupEnumCase, enumIsOpen, typecheckProgram, initProgram } from "../typecheck";
+import { Program, TypedModule, Symbol, Type, TypeId, TYPE_ERROR_ID, symbolAt, typeAt,
+  lookupEnumCase, enumIsOpen, typecheckProgram, initProgram,
+  isUnionType, lookupUnionField, unionDeclNameOf, unionPayloadSize,
+  sizeOfType, alignOfType } from "../typecheck";
 import { Diagnostic, errorAt } from "../diagnostics";
 
 suite function passARegistersATopLevelFunction(): void {
@@ -3299,12 +3301,22 @@ suite function moduleGlobalsAreRealStorage(): void {
     theory.detail = `wanted the no-storage message, got: ${firstDiagnostic(ref writeConst)}`;
   }
 
-  // A global's initializer becomes the LLVM global's initializer, which is
-  // fixed at compile time - so it has to be a literal.
+  // An INTEGER literal initializer is baked into the LLVM global. Anything else
+  // used to be refused by name; it is now a RUN-TIME initializer, stored by the
+  // module's init function before `main` runs a line of user code. So the
+  // refusal this pair used to assert is gone, and what replaces it is that the
+  // initializer is accepted and still CHECKED - it is an ordinary expression
+  // pass D reads now, so the annotation is what it has to satisfy.
   let computed = checkSource("function f(): int32 { return 1; }\nlet N: int32 = f();\nfunction main(): int { return 0; }");
-  let test theory: Case = t.asserts("a non-literal initializer is refused") {
-    theory.isSuccessful = diagnosticsMention(ref computed, "integer literal initializer");
-    theory.detail = `wanted a literal-initializer refusal, got: ${firstDiagnostic(ref computed)}`;
+  let test theory: Case = t.asserts("a non-literal initializer is accepted") {
+    theory.isSuccessful = computed.diagnostics.len == 0;
+    theory.detail = `reported ${computed.diagnostics.len}: ${firstDiagnostic(ref computed)}`;
+  }
+
+  let wrongInit = checkSource("function f(): string { return \"x\"; }\nlet N: int32 = f();\nfunction main(): int { return 0; }");
+  let test theory: Case = t.asserts("a run-time initializer is checked against the annotation") {
+    theory.isSuccessful = diagnosticsMention(ref wrongInit, "its initializer is");
+    theory.detail = `wanted a type mismatch, got: ${firstDiagnostic(ref wrongInit)}`;
   }
 
   let noAnnot = checkSource("let N = 7;\nfunction main(): int { return 0; }");
@@ -4676,6 +4688,56 @@ suite function aPropagatingTypeDisposesItsFields(): void {
   }
 }
 
+// The OTHER way a field supplies a propagated kind: it says so with a kind
+// PREFIX in its own annotation, rather than its type propagating the kind.
+//
+// `Plain` here is the case that makes the two spellings distinguishable - it
+// implements the trait OUTRIGHT and propagates nothing, so its type answers no
+// and only the annotation can. That is `examples/pass/propagates_full`'s
+// `handle: disposable FileHandle`.
+suite function aFieldCarriesAKindByPrefix(): void {
+  const KIND: string = "kind tracked { appliesTo binding; requires Closer; mustCall close beforeScopeEnd; }\ntrait Closer { function close(ref self): void; }\ntype Plain implements Closer { id: int32,\n  function close(ref self): void { } }\n";
+
+  let carried = checkSource(
+    `${KIND}type Holder propagates<tracked> { h: tracked Plain, }\nfunction main(): int32 { tracked x: Holder = { h: { id: 1 } }; return 0; }`
+  );
+  let test theory: Case = t.asserts("a field carrying the kind by prefix supplies it") {
+    theory.isSuccessful = carried.diagnostics.len == 0;
+    theory.detail = `a carried-kind field reported: ${firstDiagnostic(ref carried)}`;
+  }
+
+  // The PREFIX is what does the work, and this is the assertion that proves it:
+  // the same field, the same type, no prefix, and the refusal comes back.
+  let noPrefix = checkSource(
+    `${KIND}type Holder propagates<tracked> { h: Plain, }\nfunction main(): int32 { tracked x: Holder = { h: { id: 1 } }; return 0; }`
+  );
+  let test theory: Case = t.asserts("the same field with no prefix is still refused") {
+    theory.isSuccessful = diagnosticsMention(ref noPrefix, "no field of");
+    theory.detail = `wanted the no-carrying-field refusal, got: ${firstDiagnostic(ref noPrefix)}`;
+  }
+
+  // A prefix is a CLAIM, and a claim the type cannot honour is a bad annotation
+  // rather than a missing feature - so it gets its own message instead of the
+  // second-level one.
+  let noMethod = checkSource(
+    `${KIND}type Bare { n: int32, }\ntype Holder propagates<tracked> { h: tracked Bare, }\nfunction main(): int32 { tracked x: Holder = { h: { n: 1 } }; return 0; }`
+  );
+  let test theory: Case = t.asserts("a carried kind whose type has no such method is refused by name") {
+    theory.isSuccessful = diagnosticsMention(ref noMethod, "carries the kind in its annotation");
+    theory.detail = `wanted the bad-annotation refusal, got: ${firstDiagnostic(ref noMethod)}`;
+  }
+
+  // An unrelated prefix supplies nothing. The kind the field names has to be the
+  // kind the binding is asking about, not merely SOME kind.
+  let otherKind = checkSource(
+    `${KIND}kind noted { appliesTo binding; }\ntype Holder propagates<tracked> { h: noted Plain, }\nfunction main(): int32 { tracked x: Holder = { h: { id: 1 } }; return 0; }`
+  );
+  let test theory: Case = t.asserts("a prefix naming a DIFFERENT kind supplies nothing") {
+    theory.isSuccessful = diagnosticsMention(ref otherKind, "no field of");
+    theory.detail = `wanted the no-carrying-field refusal, got: ${firstDiagnostic(ref otherKind)}`;
+  }
+}
+
 // `switch` over a BOOL. Exhaustiveness is the whole reason it is its own
 // scrutinee kind rather than a one-bit integer: two values means `true` beside
 // `false` covers everything, so the default arm becomes optional.
@@ -4802,5 +4864,159 @@ suite function aComposedKindCarriesItsOperandsClauses(): void {
   let test theory: Case = t.asserts("appliesTo region arrives through a composition") {
     theory.isSuccessful = region.diagnostics.len == 0;
     theory.detail = `a composed region reported: ${firstDiagnostic(ref region)}`;
+  }
+}
+
+// ----- unions ---------------------------------------------------------------
+//
+// A union is the one nominal type whose fields OVERLAP, so the two things worth
+// asserting here follow from that: pass A binds a SHELL that pass C fills in
+// place, and the LAYOUT is the widest field rather than the sum of them.
+
+const MIXED_UNION: string =
+  "type Bytes4 { b0: uint8, b1: uint8, b2: uint8, b3: uint8 }\nunion Word { word: uint32, wide: uint64, bytes: Bytes4 }\n";
+
+suite function passARegistersAUnionShellAndPassCFillsIt(): void {
+  let prog = checkSource(`${MIXED_UNION}function main(): int32 { return 0; }`);
+
+  let test theory: Case = t.asserts("the union's name is bound in the module namespace") {
+    theory.isSuccessful = hasName(ref prog, "Word");
+    theory.detail = `"Word" is not in the module namespace after pass A`;
+  }
+
+  const unionType = unionTypeIdOf(ref prog, "Word");
+  let test theory: Case = t.asserts("the name binds to a Symbol.Union carrying a Type.Union") {
+    theory.isSuccessful = unionType != TYPE_ERROR_ID && isUnionType(ref prog, unionType);
+    theory.detail = `"Word" did not resolve through a Symbol.Union to a union type`;
+  }
+
+  // The FILL is what pass C adds, and reading a field back is the only way to
+  // tell a filled shell from the empty one pass A interned.
+  let test theory: Case = t.asserts("pass C filled the shell in place, so the fields are reachable") {
+    theory.isSuccessful = lookupUnionField(ref prog, unionType, "bytes").found
+      && lookupUnionField(ref prog, unionType, "wide").found
+      && lookupUnionField(ref prog, unionType, "word").found;
+    theory.detail = "one of the three declared fields is missing from the filled union";
+  }
+
+  let test theory: Case = t.asserts("a field the union does not declare is not found") {
+    theory.isSuccessful = !lookupUnionField(ref prog, unionType, "nope").found;
+    theory.detail = "lookupUnionField claimed to find a field that was never declared";
+  }
+
+  let test theory: Case = t.asserts("the decl name comes back for a diagnostic to use") {
+    theory.isSuccessful = str.stringEq(unionDeclNameOf(ref prog, unionType), "Word");
+    theory.detail = `unionDeclNameOf gave "${unionDeclNameOf(ref prog, unionType)}", wanted "Word"`;
+  }
+}
+
+// The layout, which is the half a slice fixture can only see indirectly: it
+// sees the CONSEQUENCE of a wrong size (a stomped neighbouring field), and only
+// when the neighbour happens to be observable.
+suite function aUnionIsAsWideAsItsWidestField(): void {
+  let prog = checkSource(`${MIXED_UNION}function main(): int32 { return 0; }`);
+  const unionType = unionTypeIdOf(ref prog, "Word");
+
+  // uint32 (4), uint64 (8), Bytes4 (4). Eight, not sixteen: the fields overlap.
+  let test theory: Case = t.asserts("the size is the largest field's, not the sum") {
+    theory.isSuccessful = sizeOfType(ref prog, unionType) == 8;
+    theory.detail = `sizeOfType gave ${sizeOfType(ref prog, unionType)}, wanted 8`;
+  }
+  let test theory: Case = t.asserts("the emitted byte buffer is that same size") {
+    theory.isSuccessful = unionPayloadSize(ref prog, unionType) == 8;
+    theory.detail = `unionPayloadSize gave ${unionPayloadSize(ref prog, unionType)}, wanted 8`;
+  }
+  let test theory: Case = t.asserts("the alignment is the widest field's") {
+    theory.isSuccessful = alignOfType(ref prog, unionType) == 8;
+    theory.detail = `alignOfType gave ${alignOfType(ref prog, unionType)}, wanted 8`;
+  }
+
+  // A union of nothing but narrow fields is narrow and aligns to one byte, so
+  // the answers above are being measured rather than defaulted to a pointer.
+  let narrow = checkSource(
+    "union Flags { lo: uint8, hi: int8 }\nfunction main(): int32 { return 0; }"
+  );
+  const narrowType = unionTypeIdOf(ref narrow, "Flags");
+  let test theory: Case = t.asserts("a union of bytes is one byte wide and one-byte aligned") {
+    theory.isSuccessful = sizeOfType(ref narrow, narrowType) == 1
+      && alignOfType(ref narrow, narrowType) == 1;
+    theory.detail = `a two-uint8 union measured ${sizeOfType(ref narrow, narrowType)} bytes at align ${alignOfType(ref narrow, narrowType)}`;
+  }
+}
+
+suite function unionsRefuseTheShapesTheyCannotCarry(): void {
+  // A literal names exactly one field. Two would be two values written over
+  // each other, and which one survived would depend on emission order.
+  let two = checkSource(
+    `${MIXED_UNION}function main(): int32 { let w: Word = { word: 1, wide: 2 }; return 0; }`
+  );
+  let test theory: Case = t.asserts("a two-field union literal is refused") {
+    theory.isSuccessful = diagnosticsMention(ref two, "initializes exactly one field");
+    theory.detail = `wanted the one-field refusal, got: ${firstDiagnostic(ref two)}`;
+  }
+
+  let none = checkSource(
+    `${MIXED_UNION}function main(): int32 { let w: Word = { }; return 0; }`
+  );
+  let test theory: Case = t.asserts("an empty union literal is refused too") {
+    theory.isSuccessful = diagnosticsMention(ref none, "initializes exactly one field");
+    theory.detail = `wanted the one-field refusal, got: ${firstDiagnostic(ref none)}`;
+  }
+
+  let unknown = checkSource(
+    `${MIXED_UNION}function main(): int32 { let w: Word = { nope: 1 }; return 0; }`
+  );
+  let test theory: Case = t.asserts("a literal naming an undeclared field says which union") {
+    theory.isSuccessful = diagnosticsMention(ref unknown, `union "Word" has no field "nope"`);
+    theory.detail = `wanted the unknown-field refusal, got: ${firstDiagnostic(ref unknown)}`;
+  }
+
+  let readMissing = checkSource(
+    `${MIXED_UNION}function main(): int32 { let w: Word = { word: 1 }; return int32(w.nope); }`
+  );
+  let test theory: Case = t.asserts("reading an undeclared field says which union") {
+    theory.isSuccessful = diagnosticsMention(ref readMissing, `union "Word" has no field "nope"`);
+    theory.detail = `wanted the unknown-field refusal, got: ${firstDiagnostic(ref readMissing)}`;
+  }
+
+  // Three things a union may not carry, all refused by the PARSER so they never
+  // reach a pass that would have to invent an answer for them.
+  let generic = checkSource("union Box<T> { a: T }\nfunction main(): int32 { return 0; }");
+  let test theory: Case = t.asserts("a generic union is refused by name") {
+    theory.isSuccessful = diagnosticsMention(ref generic, "generic unions are not supported");
+    theory.detail = `wanted the generic refusal, got: ${firstDiagnostic(ref generic)}`;
+  }
+
+  let empty = checkSource("union Nothing { }\nfunction main(): int32 { return 0; }");
+  let test theory: Case = t.asserts("a union with no fields is refused by name") {
+    theory.isSuccessful = diagnosticsMention(ref empty, "must declare at least one field");
+    theory.detail = `wanted the empty-union refusal, got: ${firstDiagnostic(ref empty)}`;
+  }
+
+  let method = checkSource(
+    "union Word { word: uint32, function get(ref self): uint32 { return self.word; } }\nfunction main(): int32 { return 0; }"
+  );
+  let test theory: Case = t.asserts("a method on a union is refused by name") {
+    theory.isSuccessful = diagnosticsMention(ref method, "cannot declare methods");
+    theory.detail = `wanted the method refusal, got: ${firstDiagnostic(ref method)}`;
+  }
+}
+
+// The TypeId a union NAME binds to, or TYPE_ERROR_ID when it binds to anything
+// else. It checks the SYMBOL kind rather than only the type, because "pass A
+// bound a Symbol.Union" is half of what the shell test asserts.
+function unionTypeIdOf(ref prog: Program, name: string): TypeId {
+  if (prog.modules.len == 0) {
+    return TYPE_ERROR_ID;
+  }
+  let tm = vec.vecGet(ref prog.modules, 0);
+  switch (map.mapGet(ref tm.names, name)) {
+    case Option.None: { return TYPE_ERROR_ID; }
+    case Option.Some { value: symId }: {
+      switch (symbolAt(ref prog, symId)) {
+        case Symbol.Union { typeId: t }: { return t; }
+        default: { return TYPE_ERROR_ID; }
+      }
+    }
   }
 }

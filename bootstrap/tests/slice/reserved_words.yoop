@@ -1,0 +1,66 @@
+// Reserved words standing where a NAME is metadata rather than a binding.
+//
+// C headers are full of arguments and members spelled `type`, `kind`, `enum`
+// and `in`, and an extern signature mirrors a C ABI it does not get to rename -
+// so a generated binding used to need a hand edit on the first collision. The
+// positions that accept one are the positions where the keyword's grammar role
+// cannot reach: a struct, variant or enum FIELD or CASE name, an extern
+// PARAMETER name, the right of a `.`, and a struct-literal field name.
+//
+// This has to reach an executable rather than stopping at the parser, because
+// the name travels: it is what pass C looks a field up by, what the switch
+// lowering matches a case on, and what codegen geps against. `function
+// f(type: int32)` on an ORDINARY function stays refused, and that half is
+// asserted in bootstrap/src/parse/parse.test.yoop.
+
+extern "C" from "stdio.h" {
+  function puts(type: string): int32;
+}
+
+extern "C" from "stdlib.h" {
+  function abs(in: int32): int32;
+}
+
+// A struct spelled the way the header it mirrors spells it.
+type Header {
+  type: int32,
+  enum: int32,
+  in: int32,
+}
+
+variant Ev {
+  type { in: int32 },
+  default,
+}
+
+enum Kind { type, union, variant }
+
+// The right of a `.` is a pure name lookup, so every read here is a keyword.
+function describe(ref h: Header): int32 {
+  return h.type * 100 + h.enum * 10 + h.in;
+}
+
+// A pattern has to write back whatever the declaration spelled, so both the
+// case name and the payload field are keywords. The BINDING is not - it is a
+// new local in the arm, where a keyword would shadow a grammar role.
+function payloadOf(e: Ev): int32 {
+  switch (e) {
+    case Ev.type { in: n }: { return n; }
+    case Ev.default: { return 0 - 1; }
+  }
+}
+
+function main(): int32 {
+  const h: Header = { type: 3, enum: 4, in: 5 };
+  printf("header: %d\n", describe(ref h));
+  printf("field: %d\n", h.type);
+
+  printf("payload: %d\n", payloadOf(Ev.type { in: 7 }));
+  printf("bare: %d\n", payloadOf(Ev.default));
+
+  printf("enum: %d %d\n", int32(Kind.type), int32(Kind.variant));
+
+  puts("extern parameters named type and in");
+  printf("abs: %d\n", abs(0 - 5));
+  return 0;
+}

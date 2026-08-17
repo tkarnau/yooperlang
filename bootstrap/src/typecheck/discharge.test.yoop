@@ -1,0 +1,353 @@
+// Tests for the DISCHARGE walk - "was this binding's scope-end call already
+// made by hand on every path that reaches here".
+//
+// These drive the real pipeline (lex -> parse -> typecheck) over source
+// literals and then ask the table the same question codegen asks: is the
+// binding declared at THIS node discharged at THAT exit site. Nothing here
+// reaches an executable; bootstrap/tests/slice/dispose_manual.yoop does that
+// half, and it has to, because the whole bug was an extra line of output.
+//
+// The kind is a local one rather than std's `disposable`, for the same reason
+// every other kind test in this tree declares its own: a source literal has no
+// import path to std, and a kind is an ordinary declaration.
+
+import.test;
+import * as t from "std/test.yoop";
+import { suite, test, Case } from "std/test.yoop";
+import * as intr from "std/core/intrinsics.yoop";
+import { Vec }, * as vec from "std/core/vec.yoop";
+import * as str from "std/core/strings.yoop";
+import { AST, ASTNodeKind, NodeId, childAt, nodeAt } from "../ast";
+import { LoadModuleResult, moduleFromSource, singleModuleGraph } from "../source_graph";
+import { Program, TypedModule, isDischargedAt, typecheckProgram } from "../typecheck";
+
+// The preamble every case shares: a user's kind naming a user's method, so
+// nothing here is riding on the compiler knowing what `disposable` is.
+const DECLS: string = "trait Closer { function close(ref self): void; }\nkind tracked { appliesTo binding; requires Closer; mustCall close beforeScopeEnd; }\ntype Res implements Closer { id: int, function close(ref self): void { } }\nconst FLAG: bool = true;\nfunction open(n: int): Res { return { id: n }; }\n";
+
+// What one source literal says about one binding in one function.
+type Probe {
+  diagnostics: usize,
+  detail: string,
+  total: usize,          // (exit, binding) pairs the whole module recorded
+  atBrace: bool,         // discharged at the closing brace of the function body
+  atFirstReturn: bool,   // discharged at the first `return` in the file
+}
+
+// ----- the top level of a scope -------------------------------------------
+
+suite function aManualCallAnswersTheObligation(): void {
+  let p = probe(
+    `${DECLS}function useIt(): void { tracked c: Res = open(1); Closer.close(ref c); }`,
+    "useIt", "c"
+  );
+
+  let test theory: Case = t.asserts("the source checks clean") {
+    theory.isSuccessful = p.diagnostics == 0;
+    theory.detail = `reported ${p.diagnostics} diagnostic(s): ${p.detail}`;
+  }
+  let test theory: Case = t.asserts("the closing brace owes nothing after a manual call") {
+    theory.isSuccessful = p.atBrace;
+    theory.detail = "a hand-written close left the brace still owing one";
+  }
+}
+
+// The failure mode this whole feature must not have: skipping a call nobody
+// made. That is a leak, and it is worse than the duplicate being fixed.
+suite function aBindingNobodyTouchedIsNotDischarged(): void {
+  let p = probe(
+    `${DECLS}function useIt(): void { tracked c: Res = open(1); }`,
+    "useIt", "c"
+  );
+
+  let test theory: Case = t.asserts("the source checks clean") {
+    theory.isSuccessful = p.diagnostics == 0;
+    theory.detail = `reported ${p.diagnostics} diagnostic(s): ${p.detail}`;
+  }
+  let test theory: Case = t.asserts("the brace still owes the call") {
+    theory.isSuccessful = !p.atBrace;
+    theory.detail = "a binding nothing disposed came back discharged";
+  }
+  let test theory: Case = t.asserts("and the module records nothing at all") {
+    theory.isSuccessful = p.total == 0;
+    theory.detail = `recorded ${p.total} discharge(s) for a program with no manual call in it`;
+  }
+}
+
+// A close of a DIFFERENT binding, and a call that takes the binding BY VALUE,
+// each answer nothing. Both are the "when unsure, say no" side of the rule.
+suite function onlyTheNamedBindingIsDischarged(): void {
+  let other = probe(
+    `${DECLS}function useIt(): void { tracked a: Res = open(1); tracked b: Res = open(2); Closer.close(ref b); }`,
+    "useIt", "a"
+  );
+  let test theory: Case = t.asserts("closing b leaves a still owing") {
+    theory.isSuccessful = other.diagnostics == 0 && !other.atBrace;
+    theory.detail = `${other.diagnostics} diagnostic(s) [${other.detail}], a discharged=${other.atBrace}`;
+  }
+
+  let byValue = probe(
+    `${DECLS}function takes(r: Res): void { }\nfunction useIt(): void { tracked c: Res = open(1); takes(c); }`,
+    "useIt", "c"
+  );
+  let test theory: Case = t.asserts("handing it over BY VALUE is not a discharge") {
+    theory.isSuccessful = byValue.diagnostics == 0 && !byValue.atBrace;
+    theory.detail = `${byValue.diagnostics} diagnostic(s) [${byValue.detail}], discharged=${byValue.atBrace}`;
+  }
+}
+
+// ----- the merge ----------------------------------------------------------
+
+suite function bothBranchesDischargeAndOneDoesNot(): void {
+  let both = probe(
+    `${DECLS}function useIt(): void { tracked c: Res = open(1); if (FLAG) { Closer.close(ref c); } else { Closer.close(ref c); } }`,
+    "useIt", "c"
+  );
+  let test theory: Case = t.asserts("closed on both arms, so the join is closed") {
+    theory.isSuccessful = both.diagnostics == 0 && both.atBrace;
+    theory.detail = `${both.diagnostics} diagnostic(s) [${both.detail}], discharged=${both.atBrace}`;
+  }
+
+  // The INTERSECTION is the whole point: one arm is not every path.
+  let one = probe(
+    `${DECLS}function useIt(): void { tracked c: Res = open(1); if (FLAG) { Closer.close(ref c); } else { } }`,
+    "useIt", "c"
+  );
+  let test theory: Case = t.asserts("closed on one arm only leaves the join owing") {
+    theory.isSuccessful = one.diagnostics == 0 && !one.atBrace;
+    theory.detail = `${one.diagnostics} diagnostic(s) [${one.detail}], discharged=${one.atBrace}`;
+  }
+
+  // No `else` at all is the same answer, reached differently: the path that
+  // skipped the arm ran nothing.
+  let noElse = probe(
+    `${DECLS}function useIt(): void { tracked c: Res = open(1); if (FLAG) { Closer.close(ref c); } }`,
+    "useIt", "c"
+  );
+  let test theory: Case = t.asserts("an `if` with no `else` can never discharge") {
+    theory.isSuccessful = noElse.diagnostics == 0 && !noElse.atBrace;
+    theory.detail = `${noElse.diagnostics} diagnostic(s) [${noElse.detail}], discharged=${noElse.atBrace}`;
+  }
+}
+
+// An arm that DIVERGES never reaches the join, so it is left out of the
+// intersection - the reaching arm decides alone.
+suite function aDivergingArmIsNotAReachingPath(): void {
+  let p = probe(
+    `${DECLS}function useIt(): void { tracked c: Res = open(1); if (FLAG) { return; } else { Closer.close(ref c); } }`,
+    "useIt", "c"
+  );
+
+  let test theory: Case = t.asserts("the source checks clean") {
+    theory.isSuccessful = p.diagnostics == 0;
+    theory.detail = `reported ${p.diagnostics} diagnostic(s): ${p.detail}`;
+  }
+  let test theory: Case = t.asserts("the arm that returned does not vote") {
+    theory.isSuccessful = p.atBrace;
+    theory.detail = "a diverging arm was counted as a path that reaches the brace";
+  }
+  let test theory: Case = t.asserts("and that `return` itself still owes the call") {
+    theory.isSuccessful = !p.atFirstReturn;
+    theory.detail = "the early return skipped a call nobody had made yet";
+  }
+}
+
+// A loop body may run ZERO times, so nothing it closed can be relied on after
+// it. Conservative in the direction that disposes.
+suite function aLoopBodyDischargesNothingAfterIt(): void {
+  let p = probe(
+    `${DECLS}function useIt(): void { tracked c: Res = open(1); while (FLAG) { Closer.close(ref c); } }`,
+    "useIt", "c"
+  );
+
+  let test theory: Case = t.asserts("the source checks clean") {
+    theory.isSuccessful = p.diagnostics == 0;
+    theory.detail = `reported ${p.diagnostics} diagnostic(s): ${p.detail}`;
+  }
+  let test theory: Case = t.asserts("what the body closed does not reach the brace") {
+    theory.isSuccessful = !p.atBrace;
+    theory.detail = "a close inside a loop body was taken as reaching the brace";
+  }
+
+  // A `for` head is the same question with a different spelling.
+  let forLoop = probe(
+    `${DECLS}function useIt(): void { tracked c: Res = open(1); for (let i = 0; i < 2; i += 1) { Closer.close(ref c); } }`,
+    "useIt", "c"
+  );
+  let test theory: Case = t.asserts("a `for` body is no different") {
+    theory.isSuccessful = forLoop.diagnostics == 0 && !forLoop.atBrace;
+    theory.detail = `${forLoop.diagnostics} diagnostic(s) [${forLoop.detail}], discharged=${forLoop.atBrace}`;
+  }
+}
+
+// ----- an early return ----------------------------------------------------
+
+// The same binding in the same function, with two different answers depending
+// on where you stand. That is what makes a per-binding flag wrong.
+suite function anEarlyReturnGetsItsOwnAnswer(): void {
+  let before = probe(
+    `${DECLS}function useIt(): void { tracked c: Res = open(1); Closer.close(ref c); if (FLAG) { return; } }`,
+    "useIt", "c"
+  );
+  let test theory: Case = t.asserts("a return AFTER the manual call owes nothing") {
+    theory.isSuccessful = before.diagnostics == 0 && before.atFirstReturn;
+    theory.detail = `${before.diagnostics} diagnostic(s) [${before.detail}], atReturn=${before.atFirstReturn}`;
+  }
+
+  let after = probe(
+    `${DECLS}function useIt(): void { tracked c: Res = open(1); if (FLAG) { return; } Closer.close(ref c); }`,
+    "useIt", "c"
+  );
+  let test theory: Case = t.asserts("a return BEFORE it still owes the call") {
+    theory.isSuccessful = after.diagnostics == 0 && !after.atFirstReturn;
+    theory.detail = `${after.diagnostics} diagnostic(s) [${after.detail}], atReturn=${after.atFirstReturn}`;
+  }
+  let test theory: Case = t.asserts("while the brace, past the manual call, does not") {
+    theory.isSuccessful = after.atBrace;
+    theory.detail = "the brace after a manual call was left owing one";
+  }
+}
+
+// Rebinding the name puts the obligation BACK. The hand-written call answered
+// the OUTGOING value, and the binding now holds one nobody has disposed - which
+// is exactly the mutable pattern std/core/kinds.yoop documents.
+//
+// A DIVERGENCE from the reference, which never clears its satisfied flag and
+// leaks the new value. See bootstrap/tests/slice/dispose_rebind.bootonly.
+suite function anAssignmentRearmsTheObligation(): void {
+  let p = probe(
+    `${DECLS}function useIt(): void { let tracked c: Res = open(1); Closer.close(ref c); c = open(2); }`,
+    "useIt", "c"
+  );
+
+  let test theory: Case = t.asserts("the source checks clean") {
+    theory.isSuccessful = p.diagnostics == 0;
+    theory.detail = `reported ${p.diagnostics} diagnostic(s): ${p.detail}`;
+  }
+  let test theory: Case = t.asserts("the brace owes a call again after the rebind") {
+    theory.isSuccessful = !p.atBrace;
+    theory.detail = "the value assigned after a manual close was left undisposed";
+  }
+
+  // Writing a FIELD is not a rebind - the binding still holds what it held.
+  let field = probe(
+    `${DECLS}function useIt(): void { let tracked c: Res = open(1); Closer.close(ref c); c.id = 2; }`,
+    "useIt", "c"
+  );
+  let test theory: Case = t.asserts("a field write leaves the discharge standing") {
+    theory.isSuccessful = field.diagnostics == 0 && field.atBrace;
+    theory.detail = `${field.diagnostics} diagnostic(s) [${field.detail}], discharged=${field.atBrace}`;
+  }
+}
+
+// ----- the harness --------------------------------------------------------
+
+function probe(src: string, fnName: string, bindingName: string): Probe {
+  let srcBuf: Vec<uint8> = vec.vecNew(src.len + 1);
+  vec.vecExtendFrom(ref srcBuf, intr.stringAsBytes(src));
+
+  switch (moduleFromSource("test", "test.yoop", srcBuf)) {
+    case LoadModuleResult.Err { error: e }: {
+      // A parse failure comes back as a diagnostic COUNT, so a suite asserting
+      // "this checks clean" fails on it rather than quietly asserting nothing.
+      return { diagnostics: 1, detail: e, total: 0, atBrace: false, atFirstReturn: false };
+    }
+    case LoadModuleResult.Ok { value: m }: {
+      let graph = singleModuleGraph(m);
+      let prog = typecheckProgram(ref graph);
+      let mod = vec.vecGet(ref graph.modules, 0);
+      let tm = vec.vecGet(ref prog.modules, 0);
+      const bodyId = bodyOfFunction(ref mod.ast, fnName);
+      const declId = declNamedUnder(ref mod.ast, bodyId, bindingName);
+      const returnId = findUnder(ref mod.ast, bodyId, ASTNodeKind.RETURN_STATEMENT, "");
+      return {
+        diagnostics: prog.diagnostics.len,
+        detail: firstDiagnostic(ref prog),
+        total: tm.discharges.len,
+        atBrace: isDischargedAt(ref tm, bodyId, declId),
+        atFirstReturn: isDischargedAt(ref tm, returnId, declId),
+      };
+    }
+  }
+}
+
+function firstDiagnostic(ref prog: Program): string {
+  if (prog.diagnostics.len == 0) {
+    return "";
+  }
+  return vec.vecGet(ref prog.diagnostics, 0).message;
+}
+
+// The arena is FLAT, so finding a node is a linear scan rather than a walk.
+// Good enough at these sizes and it needs no knowledge of which slot holds
+// what.
+function bodyOfFunction(ref ast: AST, name: string): NodeId {
+  let i: NodeId = 1;
+  while (i < ast.nodes.len) {
+    const n = nodeAt(ref ast, i);
+    if (n.kind == ASTNodeKind.FUNCTION_DECL && str.stringEq(n.name, name)) {
+      return n.childD;
+    }
+    i += 1;
+  }
+  return 0;
+}
+
+// A kind-prefixed binding is CONST unless it was written `let`, so both
+// spellings are asked for.
+function declNamedUnder(ref ast: AST, rootId: NodeId, name: string): NodeId {
+  const asConst = findUnder(ref ast, rootId, ASTNodeKind.CONST_DECL, name);
+  if (asConst != 0) {
+    return asConst;
+  }
+  return findUnder(ref ast, rootId, ASTNodeKind.LET_DECL, name);
+}
+
+// The first node of `kind` (and, when `name` is given, of that name) anywhere
+// under `rootId`.
+//
+// UNDER the body rather than anywhere in the arena: the shared preamble
+// declares an `open` with a `return` in it and a module-level `const FLAG`, and
+// either would be found first by a flat scan of the arena.
+function findUnder(ref ast: AST, rootId: NodeId, kind: ASTNodeKind, name: string): NodeId {
+  if (rootId == 0) {
+    return 0;
+  }
+  const n = nodeAt(ref ast, rootId);
+  if (n.kind == kind && (name.len == 0 || str.stringEq(n.name, name))) {
+    return rootId;
+  }
+  let found: NodeId = findUnder(ref ast, n.childA, kind, name);
+  if (found != 0) {
+    return found;
+  }
+  found = findUnder(ref ast, n.childB, kind, name);
+  if (found != 0) {
+    return found;
+  }
+  found = findUnder(ref ast, n.childC, kind, name);
+  if (found != 0) {
+    return found;
+  }
+  found = findUnder(ref ast, n.childD, kind, name);
+  if (found != 0) {
+    return found;
+  }
+  found = findUnder(ref ast, n.childE, kind, name);
+  if (found != 0) {
+    return found;
+  }
+  found = findUnder(ref ast, n.childF, kind, name);
+  if (found != 0) {
+    return found;
+  }
+  let i: usize = 0;
+  while (i < n.childCount) {
+    found = findUnder(ref ast, childAt(ref ast, n, i), kind, name);
+    if (found != 0) {
+      return found;
+    }
+    i += 1;
+  }
+  return 0;
+}

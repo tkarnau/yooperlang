@@ -46,10 +46,7 @@ export function parseVariantDecl(ref ps: ParserState): Result<NodeId, ParsingErr
 
   SelfLexing.expect(ref ps, TokenTags.LCURLY)?;
   disposable caseIds: Vec<NodeId> = vec.vecNew(4);
-  while (
-    SelfLexing.peek(ref ps).tag != TokenTags.RCURLY &&
-    SelfLexing.peek(ref ps).tag != TokenTags.EOF
-  ) {
+  while (untilClosing(ref ps, TokenTags.RCURLY)) {
     // A method, not a case. `function` cannot start a case name, so the two
     // members never have to be told apart by anything but the keyword.
     if (SelfLexing.peek(ref ps).tag == TokenTags.FUNCTION ||
@@ -66,21 +63,20 @@ export function parseVariantDecl(ref ps: ParserState): Result<NodeId, ParsingErr
 
   // Spliced only now: parsing a case appends its own field run to the shared
   // pool, so a partial splice would interleave the two.
-  const start: usize = ps.ast.childIds.len;
-  vec.vecExtendFrom(ref ps.ast.childIds, vec.vecAsArray(ref caseIds));
-  node.childStart = start;
-  node.childCount = caseIds.len;
+  spliceChildren(ref ps, ref node, ref caseIds);
 
   return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
 }
 
 // One `Case { field: T, ... }` or a bare `Case`.
 //
-//   name                    the case's name
+//   name                    the case's name, which may be a RESERVED WORD - a
+//                           case name is metadata and the keyword's grammar
+//                           role does not reach a variant body
 //   own childIds run        its FIELD_DECLs, empty for a payload-less case
 function parseVariantCase(ref ps: ParserState): Result<NodeId, ParsingError> {
   let node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.VARIANT_CASE);
-  node.name = parseIdentAsName(ref ps)?;
+  node.name = parseIdentOrKeywordAsName(ref ps)?;
 
   if (SelfLexing.peek(ref ps).tag != TokenTags.LCURLY) {
     return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
@@ -88,10 +84,7 @@ function parseVariantCase(ref ps: ParserState): Result<NodeId, ParsingError> {
 
   SelfLexing.advance(ref ps)?;
   disposable fieldIds: Vec<NodeId> = vec.vecNew(2);
-  while (
-    SelfLexing.peek(ref ps).tag != TokenTags.RCURLY &&
-    SelfLexing.peek(ref ps).tag != TokenTags.EOF
-  ) {
+  while (untilClosing(ref ps, TokenTags.RCURLY)) {
     vec.vecPush(ref fieldIds, parseFieldDecl(ref ps)?);
     if (SelfLexing.peek(ref ps).tag == TokenTags.COMMA) {
       SelfLexing.advance(ref ps)?;
@@ -99,10 +92,7 @@ function parseVariantCase(ref ps: ParserState): Result<NodeId, ParsingError> {
   }
   SelfLexing.expect(ref ps, TokenTags.RCURLY)?;
 
-  const start: usize = ps.ast.childIds.len;
-  vec.vecExtendFrom(ref ps.ast.childIds, vec.vecAsArray(ref fieldIds));
-  node.childStart = start;
-  node.childCount = fieldIds.len;
+  spliceChildren(ref ps, ref node, ref fieldIds);
 
   return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
 }
@@ -123,7 +113,10 @@ export function parseVariantPattern(ref ps: ParserState): Result<NodeId, Parsing
   node.childB = SelfLexing.pushNode(ref ps, base);
 
   SelfLexing.expect(ref ps, TokenTags.DOT)?;
-  node.name = parseIdentAsName(ref ps)?;
+  // The case NAME, which the declaration was free to spell with a reserved
+  // word, so the pattern has to be able to write it back. The VARIANT name on
+  // the left of the `.` is an ordinary identifier and stays one.
+  node.name = parseIdentOrKeywordAsName(ref ps)?;
 
   if (SelfLexing.peek(ref ps).tag == TokenTags.LCURLY) {
     node.childA = parsePatternFields(ref ps)?;
@@ -154,12 +147,12 @@ function parsePatternFields(ref ps: ParserState): Result<NodeId, ParsingError> {
   SelfLexing.expect(ref ps, TokenTags.LCURLY)?;
 
   disposable ids: Vec<NodeId> = vec.vecNew(4);
-  while (
-    SelfLexing.peek(ref ps).tag != TokenTags.RCURLY &&
-    SelfLexing.peek(ref ps).tag != TokenTags.EOF
-  ) {
+  while (untilClosing(ref ps, TokenTags.RCURLY)) {
     let field = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.STRUCT_LITERAL_FIELD);
-    field.name = parseIdentAsName(ref ps)?;
+    // The FIELD name mirrors the declaration and may be a reserved word; the
+    // BINDING below is a new local in the arm's scope and may not, because
+    // there a keyword would shadow a grammar role. Same split as the reference.
+    field.name = parseIdentOrKeywordAsName(ref ps)?;
 
     let binding = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.IDENT);
     if (SelfLexing.peek(ref ps).tag == TokenTags.COLON) {

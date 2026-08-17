@@ -11,7 +11,6 @@ import { Vec }, * as vec from "std/core/vec.yoop";
 import { disposable } from "std/core/kinds.yoop";
 import * as str from "std/core/strings.yoop";
 import * as bytes from "std/core/bytes.yoop";
-import { NodeId } from "../ast";
 import { Token } from "../lex";
 import { ParsingError } from "../diagnostics";
 

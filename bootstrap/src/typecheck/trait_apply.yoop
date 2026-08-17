@@ -21,7 +21,7 @@ module typecheck;
 */
 
 import { Vec }, * as vec from "std/core/vec.yoop";
-import { Map, MapIter, MapEntry }, * as map from "std/collections/map.yoop";
+import { Map, MapIter }, * as map from "std/collections/map.yoop";
 import { disposable } from "std/core/kinds.yoop";
 import { SourceLocation } from "../diagnostics";
 

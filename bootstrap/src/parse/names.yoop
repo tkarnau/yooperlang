@@ -7,11 +7,17 @@ module parse;
 // `task`, ...) is not a reserved word - it lexes as IDENT so it stays usable as
 // an ordinary name. Recognizing one is therefore a text comparison at the point
 // where the grammar expects it, which is what `peekIsWord` is for.
+//
+// What IS reserved is refused as a name here, by name, with one carve-out: the
+// positions where a name is METADATA rather than a binding take a keyword
+// happily. `parseIdentAsName` is the refusing half and
+// `parseIdentOrKeywordAsName` the accepting one; the rule and its reason are on
+// the second.
 
 import { Result, Option } from "std/core/types.yoop";
 import * as bytes from "std/core/bytes.yoop";
 import * as str from "std/core/strings.yoop";
-import { TokenTags } from "../lex";
+import { TokenTags, tagName } from "../lex";
 import { ParsingError } from "../diagnostics";
 
 // The current token's source text, or "" if there is no text to read.
@@ -63,7 +69,96 @@ export function peekIsWord(ref ps: ParserState, word: string): bool {
   return str.stringEq(peekText(ref ps), word);
 }
 
+// True when `tag` is a RESERVED WORD - one of the spellings the lexer's keyword
+// table promotes out of IDENT (lex/scan_tables.yoop). Written out here rather
+// than read off that table because every caller is a one-token test on a hot
+// path and the table is two heap vectors built per file.
+//
+// DISCARD is deliberately NOT in it. `_` is punctuation the lexer happens to
+// spell as a word, nothing wants it as a name, and calling it reserved would
+// only change the wording of a refusal that already exists.
+function isKeywordTag(tag: TokenTags): bool {
+  switch (tag) {
+    case TokenTags.LET, TokenTags.FUNCTION, TokenTags.CONST, TokenTags.RETURN,
+         TokenTags.IF, TokenTags.ELSE, TokenTags.WHILE, TokenTags.FOR,
+         TokenTags.IN, TokenTags.TYPE, TokenTags.IMPORT, TokenTags.EXPORT,
+         TokenTags.EXTERN, TokenTags.FROM, TokenTags.AS, TokenTags.REF: {
+      return true;
+    }
+    case TokenTags.BREAK, TokenTags.CONTINUE, TokenTags.TRUE, TokenTags.FALSE,
+         TokenTags.TRAIT, TokenTags.IMPLEMENTS, TokenTags.SELF,
+         TokenTags.EXTENDS, TokenTags.VTABLE, TokenTags.APPLIESTO,
+         TokenTags.MUSTCALL, TokenTags.OWNSBLOCK, TokenTags.BEFORESCOPEEND: {
+      return true;
+    }
+    case TokenTags.MUSTNOTESCAPE, TokenTags.MUSTNOTSHARE, TokenTags.FORBIDS,
+         TokenTags.ACROSSSCOPES, TokenTags.GLOBALSTATE, TokenTags.WAIT,
+         TokenTags.AWAIT, TokenTags.SWITCH, TokenTags.CASE, TokenTags.DEFAULT,
+         TokenTags.ENUM, TokenTags.VARIANT, TokenTags.UNION, TokenTags.NULL: {
+      return true;
+    }
+    default: { return false; }
+  }
+}
+
+// True when the token could stand where a NAME does: an ordinary identifier, or
+// a reserved word in one of the positions that accepts one.
+function isIdentLikeTag(tag: TokenTags): bool {
+  return tag == TokenTags.IDENT || isKeywordTag(tag);
+}
+
+// The three reserved words a reader is most likely to have chosen on purpose,
+// and why each has to stay reserved. Unlike `kind`, `field` or `io` - which
+// were demoted to contextual words for exactly this reason - these carry real
+// grammar in a position where an identifier is also legal, so a targeted
+// diagnostic is the whole fix. Empty for everything else.
+function reservedNameHint(word: string): string {
+  if (str.stringEq(word, "in")) {
+    return " (it separates the two halves of `for x in xs`)";
+  }
+  if (str.stringEq(word, "from")) {
+    return " (it introduces the path in `import ... from` and `extern ... from`)";
+  }
+  if (str.stringEq(word, "as")) {
+    return " (it names the binding in `import * as ns`)";
+  }
+  return "";
+}
+
+// True when a reserved word is sitting where a PARAMETER NAME belongs -
+// `f(type: int32)`, `f(x, in)`.
+//
+// The ordinary parameter loop stops on any non-ident, so without this the
+// failure surfaces as "expected RPAREN, got TYPE": it describes the parser's
+// state, points at a word the reader has stopped seeing as a word, and says
+// nothing about what to do. Entering the loop anyway lets `parseIdentAsName`
+// report it properly. Same test, and same reason, as the reference's.
+export function atReservedUsedAsName(ref ps: ParserState): bool {
+  if (!isKeywordTag(SelfLexing.peek(ref ps).tag)) {
+    return false;
+  }
+  switch (SelfLexing.peekAhead(ref ps, 1)) {
+    case Result.Err { error: e }: { return false; }
+    case Result.Ok { value: tok }: {
+      return tok.tag == TokenTags.COLON
+        || tok.tag == TokenTags.COMMA
+        || tok.tag == TokenTags.RPAREN;
+    }
+  }
+}
+
 export function parseIdentAsName(ref pState: ParserState): Result<string, ParsingError> {
+  // Named rather than left to `expect`. A reserved word in name position
+  // reports as "expected IDENT, got FROM" otherwise, which names a TAG the
+  // reader never wrote and is often several lines from where they are looking.
+  if (isKeywordTag(SelfLexing.peek(ref pState).tag)) {
+    const word = peekText(ref pState);
+    return Result.Err { error: SelfLexing.createParsingError(
+      ref pState,
+      `"${word}" is a reserved word and cannot be used as a name${reservedNameHint(word)}. Pick a different name.`,
+      peekLengthUsize(ref pState),
+    )};
+  }
   const identToken = SelfLexing.expect(ref pState, TokenTags.IDENT)?;
   const src = pState.src;
   const nameResult = str.stringFromBytes(bytes.bytesSlice(
@@ -84,4 +179,31 @@ export function parseIdentAsName(ref pState: ParserState): Result<string, Parsin
       return Result.Ok { value: name };
     }
   }
+}
+
+// parseIdentAsName's twin, for the positions where the name is METADATA rather
+// than a binding: a struct, variant or enum FIELD or CASE name, an extern
+// PARAMETER name, the right of a `.`, and a struct-literal field name.
+//
+// A reserved word is unambiguous in every one of them - the keyword's grammar
+// role does not reach there - and C headers are full of parameters spelled
+// `type`, `kind` and `enum`, so refusing one makes a generated binding need a
+// hand edit on the first collision. `function fputs(type: string, kind: ref
+// FILE): int32;` is the line that pays for this.
+//
+// The asymmetry is deliberate and is the reference's: an extern signature
+// MIRRORS a C ABI and has no say in what the names are, while ordinary Yoop
+// source does, so `function f(type: int32)` stays refused.
+export function parseIdentOrKeywordAsName(ref pState: ParserState): Result<string, ParsingError> {
+  const tok = SelfLexing.peek(ref pState);
+  if (!isIdentLikeTag(tok.tag)) {
+    return Result.Err { error: SelfLexing.createParsingError(
+      ref pState,
+      `expected ${tagName(TokenTags.IDENT)}, got ${tagName(tok.tag)}`,
+      peekLengthUsize(ref pState),
+    )};
+  }
+  const text = peekText(ref pState);
+  SelfLexing.advance(ref pState)?;
+  return Result.Ok { value: text };
 }

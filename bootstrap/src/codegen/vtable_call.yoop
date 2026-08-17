@@ -14,7 +14,7 @@ module codegen;
 // feeds.
 
 import { Vec }, * as vec from "std/core/vec.yoop";
-import { Text }, * as text from "std/core/text.yoop";
+import * as text from "std/core/text.yoop";
 import { disposable } from "std/core/kinds.yoop";
 import { ASTNode, NodeId, childAt, nodeAt } from "../ast";
 import { Type, TypeId, typeAt } from "../typecheck";
@@ -29,20 +29,14 @@ function emitVtableDispatch(
   exprId: NodeId,
   slotIndex: usize,
   ref out: Operand
-): string {
+): EmitResult {
   let ctx: usize = 0;
   let fnPtr: usize = 0;
-  const err = emitVtableSlotLoad(ref cx, expr, slotIndex, ref ctx, ref fnPtr);
-  if (err.len > 0) {
-    return err;
-  }
+  emitVtableSlotLoad(ref cx, expr, slotIndex, ref ctx, ref fnPtr)?;
 
   disposable args: Vec<CallArg> = vec.vecNew(4);
   vec.vecPush(ref args, { ty: "ptr", value: Operand.Temp { id: ctx } });
-  const aerr = emitDispatchArgs(ref cx, expr, ref args);
-  if (aerr.len > 0) {
-    return aerr;
-  }
+  emitDispatchArgs(ref cx, expr, ref args)?;
 
   const retTy = typeOf(ref cx, exprId);
   const isVoid = text.equals(retTy, "void");
@@ -56,7 +50,7 @@ function emitVtableDispatch(
   } else {
     out = Operand.Temp { id: dest };
   }
-  return "";
+  return EmitResult.Ok;
 }
 
 // The two loads every dispatch begins with, shared with the async one.
@@ -71,12 +65,9 @@ export function emitVtableSlotLoad(
   slotIndex: usize,
   ref ctx: usize,
   ref fnPtr: usize
-): string {
+): EmitResult {
   let vtAddr: Operand = Operand.None;
-  const err = emitVtableReceiver(ref cx, expr, ref vtAddr);
-  if (err.len > 0) {
-    return err;
-  }
+  emitVtableReceiver(ref cx, expr, ref vtAddr)?;
   // The receiver is `ref VT`, so the vtable's own LLVM type is one deref away.
   // Read off the ARGUMENT rather than off the call, because a dispatch's node
   // type is the slot's RETURN.
@@ -92,32 +83,29 @@ export function emitVtableSlotLoad(
   emitGepFieldOfAddr(ref cx, slotGep, vtLlvm, vtAddr, slotIndex + VTABLE_FIRST_SLOT);
   fnPtr = freshTemp(cx.e);
   emitLoadFromPtr(ref cx, fnPtr, "ptr", slotGep);
-  return "";
+  return EmitResult.Ok;
 }
 
 // Every argument PAST the vtable receiver, in call order.
-export function emitDispatchArgs(ref cx: Cx, expr: ASTNode, ref args: Vec<CallArg>): string {
+export function emitDispatchArgs(ref cx: Cx, expr: ASTNode, ref args: Vec<CallArg>): EmitResult {
   if (expr.childA == 0) {
-    return "";
+    return EmitResult.Ok;
   }
   const list = nodeAt(cx.ast, expr.childA);
   let i: usize = 1;
   while (i < list.childCount) {
     const argId = childAt(cx.ast, list, i);
     let value: Operand = Operand.None;
-    const err = emitExpr(ref cx, argId, ref value);
-    if (err.len > 0) {
-      return err;
-    }
+    emitExpr(ref cx, argId, ref value)?;
     vec.vecPush(ref args, { ty: typeOf(ref cx, argId), value: value });
     i += 1;
   }
-  return "";
+  return EmitResult.Ok;
 }
 
 // The first argument's operand: the receiver of a `from`, the vtable of a
 // dispatch. Both are written `ref x` and both evaluate to an address.
-function emitVtableReceiver(ref cx: Cx, expr: ASTNode, ref out: Operand): string {
+function emitVtableReceiver(ref cx: Cx, expr: ASTNode, ref out: Operand): EmitResult {
   if (expr.childA == 0) {
     return internalError("a vtable call reached codegen with no arguments", expr.name);
   }

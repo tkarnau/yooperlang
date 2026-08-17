@@ -328,7 +328,11 @@ export function prebuiltRuntimeObjects(runtimeSources, extraArgs = []) {
       ...windowsClangArgs().filter((a) => a !== "-fuse-ld=link"), // compile-only
       ...extraArgs,
     ],
-    { stdio: "pipe", env: clangEnv(), cwd: dir },
+    // A deadline, because this is the one clang the test suites run
+    // synchronously: a wedged one here used to block a whole test file with no
+    // way out but killing it by hand. Five minutes is far past a cold compile
+    // of the runtime on any machine that can run the suite at all.
+    { stdio: "pipe", env: clangEnv(), cwd: dir, timeout: 300000, killSignal: "SIGKILL" },
   );
 
   const objects = fs

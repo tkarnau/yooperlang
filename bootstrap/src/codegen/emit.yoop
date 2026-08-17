@@ -11,8 +11,7 @@ import { Vec }, * as vec from "std/core/vec.yoop";
 import { Map }, * as map from "std/collections/map.yoop";
 import { Text }, * as text from "std/core/text.yoop";
 import { disposable } from "std/core/kinds.yoop";
-import { Type, TypeId, PrimKind, Program, moduleIdOf, typeAt, TYPE_VOID_ID,
-  enumUnderlyingOf } from "../typecheck";
+import { Type, TypeId, PrimKind, Program, moduleIdOf, typeAt, TYPE_VOID_ID, enumUnderlyingOf } from "../typecheck";
 
 export type Emitter propagates<disposable> {
   globals: Text,        // constants and declares, emitted first
@@ -68,6 +67,11 @@ export type Emitter propagates<disposable> {
   // function have to share one define - a second is an invalid redefinition
   // rather than a duplicate. See instr_vtable.yoop.
   fromFnShims: Map<string, bool>,
+  // The `@<mod>__module_init<N>` functions this program owes, in the order
+  // `main` has to call them. Filled by the globals pre-pass, which walks the
+  // graph in TOPOLOGICAL order, so a module's globals are already stored by the
+  // time an importing module's initializer reads one. See module_init.yoop.
+  moduleInits: Vec<string>,
 }
 
 export function emitterNew(): Emitter propagates<disposable> {
@@ -75,6 +79,7 @@ export function emitterNew(): Emitter propagates<disposable> {
   // and there is no turbofish.
   let constOps: Map<uint64, Operand> = map.mapNew(0, map.uint64KeyOps());
   let fromFnShims: Map<string, bool> = map.mapNew(0, map.stringKeyOps());
+  let moduleInits: Vec<string> = vec.vecNew(0);
   return {
     globals: text.make(1024),
     body: text.make(8192),
@@ -92,31 +97,13 @@ export function emitterNew(): Emitter propagates<disposable> {
     hasTasks: false,
     usesTaskIntrinsics: false,
     fromFnShims: fromFnShims,
+    moduleInits: moduleInits,
   };
-}
-
-export function emitLine(ref e: Emitter, line: string): void {
-  text.push(ref e.fn, line);
-  text.pushByte(ref e.fn, 10);
 }
 
 export function emitGlobal(ref e: Emitter, line: string): void {
   text.push(ref e.globals, line);
   text.pushByte(ref e.globals, 10);
-}
-
-// The whole point of Text: an instruction is appended piece by piece with no
-// intermediate string, so emitting IR allocates only when a buffer grows.
-export function emitPart(ref e: Emitter, part: string): void {
-  text.push(ref e.fn, part);
-}
-
-export function emitUint(ref e: Emitter, v: usize): void {
-  text.pushUint(ref e.fn, uint64(v));
-}
-
-export function endLine(ref e: Emitter): void {
-  text.pushByte(ref e.fn, 10);
 }
 
 // A fresh block label number, unique within the function.
@@ -204,6 +191,12 @@ export function llvmType(ref prog: Program, rawId: TypeId): string {
     // then one function pointer per slot. Named for the same reason a struct is.
     case Type.VTable { decl: d, forTrait: ft, fields: f, methodOrder: mo }: {
       return vtableLlvmName(moduleIdOf(ref prog, d.module), d.name);
+    }
+    // A union is `{ [N x i8] }` - a byte BUFFER rather than a field list,
+    // because the fields overlap and LLVM has no type that says so. Every
+    // access reinterprets that buffer at the field's own type; see union.yoop.
+    case Type.Union { decl: d, fields: f }: {
+      return unionLlvmName(moduleIdOf(ref prog, d.module), d.name);
     }
     default: { return "ptr"; }
   }

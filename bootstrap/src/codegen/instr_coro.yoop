@@ -16,7 +16,7 @@ module codegen;
 // instruction stream, because `coro.begin` has to dominate every alloca and the
 // bootstrap hoists allocas to the top of `entry:`. See coro.yoop.
 
-import { Text }, * as text from "std/core/text.yoop";
+import * as text from "std/core/text.yoop";
 
 //   %t1 = call token @llvm.coro.id(i32 0, ptr null, ptr null, ptr null)
 //

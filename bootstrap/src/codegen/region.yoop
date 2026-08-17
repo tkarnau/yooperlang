@@ -14,7 +14,7 @@ module codegen;
 // The ordinary `disposable ids: Vec<T> = ...;` binding is NOT here - it belongs
 // to whatever scope it was declared in, which is dispose.yoop's business.
 
-import { ASTNode, NodeId, nodeAt } from "../ast";
+import { ASTNode, NodeId } from "../ast";
 
 // `disposable reg: ArenaScope = arenaScope(4096) { ... }` - a kind-prefixed
 // binding that OWNS a block.
@@ -35,21 +35,21 @@ export function emitScopedBinding(
   stmtId: NodeId,
   retTy: string,
   ref terminated: bool
-): string {
+): EmitResult {
   localsPushBlock(cx.locals);
   disposePushScope(cx.disposes);
 
   const declErr = emitVarDecl(ref cx, stmt, stmtId);
-  if (declErr.len > 0) {
+  if (emitFailed(declErr)) {
     disposePopScope(cx.disposes);
     localsPopBlock(cx.locals);
     return declErr;
   }
 
-  let bodyErr = "";
+  let bodyErr: EmitResult = EmitResult.Ok;
   let bodyTerminated = false;
   emitBlock(ref cx, stmt.childD, retTy, ref bodyTerminated, ref bodyErr);
-  if (bodyErr.len > 0) {
+  if (emitFailed(bodyErr)) {
     disposePopScope(cx.disposes);
     localsPopBlock(cx.locals);
     return bodyErr;
@@ -59,8 +59,10 @@ export function emitScopedBinding(
   // `return` unwinds to 0 and a `break` unwinds to the loop, and both pass
   // through here.
   if (!bodyTerminated) {
-    const derr = emitScopeDisposals(ref cx, disposeScopeDepth(cx.disposes) - 1);
-    if (derr.len > 0) {
+    // The DECLARATION is the exit site here: it is the node that owns this
+    // scope, and the one pass D keyed a manual dispose inside the block by.
+    const derr = emitScopeDisposals(ref cx, disposeScopeDepth(cx.disposes) - 1, stmtId);
+    if (emitFailed(derr)) {
       disposePopScope(cx.disposes);
       localsPopBlock(cx.locals);
       return derr;
@@ -69,7 +71,7 @@ export function emitScopedBinding(
   disposePopScope(cx.disposes);
   localsPopBlock(cx.locals);
   terminated = bodyTerminated;
-  return "";
+  return EmitResult.Ok;
 }
 
 export function emitKindRegion(
@@ -78,17 +80,14 @@ export function emitKindRegion(
   stmtId: NodeId,
   retTy: string,
   ref terminated: bool
-): string {
+): EmitResult {
   const method = disposeMethodOf(ref cx, stmt);
   if (method.len == 0) {
     return internalError("kind region with no scope-end method", "codegen");
   }
 
   let subject: Operand = Operand.None;
-  const err = emitExpr(ref cx, stmt.childA, ref subject);
-  if (err.len > 0) {
-    return err;
-  }
+  emitExpr(ref cx, stmt.childA, ref subject)?;
   const ty = typeOf(ref cx, stmtId);
   const slot = declareAnonSlot(ref cx, ty);
   emitStore(ref cx, ty, subject, TEMP_SLOT_NAME, slot.id);
@@ -99,37 +98,39 @@ export function emitKindRegion(
   // what makes two of them in a row unwind in reverse: they are two entries in
   // one scope, exactly like two `disposable` bindings.
   if (stmt.childB == 0) {
-    return recordDisposal(ref cx, TEMP_SLOT_NAME, slot.id,
+    // declNode 0: the subject is ANONYMOUS, so there is no name a hand-written
+    // call could reach it by and nothing that could discharge it early.
+    return recordDisposal(ref cx, TEMP_SLOT_NAME, slot.id, 0,
       resolvedTypeAt(ref cx, stmtId), method);
   }
 
   // Its own scope, holding just the subject, so the block's own disposables
   // unwind INSIDE it and the region's call comes last.
   disposePushScope(cx.disposes);
-  const rerr = recordDisposal(ref cx, TEMP_SLOT_NAME, slot.id,
+  const rerr = recordDisposal(ref cx, TEMP_SLOT_NAME, slot.id, 0,
     resolvedTypeAt(ref cx, stmtId), method);
-  if (rerr.len > 0) {
+  if (emitFailed(rerr)) {
     disposePopScope(cx.disposes);
     return rerr;
   }
 
-  let bodyErr = "";
+  let bodyErr: EmitResult = EmitResult.Ok;
   let bodyTerminated = false;
   emitBlock(ref cx, stmt.childB, retTy, ref bodyTerminated, ref bodyErr);
-  if (bodyErr.len > 0) {
+  if (emitFailed(bodyErr)) {
     disposePopScope(cx.disposes);
     return bodyErr;
   }
 
   // A body that terminated already unwound this scope on its way out.
   if (!bodyTerminated) {
-    const derr = emitScopeDisposals(ref cx, disposeScopeDepth(cx.disposes) - 1);
-    if (derr.len > 0) {
+    const derr = emitScopeDisposals(ref cx, disposeScopeDepth(cx.disposes) - 1, stmtId);
+    if (emitFailed(derr)) {
       disposePopScope(cx.disposes);
       return derr;
     }
   }
   disposePopScope(cx.disposes);
   terminated = bodyTerminated;
-  return "";
+  return EmitResult.Ok;
 }

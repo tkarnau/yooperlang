@@ -1,0 +1,6 @@
+// Sorts LAST of the three discovered fixtures, and is the one written with the
+// `export` an author may add by hand - the wrapper has to be seen through.
+import.test;
+import { suite, test, Case } from "std/test.yoop";
+
+export suite function zetaBehaves(): void { }

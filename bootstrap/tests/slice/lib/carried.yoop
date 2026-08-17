@@ -1,0 +1,46 @@
+// The kind and the plain implementer for `dispose_carried_kind.yoop`.
+//
+// This is a SEPARATE module for one specific reason, and it is the same reason
+// `examples/pass/propagates_full/io.yoop` is: the JS reference only populates a
+// kind's `appliesTo` site set for an IMPORTED kind. A kind declared in the same
+// module as the field that carries it reads back as `appliesTo: (none)` there,
+// and the field prefix is refused with "kind 'tracked' does not apply to
+// fields". The bootstrap accepts both, because it records a kind's clauses by
+// their leading word and never reads the site list at all.
+//
+// A slice `.expected` is asserted against both compilers, so the fixture has to
+// stay inside the intersection - which means importing the kind from here.
+
+export kind tracked {
+  appliesTo binding field;
+  requires Closer;
+  mustCall close beforeScopeEnd;
+}
+
+export trait Closer {
+  function close(ref self): void;
+}
+
+extern "C" from "stdio.h" {
+  function printf(fmt: string, ...): int32;
+}
+
+// Implements Closer OUTRIGHT and propagates NOTHING. That is what makes this the
+// case a type test cannot see: `Handle` is perfectly disposable on its own, so a
+// holder asking "does this field's type propagate the kind" gets no, and only
+// the field's own annotation can say otherwise.
+export type Handle implements Closer {
+  id: int,
+  function close(ref self): void {
+    printf("  close %d\n", self.id);
+  }
+}
+
+// The OTHER spelling, for the mixed case: this one propagates the kind, so a
+// field of this type supplies it without any prefix.
+export type Res implements Closer propagates<tracked> {
+  id: int,
+  function close(ref self): void {
+    printf("  close %d\n", self.id);
+  }
+}

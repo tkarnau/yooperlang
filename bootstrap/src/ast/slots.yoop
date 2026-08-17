@@ -7,6 +7,13 @@ module ast;
 // `functionParamList` for a dump or an error message. They are documentation
 // the compiler can execute - add a case here whenever a kind starts using a
 // slot, or the dump will just say "undefined".
+//
+// ONLY `astNodeChildAName` HAS A CALLER TODAY. The other six are groundwork for
+// the AST parity dump, which needs a normalized tree format before it can be
+// diffed against the JS reference's - see the note on `flagA` in node.yoop. They
+// are kept because the table is only useful COMPLETE: a slot whose meaning was
+// never written down is the one a reader cannot recover, and recovering it means
+// reading every parser site that assigns it.
 
 export function astNodeFlagAName(v: ASTNodeKind): string {
   switch (v) {
@@ -160,6 +167,11 @@ export function astNodeChildBName(v: ASTNodeKind): string {
     }
     // `f()? "loading config"` - the note prefixed onto the Err on the way out.
     // 0 for a plain `f()?`.
+    // `disposable FileHandle`: the NODE_LIST of KIND_PREFIX nodes before the
+    // type name, 0 when there is none. Read by pass C into `Field.carriedKind`.
+    case ASTNodeKind.TYPE_ANNOTATION_TYPE_NAME: {
+      return "kindPrefixList";
+    }
     case ASTNodeKind.TRY_OP: {
       return "contextString";
     }

@@ -15,13 +15,11 @@ module codegen;
 //   * the symbol table via `returnTypeOf` (a callee's return type)
 // Everything else on Program/TypedModule is typecheck's business.
 
-import { Vec }, * as vec from "std/core/vec.yoop";
-import { Map }, * as map from "std/collections/map.yoop";
-import { Text }, * as text from "std/core/text.yoop";
-import { Option } from "std/core/types.yoop";
-import { AST, NodeId } from "../ast";
-import { Program, TypedModule, TypeId, Type, Symbol, symbolAt, typeAt, TYPE_VOID_ID, TYPE_ERROR_ID,
-  primTypeIdOfName, primBitWidth, primIsSigned } from "../typecheck";
+import { Vec } from "std/core/vec.yoop";
+import * as map from "std/collections/map.yoop";
+import * as text from "std/core/text.yoop";
+import { AST } from "../ast";
+import { Program, TypedModule, TypeId } from "../typecheck";
 
 export type Cx {
   e: ref Emitter,
@@ -65,6 +63,20 @@ export type Cx {
   // `return` out of it closes with shutdown. False everywhere else, including
   // in `main` when the program has nothing to schedule.
   inMain: bool,
+  // Whether the function being emitted is a `main` DECLARED `void`. C's entry
+  // point returns an int, so such a main is emitted as `define i32 @main()`
+  // and every way out of it hands back 0 - which is what C says a missing
+  // `return` in `main` means.
+  //
+  // `define void @main()` is ABI-illegal and the bug it hides is silent: with
+  // no `ret` value nothing writes the return register, so the process exit
+  // status is whatever the last call left in it. Both compilers used to emit
+  // it, and the reference's incidental 0 was `yoop_runtime_shutdown` returning
+  // nothing interesting rather than anything deliberate.
+  //
+  // Read by the fall-out-the-bottom in codegen.yoop and by a bare `return;` in
+  // stmt.yoop, which are the only two ways a void function terminates.
+  voidMain: bool,
 }
 
 // `Cx.instance` when the code being emitted is not inside a generic function.
@@ -176,17 +188,56 @@ export function operand(ref cx: Cx, op: Operand): void {
   emitOperand(cx.e, op);
 }
 
+// ----- what an emit function hands back -----------------------------------
+//
+// Nothing, or the first thing that stopped it. Every function in codegen that
+// EMITS rather than computes a name returns this, and reaching an `Err` means a
+// pass above let something through - the user's mistakes were all reported by
+// typecheck long before codegen ran.
+//
+// It was a bare `string`, with `""` meaning success and 102 hand-written
+// four-line blocks propagating it. The boilerplate was the visible half of the
+// problem; the other half is that `""` is a perfectly ordinary string, so a
+// check written against the wrong local, or testing the length the wrong way
+// round, was not a type error anywhere in the layer.
+//
+// A variant does NOT make the check unforgettable - a bare `emitX(...)`
+// statement still discards its result, exactly as before. What it does is make
+// every place that acts on the outcome say so in a form the compiler verifies,
+// and leave the layer's one deliberate discard standing out as an explicit
+// `_ = emitConcatParts(...)` in try_forms.yoop instead of blending in.
+//
+// `Ok` carries no payload because these functions produce their result through a
+// `ref out` parameter rather than through the return. That is what makes
+// `emitExpr(ref cx, id, ref v)?;` a statement.
+export variant EmitResult {
+  Ok,
+  Err { message: string },
+}
+
+// Whether an emit failed, for the handful of places that cannot simply write
+// `?`. All of them are the same shape: a walk holding a SCOPE it has to pop on
+// the way out (`emitBlock` and the four region and loop forms around it), where
+// returning early through `?` would leave the dispose and locals stacks unwound.
+// Everything else propagates with `?` and never names this.
+export function emitFailed(r: EmitResult): bool {
+  switch (r) {
+    case EmitResult.Err { message: m }: { return true; }
+    default: { return false; }
+  }
+}
+
 // The message for a codegen invariant that did not hold. One allocation on a
 // path that is aborting the compile anyway, which is why a template literal is
 // fine here - it is not in a loop.
-export function internalError(what: string, detail: string): string {
-  return `internal error: ${what} "${detail}"`;
+export function internalError(what: string, detail: string): EmitResult {
+  return EmitResult.Err { message: `internal error: ${what} "${detail}"` };
 }
 
 // A construct codegen understands and cannot lower YET, as opposed to one it
 // should never have been handed. The two read differently on purpose: an
 // internal error means a pass above let something through, and this means the
 // feature is not built.
-export function unsupportedHere(what: string, detail: string): string {
-  return `${what} "${detail}" is not supported by the bootstrap codegen yet`;
+export function unsupportedHere(what: string, detail: string): EmitResult {
+  return EmitResult.Err { message: `${what} "${detail}" is not supported by the bootstrap codegen yet` };
 }

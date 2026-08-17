@@ -28,8 +28,8 @@ import * as str from "std/core/strings.yoop";
 import * as intr from "std/core/intrinsics.yoop";
 import { disposable } from "std/core/kinds.yoop";
 import { Result } from "std/core/types.yoop";
-import { AST, emptyArena } from "../ast";
-import { ParsedFile, moduleHeaderName, parseInto, expandDerives } from "../parse";
+import { AST, emptyArena, isTestModuleProgram } from "../ast";
+import { moduleHeaderName, parseInto, expandDerives } from "../parse";
 
 export variant LoadGraphResult {
   Ok { value: ModuleGraph },
@@ -106,6 +106,12 @@ function addFile(ref mod: Module, absPath: string, srcBuf: Vec<uint8>): string {
         case Result.Ok { value: expanded }: {
           mod.ast = expanded;
         }
+      }
+      // A TEST module's suites get their `export` wrapper here, for the same
+      // reason the derive expansion is here: this is the last point at which
+      // the module's arena is a thing to write to. See test_exports.yoop.
+      if (isTestModuleProgram(ref mod.ast, file.root)) {
+        exportSuiteFunctions(ref mod.ast, file.root);
       }
       vec.vecPush(ref mod.files, {
         absPath: absPath,
