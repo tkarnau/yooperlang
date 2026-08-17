@@ -518,3 +518,166 @@ function main(): int32 {
     });
   });
 });
+
+// The `@inspect` substrate view, driven through the real server. The mapping
+// itself is covered in substrate.test.js / irIndex.test.js; what these assert
+// is the PROTOCOL wiring - that a hover on a line carries an IR section, that
+// the lens shows up, and that the panel request answers.
+describe("lsp server: @inspect substrate view", () => {
+  const MARKED = `@inspect(ir)
+function hotLoop(n: int32): int32 {
+    let acc: int32 = 0;
+    for (let i: int32 = 0; i < n; i = i + 1) {
+        acc = acc + i * i;
+    }
+    return acc;
+}
+
+function unmarked(n: int32): int32 {
+    return n * 3;
+}
+
+function main(): int32 {
+    return hotLoop(10) + unmarked(2);
+}
+`;
+  // 0-based line of `acc = acc + i * i;`.
+  const MULTIPLY_LINE = 4;
+
+  it("hover inside a marked function includes its LLVM IR", async () => {
+    const { uri, src } = writeFixture(MARKED);
+    await withClient(async (client) => {
+      client.notify("textDocument/didOpen", {
+        textDocument: { uri, languageId: "yoop", version: 1, text: src },
+      });
+      const resp = await client.request("textDocument/hover", {
+        textDocument: { uri },
+        // Column 0 of the line: deliberately NOT on an identifier, because
+        // the substrate section is keyed off the line rather than a name.
+        position: { line: MULTIPLY_LINE, character: 0 },
+      });
+      const value = resp.result?.contents?.value ?? "";
+      assert.match(value, /@inspect/);
+      assert.match(value, /hotLoop/);
+      assert.match(value, /```llvm/);
+      assert.match(value, /\bmul\b/, `no multiply in hover:\n${value}`);
+    });
+  });
+
+  it("hover inside an unmarked function carries no IR section", async () => {
+    const { uri, src } = writeFixture(MARKED);
+    await withClient(async (client) => {
+      client.notify("textDocument/didOpen", {
+        textDocument: { uri, languageId: "yoop", version: 1, text: src },
+      });
+      const lines = src.split("\n");
+      const line = lines.findIndex((l) => l.includes("return n * 3"));
+      const resp = await client.request("textDocument/hover", {
+        textDocument: { uri },
+        position: { line, character: lines[line].indexOf("n") },
+      });
+      const value = resp.result?.contents?.value ?? "";
+      assert.doesNotMatch(value, /@inspect/);
+    });
+  });
+
+  it("hover still returns type info when the file has no @inspect at all", async () => {
+    // The gate must not disturb the ordinary hover path.
+    const { uri, src } = writeFixture(`function main(): int32 {
+    let x: int32 = 7;
+    return x;
+}
+`);
+    await withClient(async (client) => {
+      client.notify("textDocument/didOpen", {
+        textDocument: { uri, languageId: "yoop", version: 1, text: src },
+      });
+      const resp = await client.request("textDocument/hover", {
+        textDocument: { uri },
+        position: { line: 2, character: 11 },
+      });
+      assert.match(resp.result?.contents?.value ?? "", /int32/);
+    });
+  });
+
+  it("advertises a code lens provider and emits one lens per marked function", async () => {
+    const { uri, src } = writeFixture(MARKED);
+    await withClient(async (client) => {
+      client.notify("textDocument/didOpen", {
+        textDocument: { uri, languageId: "yoop", version: 1, text: src },
+      });
+      const resp = await client.request("textDocument/codeLens", {
+        textDocument: { uri },
+      });
+      const lenses = resp.result ?? [];
+      assert.equal(lenses.length, 1, `expected 1 lens, got ${lenses.length}`);
+      assert.equal(lenses[0].command.command, "yoop.showSubstrate");
+      assert.match(lenses[0].command.title, /LLVM IR/);
+      // The lens sits on the function's declaration line (0-based here).
+      assert.equal(lenses[0].range.start.line, 1);
+      assert.equal(lenses[0].command.arguments[0].declLine, 2);
+    });
+  });
+
+  it("emits a lens per requested mode", async () => {
+    const { uri, src } = writeFixture(`@inspect(ir, asm)
+function doubled(x: int32): int32 { return x * 2; }
+function main(): int32 { return doubled(21); }
+`);
+    await withClient(async (client) => {
+      client.notify("textDocument/didOpen", {
+        textDocument: { uri, languageId: "yoop", version: 1, text: src },
+      });
+      const resp = await client.request("textDocument/codeLens", {
+        textDocument: { uri },
+      });
+      assert.deepEqual(
+        (resp.result ?? []).map((l) => l.command.arguments[0].mode),
+        ["ir", "asm"],
+      );
+    });
+  });
+
+  it("answers yoop/substrate with the function's full IR and highlights", async () => {
+    const { uri, src } = writeFixture(MARKED);
+    await withClient(async (client) => {
+      client.notify("textDocument/didOpen", {
+        textDocument: { uri, languageId: "yoop", version: 1, text: src },
+      });
+      const resp = await client.request("yoop/substrate", {
+        textDocument: { uri },
+        declLine: 2,
+        mode: "ir",
+        focusLine: MULTIPLY_LINE + 1, // 1-based source line
+      });
+      const r = resp.result;
+      assert.ok(r, "expected a substrate response");
+      assert.equal(r.error, undefined);
+      assert.match(r.lines[0], /^define .*hotLoop/);
+      assert.equal(r.lines[r.lines.length - 1], "}");
+      assert.ok(r.highlight.length > 0, "expected highlighted rows");
+      assert.match(
+        r.highlight.map((h) => r.lines[h]).join("\n"),
+        /\bmul\b/,
+      );
+    });
+  });
+
+  it("reports a build failure through yoop/substrate instead of erroring", async () => {
+    const { uri, src } = writeFixture(`@inspect(ir)
+function broken(): int32 { return "nope"; }
+`);
+    await withClient(async (client) => {
+      client.notify("textDocument/didOpen", {
+        textDocument: { uri, languageId: "yoop", version: 1, text: src },
+      });
+      const resp = await client.request("yoop/substrate", {
+        textDocument: { uri },
+        declLine: 2,
+        mode: "ir",
+      });
+      assert.ok(resp.result?.error, "expected an error field, not a crash");
+      assert.match(resp.result.error, /error/);
+    });
+  });
+});

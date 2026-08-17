@@ -47,6 +47,7 @@ export function analyze(entryAbsPath, overlays = new Map()) {
 
   // Entry is the last module in the topo order (post-order leaves-first).
   const entryMod = graph.modules[graph.modules.length - 1];
+  const autoloadedStdModuleIds = graph.autoloadedStdModuleIds ?? {};
   const modById = new Map(graph.modules.map((m) => [m.id, m]));
   const modByPath = new Map(graph.modules.map((m) => [m.absPath, m]));
 
@@ -101,6 +102,15 @@ export function analyze(entryAbsPath, overlays = new Map()) {
     });
   }
 
+  // The driver stamps this onto programState right after loading the graph
+  // (see yoopiler.js), and codegen hard-errors without it the moment a
+  // template literal needs std/core/format.yoop. Stamping it here too is what
+  // lets an LSP feature run codegen over the same programState the driver
+  // would have built - see lsp/substrate.js.
+  if (typecheckResult.programState) {
+    typecheckResult.programState.autoloadedStdModuleIds = autoloadedStdModuleIds;
+  }
+
   return {
     diagnostics,
     modules: graph.modules,
@@ -108,6 +118,7 @@ export function analyze(entryAbsPath, overlays = new Map()) {
     programState: typecheckResult.programState,
     entryModule: entryMod,
     modById,
+    autoloadedStdModuleIds,
   };
 }
 

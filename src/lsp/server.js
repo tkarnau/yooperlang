@@ -33,6 +33,14 @@ import { buildSemanticTokens, SEMANTIC_TOKEN_LEGEND } from "./semanticTokens.js"
 import { findReferences, identifyTarget } from "./references.js";
 import { renameAtCursor } from "./rename.js";
 import { collectCompletions } from "./completion.js";
+import {
+  SubstrateCache,
+  asmFor,
+  collectInspectFunctions,
+  renderFunctionView,
+  renderSubstrateHover,
+  substrateAt,
+} from "./substrate.js";
 
 // ---------- LSP framing (Content-Length headers) -----------------------------
 
@@ -137,6 +145,48 @@ function buildOverlays() {
     if (doc.absPath) overlays.set(doc.absPath, doc.text);
   }
   return overlays;
+}
+
+// Built IR / asm for `@inspect`ed functions. Unlike `doc.analysis`, this is
+// cleared WHOLESALE on any edit rather than per document: a substrate is a
+// whole-program build, so editing an imported module changes the IR of every
+// file that imports it. Rebuilding is ~55ms and only ever happens on demand,
+// which makes the cheap, always-correct invalidation the right trade.
+const substrateCache = new SubstrateCache();
+
+// The substrate for the program rooted at this document, or null when the
+// document has no `@inspect` in it at all. That check comes first and is the
+// reason codegen does not run on every hover in every file.
+function substrateContextFor(uri) {
+  const doc = documents.get(uri);
+  if (!doc || !doc.absPath) return null;
+  const analysis = analysisFor(uri);
+  if (!analysis) return null;
+  const marked = collectInspectFunctions(analysis.modules);
+  if (!marked.has(doc.absPath)) return null;
+  return {
+    modules: analysis.modules,
+    substrate: substrateCache.get(doc.absPath, buildOverlays()),
+    absPath: doc.absPath,
+  };
+}
+
+// Markdown for the `@inspect` part of a hover, or null when the position is
+// not inside a marked function. LSP positions are 0-based; every source
+// location in the compiler is 1-based, so the line is converted once here
+// rather than in each caller.
+function substrateHoverFor(uri, position) {
+  const ctx = substrateContextFor(uri);
+  if (!ctx) return null;
+  const line = position.line + 1;
+  try {
+    const view = substrateAt(ctx, ctx.absPath, line);
+    return renderSubstrateHover(view, line);
+  } catch (err) {
+    // A substrate view is decoration. A bug in it must cost the user their IR
+    // section, never their type hover - same rule docForHover follows.
+    return `_@inspect failed: ${err.message}_`;
+  }
 }
 
 // Run analyze() for the document at `uri` (or return the cached result).
@@ -335,6 +385,9 @@ function handleMessage(msg) {
           full: true,
           range: false,
         },
+        // One lens per `@inspect`ed function, so the feature is discoverable
+        // from the code rather than only by hovering and hoping.
+        codeLensProvider: { resolveProvider: false },
       },
       serverInfo: { name: "yoopiler-lsp", version: "0.1.0" },
     });
@@ -361,6 +414,7 @@ function handleMessage(msg) {
     }
     // Invalidate cached analysis so the next feature request reanalyzes.
     doc.analysis = null;
+    substrateCache.invalidate();
     publishFor(td.uri);
     return;
   }
@@ -368,6 +422,7 @@ function handleMessage(msg) {
   if (msg.method === "textDocument/didSave") {
     const doc = documents.get(msg.params.textDocument.uri);
     if (doc) doc.analysis = null;
+    substrateCache.invalidate();
     publishFor(msg.params.textDocument.uri);
     return;
   }
@@ -375,6 +430,7 @@ function handleMessage(msg) {
   if (msg.method === "textDocument/didClose") {
     const uri = msg.params.textDocument.uri;
     documents.delete(uri);
+    substrateCache.invalidate();
     // Clear any squiggles on the closed file.
     sendNotification("textDocument/publishDiagnostics", { uri, diagnostics: [] });
     return;
@@ -382,8 +438,22 @@ function handleMessage(msg) {
 
   if (msg.method === "textDocument/hover") {
     const { textDocument, position } = msg.params;
+    // The `@inspect` section is keyed off the LINE, not off an identifier, so
+    // it is resolved before (and independently of) the type hover: hovering
+    // the middle of `acc = acc + i * i` lands on no name, and that is exactly
+    // the position whose instructions you want to see.
+    const substrateMd = substrateHoverFor(textDocument.uri, position);
     const at = resolveAt(textDocument.uri, position);
-    if (!at) { sendResponse(msg.id, null); return; }
+    if (!at) {
+      // No AST here, but a substrate section alone is still worth showing.
+      sendResponse(
+        msg.id,
+        substrateMd
+          ? { contents: { kind: "markdown", value: substrateMd } }
+          : null,
+      );
+      return;
+    }
     let text = at.node ? getHoverInfo(at.node, at.module) : null;
     // Fall back to a type/kind hover when the cursor is on a type
     // annotation (parser object, not an AST node) - getHoverInfo on the
@@ -397,16 +467,89 @@ function handleMessage(msg) {
         });
       }
     }
-    if (!text) { sendResponse(msg.id, null); return; }
+    if (!text) {
+      sendResponse(
+        msg.id,
+        substrateMd
+          ? { contents: { kind: "markdown", value: substrateMd } }
+          : null,
+      );
+      return;
+    }
     // Append the declaration's own comment block, if it has one. Resolved
     // through findDefinition so it works at a CALL SITE and across files -
     // hovering `padStart` in your code shows the header written above it in
     // std/core/strings.yoop. See docCommentAt in nav.js for why.
     const doc = docForHover(at);
-    const value = doc
+    let value = doc
       ? "```yoop\n" + text + "\n```\n\n---\n\n" + doc
       : "```yoop\n" + text + "\n```";
+    // Substrate goes last: the type is what you came for, the IR is what you
+    // opted into.
+    if (substrateMd) value += "\n\n---\n\n" + substrateMd;
     sendResponse(msg.id, { contents: { kind: "markdown", value } });
+    return;
+  }
+
+  // One lens above each `@inspect`ed function per mode it asked for. Cheap:
+  // it reads the markers off the AST and never builds a substrate, so opening
+  // a file with `@inspect` in it does not trigger codegen until you click.
+  if (msg.method === "textDocument/codeLens") {
+    const uri = msg.params.textDocument.uri;
+    const doc = documents.get(uri);
+    const analysis = doc ? analysisFor(uri) : null;
+    if (!analysis) { sendResponse(msg.id, []); return; }
+    const marked = collectInspectFunctions(analysis.modules).get(doc.absPath);
+    if (!marked) { sendResponse(msg.id, []); return; }
+    const lenses = [];
+    for (const [declLine, { name, modes }] of marked) {
+      const range = {
+        start: { line: declLine - 1, character: 0 },
+        end: { line: declLine - 1, character: 0 },
+      };
+      for (const mode of modes) {
+        lenses.push({
+          range,
+          command: {
+            title: mode === "ir" ? "$(symbol-misc) LLVM IR" : "$(chip) x86-64 asm",
+            command: "yoop.showSubstrate",
+            arguments: [{ uri, declLine, mode, name }],
+          },
+        });
+      }
+    }
+    sendResponse(msg.id, lenses);
+    return;
+  }
+
+  // Full text of one `@inspect`ed function in one substrate, for the side
+  // panel. Params: { textDocument: { uri }, declLine, mode, focusLine? }.
+  // `focusLine` is a 1-based SOURCE line; the response's `highlight` holds
+  // 0-based indices into `lines` so the client can mark the rows that line
+  // produced without redoing the mapping.
+  if (msg.method === "yoop/substrate") {
+    const { textDocument, declLine, mode, focusLine } = msg.params ?? {};
+    const ctx = substrateContextFor(textDocument?.uri);
+    if (!ctx) { sendResponse(msg.id, null); return; }
+    if (ctx.substrate.error) {
+      sendResponse(msg.id, { mode, error: ctx.substrate.error });
+      return;
+    }
+    let index = ctx.substrate.irIndex;
+    if (mode === "asm") {
+      const asm = asmFor(ctx.substrate);
+      if (asm.error) { sendResponse(msg.id, { mode, error: asm.error }); return; }
+      index = asm.asmIndex;
+    }
+    const view = renderFunctionView(index, ctx.absPath, declLine, focusLine);
+    if (!view) {
+      sendResponse(msg.id, {
+        mode,
+        error: `no ${mode === "asm" ? "assembly" : "IR"} was emitted for this function - a generic function produces code only where it is instantiated`,
+      });
+      return;
+    }
+    sendResponse(msg.id, { mode, ...view });
     return;
   }
 

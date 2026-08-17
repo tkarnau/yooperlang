@@ -226,6 +226,89 @@ REGISTRY.set("derive", {
   },
 });
 
+// `@inspect(ir)` / `@inspect(asm)` / `@inspect(ir, asm)` on a function decl:
+// opt that function into the editor's substrate view. It is a pure MARKER -
+// it has no parsePhase side effects on the program, no comptimePhase, and no
+// codegenPhase, and the function compiles byte-for-byte as if the attribute
+// were not written. That matters more here than for any other attribute: the
+// whole feature is "show me what this compiles to", so an attribute that
+// perturbed codegen would be lying about its own subject.
+//
+// Being `transparent` means the parser stamps `fn.inspect` and returns the
+// FUNCTION_DECL itself instead of an ATTRIBUTE wrapper, so nothing downstream
+// needs to know the attribute exists. The consumer is the LSP: hovering a
+// line inside a marked function slices the emitted IR (and, for `asm`, the
+// `clang -S` output) down to the instructions attributed to that line.
+const INSPECT_MODES = new Set(["ir", "asm"]);
+
+REGISTRY.set("inspect", {
+  transparent: true,
+  parsePhase(attrNode, ctx) {
+    const args = attrNode.args ?? [];
+    if (args.length === 0) {
+      ctx.throwError(
+        `@inspect requires at least one mode - @inspect(ir), @inspect(asm), or @inspect(ir, asm)`,
+        attrNode.argsSourceLoc ?? attrNode.sourceLoc,
+      );
+    }
+    const seen = new Set();
+    for (let i = 0; i < args.length; i++) {
+      const arg = args[i];
+      // See parseAttribute: argSourceLocs is what points at the argument
+      // itself; arg.sourceLoc points one token past it.
+      const at =
+        attrNode.argSourceLocs?.[i] ??
+        attrNode.argsSourceLoc ??
+        attrNode.sourceLoc;
+      if (arg.kind !== "IDENT") {
+        ctx.throwError(
+          `@inspect modes are bare names, not expressions - write @inspect(ir) or @inspect(ir, asm)`,
+          at,
+        );
+      }
+      if (!INSPECT_MODES.has(arg.name)) {
+        ctx.throwError(
+          `unknown @inspect mode "${arg.name}" - supported modes: ${[...INSPECT_MODES].join(", ")}`,
+          at,
+        );
+      }
+      if (seen.has(arg.name)) {
+        ctx.throwError(`@inspect mode "${arg.name}" is listed twice`, at);
+      }
+      seen.add(arg.name);
+    }
+    if (inspectTargetFn(attrNode.target) == null) {
+      ctx.throwError(
+        `@inspect only applies to a function declaration (got ${attrNode.target?.kind ?? "no target"})`,
+        attrNode.sourceLoc,
+      );
+    }
+  },
+  attach(attrNode, target) {
+    const fn = inspectTargetFn(target);
+    fn.inspect = {
+      modes: (attrNode.args ?? []).map((a) => a.name),
+      sourceLoc: attrNode.sourceLoc,
+    };
+  },
+});
+
+// Reach through the `export` wrappers to the FUNCTION_DECL an @inspect is
+// really about. `export function f()` parses as EXPORT_DECL{decl}, and
+// `export "C" function f()` as EXPORT_C_FUNCTION_DECL{fn}. Returns null for
+// any other target shape, which is what parsePhase turns into a diagnostic.
+function inspectTargetFn(target) {
+  if (target == null) return null;
+  if (target.kind === "FUNCTION_DECL") return target;
+  if (target.kind === "EXPORT_DECL") {
+    return target.decl?.kind === "FUNCTION_DECL" ? target.decl : null;
+  }
+  if (target.kind === "EXPORT_C_FUNCTION_DECL") {
+    return target.fn?.kind === "FUNCTION_DECL" ? target.fn : null;
+  }
+  return null;
+}
+
 export function getAttributeHandler(name) {
   return REGISTRY.get(name) ?? null;
 }

@@ -1,0 +1,50 @@
+// `@inspect` - seeing what a function compiles to, from the editor.
+//
+// Open this file with the Yooperlang extension running and hover a line
+// inside either marked function below. The attribute is the gate; the cursor
+// is the selector, so you get the instructions for THAT line rather than a
+// dump of the whole function. Select a range to see the union. The code lens
+// above each declaration opens the whole function in a side panel that
+// highlights the rows for whatever line the cursor is on.
+//
+// Nothing here changes how the program compiles - `@inspect` is a pure
+// marker, and there is a regression test asserting the IR is byte-identical
+// with and without it.
+
+import.unsafe;
+
+extern "C" from "stdio.h" {
+  function printf(fmt: string, ...): int32;
+}
+
+// Hover the `acc = acc + i * i` line: three loads, a `mul`, an `add`, a
+// `store`. The `mul` and `add` come back marked `~`, meaning the mapping
+// inferred them - codegen only attaches debug locations to side-effecting and
+// control-flow instructions, so pure arithmetic is attributed by its
+// neighbours.
+//
+// Hover the `for` header instead and the same source line turns out to have
+// produced code in four different basic blocks: the init in `entry`, the
+// comparison in `for_cond_0`, and the increment in `for_step_2`.
+@inspect(ir)
+function hotLoop(n: int32): int32 {
+  let acc: int32 = 0;
+  for (let i: int32 = 0; i < n; i = i + 1) {
+    acc = acc + i * i;
+  }
+  return acc;
+}
+
+// Asking for both substrates. The IR keeps the multiply as written
+// (`mul i32 %t0, 2`), and the assembly shows what the backend actually chose:
+// `shll %eax` - a shift, not a multiply. That gap between the two views is
+// the reason to look at both.
+@inspect(ir, asm)
+export function doubled(x: int32): int32 {
+  return x * 2;
+}
+
+function main(): int32 {
+  printf(`hotLoop=${hotLoop(10)} doubled=${doubled(21)}\n`);
+  return 0;
+}

@@ -514,6 +514,59 @@ Fixtures live in [../examples/testing/](../examples/testing/). Do NOT put
 
 ---
 
+## 8.5 Seeing what a function compiles to
+
+`@inspect` on a function opts it into an editor view of the LLVM IR (and
+optionally the x86-64 assembly) it becomes. It is a visibility tool, not a
+debugger: nothing runs, nothing is stepped, and you do not need a build.
+
+```yoop
+@inspect(ir)
+function hotLoop(n: int32): int32 {
+  let acc: int32 = 0;
+  for (let i: int32 = 0; i < n; i = i + 1) {
+    acc = acc + i * i;   // hover this line to see its mul + add
+  }
+  return acc;
+}
+
+@inspect(ir, asm)
+export function doubled(x: int32): int32 {
+  return x * 2;          // asm shows `shll` - the shift, not a multiply
+}
+```
+
+The attribute is the **gate**, the cursor is the **selector**. Marking a
+function does not dump the whole thing at you; it means that hovering any line
+inside it shows the instructions THAT line produced, and selecting a range
+shows the union. A lens above the declaration opens a side panel with the whole
+function, highlighting the rows for whatever line the cursor is on.
+
+Modes are `ir`, `asm`, or both. `asm` is lowered with `clang -S -O0` to match
+what the driver actually builds (`-g -O0`); it costs a clang process, so it
+runs only when a function asks for it.
+
+Three things worth knowing:
+
+- **The attribute changes nothing.** A marked function compiles byte-for-byte
+  as it would unmarked - it is a pure marker consumed by the parser, and there
+  is a regression test asserting the IR is identical with and without it. A
+  visibility tool that perturbed its own subject would be lying.
+- **Generic functions have no IR of their own.** Code exists per
+  instantiation, so `@inspect` on `function map<T>(...)` shows the panel's
+  "no code emitted" message unless the entry point instantiates it.
+- **Lines marked `~` in the IR view are inferred.** Codegen only attaches
+  debug locations to side-effecting and control-flow instructions, so pure
+  arithmetic is attributed by its neighbours rather than read off metadata
+  (see [../src/jsyoopcodegen/irIndex.js](../src/jsyoopcodegen/irIndex.js)). The
+  assembly view has no such gap - `.loc` directives cover every instruction.
+
+At the IDE boundary this is the LSP's `yoop/substrate` request plus a code
+lens; the mapping itself lives in `irIndex.js` / `asmIndex.js` and is
+independent of any editor.
+
+---
+
 ## 9. Bootstrap conventions
 
 The self-hosting compiler lives in [../bootstrap/src/](../bootstrap/src/) and is

@@ -7,12 +7,15 @@
 //    system `lldb-dap` binary. The configuration provider compiles the .yoop
 //    entry file with yoopiler before launch, then rewrites `program` from
 //    the source path to the compiled binary path that lldb-dap expects.
+// 3. The `@inspect` substrate panel - a read-only side view of the LLVM IR or
+//    assembly a marked function compiles to. See substratePanel.js.
 
 const path = require("path");
 const fs = require("fs");
 const cp = require("child_process");
 const vscode = require("vscode");
 const { LanguageClient, TransportKind } = require("vscode-languageclient/node");
+const substratePanel = require("./substratePanel");
 
 let client;
 let channel;
@@ -36,6 +39,10 @@ function activate(context) {
 
   startLspClient(context, repoRoot, standaloneBin);
   registerDebugger(context, repoRoot, standaloneBin);
+  // Passed as a getter rather than a value: the client is created inside
+  // startLspClient and starts asynchronously, so the panel has to read it at
+  // command time rather than capture it at activation.
+  substratePanel.register(context, () => client, log);
 }
 
 // Locate a packaged yoopiler binary, which lets this extension work with no

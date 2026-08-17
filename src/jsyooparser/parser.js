@@ -991,7 +991,14 @@ export function parse(src) {
               // from the typechecker's perspective. Forward the
               // `isModuleLevel` flag through the wrapper so symbol
               // collection picks it up.
-              const tgt = attrNode.target;
+              //
+              // A transparent attribute (@inspect) has already returned its
+              // target unwrapped, so there is no `.target` to reach through -
+              // the decl it produced lands in the body as if written bare.
+              const tgt =
+                attrNode.kind === ASTNodeKind.ATTRIBUTE
+                  ? attrNode.target
+                  : attrNode;
               if (
                 tgt &&
                 (tgt.kind === ASTNodeKind.LET_DECL ||
@@ -1079,6 +1086,14 @@ export function parse(src) {
     node.nameSourceLoc.length = nameTok.length;
 
     node.args = [];
+    // Parallel array of "where did this argument START" locations. An
+    // expression node's own sourceLoc is stamped by buildSourcedNode from the
+    // parser position at CONSTRUCTION time, which for a bare IDENT is already
+    // one token past the name - so pointing a per-argument diagnostic at
+    // `arg.sourceLoc` underlines the comma or the closing paren instead of the
+    // argument. Capturing the start token here is the only way an attribute
+    // handler can squiggle the argument the user actually got wrong.
+    node.argSourceLocs = [];
     if (peek().tag === TokenTags.lparen) {
       const lparenTok = advance();
       node.argsSourceLoc = posToSourceLocation(src, lparenTok.start);
@@ -1086,6 +1101,10 @@ export function parse(src) {
         peek().tag !== TokenTags.rparen &&
         peek().tag !== TokenTags.eof
       ) {
+        const argTok = peek();
+        const argLoc = posToSourceLocation(src, argTok.start);
+        argLoc.length = argTok.length;
+        node.argSourceLocs.push(argLoc);
         node.args.push(parseExpression());
         if (peek().tag === TokenTags.comma) {
           advance();
@@ -1114,12 +1133,21 @@ export function parse(src) {
       node.target = parseVariantDecl();
     } else if (nextTag === TokenTags.export) {
       node.target = parseExportDecl();
+    } else if (nextTag === TokenTags.function) {
+      node.target = parseFunctionDecl();
+    } else if (kindPrefixedFunctionArity() > 0) {
+      // Kind-prefixed function decl - `@inspect(ir) async function f()`, and
+      // the prefix-only spelling `@inspect(ir) task f()`. Both start on an
+      // ident rather than the `function` keyword, so the tag switch above
+      // cannot see them; the same arity probe the top-level dispatch uses
+      // tells them apart from an ordinary expression.
+      node.target = parseFunctionDecl();
     } else if (nextTag === TokenTags.semicolon) {
       advance();
       node.target = null;
     } else {
       throw parseError(
-        `@${node.name} requires a '{ ... }' block, a 'let' / 'const' decl, a 'type' / 'variant' declaration (optionally exported), or ';' (got ${inverseTokenTags[nextTag]})`,
+        `@${node.name} requires a '{ ... }' block, a 'let' / 'const' decl, a 'function' decl, a 'type' / 'variant' declaration (optionally exported), or ';' (got ${inverseTokenTags[nextTag]})`,
         peek().start,
         peek().length,
       );
@@ -1149,6 +1177,21 @@ export function parse(src) {
           throw parseError(msg, loc?.pos ?? nameTok.start, loc?.length ?? 1);
         },
       });
+    }
+
+    // Transparent attributes are pure markers: they record something on the
+    // target for a later consumer to read, and change nothing about how the
+    // target compiles. Rather than leave an ATTRIBUTE wrapper in the AST for
+    // every downstream pass to learn to unwrap, `attach` stamps the marker
+    // onto the target and we hand back the TARGET itself. To typecheck,
+    // codegen, and the LSP the decl then looks exactly as it would have
+    // without the attribute - which is the entire point, since a marker that
+    // perturbs codegen would be showing you IR for a program you did not
+    // write. Non-transparent attributes (@precompile, @derive) still return
+    // the wrapper, because they genuinely consume their target.
+    if (handler.transparent) {
+      handler.attach(node, node.target);
+      return node.target;
     }
 
     return node;
