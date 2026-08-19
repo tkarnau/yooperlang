@@ -1,0 +1,3 @@
+# Illegal: `propagates<bogus>` names a kind nothing in the graph declares, so
+# the clause promises to carry an obligation that does not exist.
+1:18: propagates "bogus", which no kind declares

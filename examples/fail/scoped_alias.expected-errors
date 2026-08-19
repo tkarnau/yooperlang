@@ -1,0 +1,4 @@
+# Illegal: `scoped` states `mustNotEscape scope`, and `b` carries no such
+# bound. The alias outlives nothing `a` did not, but every later check on it -
+# the return rule included - would pass.
+26:9: under a name that carries no such bound

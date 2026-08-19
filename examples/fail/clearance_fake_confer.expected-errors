@@ -1,0 +1,4 @@
+# Illegal: `cleared` is conferred and names `Cleansable.cleanse` as the only
+# authority that may mint it. A free function returning the conferred form
+# forges the capability - the trait impl is the structural gate.
+25:10: would confer kind "cleared"

@@ -1,0 +1,4 @@
+# Illegal: `42x` glues an identifier onto a numeric literal. The lexer ends the
+# number at `42`, so the parser arrives where the statement's semicolon belongs
+# holding an IDENT instead.
+22:21: expected SEMICOLON, got IDENT

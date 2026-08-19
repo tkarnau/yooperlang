@@ -1,0 +1,4 @@
+# Illegal: `mustNotEscape` is bounded by a SCOPE, which is the only bound with
+# a place to check it - a closing brace. `mustNotEscape function` reads like a
+# weaker promise and is not one anything implements.
+3:5: bounds mustNotEscape by something other than "scope"

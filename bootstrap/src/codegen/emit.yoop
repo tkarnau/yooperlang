@@ -55,6 +55,12 @@ export type Emitter propagates<disposable> {
   hasDbgLoc: bool,
   inInstr: bool,
   declaredDbgIntrinsic: bool,
+  // `--track-heap`: emit a counter call beside every heap allocation and free,
+  // and install the dump as an atexit handler in `main`. Off by default, and
+  // the whole feature is those two things - the counting itself lives in
+  // runtime/yoop_runtime.c.
+  trackHeap: bool,
+  declaredDiagCounters: bool,
   usesPrintf: bool,
   // Set by the first template literal that actually builds one, so a program
   // with none declares no libc string functions at all.
@@ -91,7 +97,7 @@ export type Emitter propagates<disposable> {
   moduleInits: Vec<string>,
 }
 
-export function emitterNew(): Emitter propagates<disposable> {
+export function emitterNew(opts: CodegenOptions): Emitter propagates<disposable> {
   // Annotated rather than inline: `V` is not inferable from uint64KeyOps alone
   // and there is no turbofish.
   let constOps: Map<uint64, Operand> = map.mapNew(0, map.uint64KeyOps());
@@ -115,6 +121,8 @@ export function emitterNew(): Emitter propagates<disposable> {
     hasDbgLoc: false,
     inInstr: false,
     declaredDbgIntrinsic: false,
+    trackHeap: opts.trackHeap,
+    declaredDiagCounters: false,
     usesPrintf: false,
     usesStringBuilder: false,
     usesRuntime: false,

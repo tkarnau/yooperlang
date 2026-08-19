@@ -30,7 +30,7 @@ module codegen;
 import * as map from "std/collections/map.yoop";
 import { ASTNode, NodeId, childAt, nodeAt } from "../ast";
 import * as str from "std/core/strings.yoop";
-import { Type, typeAt, sizeOfType, isIntrinsicName } from "../typecheck";
+import { Type, typeAt, sizeOfType, derefType, isIntrinsicName } from "../typecheck";
 
 // True when this call names an intrinsic rather than a function.
 //
@@ -193,6 +193,7 @@ function emitHeapAlloc(ref cx: Cx, expr: ASTNode, exprId: NodeId, ref out: Opera
     ref cx, size, "mul", "i64", n,
     Operand.Imm { value: uint64(elementSizeOfResult(ref cx, exprId)) }
   );
+  recordAlloc(ref cx, Operand.Temp { id: size });
   const raw = freshTemp(cx.e);
   emitMalloc(ref cx, raw, Operand.Temp { id: size });
 
@@ -212,6 +213,7 @@ function emitCtxAllocCall(ref cx: Cx, expr: ASTNode, exprId: NodeId, ref out: Op
     ref cx, size, "mul", "i64", n,
     Operand.Imm { value: uint64(elementSizeOfResult(ref cx, exprId)) }
   );
+  recordAlloc(ref cx, Operand.Temp { id: size });
   const raw = freshTemp(cx.e);
   emitCtxAlloc(ref cx, raw, Operand.Temp { id: size });
   out = buildDescriptor(ref cx, Operand.Temp { id: raw }, n);
@@ -226,6 +228,7 @@ function emitCtxFreeCall(ref cx: Cx, expr: ASTNode, ref out: Operand): EmitResul
 
   const data = freshTemp(cx.e);
   emitExtractValue(ref cx, data, ARRAY_DESCRIPTOR, a, 0);
+  recordFree(ref cx, expr, a);
   emitCtxFree(ref cx, data);
   out = Operand.None;
   return EmitResult.Ok;
@@ -240,9 +243,39 @@ function emitHeapFree(ref cx: Cx, expr: ASTNode, ref out: Operand): EmitResult {
 
   const data = freshTemp(cx.e);
   emitExtractValue(ref cx, data, ARRAY_DESCRIPTOR, a, 0);
+  recordFree(ref cx, expr, a);
   emitFree(ref cx, data);
   out = Operand.None;
   return EmitResult.Ok;
+}
+
+// `--track-heap` bookkeeping, and a no-op in an ordinary build.
+//
+// Split into these two rather than written at the four call sites, because the
+// FREE side has work to do: a pointer does not know how many bytes it owns, so
+// the count is recovered from the descriptor's length times the element size -
+// the same product the allocation was made from.
+function recordAlloc(ref cx: Cx, bytes: Operand): void {
+  if (!cx.e.trackHeap) {
+    return;
+  }
+  declareDiagCounters(cx.e);
+  emitDiagRecordAlloc(ref cx, bytes);
+}
+
+function recordFree(ref cx: Cx, expr: ASTNode, descriptor: Operand): void {
+  if (!cx.e.trackHeap) {
+    return;
+  }
+  declareDiagCounters(cx.e);
+  const len = freshTemp(cx.e);
+  emitExtractValue(ref cx, len, ARRAY_DESCRIPTOR, descriptor, 1);
+  const bytes = freshTemp(cx.e);
+  emitBinOp(
+    ref cx, bytes, "mul", "i64", Operand.Temp { id: len },
+    Operand.Imm { value: uint64(elementSizeOfArg(ref cx, expr, 0)) }
+  );
+  emitDiagRecordFree(ref cx, Operand.Temp { id: bytes });
 }
 
 // `arraySlice(xs, start, end)` - a borrowing view, no copy.
@@ -301,6 +334,23 @@ function emitIntrinsicArg(ref cx: Cx, expr: ASTNode, i: usize, ref out: Operand)
 // The size in bytes of the element of the ARRAY this call returns.
 function elementSizeOfResult(ref cx: Cx, exprId: NodeId): usize {
   switch (typeAt(cx.prog, resolvedTypeAt(ref cx, exprId))) {
+    case Type.Array { elem: e }: { return sizeOfType(cx.prog, e); }
+    default: { return 1; }
+  }
+}
+
+// The element size of an intrinsic's i'th ARGUMENT, which is what a free has to
+// multiply its length by. The result twin above answers about the call, and a
+// free's result is void.
+function elementSizeOfArg(ref cx: Cx, expr: ASTNode, i: usize): usize {
+  if (expr.childA == 0) {
+    return 1;
+  }
+  const list = nodeAt(cx.ast, expr.childA);
+  if (i >= list.childCount) {
+    return 1;
+  }
+  switch (typeAt(cx.prog, derefType(cx.prog, resolvedTypeAt(ref cx, childAt(cx.ast, list, i))))) {
     case Type.Array { elem: e }: { return sizeOfType(cx.prog, e); }
     default: { return 1; }
   }

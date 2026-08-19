@@ -1,0 +1,4 @@
+# Illegal: `cleared` is CONFERRED, so it cannot be forged by annotating the
+# binding. `plain()` returns a plain string, and an annotation on the left of
+# `=` is not a source of a capability.
+13:34: binding "c" requires kind "cleared"

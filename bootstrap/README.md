@@ -52,6 +52,12 @@ a shared header file.
                        access, literal, loop, switch.
                        async.yoop is `await` coloring, task.yoop the spawn's
                        half - `Task<T>`, the binding forms, `wait`;
+                       kinds.yoop is what a `kind` DECLARATION is allowed to
+                       say - sites, effect categories, composition, and the
+                       two clauses that name a trait, kind_use.yoop where one
+                       may be WRITTEN, clearance.yoop who may move a value
+                       across a marker, and markers.yoop what a value CARRIES
+                       at every place it moves;
                        vtable*.yoop is type ERASURE - what a vtable's slots are
                        and what the three ways of using one mean;
                        diverge.yoop answers "does control flow always leave
@@ -2328,13 +2334,20 @@ different sets on purpose and neither may move the other's numbers.
 compilers and asserts identical stdout and exit code. It exercises every layer
 at once.
 
-Four divergences, worth knowing because the bootstrap is the one that is right
-in all four - and worth WRITING DOWN, because once the reference is gone there
+Five divergences, worth knowing because the bootstrap is the one that is right
+in all five - and worth WRITING DOWN, because once the reference is gone there
 is nothing left to notice them against.
 
   * `printf("%d", 2 + 3)` is an error in the JS reference ("this expression
     still has an unpinned literal type"). The bootstrap's pass D defaults an
     unconstrained untyped int literal to int32.
+  * `n += 1` ON A `ref` SCALAR PARAMETER. The reference emits `add ptr %n, 1`,
+    never opening the borrow, and clang refuses the module; `n = n + 1` on the
+    same parameter is fine. The bootstrap compiles both.
+  * `n += 1` ON A `ref` SCALAR PARAMETER. The reference emits `add ptr %n, 1`,
+    never opening the borrow, and clang refuses the module; `n = n + 1` on the
+    same parameter is fine, which is what makes it easy to hit and easy to miss.
+    The bootstrap compiles both.
   * INT LITERALS PAST 2^53. The reference carries them as JS numbers and rounds
     them in the lexer; nothing downstream can recover the value. This is not a
     curiosity: the FNV-1a offset basis in std/core/strings.yoop is one, so under

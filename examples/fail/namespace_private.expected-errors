@@ -1,0 +1,5 @@
+# Illegal: `private_fn` is declared in m.yoop without `export`, so a namespace
+# import cannot reach it. Namespace form does not widen visibility.
+#
+# A DIRECTORY fixture: the harness builds `namespace_private/main.yoop`.
+4:24: "private_fn" is declared in module

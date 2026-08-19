@@ -17,7 +17,7 @@ import { AST, ASTNodeKind, NodeId, childAt, declOf, kindName, nodeAt, emptyArena
 import { Module, ModuleGraph, LoadModuleResult, moduleFromSource, singleModuleGraph } from "../source_graph";
 import { Text }, * as text from "std/core/text.yoop";
 import { typecheckProgram, lookupOwnName, primBitWidth } from "../typecheck";
-import { codegenProgram } from "../codegen";
+import { codegenProgram, defaultCodegenOptions } from "../codegen";
 import { runPrecompilePass } from "../comptime";
 import { ComptimeError, FoldedConsts, newFoldedConsts, recordFolded, foldExpression } from "../comptime";
 import { SourceLocation } from "../diagnostics";
@@ -880,7 +880,7 @@ function precompiled(src: string): Precompiled propagates<disposable> {
   if (prog.diagnostics.len > 0) {
     return { ir: "", errors: text.view(ref messages) };
   }
-  switch (codegenProgram(ref prog, ref graph)) {
+  switch (codegenProgram(ref prog, ref graph, defaultCodegenOptions())) {
     case Result.Ok { value: out }: {
       disposable emitted: Text = out.ir;
       disposable libs: Vec<string> = out.linkLibraries;

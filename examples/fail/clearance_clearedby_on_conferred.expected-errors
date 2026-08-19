@@ -1,0 +1,3 @@
+# Illegal: `clearedBy` names the method that SHEDS a hazard, and `cleared` is
+# declared `conferred` - a capability. The conferred half is `appliedBy`.
+7:5: which is the restrictive half

@@ -1162,6 +1162,34 @@ suite function kindDeclarationsRecordTheirClauses(): void {
       topLevel(ref composed, 1).kind == ASTNodeKind.FUNCTION_DECL;
     theory.detail = `after a composition the next decl is ${topLevel(ref composed, 1).kind}, wanted FUNCTION_DECL`;
   }
+
+  // A composition is a FLAT intersection. Consuming a parenthesis silently
+  // parsed `(b & c) & d` as `b & c & d`, which reads as a grouping the grammar
+  // does not have and quietly agreed with whatever the writer meant by it.
+  let test theory: Case = t.asserts("a parenthesized composition operand is refused") {
+    const err = parseError("kind a = (b & c) & d;");
+    theory.isSuccessful = str.stringIndexOf(err, "parenthesizes its composition operands") < err.len;
+    theory.detail = `wanted a grouping refusal, got: ${err}`;
+  }
+
+  // A layout body holds SUB-CLAUSES, not loose words: `abi "C"` is a leading
+  // word plus its own argument, the same shape the outer level has. Recorded
+  // that way so a rule can tell which argument belongs to which sub-clause.
+  let layout = parseOk("kind c_layout { appliesTo type; layout { abi \"C\"; align 8; }; }");
+  let test theory: Case = t.asserts("a layout body is recorded as sub-clauses on the clause") {
+    const clause = nodeAt(ref layout, childAt(ref layout, topLevel(ref layout, 0), 1));
+    const body = nodeAt(ref layout, clause.childA);
+    theory.isSuccessful = clause.childA != 0 && body.childCount == 2;
+    theory.detail = `the layout body recorded ${body.childCount} sub-clause(s), wanted 2`;
+  }
+  let test theory: Case = t.asserts("a sub-clause keeps its argument's source spelling, quotes included") {
+    const clause = nodeAt(ref layout, childAt(ref layout, topLevel(ref layout, 0), 1));
+    const body = nodeAt(ref layout, clause.childA);
+    const abi = nodeAt(ref layout, childAt(ref layout, body, 0));
+    const marker = nodeAt(ref layout, childAt(ref layout, abi, 0));
+    theory.isSuccessful = str.stringEq(abi.name, "abi") && str.stringEq(marker.name, "\"C\"");
+    theory.detail = `recorded "${abi.name}" with argument ${marker.name}, wanted abi with "C" quoted`;
+  }
 }
 
 // `disposable reg: T = expr { ... }` - a kind-prefixed binding that OWNS a

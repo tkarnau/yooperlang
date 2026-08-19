@@ -1,0 +1,5 @@
+# Illegal: `appliesTo binding binding` names the same site twice. The second
+# says nothing the first did not, so it is written rather than meant.
+#
+# The column is the SECOND `binding`, not the clause: the word is the mistake.
+2:23: already applies to "binding"

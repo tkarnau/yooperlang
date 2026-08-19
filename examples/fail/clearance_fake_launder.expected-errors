@@ -1,0 +1,4 @@
+# Illegal: `tainted` is restrictive and names `Cleansable.cleanse` as the only
+# authority that may shed it. A free function taking the hazard and returning
+# without it launders it, which the trait impl is the gate for.
+25:10: would strip kind "tainted"

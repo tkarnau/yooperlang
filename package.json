@@ -37,10 +37,11 @@
   ],
   "scripts": {
     "test": "node --test --test-reporter=spec \"src/**/*.test.js\"",
-    "test:unit": "node --test --test-reporter=spec \"src/**/!(e2e|parity|selfhost).test.js\"",
-    "test:e2e": "node --test --test-reporter=spec src/e2e.test.js src/parity.test.js src/slice.test.js src/selfhost.test.js",
+    "test:unit": "node --test --test-reporter=spec \"src/**/!(e2e|parity|selfhost|fail).test.js\"",
+    "test:e2e": "node --test --test-reporter=spec src/e2e.test.js src/parity.test.js src/slice.test.js src/fail.test.js src/selfhost.test.js",
     "test:parity": "node --test --test-reporter=spec src/parity.test.js",
     "test:slice": "node --test --test-reporter=spec src/slice.test.js",
+    "test:fail": "node --test --test-reporter=spec src/fail.test.js",
     "test:selfhost": "node --test --test-reporter=spec src/selfhost.test.js",
     "test:debug": "node --test --test-reporter=spec src/debug.test.js",
     "lsp": "node src/lsp/server.js",

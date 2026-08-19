@@ -85,6 +85,236 @@ Covered by `typecheck.test.yoop` (both halves) and
 `bootstrap/tests/slice/pooled_handle_copy.yoop`, which the reference agrees
 with.
 
+### A8. THE BOOTSTRAP ACCEPTS 4 PROGRAMS THE REFERENCE REFUSES
+
+The largest finding in this document, and nothing in the probes could have seen
+it.
+
+The surface probe measures ONE DIRECTION: does the bootstrap compile what it
+should. It is at zero refused and zero bad-ir, which is worth having and says
+nothing at all about the other direction - does the bootstrap REFUSE what it
+should. Measured directly, over the 138 negative fixtures in `examples/fail/`:
+
+    38 of 138 compiled cleanly under the bootstrap when this was written
+     4 of 138 still do
+
+By family, with what closed each one:
+
+     1  binding_*     OPEN (`binding_trailing_block_no_ownsblock`). The RULE
+                      landed; the fixture is blocked by the kind-registry
+                      collision below.
+     1  dir_module_*  OPEN. Per-FILE import visibility inside a directory
+                      module; see below.
+     2  traits_*      STALE. Not ports - see below.
+     9  clearance_*, owned_*, scoped_escape_pass_unscoped
+                      CLOSED, by the expression-marker pass in
+                      `typecheck/markers.yoop`.
+    15  kind_*, propagates_*, layout_*, scoped_*, and the one-offs
+                      CLOSED, in `typecheck/kinds.yoop`, `typecheck/traits.yoop`,
+                      `typecheck/clearance.yoop` and `typecheck/kind_use.yoop`.
+
+`typecheck/kinds.yoop` is where the DECLARATION rules live: the application
+sites a kind declares and how a composition intersects them, the effect
+categories `forbids` accepts, what bounds a `mustNotEscape`, what a kind
+parameter may be typed, the two clauses that name a trait, the clearance clauses
+(the two marker polarities and the two transition clauses), the clause
+VOCABULARY (a word outside it, `restricts` among them, is a promise no pass
+could keep), and the `layout` body - `abi` accepting only `"C"`, and a
+sub-clause the compiler does not implement. A layout body is now PARSED as
+sub-clauses rather than skipped (`parseKindSubClause`), which is what made the
+last two possible and what `kind_compose_contradiction` reads: two composition
+operands demanding different alignments cannot both be honored, and alignment is
+the one clause a composition cannot union.
+
+`typecheck/kind_use.yoop` is new and is the other half - where a kind may be
+WRITTEN, and what writing one there costs. Four rules, each reading a fact
+already in hand at the site: the `appliesTo` SITE test at a binding, a parameter
+and a type prefix; the trailing-block form needing a kind that declares
+`ownsBlock`; a field carrying a kind its enclosing type does not
+`propagates<>`; and `mustNotEscape scope`, which refuses a `return` of a bounded
+binding and an alias of one under a name carrying no bound. `Binding.noEscape`
+on the scope entry is where the bound rides, because the bound is about the
+BINDING and the same type under a plain `let` is unbounded.
+
+Four more landed where the fact was already known: a `ref T` RETURN (refused for
+a yoop function, still allowed for an `extern`, whose `ref FILE` is a pointer
+the C library owns); a field write through a `const` binding, walked to the root
+of the field path and stopping at an INDEX, since `const xs: T[]` freezes the
+name and not the buffer; a `refcounted` kind on a binding whose initializer is
+not a `Task<T>` and whose type does not propagate the kind; and a write to a
+module-level `let` reached through an import, which the import makes visible
+rather than writable. A parenthesized kind composition (`(b & c) & d`) is a
+parse refusal - a composition is a flat intersection, and the parser had been
+consuming the parentheses silently.
+
+`typecheck/traits.yoop` holds the four trait rules: a method name declared twice
+in one type body, a receiver written `self` rather than `ref self`, and full
+signature equality between an impl method and the trait method it satisfies.
+
+`typecheck/clearance.yoop` holds the DECLARATION half of clearance: the
+unauthorized TRANSITION, read straight off a signature. The authority is the
+kind declaration's `requires <Trait>` paired with `appliedBy` / `clearedBy`, so
+only a method of that name on a type implementing that trait may confer or
+strip.
+
+`typecheck/markers.yoop` is the USE-SITE half, and it is what closed the nine
+fixtures above. What was missing was a marker set for an EXPRESSION; it is
+three pieces:
+
+  * A SymbolId-keyed table of each function's parameter and return markers,
+    filled by pass C where the declaration's AST is in hand
+    (`recordSignatureMarkers`). Keying it by SymbolId is what makes it work
+    across module boundaries with no translation: an import binds the DEFINING
+    module's SymbolId, so a same-module call, a by-name imported call and a
+    `ns.f(...)` call all read the same entry. That is what
+    `clearance_namespaced_sink` and `clearance_sibling_file_sink` were about,
+    and neither needed a per-module callee index.
+  * Per-binding markers, on `Binding` beside `noEscape`, stamped by `bindParams`
+    and `bindLocal`. A binding WITH an annotation takes the annotation's markers
+    (which is what makes `const borrowed: string = owned` a deliberate drop);
+    one WITHOUT inherits its initializer's, which the reference does not do and
+    which is right in both directions.
+  * A marker DECORATION on each call node, stamped when the call is checked, so
+    a later reader gets the callee's return markers without resolving the callee
+    a second time.
+
+A marker set is a BITMASK, not a set of names. Every conferred or restrictive
+kind gets one bit at `registerKind`, so a set rides in a `Binding` and in the
+signature table with nothing to dispose, and a comparison is two ands. A graph
+declaring more than 64 marker kinds leaves the rest UNTRACKED rather than
+aliasing them onto someone else's bit; std declares exactly one.
+
+Three checks read it, and the last one is not about clearance at all:
+
+  * a BINDING INITIALIZER against the binding's declared markers
+  * a CALL ARGUMENT against the callee's parameter markers
+  * `mustNotEscape scope` at a call argument - the third escape route, which
+    kind_use.yoop's header named as blocked on exactly this table. Passing a
+    scope-bounded binding into a parameter carrying no such bound is refused.
+
+Plus a fourth that needs the BODY rather than a slot: the conferred
+PASSTHROUGH. `owned` names no `appliedBy` on purpose - no trait impl can be the
+authority, because the only thing that mints owned storage is a bodyless
+allocating intrinsic - so clearance.yoop skipped that whole family rather than
+refuse every legitimate `owned`-returning function in std. With the return
+values' markers in hand the question is answerable: a kind naming no authority
+is legal on a return only when EVERY `return` in the body hands back a value
+that already carries it. That is what `owned_forge` asserts, in both its
+shapes (a literal, and a body that launders on one path and forges on the
+other).
+
+WHERE THE PASS IS DELIBERATELY PERMISSIVE, and why each is safe. An expression
+whose markers nothing established reads as UNKNOWN and satisfies every bound:
+
+  * a payload destructured out of a `switch` arm. The reference keeps a marker
+    TREE mirroring type arguments, so `case Result.Ok { value: v }` over a
+    `Result<owned string, string>` gives `v` the `owned`. The bootstrap keeps
+    only an annotation's ROOT markers, so it cannot, and treating those bindings
+    as unknown is what keeps `examples/pass/owned_payload.yoop` compiling.
+  * a TRAIT-METHOD call, which is the launder boundary
+    (`Cleansable.cleanse(ref dirty)`). The reference confers every kind whose
+    `appliedBy` names that method on that trait; the bootstrap does not model
+    it, and unknown is what keeps `examples/pass/clearance_marker.yoop` and the
+    passing `clearance_namespaced_sink` compiling.
+  * a call through a function value or a vtable slot, a method call, and a
+    generic function - none of which has an entry in the signature table.
+
+The cost is a forge through one of those routes that is accepted. The
+alternative cost is refusing correct programs, which is the one thing this pass
+is not allowed to do.
+
+#### The two STALE fixtures
+
+`examples/fail/` had been assumed uniformly correct and is not. `traits_collision_two_traits`
+and `traits_collision_with_function` assert that a type may not implement two
+traits declaring the same method name, and that a method may not share a name
+with a module-level function. SPEC.md section 17 item 2 says the opposite in as
+many words ("Trait method names live in the trait's namespace and may freely
+coincide with module-level free-function names or with method names from other
+traits implemented by the same type, because every call site is unambiguously
+qualified"), and the reference ACCEPTS both. They should be retired or
+rewritten, not ported.
+
+Those two are still the only stale ones found. Every other fixture in the batch
+was checked against the reference first, and the reference refuses all of them.
+
+#### What is left, and what each one needs
+
+`owned_payload_forge` IS REFUSED BUT ONLY PARTLY CHECKED. It asserts four
+forgeries and the bootstrap catches one - freeing a string literal inside a
+switch ARM, which is the walk-coverage half. The other three all live in a
+PAYLOAD position and all need markers to travel somewhere they currently do
+not:
+
+  * `return Result.Ok { value: "a literal" }` against a declared
+    `Result<owned string, string>` - needs a marker TREE that mirrors type
+    ARGUMENTS, and a check of a returned CONSTRUCTOR's fields against the
+    matching argument of the return annotation.
+  * `return Slot.Held { text: "a literal" }` where the marker is on the variant
+    case's own FIELD annotation - needs the variant DECL's field annotations
+    reachable from pass D, which means recording them the way the signature
+    table records a function's.
+  * `str.strFree(e)` on an `Err` payload destructured out of a
+    `Result<owned string, string>` - needs the two above plus payload BINDINGS
+    taking the markers of the position they came out of.
+
+All three are the same feature (`emptyMarkers().args` in
+`src/jsyooptypecheck/kindFlow.js`), and none of them can be added
+half-way: without the destructuring half, the constructor half would refuse
+`examples/pass/owned_payload.yoop`.
+
+`binding_trailing_block_no_ownsblock` IS BLOCKED BY A REGISTRY COLLISION rather
+than by a missing rule. `Program.kinds` is keyed by BARE NAME for the whole
+graph and the first registration wins, so a file declaring its own `disposable`
+beside std's reads back STD's KindInfo - and std's declares `ownsBlock`, so the
+fixture's kind looks like it owns a block. The rule itself is implemented and
+covered by unit tests, which build a single module with no std in the graph.
+The same collision is why there is no `appliesTo field` SITE test: applying one
+refused `examples/pass/propagates_full/`, whose `io.yoop` declares a `disposable`
+with `appliesTo binding field` that reads back as std's `appliesTo binding`. The
+field rule that DID land compares two syntactic WORDS - the field's prefix and
+the type's `propagates<>` clause - which the collision cannot affect. The real
+fix is a per-module kind resolution (`Symbol.Kind` already exists and carries a
+`kindId` that is always 0), and it is a change to every `lookupKind` caller.
+
+`dir_module_import_leak` NEEDS PER-FILE IMPORT VISIBILITY. A module's source
+files share its declarations but not its imports, and pass B wires every file's
+imports into one `tm.names` map for the whole module. Enforcing the rule means a
+per-file name set beside the module-wide one, which is state threaded through
+pass B and every lookup in passes C and D.
+
+This is the UNSAFE direction. Every other divergence recorded here is the
+bootstrap being stricter than the reference; this is the bootstrap being
+permissive, which means a program that is wrong compiles and runs.
+
+It also reframes what "ready to delete `src/`" means. The language surface is
+done in the sense that everything legal compiles. What is not done is the
+refusals, and there is no probe for them - which is precisely why this went
+unmeasured until a fixture harness was pointed at it.
+
+`src/fail.test.js` (`npm run test:fail`) is that harness: a fixture plus a
+hand-written `<name>.expected-errors` beside it, asserted against the BOOTSTRAP,
+in the shape `bootstrap/tests/slice/` already established. 68 of the 139 are
+ported. The rest split into roughly half that are a straight transcribe and half
+that need a decision first, because the check they assert does not exist.
+
+One more finding came with this batch, and it is about the bootstrap's own
+tests: `typecheck.test.yoop` asserted "a field of a const binding is still
+assignable", with a comment claiming the reference allows it. The reference
+refuses it, and refuses the for-in and pattern-binding forms of it too. The test
+now asserts the refusal.
+
+Three smaller findings, all worth fixing on their own:
+
+  * PARSE-ERROR COLUMNS ARE OFF BY ONE. They point one column PAST the offending
+    token; typecheck columns are exact. Same class as the DWARF line bug: it
+    reads as plausible in every message.
+  * SIX DIAGNOSTICS CARRY NO LOCATION at all - four module-graph ones and two
+    codegen ones. `<line>:<column>` has no spelling for those, so the expectation
+    format needs a decision before they can be ported.
+  * INTERNAL MODULE IDS LEAK into user-facing messages: `module m_3 has no
+    export "nope"`. The `_3` is a graph id, not anything the user wrote.
+
 ### A7. A kind-propagation check the bootstrap does not make (found while doing A2)
 
 The reference refuses
@@ -164,6 +394,10 @@ left to notice them against.
   `.expected` without being made deterministic first. Expect others like it when
   the corpus is built.
 
+  * `n += 1` ON A `ref` SCALAR PARAMETER - the reference emits `add ptr %n, 1`
+    and clang refuses the module, while `n = n + 1` on the same parameter is
+    fine. Found writing `ast/dump_json.yoop`, which works around it with a note
+    that goes when the reference does.
   * BOOL interpolation. `${flag}` prints `true` / `false` under the bootstrap
     and `1` / `0` under the reference. 13 programs.
   * FLOAT interpolation. `${x}` prints `3.5` under the bootstrap and `3.500000`
@@ -230,17 +464,45 @@ capability the toolchain loses on the day `src/` is deleted.
     It is deliberately a smoke check rather than a port of the reference's five
     `dwarf:` tests; the locals half is what it grows into once the type side
     exists.
-  * `--track-heap`. Codegen emits `yoop_diag_record_alloc` /
-    `yoop_diag_record_free` calls. No bootstrap equivalent. Note
-    `examples/pass/track_heap_basic.yoop` COMPILES under the bootstrap - the
-    flag is what is missing, not the program.
-  * `--warn-disposable` and `--warn-std`. Warning opt-ins. The bootstrap
-    reports diagnostics but has neither flag.
+  * `--track-heap`. DONE. A counter call beside every `heapAlloc` / `ctxAlloc`
+    and every `heapFree` / `ctxFree`, plus the dump installed through `atexit`
+    in `main` so an `exit()` or an abort prints the totals too. A free has to
+    recover its byte count from the descriptor's length times the element size,
+    because a pointer does not know how big it is.
+    `examples/pass/track_heap_basic.yoop` prints the same line as the reference,
+    byte for byte. A tracked build LINKS the runtime even when the program
+    otherwise would not - the counters live there, and without that a
+    hello-world compiles to valid IR and fails at the link.
+  * `--warn-disposable` and `--warn-std`. DONE, and the analysis with them -
+    `typecheck/unhandled.yoop`. A `Diagnostic` now carries a CODE, which is what
+    both filters key on and what the next opt-in warning will need.
+    The bootstrap already had the hard halves: `propagatedKindOf` says which
+    types owe a cleanup, and `discharge.yoop` decides path-sensitively whether a
+    manual call answered one. What was missing was the TRANSFER walk, and it is
+    stated as an EXCLUSION - anything that is not a borrow, a field read, an
+    index read, an assignment target or an interpolation counts as a handoff -
+    so a form nobody thought of goes quiet rather than warning about correct
+    code. That is the reference's own erring-toward-silence rule.
+    An INTERPOLATION is NOT a handoff, and getting that wrong is what the
+    differential caught: `${x}` renders through a borrow and hands nothing on,
+    and reading it as a transfer silenced every leak that happened to get
+    printed - which is most of them.
+    The two known false-positive classes are inherited rather than fixed (a
+    value in an arena scope, and a copy read out of a container). They are why
+    the warning is opt-in, and they are documented in
+    docs/writing_yoop.md section 4.
+    MEASURED against the reference over 60 corpus files: they agree on
+    `arena_request_loop` and on the two in `derive_display_array_vec`, where the
+    reference reports each one TWICE. The bootstrap additionally finds five
+    genuine unhandled obligations in `derive_display_variant.yoop` that the
+    reference misses entirely - `Shape` and `Envelope` both propagate
+    `disposable`, and all five bindings are declared without the keyword and
+    never disposed.
   * `--dump-ast` and `--dump-ast-json`, plus `src/astViewerTemplate.html`.
     `npm run gen:web` calls `--dump-ast-json` directly.
-  * `--list-attributes`, backed by the attribute registry in
-    `src/jsyoopattributes/`. The bootstrap parses attributes but has no
-    registry to enumerate.
+  * `--list-attributes`. DONE. The list is the parser's - `parse/attributes.yoop`
+    is the one place that decides what may follow an `@` - so there is no
+    registry to keep in step with it.
   * `--keep-ir`, `-a` / `--output-modules`, `--dump-bc`. Minor, and `--emit-ir`
     already covers most of what `--keep-ir` was for.
   * `--lsp`. See section D.

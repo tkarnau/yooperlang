@@ -1,0 +1,3 @@
+# Illegal: `notAKind` is not a kind declared or imported in this module, so the
+# binding prefix names nothing.
+6:5: unknown kind "notAKind"

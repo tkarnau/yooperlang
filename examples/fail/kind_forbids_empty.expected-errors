@@ -1,0 +1,2 @@
+# Illegal: `forbids;` names no effect category, so the clause forbids nothing.
+3:5: forbids on kind "k" names no category

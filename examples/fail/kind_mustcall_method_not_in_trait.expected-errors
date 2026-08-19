@@ -1,0 +1,5 @@
+# Illegal: the scope-end call is made through a trait the kind REQUIRES, and
+# `Disposable` declares `dispose` rather than `close`. A method no required
+# trait declares has no route to be called by, so the promise could never be
+# kept.
+8:14: which none of the traits it requires declares

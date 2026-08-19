@@ -22,7 +22,7 @@ import { emptyArena } from "../ast";
 import { Module, ModuleGraph, LoadModuleResult, LoadGraphResult, moduleFromSource,
   singleModuleGraph, loadModuleGraph } from "../source_graph";
 import { Program, typecheckProgram } from "../typecheck";
-import { codegenProgram } from "../codegen";
+import { codegenProgram, defaultCodegenOptions, CodegenOptions } from "../codegen";
 
 // std/core/alloc.yoop's own libc block, which is the collision the
 // template-literal lowering had with it: `malloc` and `free` spelled exactly as
@@ -435,7 +435,7 @@ suite function theSuspendPrimitiveIsABareSuspend(): void {
 
 // ----- the SPAWN --------------------------------------------------------------
 
-const TASK_KINDS: string = "kind task { appliesTo function; pausable; provides Task; } kind pooled { appliesTo binding; refcounted retain release; } kind joined { appliesTo binding; mustCall join beforeScopeEnd; } ";
+const TASK_KINDS: string = "trait Joins { function join(ref self): void; } kind task { appliesTo function; pausable; provides Task; } kind pooled { appliesTo binding; refcounted retain release; } kind joined { appliesTo binding; requires Joins; mustCall join beforeScopeEnd; } ";
 
 // THE BYTE OFFSETS. The C runtime reaches the handle's prefix through
 // `(char*)h + 16` and friends, so a field in the wrong place is a corrupted
@@ -866,6 +866,48 @@ suite function aVoidMainCarriesCsEntryPointSignature(): void {
   }
 }
 
+// `--track-heap`. The counting itself is the C runtime's; what codegen owes is
+// a counter call beside every allocation and free, and the atexit dump in
+// `main`.
+//
+// The counter calls themselves are NOT asserted here, and the reason is the
+// harness rather than the feature: `--track-heap` counts `heapAlloc` and
+// `ctxAlloc`, which are std intrinsics, and this harness builds a single module
+// with no std root to import them from. What that leaves is the half that needs
+// no allocation - that an ordinary build pays nothing, and that a tracked one
+// installs the dump - which is also the half a regression is most likely to
+// break. The pairing is covered end to end by
+// `examples/pass/track_heap_basic.yoop`, whose output matches the reference's
+// byte for byte.
+suite function trackHeapIsOffUnlessAskedFor(): void {
+  const SRC = "function main(): int32 { return 0; }";
+
+  disposable off: Emitted = emitSourceWith(SRC, { trackHeap: false });
+  let test theory: Case = t.asserts("an ordinary build emits none of it") {
+    const ir = text.view(ref off.ir);
+    theory.isSuccessful = occurrences(ir, "yoop_diag") == 0 && occurrences(ir, "atexit") == 0;
+    theory.detail = `codegen said "${off.error}"; a build that did not ask still pays for it`;
+  }
+
+  disposable on: Emitted = emitSourceWith(SRC, { trackHeap: true });
+  // Through atexit rather than before each `ret`, so an `exit()` or an abort
+  // prints the totals too.
+  let test theory: Case = t.asserts("main installs the dump as an atexit handler") {
+    const ir = text.view(ref on.ir);
+    theory.isSuccessful = occurrences(ir, "call i32 @atexit(ptr @yoop_diag_dump)") == 1 &&
+      occurrences(ir, "declare void @yoop_diag_dump()") == 1;
+    theory.detail = `codegen said "${on.error}"; the dump is never installed`;
+  }
+
+  // The counters live in the C runtime, so a tracked build has to LINK it even
+  // when the program never calls into it otherwise. Without this a hello-world
+  // compiles to valid IR and fails at the link - which is how it was found.
+  let test theory: Case = t.asserts("a tracked build links the runtime") {
+    theory.isSuccessful = on.needsRuntime && !off.needsRuntime;
+    theory.detail = "a tracked build did not ask for the runtime the counters live in";
+  }
+}
+
 // DWARF. What these assert is the SHAPE of the metadata, because the shape is
 // what a debugger reads and because getting it wrong fails silently: clang
 // strips every DI node in a module that does not declare the two named ones,
@@ -1272,6 +1314,19 @@ suite function aDeepCodegenRefusalReachesTheDriver(): void {
   }
 }
 
+function emitSourceWith(src: string, opts: CodegenOptions): Emitted propagates<disposable> {
+  let graph: ModuleGraph = graphOfSource(src);
+  disposable prog: Program = typecheckProgram(ref graph);
+  switch (codegenProgram(ref prog, ref graph, opts)) {
+    case Result.Ok { value: out }: {
+      return { ir: out.ir, error: "", needsRuntime: out.needsRuntime, linkLibraries: out.linkLibraries };
+    }
+    case Result.Err { error: e }: {
+      return { ir: text.make(0), error: e, needsRuntime: false, linkLibraries: vec.vecNew(1) };
+    }
+  }
+}
+
 function emitSource(src: string): Emitted propagates<disposable> {
   // Not disposed, matching typecheck.test.yoop: a ModuleGraph owns the arena
   // every later layer borrows from, and a test process exits before the leak
@@ -1291,7 +1346,7 @@ function emitFixture(name: string): Emitted propagates<disposable> {
 
 function emitGraph(ref graph: ModuleGraph): Emitted propagates<disposable> {
   disposable prog: Program = typecheckProgram(ref graph);
-  switch (codegenProgram(ref prog, ref graph)) {
+  switch (codegenProgram(ref prog, ref graph, defaultCodegenOptions())) {
     case Result.Ok { value: out }: {
       return { ir: out.ir, error: "", needsRuntime: out.needsRuntime, linkLibraries: out.linkLibraries };
     }

@@ -1,0 +1,4 @@
+# Illegal: `scoped disposable h` puts two kind prefixes on one parameter. The
+# two carry separate obligations with no defined interaction, so at most one is
+# allowed.
+29:29: at most one kind prefix

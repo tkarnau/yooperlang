@@ -14,6 +14,7 @@ module typecheck;
 // be an inconsistency with nothing behind it.
 
 import * as vec from "std/core/vec.yoop";
+import * as map from "std/collections/map.yoop";
 import { AST, ASTNode, ASTNodeKind, NodeId, nodeAt, kindName } from "../ast";
 import * as str from "std/core/strings.yoop";
 import { Option } from "std/core/types.yoop";
@@ -127,8 +128,24 @@ function checkAssignment(ref cx: Cx, expr: ASTNode): TypeId {
         }
       }
       case Option.None: {
-        // Not a local, so it may be a module-level `let`. A `const` reaches
-        // here too and is refused by name: it has no storage to write to.
+        // Not a local, so it may be a module-level `let` - this module's own,
+        // or another module's reached through an import. The second one is
+        // refused: a module's mutable state is its own, and a write from
+        // outside it is invisible to every invariant the declaring module
+        // keeps about it. The import is what makes it visible, not writable.
+        switch (map.mapGet(ref cx.tm.importedFrom, target.name)) {
+          case Option.Some { value: origin }: {
+            reportError(
+              cx.prog,
+              `"${target.name}" is imported, and a module-level "let" is written only inside the module that declares it`,
+              target.sourceLoc
+            );
+            return TYPE_ERROR_ID;
+          }
+          case Option.None: { }
+        }
+        // A `const` reaches here too and is refused by name: it has no storage
+        // to write to.
         targetType = moduleGlobalType(cx.prog, cx.tm, target.name);
         if (targetType == TYPE_ERROR_ID) {
           if (moduleConstType(cx.prog, cx.tm, target.name) != TYPE_ERROR_ID) {
@@ -158,6 +175,9 @@ function checkAssignment(ref cx: Cx, expr: ASTNode): TypeId {
       );
       return TYPE_ERROR_ID;
     }
+    if (!frozenFieldBase(ref cx, target.childA)) {
+      return TYPE_ERROR_ID;
+    }
     targetType = checkFieldAccess(ref cx, target, TYPE_ERROR_ID);
     vec.vecSet(ref cx.tm.resolvedTypes, expr.childA, targetType);
   } else if (target.kind == ASTNodeKind.DEREF_EXPRESSION) {
@@ -181,6 +201,54 @@ function checkAssignment(ref cx: Cx, expr: ASTNode): TypeId {
   }
   // An assignment is a statement, not a value - nothing consumes its type.
   return TYPE_VOID_ID;
+}
+
+// Whether a field write's base is writable, reporting when it is not.
+//
+// `const` freezes the NAME, and a field of the value that name holds is part of
+// what was frozen. The chain is walked to its root rather than only one level,
+// so `const p: Outer; p.inner.x = 1` is refused the same way `p.x = 1` is.
+//
+// An INDEX stops the walk and allows the write, and that is the whole subtlety:
+// `const xs: T[]` freezes the name `xs` and not the buffer behind it, so
+// `xs[i].f = v` reaches storage the binding does not own. That is the same rule
+// `isAddressableFieldBase` follows for the borrow.
+//
+// True means "carry on"; false means a diagnostic was reported.
+function frozenFieldBase(ref cx: Cx, baseId: NodeId): bool {
+  let node = nodeAt(cx.ast, baseId);
+  while (node.kind == ASTNodeKind.FIELD_ACCESS) {
+    node = nodeAt(cx.ast, node.childA);
+  }
+  if (node.kind != ASTNodeKind.IDENT) {
+    return true;
+  }
+  switch (scopeBinding(cx.scope, node.name)) {
+    case Option.Some { value: bound }: {
+      if (bound.mutable) {
+        return true;
+      }
+      reportError(
+        cx.prog,
+        `cannot assign to a field of "${node.name}", which is bound by const`,
+        node.sourceLoc
+      );
+      return false;
+    }
+    case Option.None: { }
+  }
+  // A module-level name. A `let` has storage and is writable; a `const` is not,
+  // whether it inlines at every use or is backed by a global.
+  if (moduleGlobalStorageType(cx.prog, cx.tm, node.name) != TYPE_ERROR_ID ||
+      moduleLevelValueType(cx.prog, cx.tm, node.name) == TYPE_ERROR_ID) {
+    return true;
+  }
+  reportError(
+    cx.prog,
+    `cannot assign to a field of "${node.name}", which is a module-level const`,
+    node.sourceLoc
+  );
+  return false;
 }
 
 // `xs[i]` - the base must be an array and the index an integer.

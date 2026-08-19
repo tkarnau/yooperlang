@@ -1,0 +1,4 @@
+# Illegal: a trait declares signatures only. A trait method line ends at `;`,
+# and a default body `{ }` has nowhere to live - implementations belong to the
+# type.
+2:33: expected SEMICOLON, got LCURLY

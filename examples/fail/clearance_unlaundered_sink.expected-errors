@@ -1,0 +1,4 @@
+# Illegal: a string LITERAL carries no markers, and `sink` only accepts a
+# `cleared` value. A conferred kind has to come from a signature that declares
+# it.
+13:10: argument 1 of "sink" requires kind "cleared"

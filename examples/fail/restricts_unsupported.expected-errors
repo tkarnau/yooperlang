@@ -1,0 +1,3 @@
+# Illegal: `restricts` is not a kind clause. Recording it and acting on it
+# nowhere would be a restriction that reads real and enforces nothing.
+3:5: is not a kind clause this compiler knows

@@ -1,0 +1,4 @@
+# Illegal: the only storage a body can borrow is its own frame, and the frame
+# is gone by the time the caller reads the returned pointer. An `extern` may
+# still return `ref T` - a C pointer the library owns is not a yoop frame.
+1:9: returns a "ref"

@@ -206,21 +206,38 @@ function registerFileShells(
         bindName(ref prog, ref tm, declNode, Symbol.Vtable { typeId: vtableShell }, exported);
       }
       case ASTNodeKind.KIND_DECL: {
-        // A kind is a NAME and nothing else here. Nothing enforces kinds, so
-        // there is no shell to fill and no clause to resolve - but the name has
-        // to bind, because `import { disposable } from "std/core/kinds.yoop"`
-        // is how every file in the tree reaches one, and an unbound name there
-        // would fail the import rather than the enforcement.
+        // A kind has no shell to fill: what it says is read straight off its
+        // clauses, and the name has to bind because
+        // `import { disposable } from "std/core/kinds.yoop"` is how every file
+        // in the tree reaches one.
+        //
+        // The clause RULES - which sites may combine, which categories exist,
+        // what a parameter may be typed - are typecheck/kinds.yoop's, and run
+        // after the composition merge so a composed kind is checked against the
+        // sites it inherited rather than against its own empty set.
         let info: KindInfo = {
           name: declNode.name,
           pausable: hasClause(ref m.ast, declNode, PAUSABLE_CLAUSE),
           providesTask: clauseArgumentIs(ref m.ast, declNode, PROVIDES_CLAUSE, TASK_SUBJECT),
           disposeMethod: clauseArgument(ref m.ast, declNode, MUST_CALL_CLAUSE),
           refcounted: hasClause(ref m.ast, declNode, REFCOUNTED_CLAUSE),
-          appliesToRegion: clauseArgumentIs(ref m.ast, declNode, APPLIES_TO_CLAUSE, REGION_SUBJECT),
+          sites: kindSitesOf(ref m.ast, declNode),
+          paramCount: kindParamCountOf(ref m.ast, declNode),
+          conferred: hasClause(ref m.ast, declNode, CONFERRED_CLAUSE),
+          restrictive: hasClause(ref m.ast, declNode, RESTRICTIVE_CLAUSE),
+          appliedBy: clauseArgument(ref m.ast, declNode, APPLIED_BY_CLAUSE),
+          clearedBy: clauseArgument(ref m.ast, declNode, CLEARED_BY_CLAUSE),
+          requiresTrait: clauseArgument(ref m.ast, declNode, REQUIRES_CLAUSE),
+          ownsBlock: hasClause(ref m.ast, declNode, OWNS_BLOCK_CLAUSE),
+          noEscape: hasClause(ref m.ast, declNode, MUST_NOT_ESCAPE_CLAUSE),
+          alignWord: kindAlignWordOf(ref m.ast, declNode),
+          // Handed out by `registerKind` below, which is the one place that
+          // can: the bit is a property of the REGISTRY, not of the declaration.
+          markerBit: 0,
         };
         mergeComposedKinds(ref prog, ref m.ast, declNode, ref info);
         registerKind(ref prog, info);
+        checkKindDecl(ref prog, ref m.ast, declNode, info);
         bindName(ref prog, ref tm, declNode, Symbol.Kind { kindId: 0 }, exported);
       }
       case ASTNodeKind.CONST_DECL: {
@@ -493,8 +510,8 @@ function bindName(
 // parser and understood by nobody.
 const PAUSABLE_CLAUSE: string = "pausable";
 const MUST_CALL_CLAUSE: string = "mustCall";
-const APPLIES_TO_CLAUSE: string = "appliesTo";
-const REGION_SUBJECT: string = "region";
+// Read by typecheck/kinds.yoop, which owns the site rules.
+export const APPLIES_TO_CLAUSE: string = "appliesTo";
 // `provides Task;` on `kind task`. The clause names the TYPE a call to a
 // function carrying the kind evaluates to, which is what turns a call into a
 // spawn - see KindInfo.providesTask.
@@ -502,6 +519,10 @@ const PROVIDES_CLAUSE: string = "provides";
 const TASK_SUBJECT: string = "Task";
 // `refcounted retain release;` on `kind pooled`. See KindInfo.refcounted.
 const REFCOUNTED_CLAUSE: string = "refcounted";
+// `ownsBlock;` - read by typecheck/kind_use.yoop, which owns the trailing-block
+// rule. `mustNotEscape` is declared in typecheck/kinds.yoop, which owns the
+// clause's own shape rules; this pass only records that it was written.
+const OWNS_BLOCK_CLAUSE: string = "ownsBlock";
 
 // `kind scoped_alt = disposable_base & noescape;` - fold each NAMED operand's
 // already-registered clauses into the composed kind.
@@ -523,6 +544,7 @@ function mergeComposedKinds(
   declNode: ASTNode,
   ref info: KindInfo
 ): void {
+  let seenSitedOperand = false;
   let i: usize = 0;
   while (i < declNode.childCount) {
     const clause = nodeAt(ref ast, childAt(ref ast, declNode, i));
@@ -546,9 +568,48 @@ function mergeComposedKinds(
         info.pausable = info.pausable || operand.pausable;
         info.providesTask = info.providesTask || operand.providesTask;
         info.refcounted = info.refcounted || operand.refcounted;
-        info.appliesToRegion = info.appliesToRegion || operand.appliesToRegion;
         if (info.disposeMethod.len == 0) {
           info.disposeMethod = operand.disposeMethod;
+        }
+        info.conferred = info.conferred || operand.conferred;
+        info.restrictive = info.restrictive || operand.restrictive;
+        if (info.appliedBy.len == 0) {
+          info.appliedBy = operand.appliedBy;
+        }
+        if (info.clearedBy.len == 0) {
+          info.clearedBy = operand.clearedBy;
+        }
+        if (info.requiresTrait.len == 0) {
+          info.requiresTrait = operand.requiresTrait;
+        }
+        info.ownsBlock = info.ownsBlock || operand.ownsBlock;
+        info.noEscape = info.noEscape || operand.noEscape;
+        // ALIGNMENT is the one clause a composition cannot union. Every other
+        // one adds an obligation, and holding two at once is coherent; two
+        // alignments are two different addresses for the same value, so a
+        // composition demanding both is a name for nothing.
+        if (info.alignWord.len == 0) {
+          info.alignWord = operand.alignWord;
+        } else if (operand.alignWord.len != 0 &&
+                   !str.stringEq(info.alignWord, operand.alignWord)) {
+          reportError(
+            ref prog,
+            `kind "${declNode.name}" composes operands that demand different alignments, "${info.alignWord}" and "${operand.alignWord}" - one value cannot sit at both`,
+            clause.sourceLoc
+          );
+        }
+        // Sites INTERSECT where every other clause unions: a composition
+        // carries all of its operands' obligations, so it may only be written
+        // somewhere every operand may be. The first SITED operand seeds the
+        // set - a composition's own `appliesTo` is refused, and an operand that
+        // declares no site restricts nothing.
+        if (operand.sites != 0) {
+          if (seenSitedOperand) {
+            info.sites = info.sites & operand.sites;
+          } else {
+            info.sites = operand.sites;
+            seenSitedOperand = true;
+          }
         }
       }
     }

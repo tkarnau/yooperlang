@@ -14,7 +14,7 @@ import { Vec }, * as vec from "std/core/vec.yoop";
 import { Option } from "std/core/types.yoop";
 import { Map }, * as map from "std/collections/map.yoop";
 import { disposable } from "std/core/kinds.yoop";
-import { Diagnostic, SourceLocation, errorAt } from "../diagnostics";
+import { Diagnostic, SourceLocation, errorAt, warningAt } from "../diagnostics";
 import { NodeId } from "../ast";
 
 // One entry of TypedModule.importedFrom. Both halves are needed to name the
@@ -133,6 +133,14 @@ export type TypedModule propagates<disposable> {
   // `ctxFree<T>(a: T[])` emitted for it, which is invalid IR at best and a
   // silent miscompile whenever the shapes happen to line up.
   intrinsicNames: Map<string, bool>,
+  // What the value a CALL node produces carries in clearance markers, stamped
+  // by `checkCallMarkers` off the callee's return annotation. A decoration
+  // rather than a question asked twice, for the reason `tryIntoUses` is one:
+  // re-answering it at a use site would mean resolving the callee again, which
+  // is the whole of check_call.yoop and check_qualified.yoop. Sparse and keyed
+  // by `uint64(nodeId)`; absent means "unknown", which every bound accepts.
+  // See typecheck/markers.yoop.
+  valueMarkers: Map<uint64, MarkerSet>,
   resolvedTypes: Vec<TypeId>,     // dense decoration, indexed by NodeId (0 = none / infer-later)
   // (exit site, binding) pairs saying "this binding's scope-end call was
   // already made by hand on every path reaching that exit". Codegen skips the
@@ -247,6 +255,27 @@ export type Program propagates<disposable> {
   // question is asked at a CALL site in a module that may not be the one that
   // declared it. See the task-spawn carve-out in checkAgainstSignature.
   taskSymbols: Map<uint64, bool>,
+  // ----- the clearance MARKER tables ---------------------------------------
+  //
+  // What each function's SIGNATURE says about markers, keyed by SymbolId, with
+  // the parameter sets living in one flat run. Program-level and keyed by
+  // SymbolId for the reason `taskSymbols` is: the question is asked at a CALL
+  // site in a module that may not be the one that declared the callee, and an
+  // import binds the DEFINING module's SymbolId. See typecheck/markers.yoop.
+  sigMarkers: Map<uint64, SigMarkers>,
+  sigParams: Vec<MarkerSet>,
+  // Every conferred or restrictive kind in the graph, in the order they were
+  // registered. The INDEX is the kind's bit in a marker mask, and the string is
+  // what a diagnostic names it by. A graph declaring more than 64 of them
+  // leaves the rest untracked rather than colliding - see `assignMarkerBit`.
+  markerNames: Vec<string>,
+  // The conferred-passthrough tally for the body pass D is inside: the
+  // INTERSECTION of every `return` value's conferred set, and how many returns
+  // carried a value. Ambient for the reason `currentReturn` is - a `return`
+  // sits at arbitrary depth of the statement walk. `beginReturnMarkers` is the
+  // one writer besides the `return` statement itself.
+  retMarkerAll: uint64,
+  retMarkerCount: usize,
   // registry: InstantiationRegistry - deferred until generics land in the bootstrap.
 }
 
@@ -279,10 +308,64 @@ export type KindInfo {
   // `Task<T>`: a task handle is a compiler type with no methods at all, so the
   // compiler is the only thing that can supply what these two ask for.
   refcounted: bool,
-  // `appliesTo region;` rather than `binding`. A region kind can be written
-  // anonymously in front of a block (`ephemeral arenaScope(N) { ... }`); a
-  // binding kind must be given a name.
-  appliesToRegion: bool,
+  // The `appliesTo` sites, as a set of SITE_* bits. `appliesTo region` is what
+  // lets a kind be written anonymously in front of a block
+  // (`ephemeral arenaScope(N) { ... }`); a binding kind must be given a name.
+  // A COMPOSITION's set is the INTERSECTION of its named operands' - a composed
+  // kind may only be written where every operand may be.
+  sites: uint32,
+  // How many parameters the declaration takes: the 1 of
+  // `kind aligned(n: usize)`. A use has to supply that many arguments.
+  paramCount: usize,
+  // ----- the clearance half -------------------------------------------------
+  //
+  // A MARKER kind carries no obligation and emits nothing. Its whole meaning is
+  // a bound at the places a value moves, and the polarity says which bound:
+  //
+  //   `conferred;`    a capability, and it cannot be forged. A slot asking for
+  //                   it only accepts a value that already carries it.
+  //   `restrictive;`  a hazard, and it cannot be silently dropped. A slot that
+  //                   does not name it refuses a value that carries it.
+  //
+  // The two are exclusive, and either is exclusive with `mustCall` - see
+  // typecheck/kinds.yoop, which is where a declaration saying otherwise stops.
+  conferred: bool,
+  restrictive: bool,
+  // `appliedBy cleanse;` on a conferred kind, `clearedBy cleanse;` on a
+  // restrictive one - the METHOD authorized to mint the capability or to shed
+  // the hazard, or "" when the declaration names none. Reached through
+  // `requiresTrait`, which is what makes the authority structural: a type opts
+  // in by implementing that trait, and nothing else can perform the transition.
+  appliedBy: string,
+  clearedBy: string,
+  // `requires Cleansable;` - by NAME, because the authority check compares a
+  // declared trait name against the ones an `implements` clause resolved to,
+  // and a kind is registered in pass A before any trait type exists.
+  requiresTrait: string,
+  // ----- the two clauses the USE sites read ---------------------------------
+  //
+  // `ownsBlock;` - the kind may be written in the trailing-block form,
+  // `disposable f: T = expr { ... }`, where the block IS the binding's scope.
+  // Without it the trailing block is refused: a kind that does not own one has
+  // nothing to say about when the block ends.
+  //
+  // `mustNotEscape scope;` - a value carrying the kind may not leave the scope
+  // that declared it, so a `return` of it and an alias under a name that does
+  // not carry the kind are both refused. See typecheck/kind_use.yoop.
+  ownsBlock: bool,
+  noEscape: bool,
+  // The one BIT this kind occupies in a marker mask, or 0 for a kind that is
+  // neither conferred nor restrictive (and for a marker kind past the 64th in
+  // the graph, which is untracked rather than aliased onto someone else's bit).
+  // Assigned by `registerKind`, which is the one place a kind enters the
+  // registry. See typecheck/markers.yoop.
+  markerBit: uint64,
+  // The word a `layout { align W; }` body states, or "". The WORD rather than a
+  // number, because `align n` on a parameterized kind has no number to read and
+  // still has to compare equal to itself. One reader: the composition
+  // contradiction in `mergeComposedKinds`, where two operands each demanding a
+  // different alignment of the same value cannot both be honored.
+  alignWord: string,
 }
 
 // Announce which file the pass is about to walk. Every pass that iterates
@@ -343,6 +426,7 @@ export function initProgram(): Program propagates<disposable> {
   let kinds: Map<string, KindInfo> = map.mapNew(0, map.stringKeyOps());
   let taskSymbols: Map<uint64, bool> = map.mapNew(0, map.uint64KeyOps());
   let intrinsics: Map<string, bool> = map.mapNew(0, map.stringKeyOps());
+  let sigMarkers: Map<uint64, SigMarkers> = map.mapNew(0, map.uint64KeyOps());
   let derivedDisplay: Map<string, bool> = map.mapNew(0, map.stringKeyOps());
   let prog: Program = {
     types: types,
@@ -364,6 +448,11 @@ export function initProgram(): Program propagates<disposable> {
     taskSymbols: taskSymbols,
     derivedDisplay: derivedDisplay,
     intrinsics: intrinsics,
+    sigMarkers: sigMarkers,
+    sigParams: vec.vecNew(0),
+    markerNames: vec.vecNew(0),
+    retMarkerAll: 0,
+    retMarkerCount: 0,
   };
   initGenerics(ref prog);   // burns DeclId 0
   return prog;
@@ -392,6 +481,7 @@ export function initTypedModule(moduleId: string): TypedModule propagates<dispos
   let tryContextConcat: Map<uint64, bool> = map.mapNew(0, map.uint64KeyOps());
   let intrinsicNames: Map<string, bool> = map.mapNew(0, map.stringKeyOps());
   let calleeReceiver: Map<uint64, TypeId> = map.mapNew(0, map.uint64KeyOps());
+  let valueMarkers: Map<uint64, MarkerSet> = map.mapNew(0, map.uint64KeyOps());
   return {
     moduleId: moduleId,
     names: names,
@@ -415,6 +505,7 @@ export function initTypedModule(moduleId: string): TypedModule propagates<dispos
     intrinsicNames: intrinsicNames,
     calleeInstance: calleeInstance,
     calleeReceiver: calleeReceiver,
+    valueMarkers: valueMarkers,
     resolvedTypes: vec.vecNew(0),
     discharges: vec.vecNew(0),
     allowsUnsafe: false,
@@ -596,6 +687,19 @@ export function reportError(ref prog: Program, message: string, sourceLoc: Sourc
   vec.vecPush(ref prog.diagnostics, d);
 }
 
+// A warning, carrying the code a build filters on. Never changes the exit code:
+// the whole point of a warning here is that the program is legal.
+export function reportWarning(
+  ref prog: Program,
+  message: string,
+  sourceLoc: SourceLocation,
+  code: string
+): void {
+  let d = warningAt(message, sourceLoc, code);
+  d.filePath = prog.currentFile;
+  vec.vecPush(ref prog.diagnostics, d);
+}
+
 // Record a declared kind. A later declaration of the same name does not replace
 // the first - a redeclaration is pass A's diagnostic, and overwriting here
 // would make the registry disagree with the symbol table about which one won.
@@ -603,7 +707,30 @@ export function registerKind(ref prog: Program, info: KindInfo): void {
   if (map.mapContainsKey(ref prog.kinds, info.name)) {
     return;
   }
-  map.mapInsert(ref prog.kinds, info.name, info);
+  let stamped = info;
+  stamped.markerBit = assignMarkerBit(ref prog, info);
+  map.mapInsert(ref prog.kinds, stamped.name, stamped);
+}
+
+// The next free marker bit, for a kind that is a marker. Registration is the
+// only place a kind can get one, which is what makes the assignment stable for
+// the whole compile: `Program.kinds` is first-registration-wins, so a name
+// never changes what it means partway through.
+//
+// A graph with more than 64 marker kinds gets 0 for the rest. That leaves them
+// UNTRACKED - every bound involving one silently passes - rather than aliased
+// onto another kind's bit, which would refuse correct programs. Nothing in this
+// tree comes close: std declares exactly one.
+function assignMarkerBit(ref prog: Program, info: KindInfo): uint64 {
+  if (!info.conferred && !info.restrictive) {
+    return 0;
+  }
+  if (prog.markerNames.len >= 64) {
+    return 0;
+  }
+  const bit = uint64(1) << uint64(prog.markerNames.len);
+  vec.vecPush(ref prog.markerNames, info.name);
+  return bit;
 }
 
 // What a kind prefix names, or None when nothing in the graph declares it.

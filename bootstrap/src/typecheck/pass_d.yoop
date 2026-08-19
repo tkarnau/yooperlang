@@ -52,6 +52,11 @@ export function passDCheckBodies(ref prog: Program, ref tm: TypedModule, m: Modu
   // is a merge over paths and the checks run in source order - see
   // discharge.yoop.
   computeDischarges(ref prog, ref tm, m);
+
+  // And which obligations nothing answered. After the discharge walk, because
+  // it reads what that left behind. Advisory: `--warn-disposable` decides
+  // whether the build prints them. See unhandled.yoop.
+  reportUnhandledDisposables(ref prog, ref tm, m);
 }
 
 function checkFileBodies(ref prog: Program, ref tm: TypedModule, m: Module, root: NodeId): void {
@@ -325,8 +330,14 @@ function checkBodyAgainst(
     );
     disposable scope: LocalScope = scopeNew();
     let cx: Cx = { prog: ref prog, tm: ref tm, ast: ref ast, scope: ref scope };
+    beginReturnMarkers(ref prog);
     bindParams(ref cx, declNode, ref paramTypes);
     checkBlock(ref cx, declNode.childD);
+    // The half of the clearance decl-authority check that needs a BODY: a
+    // conferred kind on the return that nothing is authorized to confer is only
+    // legal when every return hands back a value already carrying it. See the
+    // passthrough section of typecheck/markers.yoop.
+    checkConferredPassthrough(ref prog, ref ast, declNode);
   }
 }
 
@@ -367,6 +378,12 @@ function bindParams(ref cx: Cx, declNode: ASTNode, ref paramTypes: Vec<TypeId>):
     }
     if (!declared) {
       reportError(cx.prog, `parameter "${paramNode.name}" is declared more than once`, paramNode.sourceLoc);
+    } else {
+      // The clearance markers the parameter declares, in both spellings -
+      // `f(owned s: string)` and `f(s: owned string)`. See
+      // typecheck/markers.yoop.
+      scopeSetMarkers(cx.scope, paramNode.name,
+        markersOfParam(cx.prog, cx.ast, paramNode));
     }
     // The DECORATION keeps the signature type: it is what codegen emits the
     // parameter as, and a `ref` parameter arrives as a pointer.

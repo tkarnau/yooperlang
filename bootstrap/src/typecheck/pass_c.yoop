@@ -120,8 +120,17 @@ function fillFileShells(
       case ASTNodeKind.FUNCTION_DECL: {
         fillFunctionSignature(ref prog, ref tm, ref m.ast, declNode);
         checkFunctionKinds(ref prog, ref tm, ref m.ast, declNode);
+        // The clearance transitions the SIGNATURE performs, which a free
+        // function is never authorized to perform. See typecheck/clearance.yoop.
+        checkFunctionClearance(ref prog, ref m.ast, declNode);
       }
       case ASTNodeKind.TYPE_DECL: {
+        // The clauses the declaration writes about kinds: the prefix in front
+        // of the body, and what the type says it propagates. Both name a kind
+        // by word, and this is the earliest pass where every kind in the graph
+        // is registered. See typecheck/kind_use.yoop.
+        checkTypeDeclKindPrefix(ref prog, ref m.ast, declNode);
+        checkPropagatesClause(ref prog, ref m.ast, declNode);
         // An ALIAS has no shell to fill - its name resolves straight to the
         // RHS's TypeId. It is forced here anyway so a LATER module reading it
         // through an import finds the answer already computed, in the one place
@@ -133,6 +142,7 @@ function fillFileShells(
         }
       }
       case ASTNodeKind.VARIANT_DECL: {
+        checkPropagatesClause(ref prog, ref m.ast, declNode);
         fillVariantCases(ref prog, ref tm, ref m.ast, declNode, moduleId);
       }
       case ASTNodeKind.ENUM_DECL: {
@@ -143,6 +153,12 @@ function fillFileShells(
       }
       case ASTNodeKind.TRAIT_DECL: {
         fillTraitMethods(ref prog, ref tm, ref m.ast, declNode, moduleId);
+      }
+      case ASTNodeKind.KIND_DECL: {
+        // Nothing to fill - a kind has no shell. What it has is two clauses
+        // that name a TRAIT, and a trait's method table is filled by the sweep
+        // above, so this is the earliest pass that can answer either.
+        checkKindDeclTraits(ref prog, ref tm, ref m.ast, declNode);
       }
       case ASTNodeKind.CONST_DECL: {
         fillModuleConst(ref prog, ref tm, ref m.ast, declNode,
@@ -302,6 +318,7 @@ function fillFunctionSignature(
     while (p < list.childCount) {
       const paramNode = nodeAt(ref ast, childAt(ref ast, list, p));
       checkParamKind(ref prog, ref ast, paramNode);
+      checkParamKindSites(ref prog, ref ast, paramNode);
       const annotated = resolveTypeAnnotation(ref prog, ref tm, ref ast, paramNode.childA);
       // `ref v: Vec<T>` is `ref Vec<T>` in the SIGNATURE - which is what makes
       // passing a bare `v` a type error rather than a silent copy. The body
@@ -315,7 +332,14 @@ function fillFunctionSignature(
     }
   }
   const ret = resolveTypeAnnotation(ref prog, ref tm, ref ast, declNode.childC);
+  checkReturnIsNotRef(ref prog, ref ast, declNode);
   endTypeParams(ref prog);
+
+  // What this signature says about clearance markers, keyed by SymbolId. Here
+  // rather than in pass D because a CALL to it may be in any later module and
+  // this is the one pass that has the declaration's AST in hand. See
+  // typecheck/markers.yoop.
+  recordSignatureMarkers(ref prog, ref tm, ref ast, declNode);
 
   setType(ref prog, typeId, Type.Func {
     params: params,
@@ -391,10 +415,12 @@ function fillStructFields(
       f += 1;
       continue;
     }
+    const carried = carriedKindNameOf(ref ast, fieldNode.childA);
+    checkFieldKindUse(ref prog, ref ast, declNode, fieldNode, carried);
     vec.vecPush(ref fields, {
       name: fieldNode.name,
       typeId: resolveTypeAnnotation(ref prog, ref tm, ref ast, fieldNode.childA),
-      carriedKind: carriedKindNameOf(ref ast, fieldNode.childA),
+      carriedKind: carried,
     });
     f += 1;
   }
@@ -716,15 +742,40 @@ export function checkFunctionKinds(
   }
 }
 
+// `function bad(): ref int32` - a borrow handed back out of the frame it
+// borrows FROM. The only thing a body has to borrow is its own storage, and
+// that storage is gone at the `ret`, so the caller is handed a pointer into a
+// dead frame.
+//
+// An EXTERN is exempt, and the difference is real rather than a carve-out: a C
+// signature's `ref FILE` is an opaque pointer the library owns, and no yoop
+// frame is involved in either direction. `examples/pass/language_showcase.yoop`
+// declares `fopen` exactly that way.
+function checkReturnIsNotRef(ref prog: Program, ref ast: AST, declNode: ASTNode): void {
+  if (declNode.childC == 0 || declNode.kind == ASTNodeKind.EXTERN_FUNCTION_DECL) {
+    return;
+  }
+  const annot = nodeAt(ref ast, declNode.childC);
+  if (annot.kind != ASTNodeKind.TYPE_ANNOTATION_REF_TYPE) {
+    return;
+  }
+  reportError(
+    ref prog,
+    `"${declNode.name}" returns a "ref" - the storage a body can borrow is its own frame, and that is gone by the time the caller reads it`,
+    declNode.sourceLoc
+  );
+}
+
 // `scoped h: ref FileHandle` - the kind a PARAMETER carries.
 //
-// Only that the kind EXISTS. Whether it may apply to a parameter at all is a
-// clause the bootstrap does not record (`appliesTo`), so that half is the
-// reference's and not ours - but an unknown NAME is refused on both sides, and
-// it is the half that catches a typo.
+// That the kind EXISTS is answered here; whether it may be written on a
+// parameter at all is `checkParamKindSites`, which reads the same list against
+// the `appliesTo` set. Two functions rather than one loop because the unknown
+// name has to be reported even when the kind cannot be looked up, and the site
+// rule has nothing to say in that case.
 //
-// Nothing reads the prefix after this. A kind on a parameter is provenance, and
-// none of the clauses that could mean something at run time apply to one.
+// Nothing else reads the prefix. A kind on a parameter is provenance, and none
+// of the clauses that mean something at run time apply to one.
 function checkParamKind(ref prog: Program, ref ast: AST, paramNode: ASTNode): void {
   if (paramNode.childE == 0) {
     return;
@@ -1009,4 +1060,30 @@ function checkDeclTraits(
   }
   checkMethodsRequired(ref prog, ref ast, declNode, ref traits);
   checkTraitsSatisfied(ref prog, ref tm, declNode, typeId, ref traits);
+  checkMethodClearances(ref prog, ref ast, declNode, ref traits);
+}
+
+// Each method's clearance transitions, against the traits this type actually
+// implements. Here rather than in collectMethods because the authority is the
+// `implements` list, and that is what this sweep just resolved.
+function checkMethodClearances(
+  ref prog: Program,
+  ref ast: AST,
+  declNode: ASTNode,
+  ref traits: Vec<TypeId>
+): void {
+  disposable traitNames: Vec<string> = vec.vecNew(traits.len);
+  let t: usize = 0;
+  while (t < traits.len) {
+    vec.vecPush(ref traitNames, nominalNameOf(ref prog, vec.vecGet(ref traits, t)));
+    t += 1;
+  }
+  let i: usize = 0;
+  while (i < declNode.childCount) {
+    const member = nodeAt(ref ast, childAt(ref ast, declNode, i));
+    if (member.kind == ASTNodeKind.METHOD_DECL) {
+      checkMethodClearance(ref prog, ref ast, member, declNode.name, ref traitNames);
+    }
+    i += 1;
+  }
 }

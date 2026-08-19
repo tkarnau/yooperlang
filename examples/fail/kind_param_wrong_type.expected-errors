@@ -1,0 +1,4 @@
+# Illegal: a kind parameter is a compile-time number, because the only thing a
+# kind argument reaches is a layout clause. A `string` parameter has nowhere to
+# be used.
+1:13: is not a compile-time number

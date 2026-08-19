@@ -1,0 +1,5 @@
+# Illegal: a marker polarity (`conferred` / `restrictive`) and `mustCall` are
+# exclusive. A marker is a bound at the places a value moves and carries no
+# obligation, so there is no value to call `dispose` on and no scope end to
+# call it at.
+6:6: is a marker and states mustCall

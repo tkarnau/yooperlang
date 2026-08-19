@@ -1,0 +1,9 @@
+# Illegal both times: `owned` names no `appliedBy`, so nothing is authorized to
+# CONFER it - the only legal route to it is passthrough, returning a value that
+# already carries it.
+#
+#   fake    returns a literal, which was never allocated
+#   sneaky  launders on one path and forges on the other, and passthrough is
+#           "every return" rather than "any return"
+14:10: "fake" returns kind "owned"
+20:10: "sneaky" returns kind "owned"

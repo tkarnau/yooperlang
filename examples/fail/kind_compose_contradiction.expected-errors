@@ -1,0 +1,4 @@
+# Illegal: alignment is the one clause a composition cannot union. Every other
+# clause adds an obligation and holding two at once is coherent; two alignments
+# are two different addresses for the same value.
+3:18: demand different alignments

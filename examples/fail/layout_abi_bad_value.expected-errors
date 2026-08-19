@@ -1,0 +1,4 @@
+# Illegal: "C" is the only ABI this compiler lays a type out for. A struct laid
+# out to a different one is not a run-time diagnostic - it is a garbled read
+# across an FFI boundary.
+3:18: is the only ABI this compiler lays a type out for

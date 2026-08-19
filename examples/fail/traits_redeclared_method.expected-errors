@@ -1,0 +1,4 @@
+# Illegal: `dispose` is declared twice in T's body. A method mangles to one
+# symbol per (type, name), so the second body has nowhere to be emitted and no
+# call site could say which of the two it meant.
+9:14: declares method "dispose" twice
