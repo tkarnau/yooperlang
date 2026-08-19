@@ -211,19 +211,27 @@ function checkVarDeclInner(ref cx: Cx, stmt: ASTNode, stmtId: NodeId): void {
   vec.vecSet(ref cx.tm.resolvedTypes, stmtId, finalType);
 }
 
-// What every handle binding owes: a FRESH spawn on the right.
+// What a handle binding owes: a FRESH spawn on the right, unless it is POOLED.
 //
-// The reference lets a `pooled` binding copy an existing handle
-// (`pooled h2 = h1;`) and emits a retain for it. Nothing in the corpus writes
-// one, so it is refused BY NAME here rather than half-built - a copy with no
-// retain is a use-after-free the moment either binding's scope ends.
+// A `pooled` handle is heap-allocated and REFCOUNTED, so a second binding onto
+// the same handle is meaningful - it takes its own count, and each binding
+// releases once at its own scope end. Codegen emits the retain; see
+// `emitPooledHandleCopy`.
+//
+// `joined` cannot be copied and neither can the immediate form, and the reason
+// is storage rather than policy: a joined handle lives in the CALLER's frame
+// with no count to take, so two bindings would both join it and the second
+// would wait on a freed sync pair.
 function checkTaskSpawnBinding(ref cx: Cx, stmt: ASTNode, bind: TaskBind): void {
   if (nodeAt(cx.ast, stmt.childB).kind == ASTNodeKind.CALL_EXPRESSION) {
     return;
   }
+  if (bind == TaskBind.POOLED) {
+    return;
+  }
   reportError(
     cx.prog,
-    `"${stmt.name}" binds a Task<T> handle that is not a fresh spawn - copying a handle needs the refcount retain the bootstrap does not emit yet, so only a direct call to a \`task\` function may appear here`,
+    `"${stmt.name}" binds a Task<T> handle that is not a fresh spawn - only a \`pooled\` handle is refcounted, so only that form may be copied`,
     stmt.sourceLoc
   );
 }

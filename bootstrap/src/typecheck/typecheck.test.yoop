@@ -2354,13 +2354,23 @@ suite function theHandleBindingFormsComeFromTheKindsClauses(): void {
     theory.isSuccessful = immediate.diagnostics.len == 0;
     theory.detail = `reported ${immediate.diagnostics.len}: ${firstDiagnostic(ref immediate)}`;
   }
-  // A COPY of an existing handle needs a refcount retain, which is not emitted.
-  // Refused by name rather than half-built: a copy with no retain is a
-  // use-after-free the moment either binding's scope ends.
+  // A COPY of an existing handle is legal for the REFCOUNTED form, which is the
+  // only one with a count to take. Codegen emits the retain; without it, both
+  // bindings release at their own scope end and the first frees a handle the
+  // second still names.
   let copied = checkSource(`${decl}function main(): int32 { pooled a = worker(1); pooled b = a; return 0; }`);
-  let test theory: Case = t.asserts("copying a handle into a second binding is refused by name") {
-    theory.isSuccessful = diagnosticsMention(ref copied, "not a fresh spawn");
+  let test theory: Case = t.asserts("a pooled handle may be copied into a second binding") {
+    theory.isSuccessful = copied.diagnostics.len == 0;
     theory.detail = `reported ${copied.diagnostics.len}: ${firstDiagnostic(ref copied)}`;
+  }
+
+  // A `joined` handle may NOT, and the reason is storage rather than policy: it
+  // lives in the caller's frame with no count to take, so two bindings would
+  // both join it and the second would wait on a freed sync pair.
+  let copiedJoined = checkSource(`${decl}function main(): int32 { joined a = worker(1); joined b = a; return 0; }`);
+  let test theory: Case = t.asserts("a joined handle may not be copied, and the message says why") {
+    theory.isSuccessful = diagnosticsMention(ref copiedJoined, "only a `pooled` handle is refcounted");
+    theory.detail = `reported ${copiedJoined.diagnostics.len}: ${firstDiagnostic(ref copiedJoined)}`;
   }
 }
 

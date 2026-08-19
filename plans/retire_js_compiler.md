@@ -16,12 +16,12 @@ Measured with a stage1 bootstrap built from the current tree, by
 
   surface (does codegen HANDLE the file):
     479 files, 458 done, 0 bad-ir, 21 refused, 19 distinct sites
-    now 494 done, ONE refused, one site - and it is A2 below rather than
-    anything about comptime. Every `@precompile` file compiles and runs.
+    now 495 done, ZERO refused, zero sites, zero bad-ir. The whole corpus -
+    `std/`, `examples/pass/` and `bootstrap/src/` - compiles.
 
   programs (does the program WORK, both compilers run and diffed):
     pass         244   204 ok   20 differ   19 bootgap
-                       now 218 ok, 24 differ, 1 bootgap - see below
+                       now 220 ok, 23 differ, ZERO bootgap - see below
     intro          4     4 ok
     tour           5     5 ok
     modules_demo   1     1 ok
@@ -68,13 +68,39 @@ to bytecode, an evaluator, a value model, an extern whitelist, and a
   is either a subsystem the bootstrap has to grow, or a feature the language
   drops. See "Open decisions".
 
-### A2. Task handle copy needs a refcount retain (1 file)
+### A2. Task handle copy needs a refcount retain (1 file) - DONE
 
 `examples/pass/propagates_full/main.yoop:36` - `"h3" binds a Task<T> handle
-that is not a fresh spawn`. Only a direct call to a `task` function may bind a
-handle today; copying one needs the refcount retain the bootstrap does not
-emit. `refcounted` and `mustCall` already exist as binding kinds, so the
-machinery is half there.
+that is not a fresh spawn`. A `pooled` handle is heap-allocated and REFCOUNTED,
+so a second binding onto it is meaningful: it takes its own count, and each
+binding releases once at its own scope end. Codegen emits the retain
+(`emitPooledHandleCopy`), and `yoop_task_retain` was already in the runtime.
+
+`joined` still refuses the copy, and the reason is STORAGE rather than policy:
+a joined handle lives in the caller's frame with no count to take, so two
+bindings would both join it and the second would wait on a freed sync pair.
+The message says so.
+
+Covered by `typecheck.test.yoop` (both halves) and
+`bootstrap/tests/slice/pooled_handle_copy.yoop`, which the reference agrees
+with.
+
+### A7. A kind-propagation check the bootstrap does not make (found while doing A2)
+
+The reference refuses
+
+    type Job { work: Task<int32> }
+
+with `field 'work' carries kind 'pooled' but enclosing struct 'Job' does not
+propagate it`. The bootstrap ACCEPTS it, and emits no retain for the field
+store - so the handle in the struct has no count of its own and the spawning
+scope's release is the last one.
+
+This is the bootstrap accepting MORE than the reference, which is the unsafe
+direction and the opposite of every other divergence in this document. It is
+NOT what A2 named and it does not block anything - no corpus program writes it,
+which is why the probes never saw it. The fix is a check rather than a
+lowering: refuse it the way the reference does.
 
 ### A3. Keyword member names (1 file) - DONE
 
@@ -279,8 +305,7 @@ undo step - deleting `src/` - comes last and comes with everything it needs.
      literal rounding, and pinned by a slice fixture.
   2. THE TWO SMALL BUGS. Both DONE - A3 (keyword member names) and A4 (`ref` on
      a module-level `let`, plus `ref g.field`).
-  3. A2, the task handle refcount retain. NOW THE ONLY REFUSAL LEFT in the
-     whole corpus.
+  3. A2, the task handle refcount retain. DONE.
   4. THE COMPTIME INTERPRETER (A1). DONE - all thirteen `@precompile` files
      compile and run and match the reference. See
      [comptime_interpreter.md](comptime_interpreter.md).

@@ -27,6 +27,12 @@ import { TaskBind } from "../typecheck";
 export function emitTaskBinding(ref cx: Cx, stmt: ASTNode, stmtId: NodeId, bind: TaskBind): EmitResult {
   const call = nodeAt(cx.ast, stmt.childB);
   if (call.kind != ASTNodeKind.CALL_EXPRESSION) {
+    // `pooled h2 = h1;` - a COPY of an existing handle rather than a spawn.
+    // Pass D allows it only for the refcounted form, which is the only one that
+    // has a count to take.
+    if (bind == TaskBind.POOLED) {
+      return emitPooledHandleCopy(ref cx, stmt, stmtId);
+    }
     return internalError("a task binding's initializer is not a call", kindName(call.kind));
   }
   // A cross-module spawn would need the DEFINING module's handle layout and
@@ -113,6 +119,31 @@ function fillHandle(ref cx: Cx, call: ASTNode, ref meta: TaskMeta, handle: Opera
     emitStoreToPtr(ref cx, vec.vecGet(ref meta.argTys, i), value, slotAddr);
     i += 1;
   }
+  return EmitResult.Ok;
+}
+
+/*
+  `pooled h2 = h1;` - a second binding onto an existing handle.
+
+    %t12 = load ptr, ptr %h1.1.addr
+    store ptr %t12, ptr %h2.2.addr
+    call void @yoop_task_retain(ptr %t12)
+
+  The RETAIN is the whole of it, and leaving it out is a use-after-free rather
+  than a leak: both bindings release at their own scope end, so without a second
+  count the first release frees a handle the second one still names.
+
+  It is emitted AFTER the store for no reason but readability - the two are
+  independent, and the reference emits them in this order too.
+*/
+function emitPooledHandleCopy(ref cx: Cx, stmt: ASTNode, stmtId: NodeId): EmitResult {
+  let handle: Operand = Operand.None;
+  emitExpr(ref cx, stmt.childB, ref handle)?;
+
+  const slotInfo = declareLocal(ref cx, stmt.name, "ptr");
+  emitStore(ref cx, "ptr", handle, stmt.name, slotInfo.id);
+  emitTaskRetain(ref cx, handle);
+  recordTaskCleanup(cx.disposes, stmt.name, slotInfo.id, TASK_ACTION_RELEASE);
   return EmitResult.Ok;
 }
 

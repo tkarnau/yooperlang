@@ -42,6 +42,14 @@ export function emitTaskFreeSyncPair(ref cx: Cx, handle: Operand): void {
 }
 
 //   call void @yoop_task_release(ptr %t3)
+//   call void @yoop_task_retain(ptr %t3)
+//
+// A second owner taking its own count. The mirror of the release below, and
+// every retain in the program has to be matched by one.
+export function emitTaskRetain(ref cx: Cx, handle: Operand): void {
+  emitRuntimeCall1(ref cx, "yoop_task_retain", handle);
+}
+
 export function emitTaskRelease(ref cx: Cx, handle: Operand): void {
   emitRuntimeCall1(ref cx, "yoop_task_release", handle);
 }
