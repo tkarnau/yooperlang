@@ -1,7 +1,5 @@
-// Ownership redesign (2026-06-17, plans/ownership-and-typestate-redesign.md):
-// obligations are ADVISORY. A struct-literal binding of a propagating type
-// that is never disposed typechecks cleanly. (Formerly
-// examples/fail/propagates_struct_literal_missing_kind.)
+// Obligations are ADVISORY. A struct-literal binding of a propagating type
+// that is never disposed typechecks cleanly.
 
 trait Disposable {
     function dispose(ref self): void;

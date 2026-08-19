@@ -11,8 +11,8 @@
 # and diffs the two compilers against each other.
 #
 # The two probes are deliberately separate rather than one flag apart. The
-# surface numbers are what the bootstrap-completion plan has been steered by
-# for its whole life, and a probe that made them move would be a broken probe.
+# surface numbers are a tracked measure of their own, and a probe that made
+# them move would be a broken probe.
 #
 # Usage:
 #   scripts/probe_programs.sh [compiler] [jobs] [filter]
@@ -231,8 +231,7 @@ export COMPILER WORK ROOT COMPILE_LIMIT RUN_LIMIT
 # `examples/fail/` is excluded on purpose: those programs are compile-error
 # fixtures, so "does it build" is the wrong question to ask of one.
 # `*.test.yoop` is excluded too - a test module has no `main` by design, and
-# the `--test` driver mode it needs is measured separately (see item 4.3 in
-# plans/bootstrap-completion.md).
+# the `--test` driver mode it needs is measured separately.
 # ---------------------------------------------------------------------------
 cd "$ROOT"
 {

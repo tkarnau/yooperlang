@@ -1,4 +1,4 @@
-// Phase 8.F.2: yoop_io_wait_readable on a descriptor pair.
+// yoop_io_wait_readable on a descriptor pair.
 //
 // Spawn a thread that sleeps ~10ms then writes one byte to the pair;
 // main calls yoop_io_wait_readable on the read end and verifies it

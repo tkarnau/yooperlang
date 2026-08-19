@@ -74,12 +74,12 @@ export type PendingDispose {
 // A stack of scopes, and nothing else.
 //
 // How far a `break` or a `continue` unwinds is NOT here: it is recorded on the
-// frame the jump targets, in loop_stack.yoop. This used to carry a parallel
-// `loopScopeDepths` stack instead, and that stopped working the moment a switch
-// became a breakable scope - a `break` out of a switch inside a loop unwinds to
-// the SWITCH's depth while a `continue` in the same arm unwinds to the LOOP's,
-// and one stack cannot answer both. Putting the depth on the frame makes each
-// jump read the depth of the thing it is actually leaving.
+// frame the jump targets, in loop_stack.yoop. A parallel `loopScopeDepths`
+// stack cannot answer it, because a switch is a breakable scope too - a `break`
+// out of a switch inside a loop unwinds to the SWITCH's depth while a
+// `continue` in the same arm unwinds to the LOOP's, and one stack cannot hold
+// both. Putting the depth on the frame makes each jump read the depth of the
+// thing it is actually leaving.
 export type DisposeStack propagates<disposable> {
   scopes: Vec<Vec<PendingDispose>>,
 }

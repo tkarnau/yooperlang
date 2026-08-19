@@ -6,9 +6,9 @@
 //
 // The validation pass rejects:
 //   - newName empty / starts with a digit / contains non-identifier chars
-//   - target kind we don't support yet (e.g. struct fields are renameable
-//     by name match, but enum variants currently aren't because variant
-//     ordinals are ABI-significant - see CLAUDE.md Phase 7.5 invariant)
+//   - an unsupported target kind (struct fields are renameable by name
+//     match, but enum variants are not, because variant ordinals are
+//     ABI-significant)
 //
 // On rejection we return { error } and the server surfaces it via the
 // LSP error response so the user gets a clear "rename not allowed"

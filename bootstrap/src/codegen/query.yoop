@@ -22,8 +22,8 @@ import { ASTNode, childAt, nodeAt } from "../ast";
 // ----- the typecheck boundary ----------------------------------------------
 
 // The LLVM type of whatever pass D resolved for this node. Codegen is entitled
-// to assume every node it visits has one (see the layer contract in
-// plans/bootstrap-pipeline-contracts.md), so there is no error path here.
+// to assume every node it visits has one - pass D decorates every node it
+// accepts - so there is no error path here.
 export function typeOf(ref cx: Cx, nodeId: NodeId): string {
   return llvmType(cx.prog, resolvedTypeAt(ref cx, nodeId));
 }

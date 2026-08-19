@@ -6,7 +6,7 @@ This walks you from nothing to a running Yooperlang program in a few minutes.
 
 You need two things:
 
-- **Node.js 18 or newer** - the compiler itself is written in plain JavaScript
+- **Node.js 22 or newer** - the compiler itself is written in plain JavaScript
   and runs on Node. There are no dependencies, so there is no `npm install`
   step.
 - **clang** - the compiler emits LLVM IR text and shells out to `clang` to link
@@ -79,8 +79,13 @@ For longer worked examples, browse [../examples/playground/](../examples/playgro
 
 The full language specification is in [../SPEC.md](../SPEC.md).
 
-There is also a browsable reference site in [../web/](../web/). It is a static
-site with no build step - serve it with any static file server:
+The site at <https://tkarnau.github.io/yooperlang/> is the friendlier way in:
+a five-program tour that starts at downloading the compiler, an explorer that walks one program
+from source through tokens, AST and LLVM IR to its output, the language
+reference, and a standard-library browser generated from `std/` itself.
+
+The same site is in [../web/](../web/) and needs no build step. Serve it with
+any static file server:
 
 ```bash
 # Python 3
@@ -90,12 +95,22 @@ python3 -m http.server -d web 8080
 npx --yes serve web -l 8080
 ```
 
-Then open <http://localhost:8080/>.
+Then open <http://localhost:8080/>. Opening `web/index.html` straight from the
+filesystem works too.
+
+The code, output and diagnostics the site shows are captured by actually
+running this compiler, so after changing `std/` or the tour programs,
+regenerate them:
+
+```bash
+npm run gen:web
+```
 
 ## Where to go next
 
 - if using vscode: try installing the debugger, LSP, and syntax highlighting in the [editors/vscode](../editors/vscode/README.md) folder
 - [../SPEC.md](../SPEC.md) - the language spec, syntax first
-- [../plans/](../plans/) - the current focus and small consolidated plan ([../plans/archive/roadmap.md](../plans/archive/roadmap.md) for the full historical phase map)
+- [writing_yoop.md](writing_yoop.md) - current practice for writing Yoop: kinds,
+  `string` versus `Text`, arenas, errors, async, modules, tests
 - [../CONTRIBUTING.md](../CONTRIBUTING.md) - running the tests, hacking on the
   compiler

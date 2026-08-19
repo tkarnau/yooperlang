@@ -77,9 +77,9 @@ const E2E_CONCURRENCY = Number(process.env.YOOP_E2E_CONCURRENCY)
 // `where`), so those tests reported "lldb not on PATH" even with lldb.exe
 // installed - masking the real reason, which is that clang drives the MSVC
 // target with -gcodeview and therefore emits CodeView rather than DWARF.
-// Getting a debugger working on Windows is deferred; see the porting notes.
-// Memoized: this used to re-probe on every DWARF test, which is three `which`
-// processes per run for an answer that cannot change mid-suite.
+// There is no working debugger on Windows; see the porting notes.
+// Memoized: re-probing on every DWARF test is three `which` processes per run
+// for an answer that cannot change mid-suite.
 let dwarfSkipMemo;
 function dwarfSkipReason() {
   if (dwarfSkipMemo !== undefined) return dwarfSkipMemo;
@@ -104,8 +104,8 @@ function dwarfSkipReason() {
 const RUN_TIMEOUT_MS = Number(process.env.YOOP_E2E_RUN_TIMEOUT_MS) || 30000;
 
 // clang gets its own, longer deadline: a cold link on a loaded machine is slow,
-// but it is not five minutes slow, and clang had NO deadline at all before -
-// one wedged link used to sit on a core until the machine was rebooted.
+// but it is not five minutes slow, and without a deadline a wedged link sits
+// on a core until the machine is rebooted.
 const CLANG_TIMEOUT_MS = Number(process.env.YOOP_E2E_CLANG_TIMEOUT_MS) || 180000;
 
 // Compile a file with clang, asynchronously. Rejects with clang's stderr
@@ -278,7 +278,7 @@ describe("e2e: pass fixtures compile, run, and produce expected output", { concu
   // The property that breaks SILENTLY: one `import` added to std/http and
   // suddenly every program that speaks HTTP needs OpenSSL installed to build.
   // Link flags are collected program-wide, which is why std/tls and std/https
-  // are separate modules (plans/tls.md D4) - and why this is worth asserting
+  // are separate modules - and why this is worth asserting
   // rather than trusting.
   //
   // Needs no clang: it inspects what the driver WOULD hand the linker.
@@ -307,14 +307,14 @@ describe("e2e: pass fixtures compile, run, and produce expected output", { concu
   });
 
   it("https_client: a real TLS handshake, three refusals, and https:// through the client", async (t) => {
-    // plans/tls.md phase 1. The peer is a NODE HTTPS server: a TLS client
+    // The peer is a NODE HTTPS server: a TLS client
     // tested only against itself proves almost nothing, and the value is
     // handshaking with an implementation that rejects us if we get it wrong.
     //
     // The three REFUSALS matter more than the connection. A handshake
     // succeeding says little; a client that cannot be made to refuse has no
     // security property at all - which is the same lesson the conferred-kind
-    // gate taught (yooperdoom-takeaways 0.1).
+    // gate teaches.
     const skip = tlsSkipReason();
     if (skip) {
       t.skip(`TLS: ${skip}`);
@@ -341,9 +341,9 @@ describe("e2e: pass fixtures compile, run, and produce expected output", { concu
           // ...and the escape hatch is what opens the gate, nothing else.
           "verify off connected\n" +
           // The payoff: an `https://` URL through the ORDINARY client, with
-          // no TLS at the call site. std/http takes Reader/Writer (phase 0)
-          // and TlsStream implements Readable/Writable (phase 1), so
-          // std/https is only where the two meet.
+          // no TLS at the call site. std/http takes Reader/Writer and
+          // TlsStream implements Readable/Writable, so std/https is only
+          // where the two meet.
           "client     200 tls-hello:/hi\n" +
           "done\n",
       );
@@ -353,10 +353,9 @@ describe("e2e: pass fixtures compile, run, and produce expected output", { concu
   });
 
   it("http_no_socket: a full HTTP exchange over in-memory Reader/Writer", async () => {
-    // plans/tls.md phase 0. std/http used to name TcpStream in every
-    // signature; it now takes the erased Reader/Writer vtables, so anything
-    // implementing Readable/Writable can drive it - which is what will let a
-    // TlsStream slot in with no other change.
+    // std/http takes the erased Reader/Writer vtables rather than naming
+    // TcpStream, so anything implementing Readable/Writable can drive it -
+    // which is what lets a TlsStream slot in with no other change.
     //
     // Useful on its own merits too: a server test with no port, no timing and
     // no cleanup, that can hand the server bytes no real client would send.
@@ -593,7 +592,8 @@ describe("e2e: pass fixtures compile, run, and produce expected output", { concu
     assert.equal(exitCode, 1);
     // The whole point: buffered stdout is flushed before the process dies, so
     // everything printed up to the failing allocation survives to locate it.
-    // This used to come back as `output: [null, null, null]` with SIGSEGV.
+    // Without the flush this comes back as `output: [null, null, null]` with
+    // SIGSEGV.
     assert.equal(stdout, "this line must survive the abort\n");
     assert.match(stderr, /^yoop: allocation failed: wanted 4096 bytes \(align 8\)/);
     assert.match(stderr, /arena exhausted: capacity 1024, 0 used, 1024 free/);
@@ -742,7 +742,7 @@ describe("e2e: pass fixtures compile, run, and produce expected output", { concu
     assert.equal(stdout, "h=42 same=1 diff=0\n");
   });
 
-  // Phase 10.E: cross-shape `?` propagation via `Into<T>`. IoError -> AppError
+  // Cross-shape `?` propagation via `Into<T>`. IoError -> AppError
   // conversion fires on the failure branch; the `tag=7` proves the
   // user-written `into` method ran rather than a raw bit-copy of the
   // operand's Err payload.
@@ -752,7 +752,7 @@ describe("e2e: pass fixtures compile, run, and produce expected output", { concu
     assert.equal(stdout, "happy sum=7\nsad err code=-7 tag=7\n");
   });
 
-  // Phase 10.E.2: `expr? "context"` on `string` Err payloads. Both literal
+  // `expr? "context"` on `string` Err payloads. Both literal
   // forms (plain + interpolated template) prefix the propagated error, and
   // contexts stack as the error passes through each `?`. The interleaved
   // "(formatting context...)" line proves the context expression is emitted
@@ -772,7 +772,7 @@ describe("e2e: pass fixtures compile, run, and produce expected output", { concu
     );
   });
 
-  // Phase 10.E.2: a structured Err payload routes the context through a
+  // A structured Err payload routes the context through a
   // `WithContext<T>` impl. Same-shape (ParseError -> ParseError) preserves
   // the untouched `line` field, which a blind string concat could not do;
   // cross-shape (IoError -> AppError) shows one impl covering both the
@@ -789,7 +789,7 @@ describe("e2e: pass fixtures compile, run, and produce expected output", { concu
     );
   });
 
-  // Phase 10.E.3: `expr? e { ... }` handles the failure at the `?` instead of
+  // `expr? e { ... }` handles the failure at the `?` instead of
   // propagating it. `handled` returns a plain int32 - bare `?` is rejected in
   // a function with a non-fallible return type, so those two lines only exist
   // because the handler form drops that requirement. `summed=60` is the
@@ -810,10 +810,10 @@ describe("e2e: pass fixtures compile, run, and produce expected output", { concu
     );
   });
 
-  // Phase 10.E.3: a non-void function that can fall off the end is now a
-  // diagnostic. Before this it compiled and trapped at runtime (codegen
-  // emits `unreachable`), so the failure arrived as a bare SIGTRAP with no
-  // source location. All three shapes must be caught, not just the first.
+  // A non-void function that can fall off the end is a diagnostic. Without
+  // it the program compiles and traps at runtime (codegen emits
+  // `unreachable`), so the failure arrives as a bare SIGTRAP with no source
+  // location. All three shapes must be caught, not just the first.
   it("missing_return: a function that can fall off the end is rejected", () => {
     const { errors } = typecheckFixtureEntry("examples/fail/missing_return.yoop");
     for (const fn of ["noElse", "oneArm", "loopOnly"]) {
@@ -826,7 +826,7 @@ describe("e2e: pass fixtures compile, run, and produce expected output", { concu
     }
   });
 
-  // Phase 10.F: `waitUntil(h, deadline_ns): WaitResult<T>` covers Done +
+  // `waitUntil(h, deadline_ns): WaitResult<T>` covers Done +
   // Timeout. The fast task completes well inside its 1s deadline; the slow
   // task sleeps 200ms past its 50ms deadline so Timeout fires deterministically.
   it("wait_until_smoke: waitUntil returns Done before the deadline and Timeout after it", async () => {
@@ -835,7 +835,7 @@ describe("e2e: pass fixtures compile, run, and produce expected output", { concu
     assert.equal(stdout, "fast done=49\nlazy timed out\n");
   });
 
-  // Phase 10.F.2: external cancellation via `cancel(h)`. A second pooled
+  // External cancellation via `cancel(h)`. A second pooled
   // task fires the cancel mid-wait; the main thread's waitUntil (with a
   // 1s deadline that's not the path-of-success) observes WaitResult.Cancelled.
   it("cancel_smoke: cancel(h) makes waitUntil return WaitResult.Cancelled", async () => {
@@ -859,10 +859,10 @@ describe("e2e: pass fixtures compile, run, and produce expected output", { concu
     );
   });
 
-  // Bounded socket I/O. Every std/net call used to park on the
-  // multiplexer with no way out; these give up on a deadline instead.
-  // The accept-with-no-client and read-from-a-silent-peer cases are the
-  // two shapes that used to wedge a thread permanently.
+  // Bounded socket I/O. A std/net call gives up on a deadline instead of
+  // parking on the multiplexer with no way out. The accept-with-no-client and
+  // read-from-a-silent-peer cases are the two shapes that would otherwise
+  // wedge a thread permanently.
   it("io_timeout_smoke: accept and read give up on a deadline instead of parking forever", async () => {
     const { stdout, exitCode } = await runFixtureEntry("examples/pass/io_timeout_smoke.yoop");
     assert.equal(exitCode, 0);
@@ -929,7 +929,7 @@ describe("e2e: pass fixtures compile, run, and produce expected output", { concu
   // "resumed" line catches a task resuming into another worker's allocator at
   // any count, while the "neighbor" line only exercises the leak-into-a-
   // neighbor path when a worker (rather than main's re-entrant `wait`
-  // dispatch) picks the neighbor up. See plans/async-allocator-context.md.
+  // dispatch) picks the neighbor up.
   const asyncArenaExpected =
     "parked\nneighbor: arena used=0\nresumed: arena used=64\na=1 b=0\n";
 
@@ -1304,19 +1304,19 @@ describe("e2e: pass fixtures compile, run, and produce expected output", { concu
     assert.equal(stdout, "disposed(7)\n");
   });
 
-  // Ownership redesign (2026-06-17): kindCheck now walks SWITCH_STATEMENT, so a
-  // `disposable`-keyword binding inside a `case` arm gets its auto-cleanup
-  // injected at the arm-block end. dispose fires before "after", proving the
-  // arm body's implicitCleanups were populated and emitted.
+  // kindCheck walks SWITCH_STATEMENT, so a `disposable`-keyword binding
+  // inside a `case` arm gets its auto-cleanup injected at the arm-block end.
+  // dispose fires before "after", proving the arm body's implicitCleanups
+  // were populated and emitted.
   it("disposable_in_switch_arm.yoop: a `disposable` binding inside a switch arm fires cleanup at arm end", async () => {
     const { stdout, exitCode } = await runFixture("examples/pass/disposable_in_switch_arm.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "using(1)\ndisposed(1)\nafter\n");
   });
 
-  // Yoopstore-papercut #11: a returned struct/variant literal that moves a
-  // propagating binding into a field transfers the obligation - dispose fires
-  // exactly once, at the caller.
+  // A returned struct/variant literal that moves a propagating binding into a
+  // field transfers the obligation - dispose fires exactly once, at the
+  // caller.
   it("propagates_return_struct_literal.yoop: returning a struct literal transfers the inner obligation", async () => {
     const { stdout, exitCode } = await runFixture("examples/pass/propagates_return_struct_literal.yoop");
     assert.equal(exitCode, 0);
@@ -1433,20 +1433,19 @@ describe("e2e: pass fixtures compile, run, and produce expected output", { concu
     assert.equal(stdout, "a is A\nb.x=42\n");
   });
 
-  // Phase 13.A: a struct declared before a variant that mentions it back
-  // through `Variant.Inner { kids: Struct[] }` used to capture the
-  // empty-variants shell when the typechecker resolved its field types.
-  // `sizeOfType(Struct)` then ran on the stale shell and undersized the
-  // struct; `heapAlloc<Struct>(n)` allocated half the bytes LLVM expects
-  // and writes corrupted the heap. The fix makes pass C mutate the shell
-  // in place. Would fail to run cleanly under the old typechecker.
+  // A struct declared before a variant that mentions it back through
+  // `Variant.Inner { kids: Struct[] }` must not capture the empty-variants
+  // shell when the typechecker resolves its field types. `sizeOfType(Struct)`
+  // on a stale shell undersizes the struct; `heapAlloc<Struct>(n)` then
+  // allocates half the bytes LLVM expects and the writes corrupt the heap.
+  // Pass C mutates the shell in place, which is what prevents it.
   it("variant_struct_forward_ref.yoop: struct captures variant shell before its variants populate", async () => {
     const { stdout, exitCode } = await runFixture("examples/pass/variant_struct_forward_ref.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "total=110 kids=5\n");
   });
 
-  // Phase 13.B: variant decls accept `implements Trait propagates<K>` and
+  // Variant decls accept `implements Trait propagates<K>` and
   // interleave method bodies with variant cases, exactly like struct
   // decls. Auto-cleanup at scope end dispatches through the variant's
   // own dispose; cleanup order is LIFO (Empty fires before Buffer).
@@ -1459,7 +1458,7 @@ describe("e2e: pass fixtures compile, run, and produce expected output", { concu
     );
   });
 
-  // Phase 12: value enums - the new `enum` keyword as a nominal primitive alias.
+  // Value enums - the `enum` keyword as a nominal primitive alias.
   it("value_enum_basic.yoop: int32-backed enum with switch + equality", async () => {
     const { stdout, exitCode } = await runFixture("examples/pass/value_enum_basic.yoop");
     assert.equal(exitCode, 0);
@@ -1505,22 +1504,22 @@ describe("e2e: pass fixtures compile, run, and produce expected output", { concu
     assert.equal(stdout, "circle r=2\nrect 3x4\nsquare s=5\nempty\n");
   });
 
-  // Phase 9.H: `?` propagates over enums with Ok/Err variants.
+  // `?` propagates over enums with Ok/Err variants.
   it("fallible_enum_qmark.yoop: '?' on a Result-shaped enum propagates Err and unwraps Ok", async () => {
     const { stdout, exitCode } = await runFixture("examples/pass/fallible_enum_qmark.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "happy sum=7\nsad err=-7\n");
   });
 
-  // Phase 10.A: generic enum Result<T, E> instantiates per (T, E) pair, and
-  // the Phase 9.H structural `?` recognizer fires on the instantiated shape.
+  // Generic enum Result<T, E> instantiates per (T, E) pair, and the
+  // structural `?` recognizer fires on the instantiated shape.
   it("generic_enum_result.yoop: Result<int32, int32> participates in switch + ? propagation", async () => {
     const { stdout, exitCode } = await runFixture("examples/pass/generic_enum_result.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "happy sum=7\nsad err=-7\n");
   });
 
-  // Phase 10.A: generic enum with a no-payload variant. Exercises the
+  // Generic enum with a no-payload variant. Exercises the
   // FIELD_ACCESS → VARIANT_CONSTRUCTOR pinning path for `Maybe.None` in
   // return position.
   it("generic_enum_option_like.yoop: Maybe<T> with Some/None over int32", async () => {
@@ -1529,7 +1528,7 @@ describe("e2e: pass fixtures compile, run, and produce expected output", { concu
     assert.equal(stdout, "m1=Some(3)\nm2=None\n");
   });
 
-  // Phase 9.G: heterogeneous handler list via vtable. Three different impl
+  // Heterogeneous handler list via vtable. Three different impl
   // types ({Const, AddOffset, Scale}) all answer the same Handler trait,
   // and a single fan_out function dispatches across the mixed array - the
   // canonical motivating case (would have needed monomorphized generics or
@@ -1540,7 +1539,7 @@ describe("e2e: pass fixtures compile, run, and produce expected output", { concu
     assert.equal(stdout, "req=10 sum=145\nreq=7  sum=133\nscale-only=33\n");
   });
 
-  // Phase 10.K: `VTableName.fromFn(f1, ...)` builds a vtable from named
+  // `VTableName.fromFn(f1, ...)` builds a vtable from named
   // functions (ctx-null + ctx-dropping shim), with no per-predicate struct.
   // Exercises a heterogeneous array mixing fromFn and from(ref struct) values
   // through one vtable type, plus a two-method vtable to pin slot ordering.
@@ -1550,7 +1549,7 @@ describe("e2e: pass fixtures compile, run, and produce expected output", { concu
     assert.equal(stdout, "matches=6\nseven-is-digit\nlo=20 hi=11\n");
   });
 
-  // Phase 10.K: a function-pointer parameter is callable directly by name
+  // A function-pointer parameter is callable directly by name
   // (`pred(ch)`), and a bare top-level function name materializes as the
   // argument - the lightest higher-order form, no vtable/struct/ctx.
   it("fn_pointer_param.yoop: a function passed as an argument is called indirectly", async () => {
@@ -1559,7 +1558,7 @@ describe("e2e: pass fixtures compile, run, and produce expected output", { concu
     assert.equal(stdout, "digits=3\nuppers=2\nagain=2\n");
   });
 
-  // Phase 10.K: an array of function pointers - element type spelled with a
+  // An array of function pointers - element type spelled with a
   // parenthesized function-value type `((p: T) => R)[]`. Names materialize
   // into the slots, the loop variable is called directly. No vtable/struct.
   it("fn_pointer_array.yoop: an array of function pointers scans via indirect calls", async () => {
@@ -1568,7 +1567,7 @@ describe("e2e: pass fixtures compile, run, and produce expected output", { concu
     assert.equal(stdout, "aF3: ok end=3\na_3: ok end=3\n_a3: err leading underscore\naFxy: ok end=2\n");
   });
 
-  // Phase 9.I: a nested-wait chain deeper than the worker count must complete.
+  // A nested-wait chain deeper than the worker count must complete.
   // Pre-9.I, YOOP_NUM_WORKERS=1 plus an inner `wait` deadlocked the lone
   // worker; the suspendable-wait path drains the queue on the calling thread
   // instead of pthread_cond_wait'ing.
@@ -1599,8 +1598,8 @@ describe("e2e: pass fixtures compile, run, and produce expected output", { concu
     assert.equal(stdout, "diff=3\nsame=1\n");
   });
 
-  // Yoopstore-papercut #3: bare `unsafe_ptr` (no `<T>`) is the opaque
-  // C-pointer handle. fopen/fclose round-trip + implicit decay + cast.
+  // Bare `unsafe_ptr` (no `<T>`) is the opaque C-pointer handle.
+  // fopen/fclose round-trip + implicit decay + cast.
   it("unsafe_ptr_opaque.yoop: bare unsafe_ptr round-trips through fopen/fclose and casts", async () => {
     const { stdout, exitCode } = await runFixture("examples/pass/unsafe_ptr_opaque.yoop");
     assert.equal(exitCode, 0);
@@ -1707,8 +1706,8 @@ describe("e2e: pass fixtures compile, run, and produce expected output", { concu
     assert.equal(stdout, "a: safe\nb: safe\n");
   });
 
-  // chat-agent-papercut #3: `contains` was a global keyword (kind-clause
-  // word) blocking it as an ordinary function name. Now contextual.
+  // `contains` is a contextual keyword: as a global kind-clause word it would
+  // block `contains` as an ordinary function name.
   it("contains_as_function_name.yoop accepts `contains` as an ordinary fn name", async () => {
     const { stdout, exitCode } = await runFixture("examples/pass/contains_as_function_name.yoop");
     assert.equal(exitCode, 0);
@@ -1728,12 +1727,11 @@ async function runFixtureEntry(relPath, opts = {}) {
   const allLinkFlags = [...linkFlags, ...runtimeLinkFlags()];
   // -g is OPT-IN (opts.debug), not the default, and that is a measured choice.
   //
-  // It used to be unconditional, to "mirror the production yoopiler.js
-  // invocation". But almost every test here asserts on the program's STDOUT,
-  // which debug info cannot affect, and the tests that check DWARF *shape*
-  // inspect the IR string - which codegen produces before clang ever runs. The
-  // only tests that need a debug-info-bearing BINARY are the lldb ones, and
-  // they ask for it explicitly.
+  // Almost every test here asserts on the program's STDOUT, which debug info
+  // cannot affect, and the tests that check DWARF *shape* inspect the IR
+  // string - which codegen produces before clang ever runs. The only tests
+  // that need a debug-info-bearing BINARY are the lldb ones, and they ask for
+  // it explicitly.
   //
   // What it cost to carry it everywhere, measured on Windows: ~100ms of the
   // ~415ms link (25%), and 13.5MB written per fixture instead of 250KB - the
@@ -1853,7 +1851,7 @@ function typecheckFixture(relPath) {
   return typecheckSource(src);
 }
 
-// Phase 7.5: single-file fixture typechecked through the multi-module pipeline
+// Single-file fixture typechecked through the multi-module pipeline
 // (which has the full pass A/B/C with enum / union / generics wired). The
 // legacy `typecheckSource` only supports the structs+functions subset.
 function typecheckFixtureProgram(relPath) {
@@ -1897,13 +1895,13 @@ describe("e2e: multi-file pass fixtures compile and produce expected output", { 
     assert.equal(stdout, "blocks=1 a=1\n");
   });
 
-  // Regression: pass C used to REPLACE the enum/union table entry rather than
-  // fill the pass-A shell in place. Files inside one module have no dependency
-  // order, so the sibling that sorts first resolved both types while they were
-  // still shells and kept holding them - the enum arrived with a null
-  // `underlying` ("cannot switch over enum Color") and the union with empty
-  // fields ("union Bits has no field asInt"). The fixture's filenames are load
-  // bearing: aa_uses.yoop must sort before zz_decls.yoop.
+  // Pass C fills the pass-A enum/union shell in place rather than REPLACING
+  // the table entry. Files inside one module have no dependency order, so a
+  // sibling that sorts first resolves both types while they are still shells
+  // and keeps holding them - replacing the entry leaves that sibling with an
+  // enum whose `underlying` is null ("cannot switch over enum Color") and a
+  // union with empty fields ("union Bits has no field asInt"). The fixture's
+  // filenames are load bearing: aa_uses.yoop must sort before zz_decls.yoop.
   it("dir_module_shell_order: enum/union shells are filled in place, not replaced", async () => {
     const { stdout, exitCode } = await runFixtureEntry("examples/pass/dir_module_shell_order/main.yoop");
     assert.equal(exitCode, 0);
@@ -1911,11 +1909,11 @@ describe("e2e: multi-file pass fixtures compile and produce expected output", { 
   });
 });
 
-// Phase 13.C: @derive(display) - pre-typecheck expansion generates the
+// @derive(display) - pre-typecheck expansion generates the
 // Display.toString method from a struct's field annotations. Fixtures run
 // through runFixtureEntry (compileEntry): the expansion needs the driver's
 // module graph with std/core/traits.yoop autoloaded.
-describe("e2e: Phase 13.C @derive(display)", { concurrency: E2E_CONCURRENCY }, () => {
+describe("e2e: @derive(display)", { concurrency: E2E_CONCURRENCY }, () => {
   it("derive_display_basic: derived toString via explicit printf format arg", async () => {
     // Also the regression test for the printf lowering fix: a template
     // literal VALUE arg after an explicit format literal fills the %s
@@ -1985,7 +1983,7 @@ describe("e2e: Phase 13.C @derive(display)", { concurrency: E2E_CONCURRENCY }, (
     );
   });
 
-  // Phase 13.D: variants derive too. The generated body is an arm-per-case
+  // Variants derive too. The generated body is an arm-per-case
   // switch; per-case control comes from composition (a payload type declared
   // outside the variant with its own Display impl), not hand-written methods.
   it("derive_display_variant: arm-per-case switch, payload Display dispatch, collections, bound generic", async () => {
@@ -2042,10 +2040,10 @@ describe("e2e: Phase 13.C @derive(display)", { concurrency: E2E_CONCURRENCY }, (
     );
   });
 
-  it("derive parse-stage rejections: deferred names, unknown names, wrong target", () => {
+  it("derive parse-stage rejections: unsupported names, unknown names, wrong target", () => {
     assert.throws(
       () => parse(`@derive(eq)\ntype P {\n  x: int32,\n}\n`),
-      /@derive\(eq\) is not yet supported/,
+      /@derive\(eq\) is not supported/,
     );
     assert.throws(
       () => parse(`@derive(banana)\ntype P {\n  x: int32,\n}\n`),
@@ -2063,8 +2061,8 @@ describe("e2e: Phase 13.C @derive(display)", { concurrency: E2E_CONCURRENCY }, (
     assert.equal(stdout, "16 = 16\n");
   });
 
-  // Yoopstore-papercut #9: `import * as ns, { Type } from "..."` binds the
-  // namespace and a named type from a two-axis module in one line.
+  // `import * as ns, { Type } from "..."` binds the namespace and a named
+  // type from a two-axis module in one line.
   it("imports_combined: combined namespace + named import on one line", async () => {
     const { stdout, exitCode } = await runFixtureEntry("examples/pass/imports_combined/main.yoop");
     assert.equal(exitCode, 0);
@@ -2101,7 +2099,7 @@ describe("e2e: Phase 13.C @derive(display)", { concurrency: E2E_CONCURRENCY }, (
     assert.equal(stdout, "a=42 b=42\n");
   });
 
-  // Phase 9.B: bool[] arrays
+  // bool[] arrays
   it("bool_array: bool[] literal/index/heapAlloc/Vec paths all work", async () => {
     const { stdout, exitCode } = await runFixtureEntry(
       "examples/pass/bool_array.yoop",
@@ -2119,7 +2117,7 @@ describe("e2e: Phase 13.C @derive(display)", { concurrency: E2E_CONCURRENCY }, (
     );
   });
 
-  // Phase 9.C: std/ import root
+  // std/ import root
   it("std_root_import: `std/...` paths resolve against the repo std/ dir", async () => {
     const { stdout, exitCode } = await runFixtureEntry(
       "examples/pass/std_root_import.yoop",
@@ -2182,7 +2180,7 @@ describe("e2e: Phase 13.C @derive(display)", { concurrency: E2E_CONCURRENCY }, (
     assert.equal(stdout, "n=3\nn=2\nn=1\n");
   });
 
-  // Phase 7.4: cross-trait same-name impl - one method body, two emitted
+  // Cross-trait same-name impl - one method body, two emitted
   // LLVM symbols, each callable via its respective trait qualifier.
   it("traits_cross_trait_same_name: one impl satisfies two traits with the same method name", async () => {
     const { stdout, exitCode } = await runFixtureEntry("examples/pass/traits_cross_trait_same_name/main.yoop");
@@ -2190,7 +2188,7 @@ describe("e2e: Phase 13.C @derive(display)", { concurrency: E2E_CONCURRENCY }, (
     assert.equal(stdout, "bot=7\nbot=7\n");
   });
 
-  // Phase 7.4: trait method name == free function name now coexist cleanly.
+  // A trait method name and a free function name coexist cleanly.
   it("traits_method_name_collides_with_fn: free fn and trait method share a name", async () => {
     const { stdout, exitCode } = await runFixtureEntry("examples/pass/traits_method_name_collides_with_fn/main.yoop");
     assert.equal(exitCode, 0);
@@ -2261,7 +2259,7 @@ describe("e2e: Phase 13.C @derive(display)", { concurrency: E2E_CONCURRENCY }, (
     );
   });
 
-  // phase 6.2: scoped kind and escape analysis
+  // scoped kind and escape analysis
   it("scoped_basic: scoped kind with mustNotEscape, kind-prefixed param, dispose fires at scope end", async () => {
     const { stdout, exitCode } = await runFixtureEntry("examples/pass/scoped_basic/main.yoop");
     assert.equal(exitCode, 0);
@@ -2420,7 +2418,7 @@ describe("e2e: Phase 13.C @derive(display)", { concurrency: E2E_CONCURRENCY }, (
 
   // The IR assertions above prove the metadata is shaped right; this one
   // proves it survives clang and that a debugger can actually READ the values
-  // (the whole point - previously `frame variable` showed nothing but prims).
+  // (the whole point - without it `frame variable` shows nothing but prims).
   it("dwarf: lldb reads struct / string / array / variant locals by value", async (t) => {
     const skip = dwarfSkipReason();
     if (skip) { t.skip(skip); return; }
@@ -2538,8 +2536,8 @@ describe("e2e: Phase 13.C @derive(display)", { concurrency: E2E_CONCURRENCY }, (
     assert.equal(stdout, "h.x=1.000000\nbye vec3\n");
   });
 
-  // Phase 8.H: byte / string / Vec primitives and the parse_request_line
-  // smoke test. Each fixture imports from std/core/* and exercises the new
+  // Byte / string / Vec primitives and the parse_request_line
+  // smoke test. Each fixture imports from std/core/* and exercises the
   // intrinsics (arraySlice / stringAsBytes / stringFromBytesUnchecked)
   // through their pure-yoop wrappers.
 
@@ -2570,7 +2568,7 @@ describe("e2e: Phase 13.C @derive(display)", { concurrency: E2E_CONCURRENCY }, (
     );
   });
 
-  // Yoopstore-papercut #4: bulk Vec fill (vecFromArray + vecExtendFrom).
+  // Bulk Vec fill (vecFromArray + vecExtendFrom).
   it("vecExtendFrom: vecFromArray copies and vecExtendFrom grows once", async () => {
     const { stdout, stderr, exitCode } = await runFixture("examples/pass/vec_extend_from.yoop", { trackHeap: true });
     assert.equal(exitCode, 0);
@@ -2581,7 +2579,7 @@ describe("e2e: Phase 13.C @derive(display)", { concurrency: E2E_CONCURRENCY }, (
     assert.match(stderr, /net 0 bytes/);
   });
 
-  // Yoopstore-papercut #5: owned Bytes buffer with copy / seal constructors.
+  // Owned Bytes buffer with copy / seal constructors.
   // trackHeap asserts the from_vec seal doesn't double-free or leak the
   // transferred buffer.
   it("bytes_owned: bytesFromArray + bytesFromVec seal + transfer-up dispose", async () => {
@@ -2640,8 +2638,8 @@ describe("e2e: Phase 13.C @derive(display)", { concurrency: E2E_CONCURRENCY }, (
     );
   });
 
-  // Yoopstore-papercut #2 follow-ups: std/fs exists() / fileSize() via a
-  // stat runtime helper, plus real errno reasons in failure messages.
+  // std/fs exists() / fileSize() via a stat runtime helper, plus real errno
+  // reasons in failure messages.
   it("fs_metadata: exists/fileSize report state and errno surfaces the real reason", async () => {
     const { stdout, exitCode } = await runFixture("examples/pass/fs_metadata.yoop");
     assert.equal(exitCode, 0);
@@ -2666,7 +2664,7 @@ describe("e2e: Phase 13.C @derive(display)", { concurrency: E2E_CONCURRENCY }, (
     );
   });
 
-  // Library Phase A: foundational traits exported from std/core/traits.yoop.
+  // Foundational traits exported from std/core/traits.yoop.
   it("traits_readable_writable: in-memory MemBuffer implements (Readable, Writable) - round-trips bytes", async () => {
     const { stdout, exitCode } = await runFixtureEntry("examples/pass/traits_readable_writable/main.yoop");
     assert.equal(exitCode, 0);
@@ -2705,7 +2703,7 @@ describe("e2e: Phase 13.C @derive(display)", { concurrency: E2E_CONCURRENCY }, (
     // The serve loop takes the erased Dispatcher, so there is exactly one
     // copy of it and the handler is reached through the vtable.
     assert.match(ir, /%vtable\..*__Dispatcher = type/);
-    // serveConnection is async now, so it has the coroutine ABI: returns
+    // serveConnection is async, so it has the coroutine ABI: returns
     // `ptr` (the handle), takes a trailing result slot, and carries
     // presplitcoroutine. That is what lets a connection suspend on a
     // read and hand its worker thread back.
@@ -2714,11 +2712,10 @@ describe("e2e: Phase 13.C @derive(display)", { concurrency: E2E_CONCURRENCY }, (
     // MODULE, so all seven of its source files mangle against one module id
     // derived from the directory. Same for the router assertions below.
     assert.match(ir, /define ptr @http_.*__serveConnection\(.*ptr %__ret\) presplitcoroutine/);
-    // The handler is ASYNC too now, and this assertion is the inverse of what
-    // it used to be. Async used to stop at the I/O boundary deliberately, to
-    // bound how far the colour spread - but `client.send` is async, so a
-    // synchronous handler could not call the HTTP client, which made a PROXY
-    // unwritable. See examples/pass/http_proxy.
+    // The handler is ASYNC too. Stopping async at the I/O boundary would
+    // bound how far the colour spreads - but `client.send` is async, so a
+    // synchronous handler could not call the HTTP client, which would make a
+    // PROXY unwritable. See examples/pass/http_proxy.
     //
     // A handler that does no I/O (this one) pays one frame allocation and
     // never suspends: an async function with no await runs straight through
@@ -2752,7 +2749,7 @@ describe("e2e: Phase 13.C @derive(display)", { concurrency: E2E_CONCURRENCY }, (
     assert.match(ir, /declare i64 @yoop_iop_accept_wait\(/);
   });
 
-  // Phase 10.I: `vtable Reader for Readable` round-trips through a
+  // `vtable Reader for Readable` round-trips through a
   // type-erased in-memory cursor.
   it("reader_vtable_smoke: Reader.from(ref MemReader) then Readable.read through the vtable", async () => {
     const { stdout, exitCode } = await runFixtureEntry("examples/pass/reader_vtable_smoke/main.yoop");
@@ -2760,7 +2757,7 @@ describe("e2e: Phase 13.C @derive(display)", { concurrency: E2E_CONCURRENCY }, (
     assert.equal(stdout, "n=3 bytes=72,73,33\n");
   });
 
-  // Phase 10.I: pure URL parser - no sockets.
+  // Pure URL parser - no sockets.
   it("uri_parse_smoke: parseUri handles http/https/ipv6 + error cases", async () => {
     const { stdout, exitCode } = await runFixtureEntry("examples/pass/uri_parse_smoke/main.yoop");
     assert.equal(exitCode, 0);
@@ -2799,11 +2796,11 @@ describe("e2e: Phase 13.C @derive(display)", { concurrency: E2E_CONCURRENCY }, (
     );
   });
 
-  // Layout regressions. Each of these used to corrupt memory rather than fail
-  // to compile: a variant nested in a variant payload was sized without its
-  // payload floor + pad, a vtable had no size case at all (so a Vec of structs
-  // holding one overran its buffer), and a module-level const string reached
-  // the binary with its escape sequences undecoded.
+  // Layout regressions. Each of these corrupts memory rather than failing to
+  // compile: a variant nested in a variant payload sized without its payload
+  // floor + pad, a vtable with no size case at all (so a Vec of structs
+  // holding one overruns its buffer), and a module-level const string
+  // reaching the binary with its escape sequences undecoded.
   it("variant_layout: nested variant payload, vtable in a Vec, const escapes", async () => {
     const { stdout, exitCode } = await runFixtureEntry("examples/pass/variant_layout/main.yoop");
     assert.equal(exitCode, 0);
@@ -2831,7 +2828,7 @@ describe("e2e: Phase 13.C @derive(display)", { concurrency: E2E_CONCURRENCY }, (
     assert.match(ir, /define .*@http_.*__matchPath/);
   });
 
-  // Phase 10.I: end-to-end client+server in one process. A background
+  // End-to-end client+server in one process. A background
   // task serves one request; the main thread issues an http_get and
   // prints the response body.
   it("http_client_loopback: in-process server task + client GET/POST round-trip", async () => {
@@ -2924,7 +2921,7 @@ describe("e2e: porting papercuts", { concurrency: E2E_CONCURRENCY }, () => {
 // shapes shared one root cause - a reference resolving against a pass-A shell
 // that pass C had not filled yet - and they failed in four different ways,
 // including a compiler CRASH and (across the files of a directory module) a
-// SILENT MISCOMPILE. See plans/modules-as-directories.md.
+// SILENT MISCOMPILE.
 describe("e2e: declaration order independence", { concurrency: E2E_CONCURRENCY }, () => {
   it("decl_order_independence: struct field, variant payload, and generic arg all resolve when declared later", async () => {
     const { stdout, exitCode } = await runFixture(
@@ -2957,9 +2954,8 @@ describe("e2e: declaration order independence", { concurrency: E2E_CONCURRENCY }
   });
 });
 
-// modules-as-directories: a module is either one source file (no header) or a
-// DIRECTORY of source files that each declare `module <name>;`. See
-// plans/modules-as-directories.md.
+// A module is either one source file (no header) or a DIRECTORY of source
+// files that each declare `module <name>;`.
 describe("e2e: directory modules", { concurrency: E2E_CONCURRENCY }, () => {
   it("dir_module: two source files form one module and share a namespace", async () => {
     const { stdout, exitCode } = await runFixture("examples/pass/dir_module/main.yoop");
@@ -2978,11 +2974,11 @@ describe("e2e: directory modules", { concurrency: E2E_CONCURRENCY }, () => {
   // A module's semantics must not depend on the alphabetical spelling of its
   // filenames. This fixture's impl file is deliberately named so it sorts BEFORE
   // the file declaring the trait, the generic, and the type the kind governs.
-  // Pass C used to be module-major (every sub-stage per source file), so an impl
-  // could be validated against a still-empty trait method map and this failed
-  // with "'self' can only be used inside a trait method body". Pass C is now
-  // group-major / stage-minor: every file of a module completes a stage before
-  // the next stage starts for any of them.
+  // Pass C is group-major / stage-minor: every file of a module completes a
+  // stage before the next stage starts for any of them. A module-major pass C
+  // (every sub-stage per source file) would validate an impl against a
+  // still-empty trait method map and fail with "'self' can only be used
+  // inside a trait method body".
   it("dir_module_order: a trait/generic/kind used from an EARLIER-sorting sibling file", async () => {
     const { stdout, exitCode } = await runFixture(
       "examples/pass/dir_module_order/main.yoop",
@@ -3141,7 +3137,7 @@ describe("e2e: multi-file fail fixtures produce the right errors", { concurrency
     );
   });
 
-  // Phase 10.E: cross-shape `?` is only accepted when the operand's Err type
+  // Cross-shape `?` is only accepted when the operand's Err type
   // implements `Into<RetErr>` for the enclosing return's Err type. Without
   // that impl the typechecker rejects with a fix-it pointing at the trait.
   it("qmark_cross_shape_no_into: `?` between mismatched Err payloads without an Into<T> impl is a typecheck error", () => {
@@ -3152,7 +3148,7 @@ describe("e2e: multi-file fail fixtures produce the right errors", { concurrency
     );
   });
 
-  // Phase 10.E.2: a context string on a `?` whose Err payload is a struct
+  // A context string on a `?` whose Err payload is a struct
   // with no `WithContext<RetErr>` impl is rejected, with the impl to add
   // spelled out in source-writable form.
   it("qmark_context_no_impl: `?` context on a payload with no WithContext impl is a typecheck error", () => {
@@ -3165,7 +3161,7 @@ describe("e2e: multi-file fail fixtures produce the right errors", { concurrency
     );
   });
 
-  // Phase 10.K: `VTableName.fromFn(...)` arguments must match the method slot
+  // `VTableName.fromFn(...)` arguments must match the method slot
   // signature. A return-type mismatch (int32 where the slot wants bool) is
   // rejected at typecheck.
   it("vtable_fromfn_sig_mismatch: a fromFn arg whose signature differs from the method slot is a typecheck error", () => {
@@ -3177,12 +3173,12 @@ describe("e2e: multi-file fail fixtures produce the right errors", { concurrency
   });
 });
 
-// Phase 11.B: opportunistic module-init folding. The comptime pass
+// Opportunistic module-init folding. The comptime pass
 // tries to evaluate each module-level let/const initializer; on success
 // codegen emits the literal value as the LLVM @global initial and
 // skips the runtime module_init for that decl. Failures are silent
 // (existing programs unaffected).
-describe("e2e: Phase 11.B opportunistic module-init folding", { concurrency: E2E_CONCURRENCY }, () => {
+describe("e2e: opportunistic module-init folding", { concurrency: E2E_CONCURRENCY }, () => {
   it("comptime_enum_fold.yoop: enum variant + switch + payload-bindings fold via the comptime interpreter", async () => {
     const { stdout, exitCode } = await runFixture("examples/pass/comptime_enum_fold.yoop");
     assert.equal(exitCode, 0);
@@ -3200,8 +3196,8 @@ describe("e2e: Phase 11.B opportunistic module-init folding", { concurrency: E2E
     const ir = compileSource(src);
     // The function-call results fold even though the enum producers
     // themselves stay at zeroinitializer (enum payload-as-bytes
-    // constant encoding isn't wired yet - runtime module_init still
-    // constructs the enum globals).
+    // constant encoding is not supported - runtime module_init constructs
+    // the enum globals).
     assert.match(ir, /C_AREA = internal global i32 96,/);
     assert.match(ir, /S_AREA = internal global i32 50,/);
     assert.match(ir, /T_AREA = internal global i32 0,/);
@@ -3309,12 +3305,11 @@ describe("e2e: Phase 11.B opportunistic module-init folding", { concurrency: E2E
   });
 });
 
-// Phase 11.A: `@`-attribute syntax + registry skeleton. Phase 11.C
-// wires `@precompile`'s comptimePhase to the interpreter - init-form
-// folds become hard errors when the comptime evaluator can't honor
-// the user's directive, and the block form is reserved for a later
-// sub-phase with a clear "not yet supported" diagnostic.
-describe("e2e: Phase 11.A `@`-attribute parsing + registry dispatch", { concurrency: E2E_CONCURRENCY }, () => {
+// `@`-attribute syntax + registry dispatch. `@precompile`'s comptimePhase
+// runs the interpreter - init-form folds are hard errors when the comptime
+// evaluator can't honor the user's directive, and the block form is rejected
+// with a clear "not supported" diagnostic.
+describe("e2e: `@`-attribute parsing + registry dispatch", { concurrency: E2E_CONCURRENCY }, () => {
   it("at_unknown_attribute.yoop: unknown `@foo` errors with a Levenshtein 'did you mean' hint", () => {
     const src = fs.readFileSync(
       path.join(repoRoot, "examples/fail/at_unknown_attribute.yoop"),
@@ -3501,7 +3496,7 @@ describe("e2e: Phase 11.A `@`-attribute parsing + registry dispatch", { concurre
     assert.doesNotMatch(ir, /define internal void @[^ ]*__module_init\(\)/);
   });
 
-  // Phase 10.E.2 at comptime. Multi-module fixture (imports std/core/types +
+  // `?` context strings at comptime. Multi-module fixture (imports std/core/types +
   // std/core/traits) so it goes through the module-graph compile path.
   // CONCAT_CMP=0 means the string-payload path built exactly
   // "step -1: boom"; TRAIT_SCORE=500 means WithContext.withContext ran with
@@ -3527,8 +3522,8 @@ describe("e2e: Phase 11.A `@`-attribute parsing + registry dispatch", { concurre
     assert.equal(exitCode, 0);
     assert.equal(stdout, "IMM=50 JOIN=66 POOL=84 MULTI=42\n");
     // compileEntry, not compileSource: the concurrency kinds live in
-    // std/core/kinds.yoop now, so this fixture needs the module graph (which
-    // autoloads it). The legacy single-module path has no std at all.
+    // std/core/kinds.yoop, so this fixture needs the module graph (which
+    // autoloads it). The single-module path has no std at all.
     const { ir } = compileEntry(
       path.join(repoRoot, "examples/pass/at_precompile_tasks.yoop"),
     );
@@ -3703,7 +3698,7 @@ describe("e2e: fail fixtures fail at the right stage with the right message", { 
     );
   });
 
-  // Phase 10.A: bare `GenericEnum.Variant { ... }` outside a pinning context
+  // Bare `GenericEnum.Variant { ... }` outside a pinning context
   // is unrepresentable - surface the diagnostic at the construction site.
   it("generic_enum_unpinned.yoop rejects unpinned generic-enum variant constructor", () => {
     const { errors } = typecheckFixtureProgram("examples/fail/generic_enum_unpinned.yoop");
@@ -3715,7 +3710,7 @@ describe("e2e: fail fixtures fail at the right stage with the right message", { 
     );
   });
 
-  // Phase 10.A: arity mismatch on a generic-enum type annotation should fail
+  // Arity mismatch on a generic-enum type annotation should fail
   // type resolution rather than partial-applying or silently ignoring args.
   it("generic_enum_arity.yoop rejects `Result<int32>` (missing E arg)", () => {
     const { errors } = typecheckFixtureProgram("examples/fail/generic_enum_arity.yoop");
@@ -3773,12 +3768,11 @@ describe("e2e: fail fixtures fail at the right stage with the right message", { 
     );
   });
 
-  // Phase 7.4: these two scenarios are no longer errors - cross-trait same-
-  // name impls and trait-method/free-function name collisions are both
-  // allowed, because every trait call site qualifies through the trait name.
-  // The old fail-fixtures stay on disk as ground truth that they typecheck
-  // cleanly now.
-  it("traits_collision_two_traits.yoop now typechecks cleanly (Phase 7.4 lifted the restriction)", () => {
+  // Neither of these two scenarios is an error - cross-trait same-name impls
+  // and trait-method/free-function name collisions are both allowed, because
+  // every trait call site qualifies through the trait name. The fixtures live
+  // under examples/fail/ as ground truth that they typecheck cleanly.
+  it("traits_collision_two_traits.yoop typechecks cleanly", () => {
     const { errors } = typecheckFixtureEntry("examples/fail/traits_collision_two_traits.yoop");
     assert.deepEqual(
       errors,
@@ -3787,7 +3781,7 @@ describe("e2e: fail fixtures fail at the right stage with the right message", { 
     );
   });
 
-  it("traits_collision_with_function.yoop now typechecks cleanly (Phase 7.4 lifted the restriction)", () => {
+  it("traits_collision_with_function.yoop typechecks cleanly", () => {
     const { errors } = typecheckFixtureEntry("examples/fail/traits_collision_with_function.yoop");
     assert.deepEqual(
       errors,
@@ -3796,7 +3790,7 @@ describe("e2e: fail fixtures fail at the right stage with the right message", { 
     );
   });
 
-  // Phase 7.4: bare-form trait method call is rejected with a hint at the
+  // Bare-form trait method call is rejected with a hint at the
   // qualified form.
   it("traits_bare_form_call.yoop rejects bare 'dispose(ref h)' and hints at Disposable.dispose", () => {
     const { errors } = typecheckFixtureEntry("examples/fail/traits_bare_form_call.yoop");
@@ -3806,10 +3800,10 @@ describe("e2e: fail fixtures fail at the right stage with the right message", { 
     );
   });
 
-  // modules-as-directories: a module's source files share its DECLARATIONS but
-  // not its IMPORTS. Without this, a file could use `vec` because a sibling
-  // imported it, and reading a file's head would no longer tell you what it
-  // depends on - which is the locality the whole feature exists to recover.
+  // A module's source files share its DECLARATIONS but not its IMPORTS.
+  // Without this, a file could use `vec` because a sibling imported it, and
+  // reading a file's head would not tell you what it depends on - which is
+  // the locality directory modules exist to preserve.
   it("dir_module_import_leak: using a name only a SIBLING file imported is rejected", () => {
     const { errors } = typecheckFixtureEntry(
       "examples/fail/dir_module_import_leak/main.yoop",
@@ -3879,7 +3873,7 @@ describe("e2e: fail fixtures fail at the right stage with the right message", { 
     assert.throws(() => parse(src), /expected semicolon, got lcurly/);
   });
 
-  // Phase 9.J: `extends` is supported; the SCC rejection is the new failure case.
+  // `extends` is supported; the SCC rejection is the failure case.
   it("traits_extends_cycle.yoop rejects a cycle in the extends graph", () => {
     const { errors } = typecheckFixtureProgram(
       "examples/fail/traits_extends_cycle.yoop",
@@ -3957,7 +3951,7 @@ describe("e2e: fail fixtures fail at the right stage with the right message", { 
   it("binding_non_struct.yoop rejects a kind-prefixed binding with a non-struct type", () => {
     const { errors } = typecheckFixtureEntry("examples/fail/binding_non_struct.yoop");
     assert.ok(
-      // Phase 13.B: error wording now includes "or variant".
+      // Error wording includes "or variant".
       errors.some((e) => /can only apply to struct or variant values/.test(e.message)),
       `expected non-struct-kind error, got: ${errors.map((e) => e.message).join(" | ")}`,
     );
@@ -3971,7 +3965,7 @@ describe("e2e: fail fixtures fail at the right stage with the right message", { 
     );
   });
 
-  // testing-via-kinds: `appliesTo function` now parses (it backs the `suite`
+  // testing-via-kinds: `appliesTo function` parses (it backs the `suite`
   // kind in std/test.yoop), but a function kind marks a DECLARATION, so it
   // cannot also name a value site.
   it("kind_appliesto_function.yoop rejects appliesTo function mixed with a value site", () => {
@@ -3982,7 +3976,7 @@ describe("e2e: fail fixtures fail at the right stage with the right message", { 
     );
   });
 
-  // phase 6.2 parser rejections
+  // kind-clause parser rejections
 
   it("kind_appliesto_duplicate.yoop rejects duplicate appliesTo site", () => {
     assert.throws(
@@ -4001,11 +3995,11 @@ describe("e2e: fail fixtures fail at the right stage with the right message", { 
   it("kind_mustnotescape_function.yoop rejects mustNotEscape function", () => {
     assert.throws(
       () => parseFixture("examples/fail/kind_mustnotescape_function.yoop"),
-      /mustNotEscape function not yet supported/,
+      /mustNotEscape function is not supported/,
     );
   });
 
-  // Phase 9.J: `mustNotShare acrossThreads` is now a real language feature.
+  // `mustNotShare acrossThreads` is a real language feature.
   // The fail fixture asserts a binding carrying the kind cannot flow into a
   // task spawn site.
   it("kind_mustnotshare_acrossthreads.yoop rejects passing a thread-local binding into a task spawn", () => {
@@ -4071,36 +4065,34 @@ describe("e2e: fail fixtures fail at the right stage with the right message", { 
     );
   });
 
-  // Ownership redesign (2026-06-17, plans/ownership-and-typestate-redesign.md):
   // `propagates<K>` obligations are ADVISORY, not enforced. The five fixtures
-  // below were formerly examples/fail cases asserting hard errors; they now
-  // typecheck cleanly and live in examples/pass. These tests guard that the
-  // relaxation holds (no obligation error is produced).
-  it("propagates_return_not_declared.yoop: returning a propagating type without propagates<K> is no longer an error", () => {
+  // below live in examples/pass and typecheck cleanly; these tests guard that
+  // no obligation error is produced.
+  it("propagates_return_not_declared.yoop: returning a propagating type without propagates<K> is not an error", () => {
     const { errors } = typecheckFixtureEntry("examples/pass/propagates_return_not_declared.yoop");
     assert.equal(errors.length, 0,
       `expected clean typecheck, got: ${errors.map((e) => e.message).join(" | ")}`);
   });
 
-  it("propagates_return_struct_literal_not_declared.yoop: moved-binding literal return without propagates<K> is no longer an error", () => {
+  it("propagates_return_struct_literal_not_declared.yoop: moved-binding literal return without propagates<K> is not an error", () => {
     const { errors } = typecheckFixtureEntry("examples/pass/propagates_return_struct_literal_not_declared.yoop");
     assert.equal(errors.length, 0,
       `expected clean typecheck, got: ${errors.map((e) => e.message).join(" | ")}`);
   });
 
-  it("propagates_binding_missing_kind.yoop: an un-disposed binding of a propagating type is no longer an error", () => {
+  it("propagates_binding_missing_kind.yoop: an un-disposed binding of a propagating type is not an error", () => {
     const { errors } = typecheckFixtureEntry("examples/pass/propagates_binding_missing_kind.yoop");
     assert.equal(errors.length, 0,
       `expected clean typecheck, got: ${errors.map((e) => e.message).join(" | ")}`);
   });
 
-  it("propagates_struct_literal_missing_kind.yoop: an un-disposed struct-literal binding is no longer an error", () => {
+  it("propagates_struct_literal_missing_kind.yoop: an un-disposed struct-literal binding is not an error", () => {
     const { errors } = typecheckFixtureEntry("examples/pass/propagates_struct_literal_missing_kind.yoop");
     assert.equal(errors.length, 0,
       `expected clean typecheck, got: ${errors.map((e) => e.message).join(" | ")}`);
   });
 
-  it("propagates_dispose_only_then.yoop: a manual dispose in only one if/else arm is no longer an error", () => {
+  it("propagates_dispose_only_then.yoop: a manual dispose in only one if/else arm is not an error", () => {
     const { errors } = typecheckFixtureEntry("examples/pass/propagates_dispose_only_then.yoop");
     assert.equal(errors.length, 0,
       `expected clean typecheck, got: ${errors.map((e) => e.message).join(" | ")}`);
@@ -4130,7 +4122,7 @@ describe("e2e: fail fixtures fail at the right stage with the right message", { 
     );
   });
 
-  // ---- phase 6.3 task fail fixtures ----
+  // ---- task fail fixtures ----
   it("task_on_main.yoop rejects `task main`", () => {
     const { errors } = typecheckFixtureEntry("examples/fail/task_on_main.yoop");
     assert.ok(
@@ -4162,8 +4154,7 @@ describe("e2e: fail fixtures fail at the right stage with the right message", { 
       `expected wait-in-task error, got: ${errors.map((e) => e.message).join(" | ")}`,
     );
     // The diagnostic has to name the alternative - `await` is the in-task
-    // form now, and the old message promised a "future phase" that has
-    // since landed.
+    // form.
     assert.ok(
       errors.some((e) => /use "await f\(\.\.\.\)"/.test(e.message)),
       `expected the await fix-it, got: ${errors.map((e) => e.message).join(" | ")}`,
@@ -4186,7 +4177,7 @@ describe("e2e: fail fixtures fail at the right stage with the right message", { 
     );
   });
 
-  // ---- phase 6.4 fail fixtures ----
+  // ---- propagates / contains fail fixtures ----
   it("propagates_missing.yoop rejects a kind-bearing field without propagates", () => {
     const { errors } = typecheckFixtureEntry("examples/fail/propagates_missing.yoop");
     assert.ok(
@@ -4203,11 +4194,11 @@ describe("e2e: fail fixtures fail at the right stage with the right message", { 
     );
   });
 
-  it("contains_deferred.yoop rejects contains<K> as not yet supported", () => {
-    const { errors } = typecheckFixtureEntry("examples/fail/contains_deferred.yoop");
+  it("contains_unsupported.yoop rejects contains<K> as unsupported", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/contains_unsupported.yoop");
     assert.ok(
-      errors.some((e) => /contains not yet supported \(phase 6\.5 or later\)/.test(e.message)),
-      `expected contains-deferred error, got: ${errors.map((e) => e.message).join(" | ")}`,
+      errors.some((e) => /contains is not supported/.test(e.message)),
+      `expected contains error, got: ${errors.map((e) => e.message).join(" | ")}`,
     );
   });
 
@@ -4219,7 +4210,7 @@ describe("e2e: fail fixtures fail at the right stage with the right message", { 
     );
   });
 
-  // ---- phase 6.5: layout / composition / parameterized kinds ----
+  // ---- layout / composition / parameterized kinds ----
 
   it("kind_compose_contradiction.yoop rejects two align values in composition", () => {
     const { errors } = typecheckFixtureEntry("examples/fail/kind_compose_contradiction.yoop");
@@ -4247,7 +4238,7 @@ describe("e2e: fail fixtures fail at the right stage with the right message", { 
   it("kind_param_wrong_type.yoop rejects an unsupported kind-parameter type", () => {
     const { errors } = typecheckFixtureEntry("examples/fail/kind_param_wrong_type.yoop");
     assert.ok(
-      errors.some((e) => /kind parameter type 'string' not yet supported/.test(e.message)),
+      errors.some((e) => /kind parameter type 'string' is not supported/.test(e.message)),
       `expected unsupported-param-type error, got: ${errors.map((e) => e.message).join(" | ")}`,
     );
   });
@@ -4263,15 +4254,15 @@ describe("e2e: fail fixtures fail at the right stage with the right message", { 
   it("kind_app_non_constant.yoop rejects a non-constant kind argument", () => {
     const { errors } = typecheckFixtureEntry("examples/fail/kind_app_non_constant.yoop");
     assert.ok(
-      errors.some((e) => /kind argument must be a constant in phase 6\.5/.test(e.message)),
+      errors.some((e) => /kind argument must be a constant/.test(e.message)),
       `expected non-constant-arg error, got: ${errors.map((e) => e.message).join(" | ")}`,
     );
   });
 
-  it("restricts_deferred.yoop rejects `restricts iteration` as deferred", () => {
+  it("restricts_unsupported.yoop rejects `restricts iteration`", () => {
     assert.throws(
-      () => parseFixture("examples/fail/restricts_deferred.yoop"),
-      /iteration restrictions deferred until for-in iteration lands \(phase 7\)/,
+      () => parseFixture("examples/fail/restricts_unsupported.yoop"),
+      /restricts is not a supported kind clause/,
     );
   });
 
@@ -4345,7 +4336,7 @@ describe("e2e: fail fixtures fail at the right stage with the right message", { 
     );
   });
 
-  // Phase 12: value-enum failure cases.
+  // Value-enum failure cases.
   it("value_enum_forward_ref.yoop rejects forward reference to a later case", () => {
     const { errors } = typecheckFixtureProgram("examples/fail/value_enum_forward_ref.yoop");
     assert.ok(
@@ -4428,7 +4419,7 @@ describe("e2e: fail fixtures fail at the right stage with the right message", { 
     );
   });
 
-  // Yoopstore-papercut #3: opaque `unsafe_ptr` (no `<T>`) ergonomics.
+  // Opaque `unsafe_ptr` (no `<T>`) ergonomics.
   it("unsafe_ptr_opaque_deref.yoop rejects '*' on opaque unsafe_ptr", () => {
     const src = fs.readFileSync(
       path.join(repoRoot, "examples/fail/unsafe_ptr_opaque_deref.yoop"),
@@ -4582,12 +4573,12 @@ describe("e2e: fail fixtures fail at the right stage with the right message", { 
     );
   });
 
-  // S1 + S2 (plans/strings-ownership-and-ergonomics.md): the `owned` marker
-  // kind, and the conferred-passthrough rule that makes it usable.
+  // The `owned` marker kind, and the conferred-passthrough rule that makes it
+  // usable.
   //
   // No trackHeap assertion here on purpose: a string's storage comes from a
   // direct @malloc rather than through ctxAlloc, so the counter sees the
-  // frees and not the allocations. Routing that through the context is S4.
+  // frees and not the allocations.
   it("owned_string.yoop: passthrough, plain-slot flow, and strFree", async () => {
     const { stdout, exitCode } = await runFixture("examples/pass/owned_string.yoop");
     assert.equal(exitCode, 0);
@@ -4650,9 +4641,9 @@ describe("e2e: fail fixtures fail at the right stage with the right message", { 
       `expected concrete payload-field forge rejected, got: ${msgs}`,
     );
     // The Err payload is a plain string, so freeing it is not allowed, and a
-    // violation inside a switch ARM is caught at all - kindFlow read
-    // `stmt.value`/`stmt.cases`, which a SWITCH_STATEMENT does not have, so
-    // arm bodies used to go unwalked entirely.
+    // violation inside a switch ARM is caught at all - reading
+    // `stmt.value`/`stmt.cases`, which a SWITCH_STATEMENT does not have,
+    // leaves kindFlow walking no arm bodies at all.
     const sinkHits = errors.filter((e) =>
       /parameter 's' of 'str.strFree' requires kind 'owned'/.test(e.message),
     );
@@ -4684,7 +4675,7 @@ describe("e2e: fail fixtures fail at the right stage with the right message", { 
 // testing-via-kinds: the test harness. These drive the driver itself as a
 // subprocess rather than calling compileEntry, because the thing under test IS
 // the driver's --test mode: discovery, the synthetic entry module, the
-// temp-dir executable, and the exit code. See plans/testing-via-kinds.md.
+// temp-dir executable, and the exit code.
 describe("e2e: --test mode runs *.test.yoop suites through std/test.yoop", { concurrency: E2E_CONCURRENCY }, () => {
   // These are the deepest process trees in the suite and the ones most worth
   // getting right: node runs the driver, the driver runs clang, and then the
@@ -4807,10 +4798,9 @@ describe("e2e: --test mode runs *.test.yoop suites through std/test.yoop", { con
   });
 });
 
-// modules-folder: the program-owned `modules/` import root, end to end.
-// Unit coverage for the resolution rules themselves is in
-// src/jsyoopdriver/moduleGraph.test.js; this is the "does a real program built
-// this way compile, link and run" check. See plans/modules-folder.md.
+// The program-owned `modules/` import root, end to end. Unit coverage for the
+// resolution rules themselves is in src/jsyoopdriver/moduleGraph.test.js; this
+// is the "does a real program built this way compile, link and run" check.
 describe("e2e: std/core/bytes lastIndexOfSeq", { concurrency: E2E_CONCURRENCY }, () => {
   // The loop condition was inverted, so the body never ran and every call
   // reported "not found". It failed SILENTLY - fs.dirName returned its own

@@ -84,25 +84,25 @@ export function resolveImports(mod, moduleEnv, errors) {
       const srcTrait = srcEnv.traitTable?.get(spec.exportName);
       const srcStruct = srcEnv.structTable.get(spec.exportName);
       const srcSym = srcEnv.localSymbols.get(spec.exportName);
-      // Phase 8.H: also check the generic tables. The genericFuncTable
+      // Also check the generic tables. The genericFuncTable
       // lookup is the path through which call-site inference resolves an
       // imported generic call; the genericStructTable lookup wires up
       // imported generic types like `Vec<T>` for resolveTypeAnnotation.
       const srcGenericStruct = srcEnv.genericStructTable?.get(spec.exportName);
       const srcGenericFunc = srcEnv.genericFuncTable?.get(spec.exportName);
       const srcGenericTrait = srcEnv.genericTraitTable?.get(spec.exportName);
-      // Phase 10.A: generic enums import-side; lookups for an instantiated
+      // Generic enums import-side; lookups for an instantiated
       // generic enum go through genericVariantTable in the source module.
       const srcGenericVariant = srcEnv.genericVariantTable?.get(spec.exportName);
-      // Phase 7.5: enum / union are sibling nominal types alongside struct.
+      // Enum / union are sibling nominal types alongside struct.
       // lookupEnumByName / lookupUnionByName walk importedNames with kind ===
       // "type", so we register them the same way (and surface the resolved
       // type so resolveTypeAnnotation can find it via the type table).
       const srcVariant = srcEnv.variantTable?.get(spec.exportName);
       const srcUnion = srcEnv.unionTable?.get(spec.exportName);
-      // Phase 12: value-enum export lookup.
+      // Value-enum export lookup.
       const srcValueEnum = srcEnv.enumTable?.get(spec.exportName);
-      // Phase 9.G / 10.I: vtable nominal lookup. Treated as a "type" kind
+      // Vtable nominal lookup. Treated as a "type" kind
       // import - resolveTypeAnnotation walks importedNames and consults
       // the source module's vtableTable when the kind is "type".
       const srcVtable = srcEnv.vtableTable?.get(spec.exportName);
@@ -112,7 +112,7 @@ export function resolveImports(mod, moduleEnv, errors) {
       const srcAlias = srcEnv.aliasTable?.get(spec.exportName);
 
       if (srcKind) {
-        // Phase 6.4: cross-module kind import. Identity is preserved by reference -
+        // Cross-module kind import. Identity is preserved by reference -
         // the same KindType instance is shared across modules so equality holds.
         kindTable.set(spec.localName, srcKind);
         importedNames.set(spec.localName, { fromModuleId: imp.resolvedModuleId, exportName: spec.exportName, kind: "kind" });
@@ -124,12 +124,12 @@ export function resolveImports(mod, moduleEnv, errors) {
         structTable.set(spec.localName, srcStruct);
         importedNames.set(spec.localName, { fromModuleId: imp.resolvedModuleId, exportName: spec.exportName, kind: "type" });
       } else if (srcGenericStruct) {
-        // Phase 8.H: imported generic struct type. lookupGenericStruct
+        // Imported generic struct type. lookupGenericStruct
         // (and resolveTypeAnnotation for type-applications) walks
         // importedNames to find it.
         importedNames.set(spec.localName, { fromModuleId: imp.resolvedModuleId, exportName: spec.exportName, kind: "generic-type" });
       } else if (srcGenericFunc) {
-        // Phase 8.H: imported generic function. lookupGenericFunc looks
+        // Imported generic function. lookupGenericFunc looks
         // here via importedNames + the remote module's genericFuncTable.
         // Generic functions from std/ also fall under the namespace-only
         // rule (see the srcSym branch below for the full rationale).
@@ -145,7 +145,7 @@ export function resolveImports(mod, moduleEnv, errors) {
       } else if (srcGenericTrait) {
         importedNames.set(spec.localName, { fromModuleId: imp.resolvedModuleId, exportName: spec.exportName, kind: "generic-trait" });
       } else if (srcGenericVariant) {
-        // Phase 10.A: imported generic enum. resolveGenericApplication walks
+        // Imported generic enum. resolveGenericApplication walks
         // importedNames → genericVariantTable to find it; variant-constructor
         // pinning uses the same path.
         importedNames.set(spec.localName, { fromModuleId: imp.resolvedModuleId, exportName: spec.exportName, kind: "generic-type" });

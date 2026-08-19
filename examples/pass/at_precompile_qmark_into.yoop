@@ -1,4 +1,4 @@
-// Phase 11.D.15: cross-shape `?` propagation through `Into<T>` folds
+// Cross-shape `?` propagation through `Into<T>` folds
 // at comptime. When the operand's Err type differs from the
 // enclosing function's Err type, the typechecker stamps the
 // TRY_OP with `tryConvert = { mangledName, targetType }` pointing

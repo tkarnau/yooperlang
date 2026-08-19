@@ -1,4 +1,4 @@
-// Phase 11.D.17: real CLEANUP_CALL execution at comptime. The
+// Real CLEANUP_CALL execution at comptime. The
 // kindCheck pass synthesizes a `CLEANUP_CALL` statement at scope
 // exit for each `disposable` (or other `mustCall <method>`)
 // binding. The interpreter resolves the trait method's bytecode

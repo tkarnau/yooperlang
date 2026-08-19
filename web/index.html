@@ -1,397 +1,323 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Yooperlang</title>
-    <link rel="stylesheet" href="styles.css">
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Yooperlang</title>
+<meta name="description" content="A systems language with a TypeScript feel: no garbage collector, structs plus free functions, traits and kinds. Compiles to LLVM IR and links with clang.">
+<link rel="stylesheet" href="assets/site.css">
+<script>
+  // Set the theme before first paint so a light-theme reader never sees a
+  // dark flash. The toggle in the header writes the same key.
+  try {
+    var t = localStorage.getItem("yoop-theme");
+    if (t) document.documentElement.setAttribute("data-theme", t);
+  } catch (e) {}
+</script>
 </head>
 <body>
-    <header class="site-header">
-        <div class="container header-inner">
-            <a class="brand" href="index.html">
-                <span class="brand-mark">yoop</span><span class="brand-tail">erlang</span>
-            </a>
-            <nav class="site-nav">
-                <a href="reference.html">Language Reference</a>
-                <a href="https://github.com/tkarnau/yooperlang" target="_blank" rel="noopener">GitHub</a>
-            </nav>
-        </div>
-    </header>
+<a class="skip-link" href="#main">Skip to content</a>
 
-    <main>
-        <section class="hero">
-            <div class="container">
-                <h1>A systems language for folks who got stuck writing web apps.</h1>
-                <p class="lede">
-                    I've spent my career in JavaScript, TypeScript, C#, and Node - shipping CRUD apps
-                    and APIs. Every time I tried to pick up a real systems language, I bounced off the
-                    cliff face of dense syntax and missing context. So I'm building Yooperlang:
-                    a systems language with a TypeScript feel, no garbage collector, and code that's
-                    actually readable if you came up on the web side.
-                </p>
-                <div class="hero-actions">
-                    <a class="btn btn-primary" href="reference.html">Read the Language Reference</a>
-                    <a class="btn btn-ghost" href="#sample">See some code</a>
-                </div>
-            </div>
-        </section>
+<header class="site-header">
+  <div class="container header-inner">
+    <a class="brand" href="index.html">
+      <span class="brand-mark">yoop</span><span class="brand-tail">erlang</span>
+    </a>
+    <nav class="site-nav" aria-label="Main">
+      <a href="index.html" aria-current="page">Home</a>
+      <a href="tour.html">Tour</a>
+      <a href="pipeline.html">Pipeline</a>
+      <a href="reference.html">Reference</a>
+      <a href="std.html">Std</a>
+      <a href="https://github.com/tkarnau/yooperlang" target="_blank" rel="noopener">GitHub</a>
+      <button class="icon-btn search-trigger" type="button" aria-label="Search">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><line x1="16.5" y1="16.5" x2="21" y2="21"></line></svg>
+        <span class="kbd">/</span>
+      </button>
+      <button class="icon-btn theme-toggle" type="button" aria-label="Toggle light and dark theme">
+        <svg class="icon-moon" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"></path></svg>
+        <svg class="icon-sun" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4.2"></circle><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M19.1 4.9l-1.4 1.4M6.3 17.7l-1.4 1.4"></path></svg>
+      </button>
+    </nav>
+  </div>
+</header>
 
-        <section id="sample" class="sample">
-            <div class="container">
-                <h2>A taste</h2>
-                <p class="muted">
-                    Two concurrent <code>task</code> calls, errors as
-                    values with <code>?</code>, a <code>switch</code> over
-                    the result variants - and not an
-                    <code>async</code> or <code>await</code> in sight.
-                    Still compiles to a native binary with no garbage
-                    collector. If you've written TypeScript, the shapes
-                    should still feel familiar.
-                </p>
-                <pre><code class="yoop">import { Result } from "std/core/types.yoop";
+<main id="main">
 
-// `task` says every call to fetch() spawns a concurrent worker.
-// The return type is a Result - any Ok/Err enum participates in `?`.
-task fetch(url: string): Result&lt;int32, string&gt; {
-    if (url.len == 0) {
-        return Result.Err { error: "empty url" };
-    }
-    return Result.Ok { value: url.len };   // pretend network here
+<section class="hero">
+  <div class="container hero-grid">
+    <div>
+      <h1>A small systems language with a TypeScript feel.</h1>
+      <p class="lede">
+        Yooperlang started as one idea I wanted to try: put more context about how a value
+        is <em>used</em> into the code itself, and see whether that makes systems programming
+        easier to follow coming from the garbage collected web world. That context is the
+        <code>kind</code> layer. Everything around it is a deliberately small language:
+        structs plus free functions, traits, no GC, LLVM IR out and a native binary from
+        <code>clang</code>.
+      </p>
+      <p class="hero-actions">
+        <a href="tour.html">Take the tour</a>
+        <a href="pipeline.html">Watch it compile</a>
+        <a href="https://github.com/tkarnau/yooperlang">Source</a>
+      </p>
+      <p class="hero-facts">
+        <span><b data-stat="stdModules">32</b> std modules</span>
+        <span><b data-stat="stdExports">522</b> exports</span>
+        <span><b data-stat="exampleProgramsPass">245</b> example programs</span>
+        <span><b>0</b> bytes of GC</span>
+        <span>it <b>compiles itself</b></span>
+      </p>
+    </div>
+
+    <div>
+<pre data-file="a whole program, and it runs" data-scroll="true"><code class="yoop">import * as text from "std/core/text.yoop";
+import { Text } from "std/core/text.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import { Result } from "std/core/types.yoop";
+
+type Town {
+  name: string,
+  population: int32,
 }
 
-function total(a: string, b: string): Result&lt;int32, string&gt; {
-    joined ra = fetch(a);                  // spawned now
-    joined rb = fetch(b);                  // also spawned - running in parallel
-    // `wait` reads each task's result; `?` bails to the caller on Err.
-    return Result.Ok { value: (wait ra)? + (wait rb)? };
+// Errors are values: no exceptions, no null. `?` unwraps the Ok and
+// returns the Err from the enclosing function, with a context string
+// that is only built on the failure path.
+function census(t: ref Town): Result&lt;int32, string&gt; {
+  if (t.population &lt; 0) {
+    return Result.Err { error: "negative population" };
+  }
+  return Result.Ok { value: t.population };
 }
 
-function main(): int32 {
-    switch (total("hello", "yoop")) {
-        case Result.Ok  { value: n }: printf(`total=${n}\n`);
-        case Result.Err { error: e }: printf(`failed: ${e}\n`);
-    }
-    return 0;
-}</code></pre>
-            </div>
-        </section>
+function describe(t: ref Town): Result&lt;int32, string&gt; {
+  const n = census(t)? "reading the census";
 
-        <section class="why">
-            <div class="container">
-                <h2>Why bother?</h2>
-                <p>
-                    The gap between web devs and systems devs keeps getting wider. Every year there's
-                    another framework, another runtime, another layer of abstraction - and every year
-                    the machine underneath gets a little further away. Performance gets traded for
-                    ergonomics, and ergonomics gets traded for "developer experience" that mostly
-                    means more layers.
-                </p>
-                <p>
-                    I miss the idea that one person could write the whole thing. Yooperlang is a
-                    small push in that direction - a language that web folks can pick up without
-                    feeling like a simpleton, and that's still close enough to the metal to actually
-                    be fast.
-                </p>
-                <p class="aside">
-                    About the name: the author is from the Upper Peninsula of Michigan, and "yooper"
-                    is a funny word. That's the whole story.
-                </p>
-                <p class="disclaimer">
-                    Heads up: I'm not a compiler designer. This is my first real swing at a language
-                    beyond a toy project. The pitch isn't "this is the best systems language ever
-                    made" - it's "maybe folks like me deserve a path back to the fun stuff." If that
-                    resonates, stick around. It's more fun with company.
-                </p>
-            </div>
-        </section>
+  // `disposable` is a kind, and a kind attaches to the BINDING, not
+  // the type. It makes the compiler place the cleanup call on every
+  // path out of this scope, including the one `?` above takes.
+  disposable line: Text = text.make(64);
+  text.push(ref line, t.name);
+  text.push(ref line, ": ");
+  text.pushInt(ref line, int64(n));
+  printf(`${text.view(ref line)}\n`);
 
-        <section class="pillars">
-            <div class="container">
-                <h2>Three layers, kept honest</h2>
-                <div class="grid-3">
-                    <div class="card">
-                        <h3>Type</h3>
-                        <p>What the value <em>is</em> - the concrete shape of data. <code>int32</code>, <code>Point</code>, <code>FileHandle</code>.</p>
-                    </div>
-                    <div class="card">
-                        <h3>Trait</h3>
-                        <p>What the value <em>can do</em> - operations it supports. <code>Disposable</code>, <code>Iterable&lt;T&gt;</code>, <code>Task&lt;T&gt;</code>.</p>
-                    </div>
-                    <div class="card">
-                        <h3>Kind</h3>
-                        <p>How the binding <em>must be used</em> - lifecycle and scoping rules. <code>disposable</code>, <code>scoped</code>, <code>pooled</code>.</p>
-                    </div>
-                </div>
-            </div>
-        </section>
-
-        <section class="compare">
-            <div class="container">
-                <h2>How it stacks up against languages you might already know</h2>
-                <p class="muted">
-                    Yooperlang isn't trying to dethrone anything. It sits
-                    in the gap between languages I already use. Here's the
-                    short version of what's different.
-                </p>
-
-                <div class="compare-row">
-                    <h3>vs TypeScript</h3>
-                    <p>
-                        The syntax feel is on purpose - types on the
-                        right, structs, no classes, template literals with
-                        <code>${...}</code>. But TypeScript erases types at
-                        runtime and rides on a garbage-collected VM. Yooper
-                        compiles to a native binary, keeps types around for
-                        codegen and lifecycle enforcement, and ships no
-                        runtime worth mentioning.
-                    </p>
-                    <p>
-                        Also: types are <strong>nominal</strong>, not
-                        structural - <code>type Meters { v: int32 }</code>
-                        and <code>type Seconds { v: int32 }</code> aren't
-                        the same type, even though they have the same
-                        shape. And there's no <code>null</code> or
-                        <code>undefined</code>; absence is modeled
-                        explicitly with an enum variant or a validity
-                        field.
-                    </p>
-                </div>
-
-                <div class="compare-row">
-                    <h3>vs C++</h3>
-                    <p>
-                        Same target - native, fast, low-level access
-                        when you need it - without the surface area
-                        that pushes web folks away. No header files. No
-                        preprocessor. No template metaprogramming maze. No
-                        rule of five.
-                    </p>
-                    <p>
-                        Memory cleanup is <em>declarative</em>: tag a
-                        binding with the <code>disposable</code> kind and
-                        the compiler emits the cleanup call at scope end.
-                        You write <code>dispose</code> once on the type
-                        that owns the resource; every caller gets the
-                        cleanup for free. No constructor / destructor
-                        pairs, no RAII wrapper types, no <code>std::unique_ptr</code>
-                        ceremony.
-                    </p>
-                </div>
-
-                <div class="compare-row">
-                    <h3>vs Rust</h3>
-                    <p>
-                        A lot of the good Rust stuff is here on purpose:
-                        errors as values via <code>Result&lt;T, E&gt;</code>,
-                        the <code>?</code> operator with
-                        <code>Into&lt;T&gt;</code> conversions on mismatched
-                        error types, traits without inheritance, no GC,
-                        monomorphized generics, sum types via
-                        <code>enum</code>.
-                    </p>
-                    <p>
-                        What's not here: the borrow checker, named
-                        lifetimes, and the <code>Box&lt;dyn Trait&gt;</code>
-                        dance. <strong>Kinds</strong> do a lot of what
-                        lifetimes do in Rust - they're a usage
-                        contract on the binding
-                        (<code>disposable</code>, <code>joined</code>,
-                        <code>pooled</code>, <code>propagates&lt;K&gt;</code>)
-                        rather than an inferred lifetime parameter that
-                        travels with every reference. Runtime trait
-                        polymorphism is opt-in via a named
-                        <code>vtable Reader for Readable { ... }</code>
-                        shape, not a magic <code>dyn</code>.
-                    </p>
-                    <p>
-                        The trade is honest: Yooper accepts some
-                        memory-safety responsibility back onto the
-                        developer in exchange for a much shorter on-ramp.
-                        If you've bounced off Rust's borrow checker and
-                        wanted the rest of Rust without the fight, that's
-                        the lane.
-                    </p>
-                </div>
-            </div>
-        </section>
-
-        <section class="borrowed">
-            <div class="container">
-                <h2>Ideas borrowed from other languages</h2>
-                <p>
-                    None of this is original research. I'm a working
-                    developer who liked some ideas in other modern
-                    languages and stitched them together into something
-                    that fits the way I want to write code. Credit where
-                    it's due:
-                </p>
-                <ul class="borrow-list">
-                    <li>
-                        <strong>Zig</strong> - compile-time evaluation
-                        with <code>@precompile</code> (constants and small
-                        tables folded into the binary), direct C ABI
-                        interop with no FFI shim, and the idea that "async
-                        coloring" shouldn't infect the type system. Yooper
-                        expresses "this function spawns" via the
-                        <code>task</code> kind instead of an
-                        <code>async</code> keyword, and call sites pick the
-                        wait strategy on the binding
-                        (<code>let joined</code>, <code>let pooled</code>).
-                    </li>
-                    <li>
-                        <strong>Rust</strong> - <code>Result&lt;T, E&gt;</code>,
-                        the <code>?</code> operator, traits as the only
-                        polymorphism mechanism, no nulls, and the general
-                        attitude that errors should be visible at the call
-                        site.
-                    </li>
-                    <li>
-                        <strong>TypeScript</strong> - types on the
-                        right, inferred when obvious, optional when not.
-                        The whole expression-level feel of a modern web
-                        language.
-                    </li>
-                    <li>
-                        <strong>Swift</strong> - value semantics by
-                        default, <code>ref</code> only where you mean it,
-                        and the convention that capability-shaped things
-                        (<code>Disposable</code>, <code>Iterable&lt;T&gt;</code>)
-                        live in a separate layer from data.
-                    </li>
-                    <li>
-                        <strong>Go</strong> - small core,
-                        unsurprising standard library, and the conviction
-                        that fast compiles are worth designing the
-                        language around.
-                    </li>
-                </ul>
-                <p class="muted aside-note">
-                    The actual original-ish piece is the <strong>kind</strong>
-                    layer - treating lifecycle, scoping, concurrency
-                    mode, and propagation as one orthogonal mechanism
-                    instead of five unrelated keywords. Whether that turns
-                    out to be a good idea is something I'm figuring out as
-                    I go.
-                </p>
-            </div>
-        </section>
-
-        <section class="examples">
-            <div class="container">
-                <h2>What you can build today</h2>
-                <p class="muted">
-                    These aren't promises about a future version - the snippets below are
-                    excerpts from real programs in the repo.
-                </p>
-
-                <div class="example">
-                    <h3>An HTTP server</h3>
-                    <p>
-                        The handler shape borrows the comfort of Express-style request/response
-                        objects, but everything underneath compiles down to native code. The
-                        <code>disposable</code> kind on the listener means cleanup happens at scope
-                        end, automatically - no try/finally, no defer.
-                    </p>
-                    <pre><code class="yoop">import { disposable } from "std/core/kinds.yoop";
-import { tcp_listen, ListenResult } from "std/net/tcp.yoop";
-import { serve_n, Handler, HandleOutcome } from "std/http/server.yoop";
-import { Request, Response, ok, headers_add } from "std/http/types.yoop";
-
-// User-defined handler. std/http/server is generic over any type
-// that implements the Handler trait.
-type HelloHandler implements Handler {
-    greeting: string,
-    function handle(ref self, ref req: Request, ref resp: Response): HandleOutcome {
-        resp.status = ok();
-        headers_add(ref resp.headers, "Content-Type", "text/plain");
-        resp.body = string_as_bytes(self.greeting);
-        return HandleOutcome.Ok;
-    }
+  return Result.Ok { value: n };
 }
 
 function main(): int32 {
-    // host, port, backlog. `disposable` drops the socket at scope end.
-    let disposable lr: ListenResult = tcp_listen("127.0.0.1", 18080, 128);
-
-    // No try/catch in this language - inspect the error field directly.
-    if (lr.error.len &gt; 0) {
-        printf(`bind failed: ${lr.error}\n`);
-        return 1;
-    }
-
-    let handler: HelloHandler = { greeting: "Hello, World!\n" };
-    serve_n(ref lr.listener, ref handler, 0);  // 0 = serve forever
-    return 0;
+  let marquette: Town = { name: "Marquette", population: 20629 };
+  switch (describe(ref marquette)) {
+    case Result.Ok { value: n }: { return 0; }
+    case Result.Err { error: e }: { printf(`failed: ${e}\n`); return 1; }
+  }
 }</code></pre>
-                </div>
+    </div>
+  </div>
+</section>
 
-                <div class="example">
-                    <h3>Use any C library - right now</h3>
-                    <p>
-                        You don't have to wait for the ecosystem to catch up. The
-                        <code>extern "C" from library</code> block declares the C ABI you want to
-                        call into, and the linker does the rest. Wrap the opaque handle in a thin
-                        type that implements <code>Disposable</code> and the cleanup call disappears
-                        from your code - the <code>disposable</code> kind emits it at scope end.
-                    </p>
-                    <pre><code class="yoop">// Pull SDL2 in directly - no bindings crate, no shim, no rewrite.
-extern "C" from library "SDL2" {
-    type SDL_Window;
-    type SDL_Renderer;
+<section class="section" id="layers">
+  <div class="container">
+    <div class="section-head">
+      <h2>Three layers, kept separate</h2>
+      <p class="lede">
+        A <b>type</b> is what a value is, a <b>trait</b> is what it can do, and a <b>kind</b>
+        is how a binding is used. Most languages mix the third into the other two. Keeping it
+        apart is the whole experiment. Pick one:
+      </p>
+    </div>
 
-    function SDL_Init(flags: uint32): int32;
-    function SDL_Quit(): void;
-    function SDL_CreateWindow(
-        title: string,
-        x: int32, y: int32, w: int32, h: int32,
-        flags: uint32
-    ): ref SDL_Window;
-    function SDL_DestroyWindow(ref win: SDL_Window): void;
-    function SDL_RenderPresent(ref ren: SDL_Renderer): void;
-}
+    <div class="layers" role="tablist" aria-label="The three layers">
+      <button class="layer-btn" role="tab" id="layer-type" aria-selected="true" aria-controls="layer-panel" data-layer="type">
+        <span class="layer-name">type</span>
+        <span class="layer-q">what the value is</span>
+      </button>
+      <button class="layer-btn" role="tab" id="layer-trait" aria-selected="false" aria-controls="layer-panel" data-layer="trait">
+        <span class="layer-name">trait</span>
+        <span class="layer-q">what it can do</span>
+      </button>
+      <button class="layer-btn" role="tab" id="layer-kind" aria-selected="false" aria-controls="layer-panel" data-layer="kind">
+        <span class="layer-name">kind</span>
+        <span class="layer-q">how the binding is used</span>
+      </button>
+    </div>
 
-// Thin yoop wrapper so the `disposable` kind manages the handle.
-// No manual SDL_DestroyWindow at the bottom of main().
-type Window implements Disposable {
-    handle: ref SDL_Window,
-    function dispose(ref self): void {
-        SDL_DestroyWindow(self.handle);
-    }
-}
+    <div id="layer-panel" role="tabpanel" aria-labelledby="layer-type"></div>
+  </div>
+</section>
 
-const SDL_INIT_VIDEO: uint32 = 0x00000020;
-const SDL_WINDOW_SHOWN: uint32 = 0x00000004;
+<section class="section" id="one-word">
+  <div class="container">
+    <div class="section-head">
+      <h2>One word in the source, one call in the binary</h2>
+      <p class="lede">
+        These two functions differ by the word in front of the binding. Below them is the LLVM IR
+        the compiler emitted for each, out of a real build of
+        <a href="https://github.com/tkarnau/yooperlang/blob/main/examples/tour/kinds.yoop">examples/tour/kinds.yoop</a>.
+      </p>
+    </div>
+    <div id="kind-diff" class="split">
+      <p class="muted">Loading the build output...</p>
+    </div>
+    <p class="muted small">
+      None of that is a special case for <code>disposable</code>. The kind declaration says
+      <code>mustCall dispose beforeScopeEnd</code>, the compiler reads the clause, and a kind you
+      write yourself gets the same treatment.
+      <a href="pipeline.html?sample=kinds">See the whole pipeline for this program.</a>
+    </p>
+  </div>
+</section>
 
-function main(): int32 {
-    if (SDL_Init(SDL_INIT_VIDEO) != 0) { return 1; }
+<section class="section" id="feel">
+  <div class="container">
+    <div class="section-head">
+      <h2>How it reads day to day</h2>
+    </div>
+    <dl class="defs">
+      <dt>errors</dt>
+      <dd>
+        A fallible function returns <code>Result&lt;T, E&gt;</code>. <code>?</code> unwraps the
+        <code>Ok</code> and returns the <code>Err</code>, and only compiles where the error can be
+        carried onward. <code>? "context"</code> builds its message on the failure path only.
+      </dd>
 
-    disposable win: Window = {
-        handle: SDL_CreateWindow("hello", 0, 0, 800, 600, SDL_WINDOW_SHOWN)
-    };
+      <dt>concurrency</dt>
+      <dd>
+        <code>task</code> is a kind on a function, so every call is a spawn and no
+        <code>async</code> keyword colors the API. The binding decides where the wait happens:
+        <code>joined</code> at the closing brace, <code>pooled</code> whenever you ask.
+      </dd>
 
-    // ... render loop here ...
+      <dt>cleanup</dt>
+      <dd>
+        Write <code>dispose</code> once on the type that owns the resource. Every
+        <code>disposable</code> binding gets the call placed on every exit path. No destructors,
+        no defer, no wrapper types.
+      </dd>
 
-    SDL_Quit();
-    return 0;  // win.dispose() fires here, automatically.
-}</code></pre>
-                    <p class="example-note">
-                        The point: you can start writing real programs today by reaching into
-                        anything C already exposes - graphics, audio, databases, crypto. The
-                        Yooperlang-native ecosystem grows over time; the C ABI is the bridge in the
-                        meantime.
-                    </p>
-                </div>
-            </div>
-        </section>
-    </main>
+      <dt>interop</dt>
+      <dd>
+        <code>extern "C" from library "SDL2" { ... }</code> and the linker does the rest. C is the
+        bridge while the Yoop-native library is still small.
+      </dd>
+    </dl>
+  </div>
+</section>
 
-    <footer class="site-footer">
-        <div class="container">
-            <p>Yooperlang - built slowly, one phase at a time.</p>
-        </div>
-    </footer>
+<section class="section" id="status">
+  <div class="container">
+    <div class="section-head">
+      <h2>Where it actually stands</h2>
+      <p class="lede">
+        A personal project by someone who is not a compiler engineer, so here is the state of it
+        without a coat of paint.
+      </p>
+    </div>
+    <dl class="defs">
+      <dt>self hosting</dt>
+      <dd>
+        The compiler is being rewritten in Yoop, layer by layer, cross-checked against the
+        JavaScript reference. As of August 2026 it builds itself, and the release refuses to
+        package unless stage2 and stage3 come out byte-identical.
+      </dd>
 
-    <script src="highlight.js"></script>
+      <dt>what works</dt>
+      <dd>
+        Structs, traits, kinds, generics with bounds, variants with exhaustive switch, errors as
+        values, tasks, vtables, C interop, an LSP, DWARF debug info, and a
+        <a href="std.html">standard library</a> with HTTP, TLS, SQLite, crypto and collections.
+        <span data-stat="exampleProgramsPass">245</span> example programs are compiled by the test
+        suite.
+      </dd>
+
+      <dt>what is rough</dt>
+      <dd>
+        Allocation failure is a null dereference with no diagnostic. A built <code>string</code>
+        ignores the allocator context and leaks unless you use <code>Text</code>. Returning a
+        <code>disposable</code> binding hands back freed storage with no warning. Generic inference
+        cannot see through a generic enum's type arguments.
+      </dd>
+
+      <dt>what it is not</dt>
+      <dd>
+        Not a borrow checker. Kinds do some of what lifetimes do, and the trade is explicit: you
+        keep more memory-safety responsibility in exchange for a shorter on-ramp.
+      </dd>
+    </dl>
+  </div>
+</section>
+
+<section class="section" id="start">
+  <div class="container">
+    <div class="section-head">
+      <h2>Where to start</h2>
+    </div>
+    <dl class="defs">
+      <dt><a href="tour.html">Tour</a></dt>
+      <dd>Install the compiler, then five programs that each add one idea. Every one really runs.</dd>
+
+      <dt><a href="pipeline.html">Pipeline</a></dt>
+      <dd>Source, tokens, AST, LLVM IR, and the program running, with the stages cross-linked.</dd>
+
+      <dt><a href="reference.html">Reference</a></dt>
+      <dd>Syntax first, semantics briefly, including the clause tables the compiler reads.</dd>
+
+      <dt><a href="std.html">Std</a></dt>
+      <dd>Every exported signature in <span data-stat="stdModules">32</span> modules, generated from the library source.</dd>
+    </dl>
+
+    <h3>Or just build it</h3>
+<pre data-file="terminal"><code class="shell">git clone https://github.com/tkarnau/yooperlang.git
+cd yooperlang
+
+node ./src/yoopiler.js examples/tour/hello.yoop
+./examples/tour/hello</code></pre>
+    <p class="muted small">
+      Needs Node 22 or newer and <code>clang</code> on your PATH. There is nothing to npm install:
+      the reference compiler is plain JavaScript and shells out to clang to link the IR it emits.
+    </p>
+  </div>
+</section>
+
+<section class="section" id="borrowed">
+  <div class="container">
+    <div class="section-head">
+      <h2>Borrowed from better languages</h2>
+    </div>
+    <p class="muted">
+      None of this is original research. C interop with no shim and compile-time evaluation come
+      from Zig. <code>Result</code>, <code>?</code> and traits-as-the-only-polymorphism come from
+      Rust. Types on the right and inferred when obvious come from TypeScript. Value semantics with
+      an explicit <code>ref</code> come from Swift. A small core and fast compiles come from Go.
+      The <code>kind</code> layer is the one part I have not seen elsewhere in this shape, and
+      whether it is a good idea is what I am still finding out.
+    </p>
+    <p class="muted small">
+      About the name: I am from the Upper Peninsula of Michigan, and "yooper" is a funny word.
+      That is the whole story.
+    </p>
+  </div>
+</section>
+
+</main>
+
+<footer class="site-footer">
+  <div class="container footer-inner">
+    <p>Yooperlang. Built slowly, one piece at a time.</p>
+    <p>
+      <a href="https://github.com/tkarnau/yooperlang">Source</a> &middot;
+      <a href="https://github.com/tkarnau/yooperlang/blob/main/SPEC.md">SPEC.md</a> &middot;
+      <a href="https://github.com/tkarnau/yooperlang/blob/main/docs/GETTING_STARTED.md">Getting started</a>
+    </p>
+  </div>
+</footer>
+
+<script src="data/status.data.js"></script>
+<script src="data/home.data.js"></script>
+<script src="data/search.data.js"></script>
+<script src="assets/highlight.js"></script>
+<script src="assets/site.js"></script>
+<script src="assets/home.js"></script>
 </body>
 </html>

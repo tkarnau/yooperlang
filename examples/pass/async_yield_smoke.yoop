@@ -1,14 +1,12 @@
 // A suspended task hands its worker thread back to the pool.
 //
-// This is the payoff of the coroutine work, and the thing the runtime
-// could not do before at any price: a task blocked on I/O used to hold
-// its worker for the whole wait, so N concurrent blocking tasks needed N
-// worker threads.
+// Without it, a task blocked on I/O holds its worker for the whole wait,
+// so N concurrent blocking tasks need N worker threads.
 //
 // The fixture runs with ONE worker (see the e2e case, which sets
 // YOOP_NUM_WORKERS=1) and parks four tasks on four different pipes at
-// the same time. Under the old blocking runtime the single worker would
-// park inside the first read and the other three would never start.
+// the same time. On a blocking runtime the single worker would park inside
+// the first read and the other three would never start.
 //
 // The mechanism, bottom to top:
 //   * conc.awaitReadable arms a one-shot interest (which RETURNS rather

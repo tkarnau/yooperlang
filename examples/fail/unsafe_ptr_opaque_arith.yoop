@@ -1,4 +1,4 @@
-// Yoopstore-papercut #3: pointer arithmetic on bare `unsafe_ptr` is
+// Pointer arithmetic on bare `unsafe_ptr` is
 // rejected - the opaque form has no element size, so `p + 1` is
 // undefined. User must cast to a typed pointer first.
 

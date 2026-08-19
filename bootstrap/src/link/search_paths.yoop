@@ -4,11 +4,10 @@ module link;
   Where clang is told to LOOK for a library and its headers - the `-L` and `-I`
   half of the link line.
 
-  This is toolchain policy rather than compilation, and it used to be left out
-  on the grounds that nothing in the corpus needed it. The program probe
-  disproved that: `examples/pass/https_client/main.yoop` compiles, emits valid
-  IR, names `ssl` - and then dies at `ld: library 'ssl' not found`, because
-  OpenSSL is KEG-ONLY in Homebrew. macOS ships its own LibreSSL, so Homebrew
+  This is toolchain policy rather than compilation, and the corpus needs it:
+  without it `examples/pass/https_client/main.yoop` compiles, emits valid IR,
+  names `ssl` - and then dies at `ld: library 'ssl' not found`, because OpenSSL
+  is KEG-ONLY in Homebrew. macOS ships its own LibreSSL, so Homebrew
   refuses to symlink openssl into a prefix on the default search path, and the
   directory that actually holds it has to be probed by NAME.
 

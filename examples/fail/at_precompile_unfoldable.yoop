@@ -1,4 +1,4 @@
-// Phase 11.C: `@precompile` on an initializer that can't be folded
+// `@precompile` on an initializer that can't be folded
 // is a hard build error. Distinct from the opportunistic module-init
 // fold path (which silently falls back to runtime init when it
 // can't evaluate something) - the user explicitly marked this

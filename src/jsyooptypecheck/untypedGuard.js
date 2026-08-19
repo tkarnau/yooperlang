@@ -10,17 +10,16 @@
 //     Error: llvmType: unhandled yooper type kind "untypedInt"
 //
 // with a JS stack trace, no source location, and nothing telling the user
-// which expression in their program is at fault. That failure has now been hit
-// twice from user code - once through a template interpolation (`${-7 / 2}`)
-// and once through a comparison (`x == -24 + 176`) - and each time the root
-// cause was a missing pinning rule in checkExpr, not anything the user did
-// wrong. See plans/yooperdoom-takeaways.md 1.2.
+// which expression in their program is at fault. Every instance of it is a
+// missing pinning rule in checkExpr - a template interpolation (`${-7 / 2}`)
+// and a comparison (`x == -24 + 176`) have both reached codegen that way -
+// and none of them are anything the user did wrong.
 //
-// So there will be a third one, and this is where it surfaces instead. Both
-// root causes are fixed; this walk exists so the NEXT gap costs a diagnostic
-// with a caret rather than an lldb session. It runs only when the program is
-// otherwise clean, because an untyped node downstream of a real type error is
-// an expected consequence of that error rather than a new problem.
+// This is where the next such gap surfaces instead, so that it costs a
+// diagnostic with a caret rather than an lldb session. It runs only when the
+// program is otherwise clean, because an untyped node downstream of a real
+// type error is an expected consequence of that error rather than a new
+// problem.
 //
 // The message says "internal" and asks for a report on purpose: reaching here
 // always means a compiler bug, never a user mistake, and a diagnostic that

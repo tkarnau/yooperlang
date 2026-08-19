@@ -1,5 +1,4 @@
-// plans/yoopbinder-papercuts.md Issue 10 path A: reserved keywords are
-// accepted in name-only positions (struct/union/variant/enum field+case
+// Reserved keywords are accepted in name-only positions (struct/union/variant/enum field+case
 // names, extern function param names, field access RHS, struct literal
 // field names). C headers use `type`, `kind`, `enum`, etc. as parameter
 // names; generated bindings would otherwise fail to parse on the first

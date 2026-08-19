@@ -5,7 +5,7 @@ module codegen;
 // the `declare` lines the intrinsics need. The await lowering is await_op.yoop
 // and the raw instructions are instr_coro.yoop.
 //
-// The ABI, unchanged from the reference (plans/async-coroutines.md):
+// The ABI, which is the reference's:
 //
 //     async f(a: A): T      ->   define ptr @f(A %a.arg, ptr %__ret) presplitcoroutine
 //

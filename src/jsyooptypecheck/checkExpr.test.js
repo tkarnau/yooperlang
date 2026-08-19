@@ -168,7 +168,7 @@ describe("resolveExprType", () => {
   });
 });
 
-describe("resolveCall: trait-qualified method dispatch (Phase 7.4)", () => {
+describe("resolveCall: trait-qualified method dispatch", () => {
   it("typechecks a Trait.method(ref x) call cleanly", () => {
     const { errors } = typecheckProgram(
       singleModule(`

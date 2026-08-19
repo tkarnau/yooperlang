@@ -1,6 +1,6 @@
 // std/tls - TLS over a TcpStream, via OpenSSL.
 //
-// Client-side only for now. What it gives you:
+// Client-side only. What it gives you:
 //
 //     import * as tls from "std/tls";
 //
@@ -19,7 +19,7 @@
 // in - and what compiles runtime/yoop_tls.c into the program.
 //
 // Design, and why the ciphertext moves through yoop rather than through
-// OpenSSL's own socket I/O: plans/tls.md.
+// OpenSSL's own socket I/O: runtime/yoop_tls.c.
 module tls;
 
 // The ONLY file in std/tls that imports unsafe, mirroring std/net's rule that

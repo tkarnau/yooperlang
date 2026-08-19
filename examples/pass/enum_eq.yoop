@@ -1,5 +1,4 @@
-// plans/yoopbinder-papercuts.md Issue 3: enum `==` / `!=` direct
-// operators. Compared values are tag-only - payload bytes are
+// Enum `==` / `!=` direct operators. Compared values are tag-only - payload bytes are
 // intentionally not consulted (use `switch` for structural comparison).
 
 extern "C" from "stdio.h" {

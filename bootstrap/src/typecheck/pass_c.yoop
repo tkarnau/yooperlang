@@ -530,8 +530,7 @@ function fillModuleConst(
     // A CALL gets its own message. The reference FOLDS one at compile time, so
     // "needs a literal" reads as a syntax complaint about a program that is
     // perfectly well formed - the missing piece is a comptime interpreter, and
-    // saying so is what points at plans/bootstrap-completion.md rather than at
-    // the line.
+    // saying so is what points at that rather than at the line.
     if (isCallInitializer(ref ast, declNode.childB)) {
       reportError(
         ref prog,

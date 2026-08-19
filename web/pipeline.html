@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>The pipeline | Yooperlang</title>
+<meta name="description" content="Take a Yooperlang program apart: source, tokens, AST, LLVM IR, and the program running. Real dumps from a real build, cross-linked to the source they came from.">
+<link rel="stylesheet" href="assets/site.css">
+<script>
+  try {
+    var t = localStorage.getItem("yoop-theme");
+    if (t) document.documentElement.setAttribute("data-theme", t);
+  } catch (e) {}
+</script>
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+
+<header class="site-header">
+  <div class="container header-inner">
+    <a class="brand" href="index.html">
+      <span class="brand-mark">yoop</span><span class="brand-tail">erlang</span>
+    </a>
+    <nav class="site-nav" aria-label="Main">
+      <a href="index.html">Home</a>
+      <a href="tour.html">Tour</a>
+      <a href="pipeline.html" aria-current="page">Pipeline</a>
+      <a href="reference.html">Reference</a>
+      <a href="std.html">Std</a>
+      <a href="https://github.com/tkarnau/yooperlang" target="_blank" rel="noopener">GitHub</a>
+      <button class="icon-btn search-trigger" type="button" aria-label="Search">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><line x1="16.5" y1="16.5" x2="21" y2="21"></line></svg>
+        <span class="kbd">/</span>
+      </button>
+      <button class="icon-btn theme-toggle" type="button" aria-label="Toggle light and dark theme">
+        <svg class="icon-moon" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"></path></svg>
+        <svg class="icon-sun" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4.2"></circle><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M19.1 4.9l-1.4 1.4M6.3 17.7l-1.4 1.4"></path></svg>
+      </button>
+    </nav>
+  </div>
+</header>
+
+<main id="main">
+<div class="container">
+  <div class="tour-intro">
+    <span class="kicker">The pipeline</span>
+    <h1>Watch a program become a binary</h1>
+    <p class="lede">
+      Source goes in, five stages happen, an executable comes out. Everything on this page is
+      a real dump from a real build: the token stream is what <code>--dump-tokens</code>
+      printed, the tree is what <code>--dump-ast-json</code> wrote, the LLVM is what
+      <code>--keep-ir</code> left behind, and the output is what the binary printed when it
+      ran.
+    </p>
+  </div>
+
+  <div class="pipe-picker">
+    <span class="pipe-label">Program</span>
+    <div class="tabs" id="sample-tabs" role="tablist" aria-label="Program"></div>
+    <p class="muted small" id="sample-blurb"></p>
+  </div>
+
+  <ol class="stage-rail" id="stage-rail" aria-label="Compiler stages"></ol>
+
+  <div id="stage-view" class="stage-view">
+    <noscript>
+      <div class="noscript">
+        <strong>This page is a viewer over generated dumps, so it needs JavaScript.</strong>
+        The same dumps are a command away in a checkout:
+        <code>node src/yoopiler.js --dump-tokens examples/tour/hello.yoop</code>.
+      </div>
+    </noscript>
+  </div>
+
+  <section class="section" id="about">
+    <div class="section-head">
+      <span class="kicker">What each stage is</span>
+      <h2>Five stages, one direction</h2>
+    </div>
+    <div class="grid grid-3">
+      <div class="card">
+        <span class="card-mark">1. lex</span>
+        <h3>Text becomes tokens</h3>
+        <p>
+          A flat stream of tagged spans. Every token records its byte offset and length, which
+          is what lets a diagnostic later point a caret at the exact column.
+        </p>
+      </div>
+      <div class="card">
+        <span class="card-mark">2. parse</span>
+        <h3>Tokens become a tree</h3>
+        <p>
+          A hand-written recursive descent parser. Note the tokens that vanish here: braces,
+          semicolons and commas are structure, so they end up as the shape of the tree rather
+          than as nodes in it.
+        </p>
+      </div>
+      <div class="card">
+        <span class="card-mark">3. typecheck</span>
+        <h3>The tree gets an opinion</h3>
+        <p>
+          Types are resolved, generics monomorphized, trait impls matched to bounds, kind
+          clauses enforced, and every path checked for a return. This stage produces the
+          diagnostics you see everywhere else on this site, so a clean build shows nothing.
+        </p>
+      </div>
+      <div class="card">
+        <span class="card-mark">4. codegen</span>
+        <h3>The tree becomes LLVM IR</h3>
+        <p>
+          Text, not bitcode. A struct becomes an LLVM aggregate, <code>ref</code> becomes a
+          pointer, a kind's <code>mustCall</code> becomes an actual call placed on every exit
+          path.
+        </p>
+      </div>
+      <div class="card">
+        <span class="card-mark">5. link</span>
+        <h3>clang does the rest</h3>
+        <p>
+          The compiler shells out to <code>clang</code> with the emitted <code>.ll</code>, the
+          small C runtime, and any <code>-l</code> flags your <code>extern</code> blocks asked
+          for. What lands next to your source is an ordinary native executable.
+        </p>
+      </div>
+      <div class="card">
+        <span class="card-mark">bonus</span>
+        <h3>It is all inspectable</h3>
+        <p>
+          <code>--dump-tokens</code>, <code>--dump-ast</code> (which writes a cross-linked HTML
+          viewer much like this page), <code>--dump-ast-json</code>, <code>--keep-ir</code>,
+          and <code>--track-heap</code>. None of it is a debug build.
+        </p>
+      </div>
+    </div>
+  </section>
+</div>
+</main>
+
+<footer class="site-footer">
+  <div class="container footer-inner">
+    <p>Dumps regenerated by <code>npm run gen:web</code> from the programs in the repository.</p>
+    <p><a href="tour.html">Back to the tour</a></p>
+  </div>
+</footer>
+
+<script src="data/pipeline.data.js"></script>
+<script src="data/search.data.js"></script>
+<script src="assets/highlight.js"></script>
+<script src="assets/site.js"></script>
+<script src="assets/pipeline.js"></script>
+</body>
+</html>

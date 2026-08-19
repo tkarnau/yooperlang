@@ -186,9 +186,9 @@ export function fillTraitMethods(
   // its `next` can be called, and nothing here does that. The parameters are
   // recorded on the trait so the day it does, they are already there.
   // NOT `disposable`: this vector is MOVED into the Type.Trait below and the
-  // trait outlives this scope, exactly as `methods` does. It used to be marked
-  // disposable and got away with it only because nothing ever read a trait's
-  // typeParams back; bounds do, and a freed one reads as garbage.
+  // trait outlives this scope, exactly as `methods` does. Marking it disposable
+  // is invisible until something reads a trait's typeParams back - bounds do,
+  // and a freed one reads as garbage.
   let typeParams: Vec<TypeId> = traitTypeParams(ref prog, ref ast, declNode);
   disposable paramNames: Vec<string> = traitTypeParamNames(ref ast, declNode);
   beginTypeParams(ref prog, ref typeParams, ref paramNames);

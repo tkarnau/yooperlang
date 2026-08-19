@@ -1,22 +1,19 @@
-// Phase 11.B.0: minimal bytecode interpreter.
+// Bytecode interpreter.
 //
 // Drives a single `BytecodeFunction` end-to-end and returns its wrapped
-// result. The instruction set covered today is the arithmetic-only
-// slice from `bytecode.js` (literal, integer + float arithmetic, ret).
-// Each later sub-phase extends the dispatch table.
+// result. The dispatch table covers the instruction set in
+// `bytecode.js`.
 //
 // Frame stack: the evaluator owns an explicit JS-array of frames
 // rather than recursing into JS, so deep comptime call chains don't
-// overflow the host stack. The 11.B.0 slice has no calls, but the
-// machinery is in place so adding `call_direct` in a later sub-phase
-// is a one-spot change.
+// overflow the host stack.
 
 import { OP } from "./bytecode.js";
 import { ComptimeError } from "./diagnostics.js";
 import { coerceNumeric, usesBigInt, valueCopy } from "./values.js";
 import { typeKinds } from "../jsyooptypecheck/types.js";
 
-// Phase 11.E.5: recursion limit configurable via env var.
+// Recursion limit configurable via env var.
 // YOOP_COMPTIME_MAX_FRAMES caps the comptime call-stack depth - past
 // this point the interpreter aborts with a "runaway recursion"
 // ComptimeError. The default is high enough to fold the SDL demo's
@@ -59,8 +56,6 @@ function makeFrame(fn, returnDst = null) {
 }
 
 // `evaluate(fn) → wrappedValue`. Throws ComptimeError on failure.
-// Currently the function takes no arguments; later sub-phases will
-// accept positional args via `evaluate(fn, args)`.
 // Build a traceback array (innermost frame first) from the live
 // interpreter stack. Each entry captures `{ fnName, sourceLoc }` -
 // the function's name and the source location of the instruction
@@ -85,7 +80,7 @@ function captureTraceback(stack, instIp) {
 }
 
 export function evaluate(fn, opts = {}) {
-  // Phase 11.D.18: shared module-state map for `@precompile { ... }`
+  // Shared module-state map for `@precompile { ... }`
   // block evaluation. Keys are mangled module-global symbols
   // (`<modid>__<name>`); values are wrapped yoop values. Reads via
   // MODULE_LOAD; writes via MODULE_STORE. Caller (comptimePass)
@@ -710,15 +705,14 @@ export function evaluate(fn, opts = {}) {
   return pendingResult;
 }
 
-// Phase 11.E.3: stringify a wrapped value for template-literal
-// interpolation. Mirrors what runtime printf does via the format
-// spec table - strings pass through unchanged; bools as
-// "true"/"false"; ints in base-10 (BigInt or Number); floats with
-// six-digit precision matching `%f`. Aggregates are formatted
-// permissively rather than rejected - at comptime we'd rather print
-// a debug-y representation than blow up, since this is debug
-// output. (The typechecker has already enforced printable-or-Display
-// rules at the source level.)
+// Stringify a wrapped value for template-literal interpolation.
+// Mirrors what runtime printf does via the format spec table -
+// strings pass through unchanged; bools as "true"/"false"; ints in
+// base-10 (BigInt or Number); floats with six-digit precision
+// matching `%f`. Aggregates are formatted permissively rather than
+// rejected - at comptime we'd rather print a debug-y representation
+// than blow up, since this is debug output. (The typechecker has
+// already enforced printable-or-Display rules at the source level.)
 function stringifyForTemplate(wrapped) {
   if (wrapped == null) return "<null>";
   const v = wrapped.v;

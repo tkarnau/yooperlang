@@ -1,14 +1,14 @@
-// Regression: two ways a module-level array binding used to go wrong.
+// Regression: two ways a module-level array binding can go wrong.
 //
-// 1. A mutable module-level array LITERAL had its backing buffer emitted as
-//    `private unnamed_addr constant`, which lands in a read-only section.
-//    The first `counters[i] = v` segfaulted with no diagnostic. It also made
-//    two same-valued mutable arrays eligible for linker merging, so writing
-//    one would have shown up in the other.
+// 1. A mutable module-level array LITERAL whose backing buffer is emitted as
+//    `private unnamed_addr constant` lands in a read-only section. The first
+//    `counters[i] = v` segfaults with no diagnostic. It also makes two
+//    same-valued mutable arrays eligible for linker merging, so writing one
+//    shows up in the other.
 // 2. A module-level binding initialized by a generic INTRINSIC call
-//    (`intr.heapAlloc(n)`) crashed the compiler outright: the intrinsic has
-//    no yoop body, so the comptime folder reached `lowerFunction` with a null
-//    AST and threw a TypeError before codegen ever ran.
+//    (`intr.heapAlloc(n)`) crashes the compiler outright: the intrinsic has
+//    no yoop body, so the comptime folder reaches `lowerFunction` with a null
+//    AST and throws a TypeError before codegen ever runs.
 //
 // A `const` array must still get the read-only, mergeable form - that is
 // correct for it, and `enum<string>` equality depends on the same interning.

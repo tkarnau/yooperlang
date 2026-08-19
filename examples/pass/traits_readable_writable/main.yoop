@@ -1,4 +1,4 @@
-// Library Phase A smoke: define a MemBuffer that implements both
+// Smoke test: define a MemBuffer that implements both
 // Readable and Writable, round-trip a few bytes through it, and print
 // the result. Validates that the traits in std/core/traits.yoop carry
 // the correct identity across module boundaries.

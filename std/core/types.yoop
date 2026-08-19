@@ -1,6 +1,6 @@
 // std/core/types.yoop - canonical algebraic types used across std.
 //
-// `Result<T, E>` is the standard fallible return shape. Phase 9.H's `?`
+// `Result<T, E>` is the standard fallible return shape. The `?`
 // operator recognizes any enum with `Ok`/`Err` variants (one payload field
 // each) as fallible, so `Result<T, string>` propagates through `?` exactly
 // like a hand-written `enum FooResult { Ok { ... }, Err { ... } }`.

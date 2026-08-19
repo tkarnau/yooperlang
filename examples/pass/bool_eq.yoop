@@ -1,9 +1,9 @@
-// plans/yooperdoom-takeaways.md 2.1: `==` / `!=` on two bools.
+// `==` / `!=` on two bools.
 //
-// These used to be rejected ("operator != cannot be applied to bool and
-// bool"), so every equality test on a truth value had to be spelled
+// Without them ("operator != cannot be applied to bool and bool"), every
+// equality test on a truth value has to be spelled
 // `(a && !b) || (!a && b)` - which needs a named helper to stay readable at a
-// call site. Ordered comparison on bools is still rejected on purpose: there
+// call site. Ordered comparison on bools IS rejected on purpose: there
 // is no useful ordering on a truth value, so `a < b` is a typo far more often
 // than it is intent.
 

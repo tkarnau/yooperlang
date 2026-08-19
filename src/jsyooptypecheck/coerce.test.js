@@ -94,8 +94,8 @@ describe("unifyArith", () => {
     assert.equal(unifyArith(PrimType("int32"), PrimType("int32"), "andand"), null);
   });
 
-  // yooperdoom-takeaways 2.1: `!=` on two bools used to be rejected, forcing
-  // the long-form `(a && !b) || (!a && b)` at every call site.
+  // Without this, `!=` on two bools would be rejected, forcing the long-form
+  // `(a && !b) || (!a && b)` at every call site.
   it("'==' on two bools yields bool", () => {
     assert.deepEqual(
       unifyArith(PrimType("bool"), PrimType("bool"), "eqeq"),
@@ -134,7 +134,7 @@ describe("unifyArith", () => {
     assert.equal(unifyArith(null, PrimType("int32"), "plus"), null);
   });
 
-  // plans/archive/yoopbinder-papercuts.md Issue 3: enums get tag-based equality.
+  // Enums get tag-based equality.
   it("`==` on two values of the same enum type yields bool", () => {
     const color = VariantType("Color", new Map(), "mod1");
     assert.deepEqual(

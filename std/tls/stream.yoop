@@ -9,8 +9,7 @@ module tls;
 //
 // That is forced rather than chosen - handing OpenSSL the fd means reacting to
 // SSL_ERROR_WANT_WRITE, which is "wait until writable", which
-// runtime/yoop_io_internal.h says cannot be expressed on IOCP at all. See
-// plans/tls.md D2.
+// runtime/yoop_io_internal.h says cannot be expressed on IOCP at all.
 
 import { Disposable, disposable } from "../core/kinds.yoop";
 import { Result } from "../core/types.yoop";
@@ -29,7 +28,7 @@ import * as tcp, { TcpStream, ConnectResult } from "../net";
 export type TlsConfig {
     // Trust roots. Empty means OpenSSL's compiled-in default paths, which is
     // right on Linux and on a normal macOS OpenSSL install, and finds nothing
-    // on Windows until the system-store bridge lands (plans/tls.md D5).
+    // on Windows, which has no bridge to the system certificate store.
     // Point it at a PEM bundle to pin, or to trust a private CA.
     caFile: string,
 
@@ -65,7 +64,7 @@ export function tlsConfigWithCaFile(path: string): TlsConfig {
 //
 // Implements `Readable` and `Writable`, which is the entire point: every
 // consumer that takes a `Reader`/`Writer` - all of std/http - accepts one
-// with no change. See plans/tls.md phase 0, which made that true.
+// with no change.
 //
 // Owns three things and disposes them in order: the OpenSSL session, the two
 // staging buffers, and the socket.

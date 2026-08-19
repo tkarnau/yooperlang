@@ -1,4 +1,4 @@
-// Phase 10.B: a struct that doesn't implement Iterable<T> is not iterable -
+// A struct that doesn't implement Iterable<T> is not iterable -
 // `for x in s` is rejected at typecheck time with a diagnostic pointing at
 // the trait the RHS would have to implement.
 

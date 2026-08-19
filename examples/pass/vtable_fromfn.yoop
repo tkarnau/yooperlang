@@ -1,8 +1,8 @@
-// Phase 10.K: `VTableName.fromFn(f1, f2, ...)` builds a vtable value directly
+// `VTableName.fromFn(f1, f2, ...)` builds a vtable value directly
 // from named functions - one per trait method, in declaration order - with no
-// struct + impl boilerplate. Stateless predicates that used to each need their
-// own empty `type X implements Trait { ... }` collapse to a plain function
-// plus a `fromFn` at the use site.
+// struct + impl boilerplate. Stateless predicates that would otherwise each
+// need their own empty `type X implements Trait { ... }` collapse to a plain
+// function plus a `fromFn` at the use site.
 //
 // The functions are stateless: the vtable's ctx slot is null and the compiler
 // emits a ctx-dropping shim so the uniform ctx-first dispatch still calls them.

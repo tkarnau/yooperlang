@@ -1,4 +1,4 @@
-// Phase 10.A: generic enums. Result<T, E> instantiates per (T, E) pair and
+// Generic enums. Result<T, E> instantiates per (T, E) pair and
 // participates in switch + `?` propagation the same way struct-fallibles and
 // concrete `Ok`/`Err` enums do.
 

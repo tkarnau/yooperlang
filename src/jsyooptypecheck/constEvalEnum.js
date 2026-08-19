@@ -1,4 +1,4 @@
-// Phase 12: const-evaluator for value-enum variant body expressions.
+// Const-evaluator for value-enum variant body expressions.
 //
 // Accepts a restricted subset of yoop expressions:
 //   - INT_LITERAL (any base; with unary minus for negative literals)

@@ -1,4 +1,4 @@
-// Phase 9.J: a trait extends another trait. A struct implementing the child
+// A trait extends another trait. A struct implementing the child
 // must provide every parent method too; both `Parent.method(...)` and
 // `Child.method(...)` dispatch to the same impl.
 

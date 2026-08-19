@@ -8,7 +8,7 @@
 //   * someone cancelled   -> WaitOutcome.Cancelled
 //
 // `isCancelled` folds both back together for the common "should I keep
-// going?" poll. See plans/cancellation-and-io-deadlines.md.
+// going?" poll.
 
 import { disposable } from "std/core/kinds.yoop";
 import { CancelToken, WaitOutcome } from "std/core/cancel";

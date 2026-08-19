@@ -206,7 +206,7 @@
           }
         },
         {
-          "comment": "The `kind <Name> { ... }` declaration. CONTEXTUAL, like the `module` rule above and for the same reason: `kind` stopped being a reserved word (yooperdoom-takeaways 2.2) because it was legal as a struct FIELD and illegal as a local or parameter. A bare \\b(kind)\\b here would colour every `kind: uint8` field as a keyword. Mirrors the parser's structural check - a name, then `{`, `(`, or `=`.",
+          "comment": "The `kind <Name> { ... }` declaration. CONTEXTUAL, like the `module` rule above and for the same reason: `kind` is not a reserved word, because it has to be legal as a struct FIELD as well as a local or parameter. A bare \\b(kind)\\b here would colour every `kind: uint8` field as a keyword. Mirrors the parser's structural check - a name, then `{`, `(`, or `=`.",
           "match": "^\\s*(?:(export)\\s+)?(kind)\\s+([A-Za-z_][A-Za-z0-9_]*)\\s*(?=[{(=])",
           "captures": {
             "1": {
@@ -244,7 +244,7 @@
         },
         {
           "name": "invalid.deprecated.reserved.yoop",
-          "comment": "Still-deferred kind clauses. `provides` moved out of this list when it was implemented; `autoJoin` is now an error pointing at `mustCall join beforeScopeEnd`.",
+          "comment": "Unimplemented kind clauses. `autoJoin` is an error pointing at `mustCall join beforeScopeEnd`.",
           "match": "\\b(restricts|autoJoin)\\b"
         },
         {
@@ -270,7 +270,7 @@
       "patterns": [
         {
           "name": "support.type.primitive.yoop",
-          "comment": "The `c_*` half is Phase 8.B's C-portable integer aliases (C_ALIASES_LP64 in src/jsyooptypecheck/types.js). They resolve to primitives for every downstream purpose, and every `extern \"C\"` block in the tree is written in them, but they were reading as plain identifiers here.",
+          "comment": "The `c_*` half is the C-portable integer aliases (C_ALIASES_LP64 in src/jsyooptypecheck/types.js). They resolve to primitives for every downstream purpose, and every `extern \"C\"` block in the tree is written in them, so they belong here rather than reading as plain identifiers.",
           "match": "\\b(int8|int16|int32|int64|uint8|uint16|uint32|uint64|float32|float64|usize|isize|int|float|bool|char|string|void|c_short|c_ushort|c_int|c_uint|c_long|c_ulong|c_size_t|c_ssize_t)\\b"
         },
         {

@@ -1,4 +1,4 @@
-// Phase 9.G: `VTableName.from(ref x)` requires x's type to implement the
+// `VTableName.from(ref x)` requires x's type to implement the
 // trait the vtable is for. Without an impl, there's no way for the compiler
 // to populate the method-pointer slots.
 

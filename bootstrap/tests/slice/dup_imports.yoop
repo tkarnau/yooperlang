@@ -4,8 +4,8 @@
 // "../counter.yoop"`, and one of them also takes `bump` by name. A directory
 // module's files each import what they use, so an alias gets bound once per
 // file that mentions it - and binding it to the same module twice is ONE
-// import rather than a redeclaration. This used to be refused as a collision,
-// which made `vec` unusable in more than one file of a module.
+// import rather than a redeclaration. Refusing it as a collision would make
+// `vec` unusable in more than one file of a module.
 //
 // The other half of the rule - one alias bound to two DIFFERENT modules, which
 // is a real collision and stays refused - cannot live in a slice fixture,

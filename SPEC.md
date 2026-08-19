@@ -241,7 +241,7 @@ let u: uint8  = uint8(i & 0xFF);      // narrowing - bits preserved, value trunc
 Narrowing casts truncate; widening casts between signed/unsigned of the same width
 reinterpret bits. Float ↔ int casts truncate toward zero.
 
-### String interpolation (reserved, not required for v2)
+### String interpolation
 
 ```js
 log(`hello, ${name}`);
@@ -286,7 +286,8 @@ they will not stop you passing a raw `usize` where a `NodeId` is expected).
 The right-hand side is any type annotation, resolved in the module that declares
 the alias; an unknown target or a cyclic chain (`type A = B; type B = A;`) is a
 compile error at the declaration. Generic aliases (`type Pair<T> = ...`) and
-composed forms (`A & B`, `A | B`) are reserved for a later phase.
+composed forms (`A & B`, `A | B`) are reserved, and writing one is a
+declaration-site error.
 
 ### Arrays
 
@@ -304,7 +305,9 @@ Length is intrinsic: `xs.len`. Arrays are fat pointers (ptr + len).
 let h: file<string>;
 ```
 
-User-defined generic types are deferred until after v2 stabilizes.
+User-defined generic types carry a type-parameter list after the declaration
+name (`type Box<T> { item: T }`) and are named by applying type arguments
+(`Box<int32>`).
 
 ### References - `ref T`
 
@@ -519,15 +522,17 @@ type Channel implements (Disposable, Iterable<Message>) {
 }
 ```
 
-### Trait bounds on generics (reserved)
+### Trait bounds on generics
 
 ```js
 function drain<T implements Iterable<T>>(ref it: T): void;
 ```
 
-Reserved syntax; semantics pinned when user generics land.
+A type parameter may be bounded by one trait, or by a parenthesized list of
+them (`<T implements (A, B)>`). The bound is what makes trait-qualified calls
+on `T` legal inside the body, and it is checked at every instantiation.
 
-### Vtables - type-erased trait dispatch (Phase 9.G)
+### Vtables - type-erased trait dispatch
 
 Generics give yoop **compile-time** trait polymorphism: each trait method
 call against an `<T implements Trait>` bound monomorphizes per concrete `T`.
@@ -560,7 +565,7 @@ Two builtins on every vtable type:
 - **`VTableName.from(ref x)`** - constructs a vtable value from any
   `ref T` where `T implements TraitName`. The compiler stores `&x` as
   the ctx and pulls the method addresses from `T`'s impl.
-- **`VTableName.fromFn(f1, f2, ...)`** (Phase 10.K) - constructs a vtable
+- **`VTableName.fromFn(f1, f2, ...)`** - constructs a vtable
   value directly from named functions, one per trait method in declaration
   order, with no struct + impl boilerplate. Each function's signature must
   match the corresponding method slot (the trait method minus `ref self`).
@@ -581,10 +586,10 @@ Field signatures must match the trait method's signature **minus
 
 Heterogeneous lists work directly: a `Reader[]` can mix `TcpStream`,
 `BufferedReader`, and `FileReader` impls because every slot is a vtable
-value of the same nominal type. Pre-9.G this required hand-rolled
+value of the same nominal type. Without vtables that shape needs hand-rolled
 `unsafe_ptr<void>` plus parallel fn-pointer fields, with no compiler help.
 
-### Function value types in type position (Phase 9.G)
+### Function value types in type position
 
 `(p1: T1, p2: T2, ...) => RetT` is a **function-value type annotation**. It
 is legal in struct fields, parameter type annotations, return type
@@ -599,7 +604,7 @@ type Handler {
 
 A function-value type may be wrapped in parentheses to form a type group, so
 an array suffix attaches to the whole function type rather than its return
-type (Phase 10.K). This is the way to spell an **array of function pointers**:
+type. This is the way to spell an **array of function pointers**:
 
 ```js
 // array of predicates - each element is a (uint8) => bool function pointer
@@ -612,8 +617,8 @@ returning `bool[]` (the return type is parsed greedily). The grouping form
 suffix out past a `=>`.
 
 The form is **only** valid in type position - `=>` is not a closure-literal
-syntax (closures aren't planned). Function-value materialization (Phase
-10.X.2) lets a bare top-level function name be used as a value wherever a
+syntax (closures aren't planned). Function-value materialization lets a bare
+top-level function name be used as a value wherever a
 matching `(p: T) => R` is expected - a struct field initializer
 (`{ handle: my_func }`), a function-pointer parameter
 (`count_where(src, isDigit)`), or a `VTableName.fromFn(...)` argument. A
@@ -714,7 +719,7 @@ Multiple `requires` are written as separate clauses
 | `mustNotShare acrossScopes` | Cannot cross into a concurrent task. |
 | `mustNotShare acrossThreads` | Cannot flow into a `task` spawn. Statically rejected at every task-call argument site. |
 | `mustNotEscape scope` | Cannot be returned or stored outside its scope. |
-| `autoJoin beforeScopeEnd` | *(Removed - not a clause.)* It was `mustCall wait beforeScopeEnd` under another name. Writing it is an error with a fix-it; `joined` in std/core/kinds.yoop spells it `mustCall join beforeScopeEnd`. |
+| `autoJoin beforeScopeEnd` | *(Not a clause.)* Writing it is an error with a fix-it; `joined` in std/core/kinds.yoop spells the same obligation `mustCall join beforeScopeEnd`. |
 | `restricts iteration { ... }` | *(Reserved - not implemented.)* Which `for*` forms are legal on this value. Writing it is a "not yet supported" error. |
 | `layout { ... }` | Memory layout contract (align, packing, SoA/AoS). |
 | `propagates<K>` / `contains<K>` | How containers surface or absorb another kind's constraints. |
@@ -842,7 +847,7 @@ type RenderPass propagates<gpu_buffer> { buf: GpuBuffer; }   // callers inherit 
 type RenderPass contains<gpu_buffer>   { buf: GpuBuffer; }   // struct absorbs them
 ```
 
-`contains<K>` is reserved but not yet implemented; until it lands, a function that breaks the propagates chain (creates a value of a propagating type, satisfies its rules locally, and returns it without re-declaring `propagates<K>`) is implicitly a "contains" boundary - the caller sees a value with no outstanding obligation.
+`contains<K>` is reserved and not implemented. A function that breaks the propagates chain (creates a value of a propagating type, satisfies its rules locally, and returns it without re-declaring `propagates<K>`) is implicitly a "contains" boundary - the caller sees a value with no outstanding obligation.
 
 Functions propagate the same way:
 
@@ -937,17 +942,20 @@ bare `impl` block; a method always implements a trait.
 
 ## 8. Concurrency
 
-Concurrency is a **kind story**. There are no `async` / `await` keywords in v2.
+Concurrency is a **kind story**. `task`, `async`, `joined` and `pooled` are
+ordinary kind declarations in [std/core/kinds.yoop](std/core/kinds.yoop), not
+compiler keywords; the compiler owns only the `wait` and `await` operators.
 
 The runtime contract - how tasks are allocated, scheduled, waited on, and torn
-down - is specified separately in [plans/runtime-design.md](plans/runtime-design.md).
+down - is described in
+[docs/compiler_internals.md](docs/compiler_internals.md#the-concurrency-runtime).
 This section describes only the language surface.
 
 ### The model
 
 - `task` is a kind applied to a function. It declares that the function's return value becomes a `Task<T>` at the call site.
 - Every call to a `task` function is **semantically a spawn**. The compiler may lower spawn-then-immediate-wait into a direct synchronous call when it can prove no observable difference; otherwise the runtime schedules the work on a worker thread.
-- `wait` blocks the calling thread until the task body completes. (Suspendable `wait` - yielding the worker rather than blocking it - is a planned future capability and does not change the surface syntax.)
+- `wait` blocks the calling thread until the task body completes.
 - The **binding's kind** decides when the compiler forces the `wait`:
 
 | Binding form | When `wait` is forced | Lifetime / storage |
@@ -956,8 +964,8 @@ This section describes only the language surface.
 | `let joined d = f()` | At the enclosing scope's `}` (`autoJoin`); also on first read of `d` if earlier. | Stack-allocated; bounded by scope. |
 | `let pooled h = f()` | Never automatically - you call `wait h` yourself. | Heap-allocated, atomically refcounted. |
 
-Allocation details and the refcount lifecycle are specified in
-[runtime-design.md §4 and §6](plans/runtime-design.md).
+Allocation details and the refcount lifecycle are in
+[docs/compiler_internals.md](docs/compiler_internals.md#the-concurrency-runtime).
 
 ### Example
 
@@ -985,8 +993,8 @@ function main(): void {
 | Operator | Meaning |
 |---|---|
 | `wait h` | Block until the task referenced by `h` completes; evaluate to the result. `h` must name a binding of type `Task<T>`. |
-| `waitUntil(h, deadline_ns)` | Bounded wait. Returns `WaitResult<T>` from [std/core/concurrency.yoop](std/core/concurrency.yoop) - `Done { value: T }` on completion, `Timeout` on deadline expiry, `Cancelled` if `cancel(h)` was observed first. `deadline_ns` is absolute, in the same clock space as `nowNs()`. Phase 10.F.1 + 10.F.2.a. |
-| `cancel(h)` | External cancellation primitive (Phase 10.F.2.a). Sets the handle's cancel byte and broadcasts so any `waitUntil` parked on `h` wakes immediately and observes `WaitResult.Cancelled`. The task body itself is not yet cooperative - it keeps running to natural completion; the caller has simply chosen to stop observing the result. Cooperative in-body polling (the `cancellation: ref Cancel` implicit parameter) lands in 10.F.2.b. |
+| `waitUntil(h, deadline_ns)` | Bounded wait. Returns `WaitResult<T>` from [std/core/concurrency.yoop](std/core/concurrency.yoop) - `Done { value: T }` on completion, `Timeout` on deadline expiry, `Cancelled` if `cancel(h)` was observed first. `deadline_ns` is absolute, in the same clock space as `nowNs()`. |
+| `cancel(h)` | External cancellation primitive. Sets the handle's cancel byte and broadcasts so any `waitUntil` parked on `h` wakes immediately and observes `WaitResult.Cancelled`. The task body itself is not cooperative - it keeps running to natural completion; the caller has simply chosen to stop observing the result. In-body cancellation is a cancellation token the body polls, from [std/core/cancel/](std/core/cancel/), not a property of the handle. |
 
 `wait` is a keyword-level operation, not a method on `Task<T>`, so the compiler can
 account for it during flow analysis (in particular, the `joined` kind's `autoJoin`
@@ -1021,19 +1029,18 @@ fire-and-forget idiom - it is not a task-specific operator.
 
 ### Safety and deadlock
 
-The MVP runtime model uses run-to-completion tasks on a fixed-size worker pool
-(see [runtime-design.md §3](plans/runtime-design.md)). Pre-Phase 9.I, a `wait`
-inside a `task` body blocked the worker thread; with N workers and deeper-than-N
-nested waits, the pool could deadlock - N tasks each waiting on an N+1th task
+Tasks run on a fixed-size worker pool (see
+[docs/compiler_internals.md](docs/compiler_internals.md#the-concurrency-runtime)).
+A `wait` that parked the calling thread outright would deadlock the pool: with N
+workers and deeper-than-N nested waits, N tasks each wait on an N+1th task
 queued behind them with no worker free to drain it.
 
-**Phase 9.I** changes the runtime so `wait` is suspendable: instead of parking
-the calling thread on the awaited handle's condvar, the wait loop
-opportunistically drains the global task queue on the calling thread until the
-target completes (or new submissions / done-signals wake a short polling
-park). The language surface is unchanged - `wait h` still has the same
-synchronous appearance - but the chain-of-N+1 deadlock above no longer
-deadlocks.
+`wait` is therefore re-entrant. Instead of parking the calling thread on the
+awaited handle's condvar, the wait loop opportunistically drains the global task
+queue on the calling thread until the target completes (or new submissions /
+done-signals wake a short polling park). The language surface is unaffected -
+`wait h` still has the same synchronous appearance - and the chain-of-N+1
+deadlock does not happen.
 
 The semantics that user code can rely on:
 
@@ -1041,8 +1048,8 @@ The semantics that user code can rely on:
   perspective there is no behavioral change.
 - While the caller is "blocked", the runtime may run other queued tasks on the
   caller's thread. Per-thread state inside a task body (e.g. errno, thread-local
-  vars) can therefore be observed in a different order than under the old
-  always-park model. Treat thread-local state as task-local for portability.
+  vars) can therefore be observed in an order the source does not suggest. Treat
+  thread-local state as task-local for portability.
 - Recursion depth is bounded by the nested-wait chain; very deep chains can
   exhaust the OS stack the same way deep direct recursion would.
 
@@ -1055,11 +1062,11 @@ Iteration *strategy* is expressed as a **trait method call on the collection** i
 RHS of `in`. This keeps the `for … in` slot recognizable as a loop while letting kinds
 and traits extend the strategy set.
 
-> **v0 status.** The `for ITEM in EXPR { ... }` form works over arrays (Phase
-> 9.D) and over any type implementing `Iterable<T>` (Phase 10.B), which is what
-> `a..b` ranges, `Vec`, and `Map` ride on. The remaining trait-driven strategy
-> slots below (`BatchIterable`, `SimdIterable`, `ParIterable`) are the long-term
-> shape and are not implemented; the only strategy today is the sequential walk.
+> **Status.** The `for ITEM in EXPR { ... }` form works over arrays and over any
+> type implementing `Iterable<T>`, which is what `a..b` ranges, `Vec`, and `Map`
+> ride on. The remaining trait-driven strategy slots below (`BatchIterable`,
+> `SimdIterable`, `ParIterable`) are reserved and not implemented; the only
+> strategy is the sequential walk.
 
 ```js
 // C-style numeric counter. The counter may be declared in the head, in which
@@ -1125,7 +1132,7 @@ for i in rows { ... }              // walks again from 0
 ```
 
 Bounds cannot be chained (`a..b..c` is an error). Inside brackets `..` keeps its
-existing slice meaning (`xs[i..j]`, Phase 9.E) and never builds a range.
+existing slice meaning (`xs[i..j]`) and never builds a range.
 
 The body's bound variable's **type** tells you the mode: a `T[]` binding means you're
 iterating in chunks; a parallel iterator's body runs under concurrent-task rules
@@ -1194,9 +1201,6 @@ break;
 continue;
 ```
 
-<!-- No `switch` in v2. Pattern-matching on tagged unions is a future addition once the
-error story hardens. (not true any more) -->
-
 ### Every path must return
 
 A function whose return type is not `void` must return on **every** path.
@@ -1239,7 +1243,7 @@ you may need to add an unreachable `return` to satisfy it.
 A **fallible** return type is an enum with exactly two variants named `Ok` and
 `Err`. Each variant carries zero or one payload field. The shape is structural -
 there is no marker trait - so any user-defined enum that matches the convention
-participates in `?` propagation. With generic enums (Phase 10.A) this collapses
+participates in `?` propagation. Generic enums collapse this
 to the standard library's `Result<T, E>` in [std/core/types.yoop](std/core/types.yoop):
 
 ```js
@@ -1258,9 +1262,7 @@ function read_all(path: string): Result<Bytes, string> {
 ```
 
 A type is fallible iff it is an Ok/Err enum with at most one payload field per
-variant. Nothing else qualifies. (The older Phase 2 struct-with-trailing-`err:
-string` convention was retired in Phase 10.X - `Result<T, E>` covers the same
-use case with cleaner mechanics.)
+variant. Nothing else qualifies.
 
 ### The `?` operator - forced propagation
 
@@ -1337,7 +1339,7 @@ The typechecker looks for a trait named `Into` in the operand-Err type's
 payload type. A miss produces a fix-it pointing at the missing impl;
 a hit rewrites the `?` failure branch to call
 `Into.into(ref operandErr)` and store the returned target value into the
-outer `Err` variant. The Phase 9.H same-type fast path is unchanged - the
+outer `Err` variant. The same-type fast path is unaffected - the
 conversion is paid only when the shapes actually differ.
 
 ### Attaching context (optional)
@@ -1543,7 +1545,7 @@ is also rejected inside `pure` functions.
 Extern signatures often need to match C types whose width is platform-dependent.
 The following aliases are name-aliases that resolve to fixed-width yoop integers:
 
-| Alias | LP64 (Linux / macOS) | LLP64 (Windows, deferred) |
+| Alias | LP64 (Linux / macOS) | LLP64 (Windows) |
 | --- | --- | --- |
 | `c_short` / `c_ushort` | `int16` / `uint16` | `int16` / `uint16` |
 | `c_int` / `c_uint` | `int32` / `uint32` | `int32` / `uint32` |
@@ -1554,7 +1556,8 @@ The aliases are typecheck-time synonyms - a `c_int` value *is* an `int32` for
 every purpose, including coercion and assignment. Using the alias in an extern
 signature documents portability intent.
 
-Phase 8.B targets **LP64** only; the LLP64 column is the future-Windows mapping.
+The aliases resolve to the **LP64** mapping on every platform. The LLP64 column
+records what the Windows C ABI actually uses, which is where `c_long` differs.
 
 A struct mirroring a C struct should declare `layout { abi "C"; }` to mark its
 intent to match the C ABI. The marker is contractual today - yoop's natural
@@ -1596,10 +1599,10 @@ errno.set(v: c_int): void            // clear or stash a value
 errno.message(c: c_int): string      // strerror(c)
 ```
 
-`errno` is thread-local on every supported platform. With the current
-run-to-completion task runtime, the value survives any sequence of FFI
-calls within a single yoop function. Once Phase 8.F lands real Task
-suspension, the suspension boundary will save and restore `errno`.
+`errno` is thread-local on every supported platform, and the runtime does not
+save or restore it across a task suspension - a task that suspends may resume on
+a different worker thread. Read it immediately after the FFI call that set it,
+not across an `await`.
 
 Recommended pattern: extern signatures return raw C result types; a
 yoop-side wrapper converts `(rv == -1)` + `errno` into the fallible-struct
@@ -1876,10 +1879,9 @@ What this example demonstrates:
 - **Garbage collection.** Lifetimes through `mustCall`, `mustNotEscape`, and `dispose`.
 - **Implicit conversions.** Explicit casts only.
 - **Exceptions.** Errors are values; `?? throw` is sugar.
-- **`async` / `await` keywords.** Subsumed by `task` (kind) + binding kinds.
+- **Built-in `async` / `await` keywords.** `async` is a kind declared in std (§6), not something the compiler defines; only the `await` operator itself is the compiler's.
 - **Per-strategy loop keywords.** One `for … in` slot; the strategy is a trait method call (`xs.batched(4)`, `xs.parallel()`).
 - **Multiple-return-value ABI.** Destructuring is compile-time sugar over a returned struct.
-- **Generic user types.** Revisit after traits and kinds are stable.
 - **A package manager.** No manifest, fetch, registry, or version resolution.
   Relative paths, the `std/` root, and the program-owned `modules/` root cover
   using third-party code; populating `modules/` is the developer's job.
@@ -1889,7 +1891,7 @@ What this example demonstrates:
 ## 17. Open questions
 
 1. **What `provides` may wrap into.** Mostly settled. `provides Name` means the call-site result type of a function carrying the kind becomes `Name<DeclaredReturn>` - `task f(): T` yields `Task<T>` where it is called - and it is now derived from the clause, so a user kind declaring `pausable; provides Task;` gets a real coroutine and a real task handle (§6 "Clause behavior comes from the clause, not the kind's name"). What remains open is the *range* of `Name`: it resolves only to `Task` today. Letting it name an arbitrary user generic needs an answer for how the wrap and unwrap happen - `Task<T>` is not just a type, it carries a worker pool, `wait`, and cancellation, so a kind that wrapped into a plain `MyBox<T>` would mint a value with no way to get the `T` back out. That is what the `provides … intercepts { … }` sketch was reaching for: a companion clause naming the wrap/unwrap pair, so a code-transforming kind stays visibly different from a constraining one. Related and smaller: `refcounted` dispatches its named retain/release only for a `Task<T>` receiver; generalizing it to any type implementing the required trait would make it a true sibling of `mustCall`.
-2. **Trait method resolution.** Methods live on `type … implements Trait` blocks. Call syntax is **trait-qualified**: `Disposable.dispose(ref x)` - the trait name must be in scope at the call site. (Phase 7.4 settled this: bare-form `dispose(ref x)` and dotted form `x.dispose()` are both rejected. Trait method names live in the trait's namespace and may freely coincide with module-level free-function names or with method names from other traits implemented by the same type, because every call site is unambiguously qualified.)
+2. **Trait method resolution.** Methods live on `type … implements Trait` blocks. Call syntax is **trait-qualified**: `Disposable.dispose(ref x)` - the trait name must be in scope at the call site. (Bare-form `dispose(ref x)` and dotted form `x.dispose()` are both rejected. Trait method names live in the trait's namespace and may freely coincide with module-level free-function names or with method names from other traits implemented by the same type, because every call site is unambiguously qualified.)
 3. **String ↔ cstr.** UTF-8 immutable `string` is TypeScript-adjacent; C expects null-terminated bytes. Options: implicit cstr view, explicit conversion, or two types.
 4. **Array length & FFI.** `xs.len` intrinsic means fat pointers; worth a separate `c_array<T>` for ABI-exact interop.
 5. **`ref` lifetimes.** Minimum rule: a `ref` cannot outlive the stack frame it names. Beyond that, `mustNotEscape` covers the rest.

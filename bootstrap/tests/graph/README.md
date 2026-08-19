@@ -9,7 +9,7 @@ reader to the wrong file.
     cycle_a/b.yoop     an import cycle, which is the one failure that would
                        otherwise HANG rather than fail
     missing.yoop       an import of a file that is not there
-    std_import.yoop    the std/ root, which the bootstrap does not resolve yet
+    std_import.yoop    a std/ import with no std root configured
     mixed/             a module directory with one file missing its header
     clash/             two files of one directory declaring different names
     onlytests/         a directory holding nothing but *.test.yoop

@@ -1,9 +1,8 @@
 // Cancelling a thread that is parked inside the I/O multiplexer.
 //
-// This is the case the runtime simply could not express before. A
-// thread blocked on `accept` for a connection that never comes was
-// unreachable: no deadline, no signal, nothing. Now a token reaches
-// into the multiplexer and unparks it.
+// A thread blocked on `accept` for a connection that never comes is
+// otherwise unreachable: no deadline, no signal, nothing. A token
+// reaches into the multiplexer and unparks it.
 //
 // The shape below is the one a real server wants - a shutdown token
 // the accept loop respects, so the process can drain and exit instead

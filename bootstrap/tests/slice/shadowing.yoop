@@ -42,8 +42,7 @@ function threeDeep(): int32 {
 // `let x: int32 = 5; if (true) { let x: string = "s"; } return x;` makes the JS
 // reference emit `ret i32 %t4` on a `ptr` - it restores the NAME and not the
 // type. The bootstrap gets it right; a fixture asserted against both compilers
-// has to stay inside the intersection, so the divergence is written up in
-// plans/bootstrap-completion.md instead.
+// has to stay inside the intersection, so that divergence is left out.
 
 // A loop counter shadows an enclosing binding, and the loop's own scope is what
 // ends the shadow - there is no block around the head to do it.

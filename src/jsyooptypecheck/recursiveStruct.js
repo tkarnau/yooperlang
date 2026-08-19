@@ -1,6 +1,6 @@
 // Detects recursive struct definitions that would have infinite size at
-// codegen. Until ref types are introduced (Phase 4), a struct that
-// directly or transitively contains itself by value is rejected.
+// codegen. A struct that directly or transitively contains itself by
+// value is rejected; going through a `ref` breaks the cycle.
 
 import { typeKinds } from "./types.js";
 

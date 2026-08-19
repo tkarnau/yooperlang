@@ -1,18 +1,18 @@
-// Phase 10.H: codegen-side alloca-name uniquification.
+// Codegen-side alloca-name uniquification.
 //
-// Before this fix, two `case ... { value: v }` arms in the same function
+// Without it, two `case ... { value: v }` arms in the same function
 // would both emit `%v = alloca`, and clang would reject the module with
 // "multiple definition of local value 'v'". Same shape for any reused
 // binding name across disjoint scopes (if/else arms, sibling blocks,
 // switch arms over Option<V>/Result<T,E>, etc.).
 //
-// The fix: every alloca for a user binding goes through
+// Every alloca for a user binding goes through
 // `symbols.declare(name, type)`, which uniquifies by appending `.1`,
 // `.2`, ... when the candidate slot name is taken. References inside
 // the binding's lexical scope look up the LLVM slot via
 // `symbols.slotFor(name)`, so source code keeps reading the original
 // name. Scope push/pop restores outer bindings when an inner one shadows
-// them. This fixture would fail to compile under the old codegen.
+// them.
 
 import { Option } from "std/core/types.yoop";
 
@@ -29,7 +29,7 @@ function main(): int32 {
     let total: int32 = 0;
 
     // Four switch arms in the same function, all binding `value: v` -
-    // would have collided pre-10.H.
+    // they would collide without uniquification.
     let a: Option<int32> = maybe(1);
     switch (a) {
         case Option.Some { value: v }: { total = total + v; }

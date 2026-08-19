@@ -1,4 +1,4 @@
-// Phase 10.E.3: `expr? e { ... }` - handle a failure at the `?` instead of
+// `expr? e { ... }` - handle a failure at the `?` instead of
 // propagating it. `e` names the Err payload for the block's extent, and the
 // block must diverge on every path.
 //

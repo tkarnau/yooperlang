@@ -1,16 +1,16 @@
-// An array of a value enum. Codegen used to throw `arrayElemLlvmName:
-// unsupported elem type "valueEnum"` for a bare `K[]` and for every `Vec<K>`
-// built on top of one, even though enums work fine as locals, parameters,
-// struct fields and switch scrutinees. A value enum IS its underlying
-// primitive at the LLVM layer, so an array of one shares that primitive's
-// fat-pointer type.
+// An array of a value enum. A value enum IS its underlying primitive at the
+// LLVM layer, so an array of one shares that primitive's fat-pointer type.
+// Miss that and codegen throws `arrayElemLlvmName: unsupported elem type
+// "valueEnum"` for a bare `K[]` and for every `Vec<K>` built on top of one,
+// even though enums work fine as locals, parameters, struct fields and
+// switch scrutinees.
 //
-// The second half of the fix is not visible in the error it produced: the
-// generic-instantiation cache key had no case for a value enum, so EVERY value
-// enum mangled to the same `unk_valueEnum`. Two of them in one program shared
-// one cached instantiation, and the second reported the baffling "cannot
-// assign enum K[] to enum Name[]". Unions, vtables, function pointers and
-// unsafe_ptr were all latent for the same reason.
+// The other half is not visible in that error: the generic-instantiation
+// cache key needs a case for a value enum, or EVERY value enum mangles to the
+// same `unk_valueEnum`. Two of them in one program then share one cached
+// instantiation, and the second reports the baffling "cannot assign enum K[]
+// to enum Name[]". Unions, vtables, function pointers and unsafe_ptr are
+// latent for the same reason.
 
 import * as intr from "std/core/intrinsics.yoop";
 import * as vec, { Vec } from "std/core/vec.yoop";

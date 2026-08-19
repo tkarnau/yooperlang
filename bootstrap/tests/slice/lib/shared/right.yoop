@@ -1,7 +1,7 @@
 module shared;
 
 // The identical namespace import, in the other file of the same module. This is
-// the line that used to be refused as a collision.
+// the line a collision check would refuse.
 
 import * as counter from "../counter.yoop";
 

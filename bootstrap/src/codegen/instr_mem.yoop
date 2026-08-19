@@ -221,9 +221,9 @@ export function emitInsertValueTemp(
 //
 // Four functions emit exactly that instruction and differ in ONE line: how the
 // base pointer is written. A temp, an arbitrary operand, a named slot, or a bare
-// LLVM name. They were four nine-line copies, which made the one line that
-// mattered the hardest one to find; the spine is factored out below so each
-// emitter is now that difference and nothing else.
+// LLVM name. The spine is factored out below so each emitter is that one
+// difference and nothing else, rather than four nine-line copies with the line
+// that matters buried in them.
 //
 // They stay four functions rather than becoming one with a tagged base, because
 // the caller always knows statically which spelling it has, and a tag would move

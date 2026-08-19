@@ -6,17 +6,15 @@ module cancel;
 // token.yoop is the public face; users never reach here.
 //
 // `import.unsafe;` is a per-source-file pragma, not a module-wide one, which is
-// what keeps this split meaningful now that the two files are one module: this
-// file may name `unsafe_ptr`, its sibling still may not, and the sibling can
-// hold a token anyway because the pointer rides inside the one-field `RawCancel`
-// envelope below (library-design.md 2.1 - no pointer types in an exported safe
-// signature). Same shape as std/net/socket_ffi.yoop and std/db/sqlite_ffi.yoop.
+// what keeps this split meaningful when the two files are one module: this
+// file may name `unsafe_ptr`, its sibling may not, and the sibling can hold a
+// token anyway because the pointer rides inside the one-field `RawCancel`
+// envelope below (no pointer types in an exported safe signature). Same shape
+// as std/net/socket_ffi.yoop and std/db/sqlite_ffi.yoop.
 //
 // Everything here except `RawCancel` is MODULE-PRIVATE: token.yoop reaches these
-// as a sibling with no import, and no `export` keyword. Before the two files
-// were one module every one of them had to be exported just so the public face
-// could call it. `RawCancel` itself stays exported because std/net/socket_ffi
-// legitimately needs the envelope type.
+// as a sibling with no import, and no `export` keyword. `RawCancel` itself is
+// exported because std/net/socket_ffi legitimately needs the envelope type.
 
 import.unsafe;
 

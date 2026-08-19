@@ -1,8 +1,6 @@
 // C-level smoke tests for the yoop runtime. Each one is a tiny standalone C
 // program that exercises the runtime without involving the compiler - proves
 // the runtime contract independently of any LLVM IR we emit.
-//
-// See plans/phase-6-3-prelude.md §7.1.
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
@@ -28,8 +26,8 @@ const testsDir = path.join(repoRoot, "runtime", "tests");
 // reason both halves below carry a deadline. Half of them are about parking,
 // cancellation and wakeup races - a missed wakeup is a thread that waits
 // forever, and a lost race is a process that never reaches its exit. Without a
-// deadline that used to be a test run that never finished and a process that
-// stayed put; with one it is a named failure and a killed process tree.
+// deadline that is a test run that never finishes and a process that stays
+// put; with one it is a named failure and a killed process tree.
 const BUILD_TIMEOUT_MS = Number(process.env.YOOP_RUNTIMEC_BUILD_TIMEOUT_MS) || 180000;
 const RUN_TIMEOUT_MS = Number(process.env.YOOP_RUNTIMEC_RUN_TIMEOUT_MS) || 60000;
 
@@ -84,8 +82,8 @@ async function buildAndRun(name) {
     }
     return { stdout: result.stdout, stderr: result.stderr, exitCode: result.status };
   } finally {
-    // In a finally: the temp dir used to be removed only when the program
-    // returned normally, so every wedged or crashed run left one behind.
+    // In a finally: removing the temp dir only on a normal return would
+    // leave one behind for every wedged or crashed run.
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 }
@@ -152,9 +150,9 @@ describe("runtime: C-level smoke tests", () => {
     assert.match(stdout, /io_cancel: ok\n$/);
   });
 
-  // Regression: a second waiter on one (fd, direction) used to overwrite
-  // the first's payload via EPOLL_CTL_MOD / EV_SET and strand it with no
-  // wakeup coming. It is now refused with EAGAIN.
+  // Regression: a second waiter on one (fd, direction) is refused with
+  // EAGAIN. Accepting it would overwrite the first's payload via
+  // EPOLL_CTL_MOD / EV_SET and strand it with no wakeup coming.
   it("io_fd_conflict: a second waiter on one fd is refused instead of stranding the first", async () => {
     const { exitCode, stdout, stderr } = await buildAndRun("io_fd_conflict");
     assert.equal(exitCode, 0, `stderr: ${stderr}`);

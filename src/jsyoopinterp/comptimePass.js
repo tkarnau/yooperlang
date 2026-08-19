@@ -1,4 +1,4 @@
-// Phase 11.B: comptime pass - opportunistic module-init folding.
+// Comptime pass - opportunistic module-init folding.
 //
 // Walks each module's `moduleInitDecls`, tries to evaluate each
 // initializer expression via lower + interp, and on success stamps:
@@ -8,11 +8,10 @@
 //
 // On failure (unsupported AST node, runtime error like divide-by-zero,
 // non-whitelisted extern call, etc.) the decl is left alone - codegen
-// will route it through the existing runtime `<modid>__module_init`
-// function as it does today. This silent-fallback policy is
-// intentional for module-init folding: existing programs must not
-// suddenly grow build errors from the introduction of comptime.
-// Explicit `@precompile` (Phase 11.C) takes the opposite policy -
+// will route it through the runtime `<modid>__module_init` function.
+// This silent-fallback policy is intentional for module-init folding:
+// an ordinary program must not grow build errors from the presence of
+// comptime. Explicit `@precompile` takes the opposite policy -
 // failures there are hard errors.
 
 import { ASTNodeKind } from "../contracts.js";
@@ -27,8 +26,8 @@ import { dumpBytecode } from "./bytecode.js";
 import { lookupExtern } from "./externWhitelist.js";
 // Codegen exports the AST-cloner used to monomorphize a generic
 // function body for a specific instantiation. We reuse it verbatim
-// at comptime to produce the same substituted AST codegen would
-// later emit, then lower that AST into bytecode.
+// at comptime to produce the same substituted AST codegen emits, then
+// lower that AST into bytecode.
 import { cloneAstWithSubstitution } from "../jsyoopcodegen/codegen.js";
 
 // Build a `(calleeName, calleeModuleId, calleeExportName) →
@@ -58,7 +57,7 @@ function makeResolvers(modules, currentMod, fnCache, programState) {
         decl.kind === ASTNodeKind.EXPORT_DECL ? decl.decl :
         decl.kind === ASTNodeKind.EXPORT_C_FUNCTION_DECL ? decl.fn :
         decl;
-      // Phase 11.D.9: include task fns in the resolver table. The
+      // Include task fns in the resolver table. The
       // call-site lowering detects a task call (via the CALL_EXPRESSION's
       // resolvedType being Task<T>) and wraps the body's T return in
       // a Task<T> at the bytecode level - see lower.js's
@@ -119,10 +118,10 @@ function makeResolvers(modules, currentMod, fnCache, programState) {
       fnCache.set(methodDecl, bc);
       return bc;
     } catch (err) {
-      // Phase 11.E.1: re-throw the inner ComptimeError so the
-      // call chain's deeper failure surfaces in the @precompile
-      // diagnostic + traceback. Cache the error so subsequent
-      // lookups of the same method short-circuit.
+      // Re-throw the inner ComptimeError so the call chain's deeper
+      // failure surfaces in the @precompile diagnostic + traceback.
+      // Cache the error so subsequent lookups of the same method
+      // short-circuit.
       if (err instanceof ComptimeError) {
         fnCache.set(methodDecl, err);
       }
@@ -251,8 +250,7 @@ function makeResolvers(modules, currentMod, fnCache, programState) {
 // mutates decls in place. Caller is the driver (yoopiler.js).
 //
 // `options.onSkip(decl, mod, error)` is an optional callback for
-// observability (e.g. a future `--warn-unfolded-inits` flag); the
-// default is silent.
+// observability; the default is silent.
 export function runComptimePass(modules, options = {}) {
   const onSkip = options.onSkip ?? (() => {});
   const programState = options.programState ?? null;
@@ -267,7 +265,7 @@ export function runComptimePass(modules, options = {}) {
     // its expression. Source-order ensures forward references are
     // never possible - declared-later names just aren't in the map
     // yet when an earlier decl is being folded. Cross-module
-    // references aren't supported in this sub-phase; they fall back
+    // references aren't supported; they fall back
     // through the same silent path as any other unsupported lookup.
     const moduleConsts = new Map();
     const { fnResolver, traitMethodResolver, genericInstanceResolver } =
@@ -313,16 +311,15 @@ export function runComptimePass(modules, options = {}) {
       }
     }
 
-    // Phase 11.D.18: now run any `@precompile { ... }` block-form
-    // attributes in this module. Each block executes with read +
-    // write access to module-level state via MODULE_LOAD/STORE; the
-    // initial value of each module-level binding comes from its
-    // already-folded init (above). After the block runs, any
-    // binding whose final value differs from the initial value
-    // (or that didn't have a comptime-folded init) gets its decl
-    // stamped with comptimeFolded + comptimeValue so codegen
-    // emits the result as the LLVM @global initial value and
-    // skips the runtime module-init path.
+    // Now run any `@precompile { ... }` block-form attributes in this
+    // module. Each block executes with read + write access to
+    // module-level state via MODULE_LOAD/STORE; the initial value of
+    // each module-level binding comes from its already-folded init
+    // (above). After the block runs, any binding whose final value
+    // differs from the initial value (or that didn't have a
+    // comptime-folded init) gets its decl stamped with comptimeFolded
+    // + comptimeValue so codegen emits the result as the LLVM @global
+    // initial value and skips the runtime module-init path.
     const declBySym = new Map();
     for (const d of mod.moduleInitDecls ?? []) {
       declBySym.set(`${mod.id}__${d.name}`, d);
@@ -391,7 +388,7 @@ export function runComptimePass(modules, options = {}) {
       }
     }
   }
-  // Phase 11.E.2: also dump every callee bytecode the fold pulled
+  // Also dump every callee bytecode the fold pulled
   // into the cache. Order is "discovery order" (insertion order of
   // the Map). Skipped error-cache entries so the dump shows only
   // bytecode that actually exists.

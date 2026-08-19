@@ -18,12 +18,12 @@ export function declareInScope(scope, name, type, kind, node, errors, kindType =
     type,
     kind,
     node,
-    // Phase 6.1: language-level kind attached to this binding (e.g. disposable).
+    // Language-level kind attached to this binding (e.g. disposable).
     // `kind` (above) is the mutability of the binding (let/const); `kindType`
-    // is the orthogonal phase-6.1 kind decl. The name collision is unfortunate
+    // is the orthogonal kind decl. The name collision is unfortunate
     // but the existing `kind` field is well-established.
     kindType,
-    // Phase 6.2: lexical depth at which this binding was declared. Used by the
+    // Lexical depth at which this binding was declared. Used by the
     // escape-analysis walker to detect field-store escapes into longer-lived structs.
     scopeDepth: scope.depth,
   });
@@ -40,11 +40,10 @@ export function lookupInScope(scope, name) {
   return null;
 }
 
-// Phase 10.X: fallible-struct scope-exit enforcement retired. Fallible
-// `Result<T, E>`-shaped enums no longer require an `err` observation at
-// scope end - they're ordinary values that propagate via `?` or get
-// destructured via `switch`. popScope is kept as a no-op stub so callers
-// don't need to change.
+// Scope exit has no fallible-value obligations. `Result<T, E>`-shaped enums
+// are ordinary values that propagate via `?` or get destructured via
+// `switch`, so there is no `err` observation to enforce at scope end.
+// popScope is a no-op stub that callers can keep calling.
 export function popScope(scope, errors) {
   // intentionally empty
 }

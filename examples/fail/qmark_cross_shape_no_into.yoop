@@ -1,4 +1,4 @@
-// Phase 10.E: cross-shape `?` propagation only works when the operand's
+// Cross-shape `?` propagation only works when the operand's
 // Err payload type implements `Into<RetErr>`. Without that impl, the
 // typechecker rejects with a fix-it message pointing at the missing trait.
 

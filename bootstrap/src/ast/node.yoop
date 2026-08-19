@@ -1,6 +1,6 @@
 module ast;
 
-// The arena node (decision D1/D1a in plans/bootstrap-pipeline-contracts.md).
+// The arena node.
 //
 // A node NAMES its children by NodeId instead of containing them, which is what
 // sidesteps recursive ownership in a value-semantic language: the whole AST is
@@ -51,8 +51,8 @@ export type ASTNode {
   // a slot is what the fat-node design says to do when a kind needs one.
   childE: NodeId,
   // childF is the `propagates<...>` clause, and it means that on every kind
-  // that has one - a FUNCTION_DECL had all five earlier slots spoken for once
-  // kind prefixes landed in childE, and giving the clause its own slot beats
+  // that has one - a FUNCTION_DECL has all five earlier slots spoken for, kind
+  // prefixes included (childE), and giving the clause its own slot beats
   // overloading one that already means something else.
   childF: NodeId,
 

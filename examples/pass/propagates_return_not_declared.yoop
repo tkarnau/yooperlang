@@ -1,8 +1,6 @@
-// Ownership redesign (2026-06-17, plans/ownership-and-typestate-redesign.md):
-// returning a value whose type propagates a kind no longer requires the
-// function to declare propagates<K>. `propagates<K>` is now an OPTIONAL
+// Returning a value whose type propagates a kind does not require the
+// function to declare propagates<K>. `propagates<K>` is an OPTIONAL
 // advisory signal, not a transfer contract - so this typechecks cleanly.
-// (Formerly examples/fail/propagates_return_not_declared.)
 
 trait Disposable {
     function dispose(ref self): void;

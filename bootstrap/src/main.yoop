@@ -7,9 +7,9 @@
     yoopiler_boot --test <dir-or-file> [filter...]
 
   Runs the whole pipeline - module graph, lex, parse, typecheck, codegen, link -
-  and produces an executable. The language subset it accepts is small and grows
-  from the bottom up; anything outside it is refused BY NAME rather than
-  mis-compiled. bootstrap/README.md has the current subset.
+  and produces an executable. The language subset it accepts is small; anything
+  outside it is refused BY NAME rather than mis-compiled. bootstrap/README.md
+  has the subset.
 
   `--test` is the same pipeline with a generated entry module in front of it:
   find the test files, collect their suites, write a `main` that hands the table
@@ -162,11 +162,9 @@ type CliArgs {
 }
 
 /*
-  The command line, as a real scan rather than the fixed positions this used to
-  read (`argAt(1)` was the entry and `argAt(3)` was the output, whatever stood
-  at `argAt(2)`). `<entry> -o <out>` still means exactly what it did; what is
-  new is that a flag may stand anywhere in the line and an unrecognized one is
-  refused BY NAME instead of being taken for an input file.
+  The command line, as a real scan rather than fixed positions. A flag may
+  stand anywhere in the line, and an unrecognized one is refused BY NAME instead
+  of being taken for an input file.
 
   `--emit-ir` is the bootstrap's own spelling - the reference has no equivalent
   (its `--keep-ir` keeps a temp copy of the IR and still links). It exists

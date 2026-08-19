@@ -352,13 +352,12 @@ describe("vertical slice: the bootstrap compiler produces working executables", 
 });
 
 // Compiles, runs the program, and renders it in .expected form: stdout, then
-// `exit=N`. A failed COMPILE throws with the compiler's own stderr attached,
-// which is what execFileSync used to do.
+// `exit=N`. A failed COMPILE throws with the compiler's own stderr attached.
 //
 // Both halves run through src/testProc.js, which is what keeps this file from
-// leaking. This helper is the sync-to-async conversion of item 4.4 and it RUNS
-// COMPILED EXECUTABLES - 134 fixtures, twice each - so it is the single spot in
-// the tree where an unkilled child would accumulate fastest. Every spawn there
+// leaking. This helper RUNS COMPILED EXECUTABLES - 134 fixtures, twice each -
+// so it is the single spot in the tree where an unkilled child would
+// accumulate fastest. Every spawn there
 // carries a deadline, and every kill walks the process tree, which is the only
 // way to reach the clang the compiler started.
 async function buildAndRun(compiler, args, exe, env = process.env) {

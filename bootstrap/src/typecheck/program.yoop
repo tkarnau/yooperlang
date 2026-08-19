@@ -191,11 +191,11 @@ export type Program propagates<disposable> {
   // helpers to answer a question all but one of them ignore. `beginFunction` is
   // the one writer.
   //
-  // The statement walk USED to thread it as well, as a `retType` parameter on
-  // checkBlock / checkStatement / checkVarDecl / checkForLoop / checkForInLoop /
-  // checkSwitch / checkKindRegion - a second copy of this field that could only
-  // ever hold the same value, since `beginFunction` runs once per body and
-  // nothing inside one rebinds it. The parameter is gone; the one reader takes
+  // The statement walk deliberately does NOT thread it as well, as a `retType`
+  // parameter on checkBlock / checkStatement / checkVarDecl / checkForLoop /
+  // checkForInLoop / checkSwitch / checkKindRegion. That is a second copy of
+  // this field that could only ever hold the same value, since `beginFunction`
+  // runs once per body and nothing inside one rebinds it. The one reader takes
   // it from here.
   currentReturn: TypeId,
   currentFn: string,

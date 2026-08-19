@@ -149,10 +149,9 @@ suite function runtimeLibrariesVaryByPlatform(): void {
   }
 }
 
-// `framework:NAME` is an Apple concept, and used to be emitted unconditionally
-// because the bootstrap had no platform to branch on. Passing `-framework` to a
-// GNU ld is an "unrecognized option", so this was a broken link on Linux for any
-// program that named one.
+// `framework:NAME` is an Apple concept. Passing `-framework` to a GNU ld is an
+// "unrecognized option", so emitting it unconditionally is a broken link on
+// Linux for any program that names one.
 suite function frameworksLowerPerPlatform(): void {
   let test theory: Case = t.asserts("macOS gets the real -framework flag") {
     disposable cmd: Text = text.make(64);

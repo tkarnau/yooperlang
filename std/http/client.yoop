@@ -11,7 +11,7 @@ module http;
 // server through std/http/wire.yoop and std/http/parser.yoop, so the two
 // directions cannot drift apart.
 //
-// Limitations, all deliberate and all deferred:
+// Limitations, all deliberate:
 //   * No TLS. `https://` URLs parse, but the connection is plain TCP and the
 //     peer will drop it at the handshake.
 //   * No response streaming. A chunked reply IS decoded (Go's HTTP server
@@ -216,9 +216,9 @@ export async send(ref c: Client, ref req: ClientRequest): Result<ClientResponse,
     // Plain TCP. An `https://` URL parses fine here and then fails at the
     // first read, because the peer is waiting for a handshake - std/http
     // deliberately does not know what TLS is. See `std/https`, which wires
-    // std/tls to `sendOn` below, and plans/tls.md D4 for why the dependency
-    // runs that way: link flags are program-wide, so an OpenSSL import here
-    // would make every program that speaks HTTP link OpenSSL.
+    // std/tls to `sendOn` below. The dependency runs that way because link
+    // flags are program-wide, so an OpenSSL import here would make every
+    // program that speaks HTTP link OpenSSL.
     disposable cr: ConnectResult = tcp.tcpConnect(u.host, u.port);
     if (cr.error.len > 0) {
         return Result.Err { error: errIo(`${cr.error} (connecting to ${u.host}:${u.port})`) };

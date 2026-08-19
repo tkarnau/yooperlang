@@ -1,5 +1,5 @@
-// Phase 9.A: parenthesized subexpressions override precedence and compose
-// with all the existing postfix ops (call, field, index, ?).
+// Parenthesized subexpressions override precedence and compose
+// with all the postfix ops (call, field, index, ?).
 
 extern "C" from "stdio.h" {
     function printf(fmt: string, ...): int32;

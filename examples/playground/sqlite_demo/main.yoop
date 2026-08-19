@@ -41,7 +41,7 @@ function createSchema(ref db: Db): Result<int32, string> {
 // shape to reach for: compiling the SQL once and reusing it is both faster and
 // the only injection-proof way to get user data into a query.
 //
-// The begin/commit pair is manual for now. A `transaction` region kind
+// The begin/commit pair is manual. A `transaction` region kind
 // (`appliesTo region` + `ownsBlock`, rolling back unless committed) is the
 // natural home for it - see the note at the top of std/db/sqlite.yoop.
 function insertCatches(ref db: Db, rows: Catch[]): Result<int32, string> {

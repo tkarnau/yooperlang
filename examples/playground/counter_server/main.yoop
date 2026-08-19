@@ -21,8 +21,8 @@
 //   * **The counters are atomic.** Worker threads share one address space
 //     (this is not Node's `cluster` of separate processes), so a plain
 //     `+= 1` from two workers loses updates. `std/runtime.yoop`'s `Counter`
-//     is the fix, and `WORKERS` below is what decides how many workers
-//     there are.
+//     is what makes it safe, and `WORKERS` below is what decides how many
+//     workers there are.
 //
 // Build: node ./src/yoopiler.js examples/playground/counter_server/main.yoop -o counter_server
 // Run:   ./counter_server              (0.0.0.0:8080, one worker per core)
@@ -262,7 +262,7 @@ async acceptLoop(
                 pooled _conn = connectionTask(st, d, cfg, ref m);
             }
             case AcceptOutcome.TimedOut: {
-                // No deadline is set on the listener, so unreachable today.
+                // No deadline is set on the listener, so unreachable here.
                 // Treated as "keep waiting" rather than an error.
             }
             case AcceptOutcome.Cancelled: {

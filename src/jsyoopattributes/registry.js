@@ -1,4 +1,4 @@
-// Phase 11.A: registry of recognized `@<name>` attributes.
+// Registry of recognized `@<name>` attributes.
 //
 // Each entry pairs an attribute name with a small set of per-phase
 // handlers. The parser, typechecker, comptime pass, and codegen each
@@ -21,34 +21,28 @@
 //     (e.g. `@expect` requiring an enclosing `@test`).
 //
 //   comptimePhase(attrNode, ctx)
-//     Called from the new comptime pass (Phase 11.B/C). For now this is
-//     where `@precompile` will invoke the interpreter once 11.B/C land.
-//     Phase 11.A stubs it to error with a "not yet implemented" message.
+//     Called from the comptime pass. This is where `@precompile`
+//     surfaces the interpreter's result as a hard build error when the
+//     fold did not happen.
 //
 //   codegenPhase(attrNode, ctx)
 //     Called from codegen if the attribute survived the comptime pass.
-//     For attributes that lower to runtime code (`@verify`, future
-//     `@assert`), this is where they emit. For `@precompile` and `@test`
-//     this should never be reached - those attributes consume their AST
-//     node during comptime / pre-codegen and any leakage is a bug.
+//     For attributes that lower to runtime code (`@verify`), this is
+//     where they emit. For `@precompile` and `@test` this should never
+//     be reached - those attributes consume their AST node during
+//     comptime / pre-codegen and any leakage is a bug.
 //
 // The handler shape is permissive: a missing key on the entry means
 // "no-op," letting attributes opt into only the phases they care about.
 
 const REGISTRY = new Map();
 
-// Phase 11.A inaugural consumer; Phase 11.C wires its comptimePhase
-// to the interpreter. Two target shapes are accepted today:
+// `@precompile` invokes the interpreter through its comptimePhase.
+// Three target shapes are accepted:
 //
-//   @precompile const X: T = expr;     ← let/const initializer
-//   @precompile let   X: T = expr;     ← (mutable not very useful yet)
-//
-// The block form (`@precompile { ... }`) parses but isn't evaluated
-// yet - supporting it cleanly needs a notion of comptime-visible
-// module-level state writes that the current interpreter doesn't
-// have. Today it errors with a clear "block form not yet supported"
-// at the comptimePhase so the surface is reserved for a later
-// sub-phase without changing the parser's grammar.
+//   @precompile const X: T = expr;     let/const initializer
+//   @precompile let   X: T = expr;
+//   @precompile { ... }                block form, run by the comptime pass
 //
 // Unlike the opportunistic module-init fold (which silently falls
 // back to runtime init on any failure), `@precompile` makes the
@@ -85,7 +79,7 @@ REGISTRY.set("precompile", {
   },
   comptimePhase(attrNode, ctx) {
     const tgt = attrNode.target;
-    // Block form: Phase 11.D.18 runs these in the comptime pass.
+    // Block form: the comptime pass runs these.
     // The pass sets `attrNode.blockExecuted = true` on success, or
     // stashes a `blockFoldError` ComptimeError on failure (same
     // shape as the let/const path's `comptimeFoldError`). We
@@ -128,13 +122,13 @@ REGISTRY.set("precompile", {
       (tgt.kind === "LET_DECL" || tgt.kind === "CONST_DECL")
     ) {
       if (!tgt.comptimeFolded) {
-        // Phase 11.E.1: if the comptime pass captured a
-        // ComptimeError + traceback, include both in the
-        // diagnostic. The originating error is usually deeper than
-        // the @precompile site itself (e.g. "unsupported extern
-        // called from <fn> called from <init>"), so the traceback
-        // is the difference between "fold failed for X" and "fold
-        // failed for X because Y at line Z called by W at line V".
+        // If the comptime pass captured a ComptimeError + traceback,
+        // include both in the diagnostic. The originating error is
+        // usually deeper than the @precompile site itself (e.g.
+        // "unsupported extern called from <fn> called from <init>"),
+        // so the traceback is the difference between "fold failed for
+        // X" and "fold failed for X because Y at line Z called by W at
+        // line V".
         const inner = tgt.comptimeFoldError;
         let suffix = "";
         if (inner) {
@@ -157,8 +151,8 @@ REGISTRY.set("precompile", {
           `@precompile fold failed for '${tgt.name}' - the initializer ` +
             `references something the comptime interpreter cannot evaluate ` +
             `(unsupported AST node, non-whitelisted extern, runtime-only ` +
-            `task, etc.). Inspect the initializer expression for shapes ` +
-            `outside Phase 11.B's supported set.${suffix}`,
+            `task, etc.). Inspect the initializer expression for an ` +
+            `unsupported shape.${suffix}`,
         );
       }
       return;
@@ -194,7 +188,7 @@ REGISTRY.set("derive", {
     const deriveName = args[0].name;
     if (DEFERRED_DERIVES.has(deriveName)) {
       ctx.throwError(
-        `@derive(${deriveName}) is not yet supported - only @derive(display) is available today`,
+        `@derive(${deriveName}) is not supported - @derive(display) is the only one`,
         attrNode.argsSourceLoc ?? attrNode.sourceLoc,
       );
     }
@@ -206,7 +200,7 @@ REGISTRY.set("derive", {
     }
     const target = attrNode.target;
     const inner = target?.kind === "EXPORT_DECL" ? target.decl : target;
-    // Phase 13.D: variants derive too - the generated body is an arm-per-case
+    // Variants derive too - the generated body is an arm-per-case
     // switch rather than a single template literal.
     if (inner?.kind !== "TYPE_DECL" && inner?.kind !== "VARIANT_DECL") {
       ctx.throwError(

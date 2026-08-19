@@ -48,7 +48,7 @@ export function coerceUntypedLiteralToTyped(
 ) {
   if (!valueType || !targetType) return;
 
-  // Phase 8.A: pin `null` literal to its target unsafe_ptr<T>.
+  // Pin `null` literal to its target unsafe_ptr<T>.
   if (
     valueType.kind === typeKinds.untypedNull &&
     targetType.kind === typeKinds.unsafePtr
@@ -72,7 +72,7 @@ export function coerceUntypedLiteralToTyped(
     coerceLiteralToType(valueNode, targetType, errors);
     return;
   }
-  // Phase 9.A fix: a nested arithmetic expression whose own resolvedType is
+  // A nested arithmetic expression whose own resolvedType is
   // still untyped (e.g. `3 * 4` inside `let x: int32 = 2 + 3 * 4;`) needs the
   // target type pushed all the way down - otherwise codegen reads an
   // untypedInt at the intermediate node and crashes. Bare literals at the
@@ -146,7 +146,7 @@ export function isAssignable(dest, src) {
     return true;
   }
 
-  // Phase 8.A: `null` is assignable to any unsafe_ptr<T>.
+  // `null` is assignable to any unsafe_ptr<T>.
   if (
     src.kind === typeKinds.untypedNull &&
     dest.kind === typeKinds.unsafePtr
@@ -154,7 +154,7 @@ export function isAssignable(dest, src) {
     return true;
   }
 
-  // Phase 12: one-way value-enum -> underlying-primitive coercion. A value
+  // One-way value-enum -> underlying-primitive coercion. A value
   // enum case is always a valid instance of its underlying primitive, so
   // passing `Flags.A` where `uint32` is expected (FFI calls being the
   // overwhelming case) is safe. The reverse (primitive -> value enum) is
@@ -167,7 +167,7 @@ export function isAssignable(dest, src) {
     return true;
   }
 
-  // Phase 8.A: pointer-to-T is assignable to pointer-to-T (matching pointee).
+  // Pointer-to-T is assignable to pointer-to-T (matching pointee).
   // `typesEqual` would catch this if pointees share identity; the `frozen`
   // type cache makes that usually true, but check structurally for safety.
   if (
@@ -192,7 +192,7 @@ export function isAssignable(dest, src) {
     return true;
   }
 
-  // Phase 10.X.2: a top-level function decl's FuncType is assignable to a
+  // A top-level function decl's FuncType is assignable to a
   // matching FunctionPointerType. The two types track the same shape but
   // store it differently - FuncType has `{ name, type, isRef }` params and
   // a variadic flag; FunctionPointerType has plain-type params and no
@@ -231,7 +231,7 @@ export function unifyArith(left, right, op) {
   const isLogical = op === "andand" || op === "oror";
   const isBitwise = op === "pipe";
 
-  // Phase 8.A: pointer arithmetic and comparison.
+  // Pointer arithmetic and comparison.
   const leftIsPtr = left.kind === typeKinds.unsafePtr;
   const rightIsPtr = right.kind === typeKinds.unsafePtr;
   const leftIsNull = left.kind === typeKinds.untypedNull;
@@ -259,7 +259,7 @@ export function unifyArith(left, right, op) {
       if (leftIsNull && rightIsNull) return PrimType(primAnnotations.bool);
       return null;
     }
-    // Ordered comparison on pointers is deferred.
+    // Ordered comparison on pointers is not supported.
     if (op === "lt" || op === "gt" || op === "lte" || op === "gte") {
       return null;
     }
@@ -312,11 +312,10 @@ export function unifyArith(left, right, op) {
 
   // Two bools compare for equality. Without this they fall all the way through
   // to the "both typed -> must match exactly" branch at the bottom, which
-  // requires isIntPrim || isFloatPrim and so rejects them - which is why
-  // `a != b` on two bools used to need the long-form `(a && !b) || (!a && b)`,
-  // and that needed a named helper to stay readable at a call site
-  // (yooperdoom-takeaways 2.1). Codegen needs no change: bool lowers to `i1`
-  // and INT_OP_MAP already maps eqeq/neq onto `icmp eq` / `icmp ne`.
+  // requires isIntPrim || isFloatPrim and so rejects them - which would force
+  // the long-form `(a && !b) || (!a && b)` at every call site. Codegen needs
+  // nothing extra: bool lowers to `i1` and INT_OP_MAP maps eqeq/neq onto
+  // `icmp eq` / `icmp ne`.
   //
   // Ordered comparison on bools (`<`, `>=`) stays rejected. There is no useful
   // ordering on a truth value, so asking for one is a typo far more often than
@@ -327,8 +326,8 @@ export function unifyArith(left, right, op) {
 
   // Variant equality: tag comparison. Both sides must be the same variant
   // type. Payload-bearing cases compare *tags only* - structural
-  // comparison of payloads is a follow-up (use `switch` for that today;
-  // see plans/archive/yoopbinder-papercuts.md Issue 3). Codegen lowers this to
+  // comparison of payloads is not supported; use `switch` for that.
+  // Codegen lowers this to
   // `icmp eq i32 tag_a, tag_b`.
   if (op === "eqeq" || op === "neq") {
     if (left.kind === typeKinds.variant && right.kind === typeKinds.variant) {
@@ -337,7 +336,7 @@ export function unifyArith(left, right, op) {
     }
   }
 
-  // Phase 12: value enum operators. Mixed enum/primitive operands are
+  // Value enum operators. Mixed enum/primitive operands are
   // rejected on purpose; the programmer must cast first. Across two
   // matching value enums:
   //   `==` / `!=`             -> bool (both int and string underlyings)

@@ -1,4 +1,4 @@
-// Phase 10.I: `vtable Reader for Readable` lets a function take a
+// `vtable Reader for Readable` lets a function take a
 // type-erased view over any Readable impl - no monomorphization per
 // stream type. The HTTP parser is the canonical consumer; this fixture
 // proves the wiring end-to-end against a simple in-memory cursor.

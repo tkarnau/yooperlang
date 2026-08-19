@@ -2,9 +2,9 @@ module net;
 
 // std/net/uri.yoop - minimal URI / URL parser.
 //
-// Phase 10.I: extract scheme, host, port, path+query from absolute
-// HTTP/HTTPS URLs. The HTTP client and any future fetch helpers want
-// "split this URL" without pulling in a heavyweight URL crate.
+// Extract scheme, host, port, path+query from absolute HTTP/HTTPS URLs.
+// The HTTP client and other callers want "split this URL" without pulling
+// in a heavyweight URL crate.
 //
 // Supported shapes:
 //   scheme://host[:port][/path[?query]]
@@ -15,9 +15,9 @@ module net;
 //   https://api.example.com/v1?x=1  -> scheme=https, host=api.example.com, port=443, target=/v1?x=1
 //   http://[::1]:18080/             -> scheme=http,  host=::1, port=18080, target=/
 //                                      (bracketed IPv6 form parses; tcpConnect
-//                                       is still IPv4-only for now)
+//                                       is IPv4-only)
 //
-// Limitations (all deferred):
+// Limitations:
 //   * userinfo (`user:pass@host`) not parsed.
 //   * fragments (`#frag`) not split out.
 //   * percent-decoding of the path/query is the caller's job.

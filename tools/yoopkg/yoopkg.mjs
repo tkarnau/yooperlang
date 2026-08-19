@@ -22,7 +22,7 @@
 // one privileged prefix). Putting installed packages somewhere the existing
 // resolver can find them keeps the compiler unchanged. A consumer imports
 // `./yoop_packages/yooparse/json.yoop` just like any other relative path.
-// A future enhancement could add a `pkg/` resolver prefix mirroring `std/`.
+// There is no `pkg/` resolver prefix mirroring `std/`.
 
 import fs from "node:fs";
 import path from "node:path";

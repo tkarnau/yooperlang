@@ -13,10 +13,9 @@ knows how to follow relative paths and the `std/` prefix. "Installing" a
 package, then, is just putting files somewhere the resolver will find them.
 That's the whole trick.
 
-A future version could teach the compiler a `pkg/` prefix that mirrors `std/`
-and resolves to `yoop_packages/<name>/...`, which would let users write
-`import * as json from "pkg/yooparse/json.yoop";` instead of the longer
-relative path. The current tool deliberately does not go there.
+The compiler knows no `pkg/` prefix mirroring `std/`, so there is no
+`import * as json from "pkg/yooparse/json.yoop";` form - users write the
+longer relative path. The tool deliberately does not go there.
 
 ## The model
 

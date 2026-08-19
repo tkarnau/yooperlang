@@ -1,5 +1,5 @@
-// Phase 10.X.2 follow-up: `Map<K, V>` generic hash map, keyed off a
-// `KeyOps<K>` ops struct (Phase 10.X.2 enables FPT-typed struct fields).
+// `Map<K, V>` generic hash map, keyed off a `KeyOps<K>` ops struct
+// (which rides on function-pointer-typed struct fields).
 // This fixture exercises the string-key form via `map.stringKeyOps()`,
 // covering the marquee paths:
 //   * insert + overwrite (return value distinguishes fresh from replace),
@@ -35,7 +35,7 @@ function main(): int32 {
     printf(`overwrite: ow=${ow} len=${map.mapLen(ref m)}\n`);
 
     // Lookup hits + miss. Payload bindings can share `value: v` across
-    // arms thanks to Phase 10.H alloca uniquification.
+    // arms thanks to alloca uniquification.
     let ga: Option<int32> = map.mapGet(ref m, "alpha");
     let gb: Option<int32> = map.mapGet(ref m, "beta");
     let gz: Option<int32> = map.mapGet(ref m, "zeta");

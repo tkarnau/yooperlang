@@ -1,9 +1,8 @@
 // std/time.yoop: the wall clock and the calendar.
 //
-// plans/yooperdoom-takeaways.md 4.2 - a project numbered its history files
-// `run-0007-*` rather than timestamping them, explicitly because "a timestamp
-// needs a clock this program has no other reason to read". `nowNs` (monotonic)
-// was already exposed; there was no wall clock in yoop at all.
+// `nowNs` is the monotonic clock and answers "how long did that take". These
+// answer "what time is it", which is what anything timestamping a log line or
+// naming a file by date needs.
 //
 // Every expected value here is checkable with one line of Node:
 //

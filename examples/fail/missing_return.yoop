@@ -1,6 +1,6 @@
-// Phase 10.E.3: a function with a value to return must return on every path.
-// Before this check existed all three of these compiled and trapped at
-// runtime with a bare SIGTRAP and no source location.
+// A function with a value to return must return on every path. Without this
+// check all three of these compile and trap at runtime with a bare SIGTRAP
+// and no source location.
 
 // 1. An `if` with no `else` leaves a path with no return.
 function noElse(x: int32): int32 {

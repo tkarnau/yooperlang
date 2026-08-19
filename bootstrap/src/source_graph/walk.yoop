@@ -52,7 +52,7 @@ type LoadUnitResult = Result<usize, string>;
 
 // `stdRoot` is where `std/...` imports resolve. It is a PARAMETER rather than
 // something this layer discovers, so a caller that already knows its root (a
-// test pointing at a stub, and eventually the LSP) never touches the
+// test pointing at a stub, or an editor server) never touches the
 // filesystem probing in std_root.yoop. The driver discovers it and passes it.
 export function loadModuleGraph(entryPath: string, stdRoot: string): LoadGraphResult {
   if (!fs.exists(entryPath)) {

@@ -511,9 +511,9 @@ export function formatType(ref prog: Program, id: TypeId): string {
     case Type.Trait { decl: d, methods: mm, typeParams: tp, extendsTraits: et }: {
       return d.name;
     }
-    // The pointer family. Every one of these used to fall through to "<type>",
-    // which turns a pointer mismatch into "<type>, not <type>" - the same "X is
-    // not X" a reader cannot act on that the Func rendering had.
+    // The pointer family. Falling through to "<type>" here turns a pointer
+    // mismatch into "<type>, not <type>" - the same "X is not X" a reader
+    // cannot act on that a missing Func rendering produces.
     case Type.UnsafePtr { pointee: p }: {
       if (p == TYPE_ERROR_ID) {
         return "unsafe_ptr";       // the OPAQUE one: pointee 0, the reserved none

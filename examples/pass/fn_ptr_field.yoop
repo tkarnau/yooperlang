@@ -1,5 +1,5 @@
-// Phase 10.X.2: two small codegen + typecheck lifts unlock arbitrary
-// function-pointer-typed struct fields:
+// Two small codegen + typecheck rules are what make arbitrary
+// function-pointer-typed struct fields work:
 //
 //   1. A top-level function decl's `FuncType` is assignable to a matching
 //      `(p: T) => R` `FunctionPointerType`. The function's name in

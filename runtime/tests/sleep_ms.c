@@ -1,4 +1,4 @@
-// Phase 8.F.3: yoop_sleep_ms timing.
+// yoop_sleep_ms timing.
 
 #include "../yoop_runtime.h"
 

@@ -1,4 +1,4 @@
-// Phase 11.A: unknown `@` attribute names are parse-time errors with
+// Unknown `@` attribute names are parse-time errors with
 // a Levenshtein-based "did you mean" suggestion against the registered
 // attribute set.
 

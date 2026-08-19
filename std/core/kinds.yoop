@@ -66,10 +66,10 @@ export kind ephemeral {
 
 // ----- the concurrency core ---------------------------------------------
 //
-// `task`, `async`, `joined`, `pooled` and `Task` used to be reserved words
-// backed by hardcoded kind objects in the compiler. They are ordinary kind
-// declarations now, and their behavior comes from the clauses below rather
-// than from a name the compiler recognizes.
+// `task`, `async`, `joined`, `pooled` and `Task` are ordinary kind
+// declarations, not reserved words backed by hardcoded kind objects in the
+// compiler. Their behavior comes from the clauses below rather than from a
+// name the compiler recognizes.
 //
 // The compiler does still REQUIRE these to exist - it asserts this file
 // declares them with at least the clauses it depends on, and errors naming
@@ -143,11 +143,11 @@ export kind joined {
 // Also the FIELD form: a struct storing a task handle participates in the
 // same refcount lifecycle, and says so with `propagates<pooled>`.
 //
-// There used to be a separate `kind Task` for the field position with
-// byte-identical clauses - only its `appliesTo` differed, so it was the
-// same kind wearing a second name. Worse, that name collided with the
-// `Task<T>` TYPE, giving you `type Job propagates<Task> { work: Task<int32> }`
-// where the two `Task`s meant different things.
+// There is no separate `kind Task` for the field position. Byte-identical
+// clauses differing only in `appliesTo` would be the same kind wearing a
+// second name, and that name collides with the `Task<T>` TYPE, giving you
+// `type Job propagates<Task> { work: Task<int32> }` where the two `Task`s
+// mean different things.
 export kind pooled {
     appliesTo binding parameter field;
     requires Shared;
@@ -188,8 +188,7 @@ export kind pooled {
 // use after free, and does not know WHICH allocator produced the value. For
 // storage you intend to release, `Text` in std/core/text.yoop carries its
 // allocator and is the sound vehicle; `owned` is how the older bare-string
-// API tells the truth about itself. See
-// plans/strings-ownership-and-ergonomics.md.
+// API tells the truth about itself.
 export kind owned {
     appliesTo binding parameter field return;
     conferred;

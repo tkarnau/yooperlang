@@ -1,7 +1,6 @@
 module diagnostics;
 
-// The accumulating error channel (decision D3 in
-// plans/bootstrap-pipeline-contracts.md).
+// The accumulating error channel.
 //
 // Lex and parse fail fast and hand back a ParsingError; typecheck instead
 // COLLECTS Diagnostics and never stops, so the user sees every error in one

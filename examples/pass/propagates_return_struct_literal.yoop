@@ -1,7 +1,7 @@
-// Yoopstore-papercut #11: returning a struct literal whose fields move in
-// propagating bindings transfers the obligation to the caller - the same as
-// a bare `return ident;`. Before the fix, the inner binding ('inner' here)
-// showed up as unsatisfied at scope exit even though the enclosing function
+// Returning a struct literal whose fields move in propagating bindings
+// transfers the obligation to the caller - the same as a bare
+// `return ident;`. Without that transfer the inner binding ('inner' here)
+// shows up as unsatisfied at scope exit even though the enclosing function
 // declared propagates<disposable>.
 
 extern "C" from "stdio.h" {

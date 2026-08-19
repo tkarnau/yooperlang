@@ -34,8 +34,8 @@ module codegen;
   COMPILE time (`${x}` becomes a literal `%d` and `x` becomes a vararg), so the
   runtime halves always arrive through `%s`. That design is also why it renders
   an interpolated float as `3.140000` and an interpolated bool as `1`, which is
-  the known divergence recorded in plans/bootstrap-completion.md - the bootstrap
-  builds the string with the language's own rules first. This file is what makes
+  a known divergence - the bootstrap builds the string with the language's own
+  rules first. This file is what makes
   the two safe in the same place without giving that up.
 */
 

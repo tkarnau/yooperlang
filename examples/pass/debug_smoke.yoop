@@ -1,4 +1,4 @@
-// Phase 10.D: `std/debug` provides `debug.assert(cond, msg)` (no-op when
+// `std/debug` provides `debug.assert(cond, msg)` (no-op when
 // the condition holds) plus the unconditional `panic(msg)` and
 // `unreachable(msg)` exits. This fixture exercises the no-op path -
 // the always-true assert returns without writing anything - and a

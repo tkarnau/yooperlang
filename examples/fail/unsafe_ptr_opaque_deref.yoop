@@ -1,4 +1,4 @@
-// Yoopstore-papercut #3: deref of bare `unsafe_ptr` is rejected -
+// Deref of bare `unsafe_ptr` is rejected -
 // there's no pointee type to read. User must `unsafe_ptr.cast<T>(p)`
 // first to spell out the pointee.
 

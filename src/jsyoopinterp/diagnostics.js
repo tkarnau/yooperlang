@@ -1,15 +1,15 @@
-// Phase 11.B: comptime evaluation errors.
+// Comptime evaluation errors.
 //
 // `ComptimeError` is the unified error type produced by both the lower
 // pass (AST → bytecode) and the interpreter. Each carries a yoop
 // source location plus an optional frame-stack traceback so the user
 // sees the same level of locality they get from the typechecker.
 //
-// In Phase 11.B these errors are *silent fallbacks* when surfaced from
-// the opportunistic module-init folding path - the comptime pass
-// catches them and leaves the decl to be runtime-initialized as before.
-// In Phase 11.C (`@precompile`) they become hard build errors that
-// surface to the user, with full traceback rendering.
+// Surfaced from the opportunistic module-init folding path these errors
+// are *silent fallbacks* - the comptime pass catches them and leaves the
+// decl to be runtime-initialized. Under an explicit `@precompile` they
+// become hard build errors that surface to the user, with full traceback
+// rendering.
 
 export class ComptimeError extends Error {
   constructor(message, sourceLoc, traceback = null) {

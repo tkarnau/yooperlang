@@ -1,11 +1,10 @@
-// std/core/bytes.yoop - Phase 8.H byte-buffer primitives.
+// std/core/bytes.yoop - byte-buffer primitives.
 //
 // Pure-yoop operations on top of the `$builtin__array_slice` and
 // `$builtin__heap_alloc` intrinsics. No `import.unsafe;` - these are the
 // safe surface library code reaches for to parse and shuffle bytes.
 //
-// Naming convention (see plans/phase-8-h-string-bytes-vec.md "Intrinsics as
-// a first-class concept"):
+// Naming convention:
 //   * `_slice` -> borrowing view, no allocation
 //   * `_copy` -> fresh heap allocation
 //   * everything else here is read-only over its inputs.
@@ -172,7 +171,7 @@ export function bytesStartsWith(buf: uint8[], prefix: uint8[]): bool {
 
 // ASCII-only case-insensitive byte equality. Non-ASCII bytes compare
 // exactly. HTTP headers are ASCII; full Unicode case folding is out of
-// scope (see plans/phase-8-h-string-bytes-vec.md §8.H.2).
+// scope.
 export function bytesEqIgnoreAsciiCase(a: uint8[], b: uint8[]): bool {
     if (a.len != b.len) { return false; }
     let i: usize = 0;

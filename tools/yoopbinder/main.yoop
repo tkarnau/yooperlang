@@ -1,6 +1,6 @@
 // yoopbinder - generate yooperlang FFI bindings from a C header.
 //
-// v0 scope:
+// Scope:
 //   - Shells out to `clang -E -P <header>` and captures preprocessed stdout
 //   - Tokenises the result
 //   - Recognises top-level *function declarations* and emits them as a
@@ -10,7 +10,7 @@
 //     pass through verbatim with a // TODO comment so the user can
 //     resolve them by hand
 //
-// Out of scope for v0 (logged + skipped):
+// Out of scope (logged + skipped):
 //   - typedef / enum / struct / union declarations
 //   - function-pointer params and returns
 //   - array params with explicit size
@@ -25,7 +25,7 @@
 //
 // The output is intentionally over-broad: clang -E expands every
 // include, so you get every declaration in the transitive closure.
-// Trim the result by hand for now.
+// Trim the result by hand.
 
 import.unsafe;
 
@@ -167,11 +167,11 @@ function run_clang_preprocess(header_path: string): Vec<uint8> propagates<dispos
     // -E    preprocess only
     // -P    strip line markers
     // Quote the header path so spaces don't break us. (Not bulletproof
-    // -- a path with embedded `"` will misbehave -- a v0 papercut.)
+    // -- a path with embedded `"` will misbehave -- a papercut.)
     //
     // Trust popen: a failed popen returns NULL and the first fread
-    // segfaults -- a loud failure mode that we accept for v0 (the
-    // language has no ref-T null check today; the language_showcase
+    // segfaults -- a loud failure mode that we accept (the
+    // language has no ref-T null check; the language_showcase
     // example uses the same convention).
     let cmd: string = strings.stringConcatAll(["clang -E -P \"", header_path, "\""]);
     let fp: unsafe_ptr<FILE> = popen(cmd, "r");
@@ -512,7 +512,7 @@ function collect_top_level_decls(toks: CTok[]): Vec<DeclSlice> propagates<dispos
         } else if (k == TK_LBRACE) {
             // Skip the {...} body (function body or struct/enum/union
             // body inside a typedef). Match braces, then absorb any
-            // trailing typedef-name + `;` -- v0 doesn't emit either.
+            // trailing typedef-name + `;` -- this tool emits neither.
             let depth: int32 = 1;
             i = i + 1;
             while (i < toks.len && depth > 0) {
@@ -634,7 +634,7 @@ function parse_params(toks: CTok[], inner_start: usize, inner_end: usize): Parse
                 if (i - seg_start == 1 && toks[seg_start].tk == TK_ELLIPSIS) {
                     variadic = true;
                 } else {
-                    // Reject function-pointer params for v0: any nested `(` in the segment
+                    // Reject function-pointer params: any nested `(` in the segment
                     // that isn't part of an outer attribute means too complex.
                     let has_inner_paren: bool = false;
                     let j: usize = seg_start;
@@ -703,7 +703,7 @@ function parse_params(toks: CTok[], inner_start: usize, inner_end: usize): Parse
                     let yt: string = render_yoop_type(final_words, n_stars);
                     if (name_tok.len == 0) {
                         // Fabricate a param name so the emitted yoop extern
-                        // decl always has named params (v0 plays it safe).
+                        // decl always has named params (playing it safe).
                         name_tok = strings.stringConcatAll(["arg", format.uintToString(uint64(pnames_v.len))]);
                     }
                     vec.vecPush(ref pnames_v, name_tok);
@@ -851,7 +851,7 @@ function parse_function_decl(toks: CTok[], start: usize, end: usize): ParsedFn {
 //
 // Numeric detection is intentionally conservative -- the gain from picking
 // up `(1<<3)` style expressions doesn't justify pulling a real C expression
-// parser into the binder for v0. The user can add those by hand.
+// parser into the binder. The user can add those by hand.
 
 type MacroConst {
     name:      string,

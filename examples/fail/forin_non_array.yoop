@@ -1,5 +1,5 @@
-// Phase 9.D: `for ... in EXPR` requires an array RHS in v0. Trait-driven
-// iteration via Iterable<T> is reserved for a later phase.
+// `for ... in EXPR` requires an array RHS, or a type implementing
+// Iterable<T>. A plain int32 is neither.
 function main(): int32 {
     let x: int32 = 5;
     for v in x {

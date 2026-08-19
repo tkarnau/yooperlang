@@ -27,7 +27,7 @@ extern "C" from library "m" {
 export const WIN_W: int32 = 1024;
 export const WIN_H: int32 = 768;
 
-// Pre-existing codegen papercut: float32 module consts must be exactly
+// Codegen papercut: float32 module consts must be exactly
 // representable in IEEE-754 single. So all gameplay numbers below are
 // integers, halves, quarters, 1/64, 1/1024, etc.
 export const PLAYER_Y_FRAC: float32 = 0.875;

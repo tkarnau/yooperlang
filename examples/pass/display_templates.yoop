@@ -1,4 +1,4 @@
-// Phase 9.F: a type that implements `Display` is interpolatable in a
+// A type that implements `Display` is interpolatable in a
 // template literal. `${value}` rewrites at typecheck time to
 // `Display.toString(ref value)` and uses the resulting string. Works
 // for both same-module types (Point below) and cross-module types

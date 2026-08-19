@@ -272,9 +272,9 @@ export function emitRuntimeDeclarations(ref e: Emitter): EmitResult {
 //   declare ptr @memcpy(ptr, ptr, i64)
 //   declare i32 @sprintf(ptr, ptr, ...)
 //
-// This is the half of 2.1 that used to collide: std/core/alloc.yoop declares
-// its own `malloc` and `free`, and both spell exactly these two lines - so
-// they are now REUSED rather than emitted twice.
+// These COLLIDE with a user's own externs: std/core/alloc.yoop declares its own
+// `malloc` and `free`, and both spell exactly these two lines - so a compatible
+// declaration is REUSED rather than emitted twice.
 export function emitStringBuilderDeclarations(ref e: Emitter): EmitResult {
   externDeclare(ref e, "strlen", "i64", ["ptr"], false)?;
   externDeclare(ref e, "malloc", "ptr", ["i64"], false)?;

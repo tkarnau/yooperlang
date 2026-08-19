@@ -31,10 +31,10 @@
 // then copies into a freshly-sized heap array before constructing the
 // variant and disposes the temporary Vec.
 //
-// Not yet implemented (intentional first-cut limits):
+// Not implemented (intentional first-cut limits):
 //   * Numbers are parsed as int64. JSON `1.5` and `1e10` parse as `15` or
-//     skip the exponent digits and yield the integer mantissa. A real
-//     float64 lane is a follow-up.
+//     skip the exponent digits and yield the integer mantissa. There is no
+//     float64 lane.
 //   * String escapes are not decoded. `\"` is recognized as "do not end
 //     the string here" but the raw bytes are kept as-is. Add a real
 //     unescape pass (and \uXXXX) before treating this as wire-safe.
@@ -60,9 +60,9 @@ export type JsonMember {
 // variant itself stays a small POD; `dispose` walks the tree and frees
 // every nested array.
 //
-// Phase 13.B lets the variant carry the trait directly - before, the
-// walk lived in a free `dispose_value` helper that the JsonDoc wrapper's
-// `dispose` had to call. We deliberately do NOT add `propagates<disposable>`
+// The variant carries the trait directly, so the walk needs no free
+// `dispose_value` helper called from a JsonDoc wrapper's `dispose`.
+// We deliberately do NOT add `propagates<disposable>`
 // here, even though the tree is heap-backed: accessor functions like
 // `obj_get` and `as_array` return child JsonValues that borrow into the
 // parent, and a propagating return type would force every borrow site

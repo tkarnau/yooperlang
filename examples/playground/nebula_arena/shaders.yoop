@@ -4,9 +4,8 @@
 //              enemies, particles, and powerups in one draw call.
 //
 // These are exported as functions returning string because module-level
-// `const string` initialisation doesn't process `\n` escapes today, and
+// `const string` initialisation does not process `\n` escapes, and
 // the GLSL preprocessor requires a newline after `#version 150 core`.
-// See plans/yoopbinder-papercuts.md Issue 9.
 
 export function nebula_vertex_src(): string {
     return "#version 150 core\nin vec2 a_pos;\nout vec2 v_uv;\nvoid main() {\n    v_uv = (a_pos + vec2(1.0)) * 0.5;\n    gl_Position = vec4(a_pos, 0.0, 1.0);\n}\n";

@@ -1,8 +1,6 @@
-// Ownership redesign (2026-06-17, plans/ownership-and-typestate-redesign.md):
-// obligations are advisory, so a manual dispose in only ONE arm of an if/else
-// is no longer an error (there is no obligation to leave unsatisfied on the
-// other path). This typechecks cleanly. (Formerly
-// examples/fail/propagates_dispose_only_then.)
+// Obligations are advisory, so a manual dispose in only ONE arm of an if/else
+// is not an error (there is no obligation to leave unsatisfied on the other
+// path). This typechecks cleanly.
 
 trait Disposable {
     function dispose(ref self): void;

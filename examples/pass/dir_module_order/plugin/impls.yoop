@@ -4,9 +4,10 @@ module plugin;
 // trait, declares a kind-governed binding, and instantiates a generic - all
 // declared in the sibling file that the module graph visits AFTER this one.
 //
-// Before the pass C fix this was a hard error ("'self' can only be used inside a
-// trait method body") purely because "impls" < "traits". A module's semantics
-// must not depend on the alphabetical spelling of its filenames.
+// Without pass C resolving the sibling first, this is a hard error ("'self'
+// can only be used inside a trait method body") purely because
+// "impls" < "traits". A module's semantics must not depend on the
+// alphabetical spelling of its filenames.
 import { Disposable, disposable } from "std/core/kinds.yoop";
 
 export type Widget implements (Greets, Disposable) {

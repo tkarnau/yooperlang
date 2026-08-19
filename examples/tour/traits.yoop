@@ -1,0 +1,44 @@
+// A trait is a capability: the operations a type promises to provide. It is
+// the only polymorphism there is. No classes, no inheritance.
+
+trait Greeter {
+  function greet(ref self): string;
+}
+
+// A type opts in with `implements` and supplies the bodies inline. Methods
+// take `ref self` first.
+type Town implements Greeter {
+  name: string,
+  population: int32,
+  function greet(ref self): string {
+    return self.name;
+  }
+}
+
+type Lake implements Greeter {
+  name: string,
+  function greet(ref self): string {
+    return self.name;
+  }
+}
+
+// The reason traits exist: one function, any type that satisfies the bound.
+// It is monomorphized, so there is no runtime dispatch.
+//
+// Calls are trait-qualified - `Greeter.greet(ref g)`, never `g.greet()`. The
+// trait name at the call site is what lets two traits on one type both have a
+// `greet` with no ambiguity.
+function announce<T implements Greeter>(ref g: T): void {
+  printf(`hello from ${Greeter.greet(ref g)}\n`);
+}
+
+function main(): int32 {
+  let mqt: Town = { name: "Marquette", population: 20629 };
+  let superior: Lake = { name: "Lake Superior" };
+
+  announce(ref mqt);
+  announce(ref superior);
+
+  printf(`${mqt.name} has ${mqt.population} people\n`);
+  return 0;
+}

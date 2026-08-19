@@ -1,4 +1,4 @@
-// Phase 10.A: bare generic-enum variant constructor outside any pinning
+// A bare generic-enum variant constructor outside any pinning
 // context. The compiler can't pick `T`/`E`, so the diagnostic asks the user
 // to add a typed binding/return/call argument.
 

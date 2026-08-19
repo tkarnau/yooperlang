@@ -61,9 +61,9 @@ export function typeAccepts(ref prog: Program, expected: TypeId, actual: TypeId)
 // `(k: string) => uint64` interns a third. `internArray` / `internRef` scan
 // before inserting, so they DO canonicalize - but they canonicalize on the id
 // they are handed, and two different Func ids give two different array ids.
-// That is why `((a: int32) => int32)[]` written in two places used to compare
-// unequal to itself: the top-level compare reached an Array on both sides,
-// found two different ids, and stopped.
+// That is why `((a: int32) => int32)[]` written in two places compares unequal
+// to itself under a top-level compare: it reaches an Array on both sides, finds
+// two different ids, and stops.
 //
 // The walk covers exactly the STRUCTURAL cases - the ones built out of other
 // TypeIds by composition rather than by declaration:

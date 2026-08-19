@@ -6,10 +6,10 @@
 // server half of this fixture is a plain socket that writes canned bytes. The
 // client half is the real `std/http` client, going through the real decoder.
 //
-// plans/yooperdoom-takeaways.md 2 (HTTP): Go's HTTP server chunks anything it
-// cannot size up front, which means ollama and most local model runners. Before
-// this, `readHeaderLines` returned an honest 501 and the first full-size reply
-// from the thing you most wanted to talk to never arrived.
+// It matters because Go's HTTP server chunks anything it cannot size up front,
+// which means ollama and most local model runners. Without chunked decoding
+// `readHeaderLines` returns an honest 501 and the first full-size reply from
+// the thing you most want to talk to never arrives.
 
 import { disposable, Disposable } from "../../../std/core/kinds.yoop";
 import { Result } from "../../../std/core/types.yoop";

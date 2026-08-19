@@ -1,12 +1,12 @@
-// `arr[i].field = v` used to be rejected everywhere with "invalid assignment
-// target - root of field chain is not an identifier": the walk that finds the
-// binding a field chain is rooted at only stepped through FIELD_ACCESS, so any
-// INDEX_EXPRESSION in the middle ended it. Reading the same chain was always
-// fine, and so was whole-element assignment, which made it read like a rule
-// rather than an oversight.
+// `arr[i].field = v` assigns through an index in the middle of a field chain.
+// The walk that finds the binding a field chain is rooted at has to step
+// through INDEX_EXPRESSION as well as FIELD_ACCESS; stopping at the index
+// rejects the whole form with "invalid assignment target - root of field chain
+// is not an identifier", even though reading the same chain works and so does
+// whole-element assignment.
 //
 // The root binding's CONSTNESS stops applying once the chain passes through an
-// index, matching what plain `arr[i] = v` already did - `const xs: T[]` freezes
+// index, matching what plain `arr[i] = v` does - `const xs: T[]` freezes
 // the name `xs`, not the buffer behind it. A direct field write on a const
 // binding is still rejected (examples/fail covers that).
 

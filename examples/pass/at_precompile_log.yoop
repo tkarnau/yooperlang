@@ -1,4 +1,4 @@
-// Phase 11: comptime `std/log`. A `@precompile { ... }` block may call
+// Comptime `std/log`. A `@precompile { ... }` block may call
 // the leveled logging functions from `std/log` (`log.info` / `log.warn`
 // / `log.error`). Two things make this work:
 //

@@ -5,8 +5,8 @@
 // HMAC-SHA-256 over a canonicalised string. This is the smallest thing that
 // makes those reachable from Yoop.
 //
-// One module across one file today; it is a DIRECTORY so a future sha512 or
-// md5 can join it without every consumer rewriting an import.
+// One module across one file; it is a DIRECTORY so a sha512 or md5 can join
+// it without every consumer rewriting an import.
 //
 // NOT a general crypto library, and it should not grow into one without
 // someone who does this for a living. Specifically:

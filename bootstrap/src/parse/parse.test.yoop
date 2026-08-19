@@ -1579,10 +1579,9 @@ suite function parenthesizedTypeGroupsAttachArraySuffixes(): void {
   }
 }
 
-// A call through anything but a name or a field used to be accepted and then
-// SILENTLY miscompiled - the arguments were dropped and the function pointer
-// itself became the value. It only became reachable when `((k: K) => V)[]`
-// started parsing.
+// A call through anything but a name or a field has no lowering, and accepting
+// one SILENTLY miscompiles - the arguments are dropped and the function pointer
+// itself becomes the value.
 suite function callingAValueThatIsNotANameOrFieldIsRefused(): void {
   let test theory: Case = t.asserts("calling an indexed element is refused") {
     theory.isSuccessful = refusalMentions(
@@ -1790,19 +1789,17 @@ suite function fromParsesAsAMemberNameOnACall(): void {
     theory.detail = `parsed a ${call.kind} named "${call.name}"`;
   }
 
-  // DECLARING one still parses - that half has been here since phase 9.G, and
-  // the refusal must not have swallowed it.
+  // DECLARING one still parses, and the refusal must not have swallowed it.
   let decl = parseOk("vtable Reader for Readable { read: () => int, }");
   let test theory: Case = t.asserts("declaring a vtable is untouched") {
     theory.isSuccessful = topLevel(ref decl, 0).kind == ASTNodeKind.VTABLE_DECL;
     theory.detail = `the decl parsed as ${topLevel(ref decl, 0).kind}`;
   }
 
-  // NOT gated on the `(` any more. A plain member read spelled `from` is the
-  // same question - the right of a `.` is a name lookup either way - so it
-  // parses as an ordinary FIELD_ACCESS rather than being tied to vtables at
-  // all. It used to be refused, and the declaration of a field spelled `from`
-  // used to be refused with it; both are legal now.
+  // NOT gated on the `(`. A plain member read spelled `from` is the same
+  // question - the right of a `.` is a name lookup either way - so it parses as
+  // an ordinary FIELD_ACCESS rather than being tied to vtables at all. It is
+  // legal, and so is the declaration of a field spelled `from`.
   let read = parseOk("function f(): int { return l.from.x; }");
   let test theory: Case = t.asserts("a plain member read spelled `from` is a field access") {
     const outer = returnedExpression(ref read);

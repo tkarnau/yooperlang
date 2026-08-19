@@ -1,8 +1,6 @@
-// Vec<T> carries propagates<disposable>. Ownership redesign (2026-06-17,
-// plans/ownership-and-typestate-redesign.md): obligations are ADVISORY, not
-// enforced. Binding a Vec without `disposable` (or any other discharge) is no
-// longer an error - it typechecks cleanly and the user owns the lifetime.
-// (Formerly examples/fail/vec_no_disposable.)
+// Vec<T> carries propagates<disposable>. Obligations are ADVISORY, not
+// enforced: binding a Vec without `disposable` (or any other discharge) is
+// not an error - it typechecks cleanly and the user owns the lifetime.
 
 import { Vec, vecNew } from "../../../std/core/vec.yoop";
 import { disposable } from "../../../std/core/kinds.yoop";

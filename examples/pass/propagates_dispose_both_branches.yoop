@@ -1,8 +1,8 @@
-// Phase 6.4 path coverage: a `Disposable.dispose(ref r)` call in BOTH arms of
-// an if/else satisfies the obligation at the merge point, so a plain `let`
+// Path coverage: a `Disposable.dispose(ref r)` call in BOTH arms of an
+// if/else satisfies the obligation at the merge point, so a plain `let`
 // binding compiles cleanly. Mirror-image of
-// examples/fail/propagates_dispose_only_then.yoop, which omits the else-arm
-// dispose and is rejected.
+// examples/pass/propagates_dispose_only_then.yoop, which omits the else-arm
+// dispose.
 
 extern "C" from "stdio.h" {
     function printf(fmt: string, ...): int32;

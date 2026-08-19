@@ -52,11 +52,11 @@ const CompletionItemKind = {
 // `primTypesAreComplete` case in completion.test.js asserts that against
 // `primTypeFromName` rather than trusting this comment.
 //
-// The second group is Phase 8.B's C-portable integer aliases (C_ALIASES_LP64
-// in src/jsyooptypecheck/types.js). They are resolution-time synonyms - the
+// The second group is the C-portable integer aliases (C_ALIASES_LP64 in
+// src/jsyooptypecheck/types.js). They are resolution-time synonyms - the
 // alias IS the target type for typesEqual, assignability and codegen - and
 // every `extern "C"` block in std, the bootstrap and the examples is written
-// in them, so leaving them out meant completion went quiet in exactly the
+// in them, so leaving them out makes completion go quiet in exactly the
 // place a C signature is being typed.
 const PRIM_TYPES = [
   "int8", "int16", "int32", "int64",
@@ -91,7 +91,7 @@ export function collectCompletions(module, src, position, ctx = {}) {
   // LSP `documentation` field, which VS Code shows in the expanded panel next
   // to the completion list - so the answer to "what does this do" arrives
   // while you are picking the name, not after. Same scanner as hover; see
-  // docCommentAt in nav.js for why this exists (yooperdoom-takeaways 4.1).
+  // docCommentAt in nav.js for why this exists.
   const push = (label, kind, detail, doc) => {
     if (!label || seen.has(label)) return;
     seen.add(label);

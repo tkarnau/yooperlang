@@ -18,8 +18,6 @@
 // the two "late" clients connect. Without that staggering, whether anything
 // got refused would depend on scheduling, and the interesting assertion would
 // pass vacuously on a fast machine.
-//
-// plans/yooperdoom-takeaways.md 3.2.
 
 import { disposable, Disposable } from "../../../std/core/kinds.yoop";
 import { Result } from "../../../std/core/types.yoop";

@@ -1,5 +1,5 @@
 // Cancellation tokens: flags, deadlines, linking, and the blocking
-// helpers. See plans/cancellation-and-io-deadlines.md.
+// helpers.
 
 #include "../yoop_runtime.h"
 #include "test_support.h"

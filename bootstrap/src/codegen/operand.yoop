@@ -2,10 +2,10 @@ module codegen;
 
 // What an expression evaluates to, as a VALUE rather than a built string.
 //
-// Codegen used to pass operands around as `string`, which meant a malloc for
-// every `%t12` and every immediate. An operand is really one of four small
-// things, so this says that out loud and lets the emitter write the text
-// straight into its buffer with no allocation at all.
+// Passing operands around as `string` costs a malloc for every `%t12` and every
+// immediate. An operand is really one of four small things, so this says that
+// out loud and lets the emitter write the text straight into its buffer with no
+// allocation at all.
 
 import { Text }, * as text from "std/core/text.yoop";
 import { pushFloatBitsHex } from "../utils";

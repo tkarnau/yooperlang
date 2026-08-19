@@ -87,13 +87,12 @@ extern "C" from "yoop_runtime" {
 
 extern "C" from "yoop_runtime" {
     // Note the READINESS API (yoop_io_wait_readable / _writable / _ex, and
-    // yoop_io_would_block) is deliberately not imported here any more. std/net
-    // used to be built on it and no longer is: readiness is a POSIX notion
-    // that a completion port cannot express - it has no way to say a socket is
-    // writable, or that a LISTENING socket is readable. The runtime still
-    // exports those for consumers that genuinely want readiness on a connected
-    // descriptor (examples/pass/concurrent_pipe.yoop), but every transfer in
-    // std/net now goes through the operation API below.
+    // yoop_io_would_block) is deliberately not imported here. Readiness is a
+    // POSIX notion that a completion port cannot express - it has no way to
+    // say a socket is writable, or that a LISTENING socket is readable. The
+    // runtime still exports those for consumers that genuinely want readiness
+    // on a connected descriptor (examples/pass/concurrent_pipe.yoop), but
+    // every transfer in std/net goes through the operation API below.
     function yoop_io_set_nonblocking(fd: c_int): c_int;
     // Operation-level async I/O. `begin` returns bytes (>= 0), IOP_PENDING
     // (-2) meaning "suspend then call end", or -1 with errno set.
@@ -230,7 +229,7 @@ type AcceptedFd { fd: c_int, peerHost: uint32, peerPort: uint16 }
 // readability, then accept": a completion port has no way to report a
 // LISTENING socket as readable, so the two-step shape does not exist on
 // Windows. See ffiAcceptAsync for the full note, including why the peer
-// address is no longer reported.
+// address is not reported.
 function ffiAccept(fd: c_int): Result<AcceptedFd, string> {
     let code: int32 = IO_READY;
     let nullCt: RawCancel = { p: null };
@@ -330,17 +329,16 @@ function ffiBoundPort(fd: c_int): c_int {
 // so one worker can carry many in-flight connections.
 //
 // The shape is "start the operation; if it did not finish inline, suspend and
-// collect the result on resume". It used to be "try the syscall, and on
-// EWOULDBLOCK wait for readiness and retry" - the readiness helpers that
-// supported that (awaitReady / wouldBlock) are gone, because readiness is not
-// a portable notion. A completion port cannot answer "is this socket writable"
-// or "is this listener readable" at all, so those questions no longer appear
-// anywhere in this file. The runtime keeps the readiness API for consumers
-// that genuinely want it (see concurrent_pipe.yoop), but std/net does not.
+// collect the result on resume", not "try the syscall, and on EWOULDBLOCK wait
+// for readiness and retry". Readiness is not a portable notion: a completion
+// port cannot answer "is this socket writable" or "is this listener readable"
+// at all, so those questions do not appear anywhere in this file. The runtime
+// keeps the readiness API for consumers that genuinely want it (see
+// concurrent_pipe.yoop), but std/net does not.
 //
-// The fallback that awaitReady used to hide now lives in the runtime: a begin()
-// called off a worker reports EAGAIN, and the operation layer's blocking
-// sibling (yoop_iop_wait) is what the non-task paths call instead.
+// The fallback lives in the runtime: a begin() called off a worker reports
+// EAGAIN, and the operation layer's blocking sibling (yoop_iop_wait) is what
+// the non-task paths call instead.
 
 // Put a socket into non-blocking mode. Every fd that reaches the async
 // helpers must go through this first; std/net does it in `newStream` and
@@ -402,15 +400,14 @@ export async ffiRecvAsync(fd: c_int, buf: uint8[]): IoResult {
 
 // Suspending write-everything. Loops until the whole buffer is out,
 // suspending whenever the socket buffer fills.
-// Suspending write-everything. Loops until the whole buffer is out.
 //
-// This is the path that FORCED the operation API. The old shape asked
-// `awaitReady(fd, true)` - "tell me when this socket is writable" - and an I/O
-// completion port cannot answer that: a zero-byte WSASend completes
-// immediately whether or not the send buffer has room, so there is nothing to
-// wait on. Issuing the send as an operation and waiting for it to complete is
-// the only formulation that works on both platforms, and it is what Windows
-// wanted anyway.
+// This is the path that FORCES the operation API. Asking
+// `awaitReady(fd, true)` - "tell me when this socket is writable" - is
+// something an I/O completion port cannot answer: a zero-byte WSASend
+// completes immediately whether or not the send buffer has room, so there is
+// nothing to wait on. Issuing the send as an operation and waiting for it to
+// complete is the only formulation that works on both platforms, and it is
+// what Windows wants anyway.
 export async ffiSendAllAsync(fd: c_int, buf: uint8[]): IoResult {
     let total: usize = 0;
     while (total < buf.len) {

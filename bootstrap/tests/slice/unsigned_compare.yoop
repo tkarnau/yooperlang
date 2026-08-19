@@ -31,8 +31,8 @@ function main(): int32 {
   // NOT here: ordering an `enum<uint8>` whose cases cross 127. The bootstrap
   // unwraps the alias and answers unsigned; the reference compares it signed
   // and says `Flags.HIGH > Flags.LOW` is false for 200 and 10. A fixture is
-  // asserted against BOTH compilers, so that one is recorded as a reference bug
-  // in plans/bootstrap-completion.md rather than tested here.
+  // asserted against BOTH compilers, so that divergence is left to a codegen IR
+  // assertion rather than tested here.
 
   // And SIGNED stays signed. These flip the other way if everything were
   // switched to the unsigned predicate.

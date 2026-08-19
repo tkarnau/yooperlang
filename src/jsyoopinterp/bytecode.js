@@ -1,4 +1,4 @@
-// Phase 11.B: typed register-based bytecode IR.
+// Typed register-based bytecode IR.
 //
 // Each `BytecodeFunction` carries an ordered list of `Instruction`s
 // plus a parallel `registerTypes` array mapping register index → yoop
@@ -21,10 +21,9 @@
 //                value the interpreter consumes directly without
 //                materializing it as a register
 //
-// The opcode set deliberately starts small. Phase 11.B.0 covers
-// primitive arithmetic + return; later sub-phases extend coverage to
-// memory ops, control flow, calls, structs/arrays/refs, enum match,
-// tasks, and kind-flow cleanups.
+// The opcode set is deliberately small: primitive arithmetic and
+// return, memory ops, control flow, calls, structs/arrays/refs, enum
+// match, tasks, and kind-flow cleanups.
 
 export const OP = Object.freeze({
   // Materializes an immediate into a register. `immediate` is the
@@ -76,13 +75,10 @@ export const OP = Object.freeze({
   FCMP_GT: "fcmp_gt",
   FCMP_GE: "fcmp_ge",
 
-  // Bool ops. `LNOT` is unary; `LAND`/`LOR` are both binary AND
-  // short-circuiting at lowering time (the lowerer emits a brcond
-  // chain rather than calling these once control flow lands in a
-  // later sub-phase). For 11.B.4 lowering emits direct LAND/LOR
-  // since we don't yet have br/label and operands are simple enough
-  // that always-evaluating both sides is observable only on
-  // diagnostics, not behavior.
+  // Bool ops. `LNOT` is unary; `LAND`/`LOR` are binary and do NOT
+  // short-circuit: lowering emits them directly rather than a brcond
+  // chain, because operands are simple enough that always-evaluating
+  // both sides is observable only on diagnostics, not behavior.
   LAND: "land",
   LOR:  "lor",
   LNOT: "lnot",
@@ -265,7 +261,7 @@ export const OP = Object.freeze({
   // mutate the referent).
   REF_STORE: "ref_store",
 
-  // Phase 11.D.18: read a module-level binding into a register.
+  // Read a module-level binding into a register.
   // `immediate` carries `{ sym, name }` - the mangled symbol
   // (`<modid>__<name>`) is the key into the shared `moduleState`
   // map; `name` is retained for diagnostics. The interpreter
@@ -273,14 +269,13 @@ export const OP = Object.freeze({
   // doesn't alias the module slot for value-typed mutations.
   MODULE_LOAD: "module_load",
 
-  // Phase 11.D.18: write a register back into a module-level
-  // binding. `args[0]` is the source register; `immediate` is the
-  // same `{ sym, name }` shape as MODULE_LOAD. Used by the block
-  // form of `@precompile` to commit folded values to module-level
-  // mutable lets.
+  // Write a register back into a module-level binding. `args[0]` is
+  // the source register; `immediate` is the same `{ sym, name }`
+  // shape as MODULE_LOAD. Used by the block form of `@precompile` to
+  // commit folded values to module-level mutable lets.
   MODULE_STORE: "module_store",
 
-  // Phase 11.E.3: assemble a string from a TEMPLATE_LITERAL's parts.
+  // Assemble a string from a TEMPLATE_LITERAL's parts.
   // `args` is the ordered list of EXPR_PART value registers; the
   // `immediate` is an array of part descriptors interleaved with the
   // args - each entry is `{ kind: "str", value }` (literal substring)
@@ -304,8 +299,7 @@ export function instruction(op, opts = {}) {
 
 // Container for one function's worth of bytecode. Created by `lower.js`
 // and consumed by `interp.js`. The `params` field is empty for the
-// synthesized wrapper used to fold a single module-init expression;
-// future user-defined `@precompile` callsites will populate it.
+// synthesized wrapper used to fold a single module-init expression.
 export function bytecodeFunction({
   name,
   params = [],
@@ -317,7 +311,7 @@ export function bytecodeFunction({
   return { name, params, returnType, registerTypes, instructions, sourceLoc };
 }
 
-// Phase 11.E.2: pretty-printer for a BytecodeFunction. Output shape:
+// Pretty-printer for a BytecodeFunction. Output shape:
 //
 //   function <name>(<paramTypes>) -> <returnType>:
 //     0: <op> $<dst>, $<arg>, ... ; <type> [<immediate>] @<line>:<col>

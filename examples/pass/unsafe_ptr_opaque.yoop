@@ -1,4 +1,4 @@
-// Yoopstore-papercut #3: bare `unsafe_ptr` (no `<T>`) is the opaque
+// Bare `unsafe_ptr` (no `<T>`) is the opaque
 // C-pointer handle. The fopen path below is the canonical FFI use case:
 // we hand a `FILE *` back and forth without ever dereferencing it. We
 // also exercise the implicit decay from `unsafe_ptr<uint8>` to the

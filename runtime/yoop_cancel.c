@@ -1,7 +1,6 @@
 // Cancellation tokens for the Yooperlang runtime.
 //
-// See plans/cancellation-and-io-deadlines.md. A token bundles three
-// things:
+// A token bundles three things:
 //
 //   * a cancelled flag, settable from any thread,
 //   * an optional absolute deadline (on the yoop_now_ns monotonic

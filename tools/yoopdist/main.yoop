@@ -6,8 +6,7 @@
 // and its MODULE file. What must NOT ship is the module's own `modules/`
 // folder. Those are the dependencies it was DEVELOPED against; in a consuming
 // program they live flat beside the module rather than inside it, and a module
-// carrying its own copy is a hard error at import time. See
-// plans/modules-folder.md.
+// carrying its own copy is a hard error at import time.
 //
 // The output of this tool is exactly the thing a user drops into their own
 // modules/ folder.
@@ -197,7 +196,7 @@ function recordedVersion(moduleDir: string): string {
 // being dist'd. The rule is that the tool REFINES a snapshot it can verify and
 // PRESERVES one it cannot: re-running it somewhere with fewer dependencies
 // present must never downgrade a real recorded version to "unknown", which is
-// exactly what disting an already-dist'd module used to do.
+// exactly what disting an already-dist'd module would otherwise do.
 function priorRequireVersion(sourceText: string, dep: string): string {
     if (sourceText.len == 0) { return ""; }
     disposable lines: Vec<string> = vec.vecNew(64);

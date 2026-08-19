@@ -19,10 +19,10 @@
 // knows nothing about TLS and exposes `sendOn`, which runs an exchange over a
 // connection the caller owns, and this module supplies the connection.
 //
-// That layering is also why the code here is so short. Phase 0 of plans/tls.md
-// made std/http take `Reader`/`Writer` instead of a concrete `TcpStream`, and
-// phase 1 made `TlsStream` implement `Readable`/`Writable`. This file is just
-// the place the two meet.
+// That layering is also why the code here is so short: std/http takes
+// `Reader`/`Writer` rather than a concrete `TcpStream`, `TlsStream`
+// implements `Readable`/`Writable`, and this file is just the place the two
+// meet.
 module https;
 
 import { Disposable, disposable } from "../core/kinds.yoop";

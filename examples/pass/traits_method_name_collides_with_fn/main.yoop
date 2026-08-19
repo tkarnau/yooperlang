@@ -1,7 +1,7 @@
 extern "C" from "stdio.h" { function printf(fmt: string, ...): int32; }
 
-// Phase 7.4: trait method names may now coincide with module-level free
-// function names. Each call site is unambiguously disambiguated by syntax:
+// Trait method names may coincide with module-level free function names.
+// Each call site is unambiguously disambiguated by syntax:
 //   `flush(...)`             -> the free function
 //   `Flushable.flush(ref x)` -> the trait method
 trait Flushable {

@@ -1,4 +1,4 @@
-// Phase 11.E.3: comptime printf. Inside a `@precompile { ... }`
+// Comptime printf. Inside a `@precompile { ... }`
 // block, `printf(...)` writes to stderr with a `[comptime] ` prefix
 // so debug output from the comptime evaluator doesn't intermingle
 // with the compiler's own output (or with the compiled program's

@@ -1,4 +1,4 @@
-// Phase 11.D.18: `@precompile { ... }` block form. The block runs
+// `@precompile { ... }` block form. The block runs
 // at compile time with read + write access to module-level state;
 // each binding the block writes to gets its decl stamped as
 // `comptimeFolded`, and codegen emits the LLVM `@global` with the

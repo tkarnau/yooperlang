@@ -1,4 +1,4 @@
-// Phase 13.C: unit tests for the @derive(display) pre-typecheck expansion.
+// Unit tests for the @derive(display) pre-typecheck expansion.
 // These exercise the expansion in isolation (no typecheck, no clang) - the
 // end-to-end behavior lives in src/e2e.test.js.
 
@@ -207,7 +207,7 @@ describe("expandDerives", () => {
   });
 });
 
-describe("expandDerives: variants (Phase 13.D)", () => {
+describe("expandDerives: variants", () => {
   function variantDeclIn(mod, name) {
     for (const decl of mod.ast.body) {
       const inner = decl.kind === ASTNodeKind.EXPORT_DECL ? decl.decl : decl;
