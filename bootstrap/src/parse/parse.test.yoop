@@ -834,10 +834,88 @@ suite function variantMethodsShareTheMemberRunWithCases(): void {
     theory.detail = `the variant has ${decl.childCount} member(s), wanted 3`;
   }
 
-  let test theory: Case = t.asserts("the method is a METHOD_DECL, told apart by the keyword alone") {
+  let test theory: Case = t.asserts("the method is a METHOD_DECL") {
     const method = nodeAt(ref ast, childAt(ref ast, decl, 2));
     theory.isSuccessful = method.kind == ASTNodeKind.METHOD_DECL;
     theory.detail = `the third member is ${method.kind}, wanted METHOD_DECL`;
+  }
+}
+
+// A case name is metadata and may be spelled with a reserved word, `function`
+// included - so the keyword is at the head of both kinds of member and cannot
+// tell them apart on its own. What does is the token after it. C-shaped code
+// writes case names like this, and generated bindings would otherwise fail to
+// parse on the first collision.
+suite function functionAsACaseNameIsToldFromAMethodByWhatFollowsIt(): void {
+  let bare = parseOk("variant Shape { function, type { kind: int } }");
+  const bareDecl = topLevel(ref bare, 0);
+
+  let test theory: Case = t.asserts("a bare case named `function` is a case, not a method") {
+    const first = nodeAt(ref bare, childAt(ref bare, bareDecl, 0));
+    theory.isSuccessful = bareDecl.childCount == 2
+      && first.kind == ASTNodeKind.VARIANT_CASE
+      && str.stringEq(first.name, "function");
+    theory.detail = `member 0 of ${bareDecl.childCount} is ${first.kind} named "${first.name}", wanted VARIANT_CASE "function"`;
+  }
+
+  // A method cannot be nameless, so `function {` is unambiguous the other way.
+  let payload = parseOk("variant Shape { function { n: int }, Empty }");
+  const payloadDecl = topLevel(ref payload, 0);
+
+  let test theory: Case = t.asserts("a case named `function` may carry a payload") {
+    const first = nodeAt(ref payload, childAt(ref payload, payloadDecl, 0));
+    theory.isSuccessful = first.kind == ASTNodeKind.VARIANT_CASE && first.childCount == 1;
+    theory.detail = `member 0 is ${first.kind} with ${first.childCount} field(s), wanted VARIANT_CASE with 1`;
+  }
+
+  // And the disambiguation does not cost the ordinary reading: a real method
+  // still parses as one when it sits beside a case wearing its keyword.
+  let both = parseOk("variant Shape { function, function code(ref self): int { return 0; } }");
+  const bothDecl = topLevel(ref both, 0);
+
+  let test theory: Case = t.asserts("a real method beside it still parses as a method") {
+    const second = nodeAt(ref both, childAt(ref both, bothDecl, 1));
+    theory.isSuccessful = bothDecl.childCount == 2 && second.kind == ASTNodeKind.METHOD_DECL;
+    theory.detail = `member 1 of ${bothDecl.childCount} is ${second.kind}, wanted METHOD_DECL`;
+  }
+}
+
+// The struct and union half of the same rule, told apart by the COLON rather
+// than by the `{` / `,` / `}` a variant body reads.
+suite function functionAsAFieldNameIsToldFromAMethodByTheColon(): void {
+  let structBody = parseOk("type S implements Get { function: int32, function get(ref self): int32 { return 0; } }");
+  const structDecl = topLevel(ref structBody, 0);
+
+  let test theory: Case = t.asserts("`function: T` is a field") {
+    const first = nodeAt(ref structBody, childAt(ref structBody, structDecl, 0));
+    theory.isSuccessful = first.kind == ASTNodeKind.FIELD_DECL
+      && str.stringEq(first.name, "function");
+    theory.detail = `member 0 is ${first.kind} named "${first.name}", wanted FIELD_DECL "function"`;
+  }
+
+  let test theory: Case = t.asserts("`function name(...)` beside it is still a method") {
+    const second = nodeAt(ref structBody, childAt(ref structBody, structDecl, 1));
+    theory.isSuccessful = structDecl.childCount == 2 && second.kind == ASTNodeKind.METHOD_DECL;
+    theory.detail = `member 1 of ${structDecl.childCount} is ${second.kind}, wanted METHOD_DECL`;
+  }
+
+  // A union has no methods at all, so the colon is the whole of the question
+  // there: with one it is storage, and without one it is the thing a union
+  // cannot declare.
+  let unionBody = parseOk("union U { function: int32, b: int32 }");
+  const unionDecl = topLevel(ref unionBody, 0);
+
+  let test theory: Case = t.asserts("a union field may be named `function` too") {
+    const first = nodeAt(ref unionBody, childAt(ref unionBody, unionDecl, 0));
+    theory.isSuccessful = first.kind == ASTNodeKind.FIELD_DECL
+      && str.stringEq(first.name, "function");
+    theory.detail = `member 0 is ${first.kind} named "${first.name}", wanted FIELD_DECL "function"`;
+  }
+
+  let test theory: Case = t.asserts("a union that really does declare a method is still refused by name") {
+    const src = "union U { function fn(ref self): int32 { return 0; }, b: int32 }";
+    theory.isSuccessful = refusalMentions(src, "a union cannot declare methods");
+    theory.detail = `wanted a union-method refusal, got: ${parseError(src)}`;
   }
 }
 

@@ -55,6 +55,19 @@ export function untilClosing(ref ps: ParserState, closer: TokenTags): bool {
   return t != closer && t != TokenTags.EOF;
 }
 
+// What comes after the token at the cursor, compared against `tag`.
+//
+// Every member position that may hold a reserved word needs this: `function` is
+// the head of both a METHOD and a name that happens to be spelled with the
+// keyword, and only the token AFTER it says which. False at end of input, since
+// nothing follows there to match.
+export function followingTokenIs(ref ps: ParserState, tag: TokenTags): bool {
+  switch (SelfLexing.peekAhead(ref ps, 1)) {
+    case Result.Err { error: e }: { return false; }
+    case Result.Ok { value: tok }: { return tok.tag == tag; }
+  }
+}
+
 // Point `node` at a run of children in the arena's one flat `childIds` table.
 //
 // The scratch-Vec-then-splice build pattern, and the reason it exists: a list's

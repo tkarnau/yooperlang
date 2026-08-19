@@ -142,6 +142,23 @@ export function emitFieldAddress(ref cx: Cx, target: ASTNode, ref addr: usize): 
 
   switch (lookupLocal(cx.locals, baseNode.name)) {
     case Option.None: {
+      // A module-level `let` as the base - `ref pair.hi`, or a write to
+      // `pair.hi`. A global's address is its SYMBOL, so the gep starts from an
+      // operand rather than from a slot; it is the same address the global's
+      // own read and write already name, which is what keeps a field write
+      // through it visible to a later read.
+      const globalTy = moduleGlobalTypeOf(ref cx, baseNode.name);
+      if (globalTy.len > 0) {
+        const sym = globalSymbol(ref cx, baseNode.name);
+        const dest = freshTemp(cx.e);
+        emitGepFieldOfAddr(
+          ref cx, dest, typeOf(ref cx, target.childA),
+          Operand.GlobalAddr { home: sym.home, name: sym.name },
+          fieldPositionOf(ref cx, target.childA, target.name)
+        );
+        addr = dest;
+        return EmitResult.Ok;
+      }
       return internalError("no stack slot for field base", baseNode.name);
     }
     case Option.Some { value: slotInfo }: {

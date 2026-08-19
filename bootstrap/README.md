@@ -2328,7 +2328,20 @@ different sets on purpose and neither may move the other's numbers.
 compilers and asserts identical stdout and exit code. It exercises every layer
 at once.
 
-One divergence, worth knowing because the bootstrap is the one that is right:
-`printf("%d", 2 + 3)` is an error in the JS reference ("this expression still
-has an unpinned literal type"). The bootstrap's pass D defaults an unconstrained
-untyped int literal to int32.
+Four divergences, worth knowing because the bootstrap is the one that is right
+in all four - and worth WRITING DOWN, because once the reference is gone there
+is nothing left to notice them against.
+
+  * `printf("%d", 2 + 3)` is an error in the JS reference ("this expression
+    still has an unpinned literal type"). The bootstrap's pass D defaults an
+    unconstrained untyped int literal to int32.
+  * INT LITERALS PAST 2^53. The reference carries them as JS numbers and rounds
+    them in the lexer; nothing downstream can recover the value. This is not a
+    curiosity: the FNV-1a offset basis in std/core/strings.yoop is one, so under
+    the reference every string in every program hashes wrong and a Map iterates
+    in an order that follows. `tests/slice/wide_int_literals.yoop` pins it.
+  * `${x}` ON A uint64 renders SIGNED under the reference. Same fixture.
+  * `${b}` ON A bool renders `1` / `0` under the reference and `true` / `false`
+    here; `${f}` on a float renders `3.500000` there and `3.5` here. Between
+    them these account for 22 of the 23 lines `scripts/probe_programs.sh`
+    reports as DIFFER.

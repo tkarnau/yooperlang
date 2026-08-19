@@ -866,6 +866,52 @@ suite function aVoidMainCarriesCsEntryPointSignature(): void {
   }
 }
 
+// `ref` on a module-level `let`. A global already IS storage, so a borrow of one
+// is its SYMBOL and costs no instruction - the same answer a local gets out of
+// its alloca, one address form over. Reading and writing a global already took
+// this fall-through; the borrow is the third position that has to know a name
+// can live outside the frame.
+suite function aBorrowOfAModuleGlobalIsItsSymbol(): void {
+  let test theory: Case = t.asserts("`ref g` hands over the global's symbol, with no instruction") {
+    disposable e: Emitted = emitSource(
+      "let counter: int32 = 0;\nfunction bump(ref n: int32): int32 { n = n + 1; return n; }\nfunction main(): int32 { return bump(ref counter); }"
+    );
+    const ir = text.view(ref e.ir);
+    theory.isSuccessful =
+      occurrences(ir, "@test__counter = internal global i32 0, align 8") == 1 &&
+      occurrences(ir, "call i32 @test__bump(ptr @test__counter)") == 1;
+    theory.detail = `codegen said "${e.error}"; wanted the global passed as a bare symbol`;
+  }
+
+  // The borrow, the read and the write all have to name the SAME address, or a
+  // write through the borrow would be invisible to a later read.
+  let test theory: Case = t.asserts("a borrow, a read and a write agree on one address") {
+    disposable e: Emitted = emitSource(
+      "let counter: int32 = 0;\nfunction bump(ref n: int32): int32 { n = n + 1; return n; }\nfunction main(): int32 { counter = 1; const a = bump(ref counter); return counter; }"
+    );
+    const ir = text.view(ref e.ir);
+    theory.isSuccessful =
+      occurrences(ir, "store i32 1, ptr @test__counter") == 1 &&
+      occurrences(ir, "call i32 @test__bump(ptr @test__counter)") == 1 &&
+      occurrences(ir, "load i32, ptr @test__counter") == 1;
+    theory.detail = `codegen said "${e.error}"; the three positions do not name one global`;
+  }
+
+  // A FIELD of a global. The gep starts from the symbol rather than from a
+  // slot, which is the one thing the address form had to make possible.
+  let test theory: Case = t.asserts("`ref g.field` geps off the symbol") {
+    disposable e: Emitted = emitSource(
+      "type Pair { lo: int32, hi: int32 }\nlet pair: Pair = { lo: 1, hi: 2 };\nfunction bump(ref n: int32): int32 { n = n + 1; return n; }\nfunction main(): int32 { return bump(ref pair.hi); }"
+    );
+    const ir = text.view(ref e.ir);
+    theory.isSuccessful = occurrences(
+      ir,
+      "getelementptr inbounds %struct.test__Pair, ptr @test__pair, i32 0, i32 1"
+    ) == 1;
+    theory.detail = `codegen said "${e.error}"; wanted a gep off the global's symbol`;
+  }
+}
+
 // A module-level `let` whose initializer is not a compile-time integer. An LLVM
 // global's initializer is a constant, so the global starts zeroed and its real
 // value is stored by a function synthesized for the file - which `main` calls

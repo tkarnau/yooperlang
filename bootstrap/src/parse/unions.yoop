@@ -56,7 +56,11 @@ export function parseUnionDecl(ref ps: ParserState): Result<NodeId, ParsingError
   while (untilClosing(ref ps, TokenTags.RCURLY)) {
     // Named rather than left to parseFieldDecl, which would report a missing
     // `:` after the word `function` and say nothing about unions.
-    if (SelfLexing.peek(ref ps).tag == TokenTags.FUNCTION) {
+    //
+    // `atStructMethod` rather than the bare keyword, because a union FIELD may
+    // be named `function` the same way a struct's may - `function: int32` is
+    // storage, and only `function name(...)` is the thing a union cannot have.
+    if (atStructMethod(ref ps)) {
       return Result.Err { error: SelfLexing.createParsingError(
         ref ps,
         `a union cannot declare methods - "${node.name}" is storage, not a type with behaviour`,
