@@ -2039,14 +2039,28 @@ suite function attributesWrapTheDeclarationTheyDecorate(): void {
     theory.detail = `wanted an unknown-derive refusal, got: ${parseError(src)}`;
   }
 
-  // `@precompile` is the one deliberate DIVERGENCE: the reference folds its
-  // initializer at compile time and the bootstrap has no comptime interpreter,
-  // so it is refused by name rather than emitted unfolded - which would compile
-  // and silently do the work at run time instead.
-  let test theory: Case = t.asserts("@precompile parses and is refused by name, not as bad syntax") {
+  // `@precompile` on a const parses and is ACCEPTED - the fold itself happens
+  // between typecheck and codegen, so nothing here has an opinion about it
+  // beyond the target being a const. See comptime/precompile.yoop.
+  let test theory: Case = t.asserts("@precompile on a const parses") {
     const src = "@precompile const X: int = 6 * 7;";
-    theory.isSuccessful = refusalMentions(src, "no comptime interpreter");
-    theory.detail = `wanted a precompile refusal, got: ${parseError(src)}`;
+    theory.isSuccessful = parseError(src).len == 0;
+    theory.detail = `a precompiled const was refused: ${parseError(src)}`;
+  }
+
+  // The BLOCK form is a different mechanism rather than the same one with a
+  // different target: it runs statements and keeps what they wrote to the
+  // module's globals. Both parse; comptime/precompile.yoop tells them apart.
+  let test theory: Case = t.asserts("the @precompile block form parses too") {
+    const src = "@precompile { let a: int = 1; }";
+    theory.isSuccessful = parseError(src).len == 0;
+    theory.detail = `a precompile block was refused: ${parseError(src)}`;
+  }
+
+  let test theory: Case = t.asserts("@precompile on something that is not a const is refused by name") {
+    const src = "@precompile type P { n: int }";
+    theory.isSuccessful = refusalMentions(src, "decorates a const declaration");
+    theory.detail = `wanted a target refusal, got: ${parseError(src)}`;
   }
 }
 

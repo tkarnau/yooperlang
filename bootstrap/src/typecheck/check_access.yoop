@@ -134,7 +134,7 @@ function checkAssignment(ref cx: Cx, expr: ASTNode): TypeId {
           if (moduleConstType(cx.prog, cx.tm, target.name) != TYPE_ERROR_ID) {
             reportError(
               cx.prog,
-              `cannot assign to const "${target.name}" - a module-level const is inlined at every use, so there is nothing to write to`,
+              `cannot assign to const "${target.name}" - a module-level const is immutable, whether it inlines at every use or is backed by a global`,
               target.sourceLoc
             );
           } else {

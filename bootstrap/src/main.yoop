@@ -28,6 +28,7 @@ import { loadModuleGraph, loadModuleGraphFromSource, LoadGraphResult, discoverSt
 import { typecheckProgram, Program } from "./typecheck";
 import { Severity, formatLocation } from "./diagnostics";
 import { codegenProgram } from "./codegen";
+import { runPrecompilePass } from "./comptime";
 import { linkExecutable, writeIrFile } from "./link";
 import { TestPlan, planTestRun, testBinaryPath, runTestBinary, removeTestArtifacts } from "./test_mode";
 
@@ -105,6 +106,14 @@ function compileGraph(loaded: LoadGraphResult, outPath: string, emitIr: bool): i
       // `disposable` here because the unhandled-disposable warning caught it:
       // Program owns the type/symbol arenas and every TypedModule's maps.
       disposable prog: Program = typecheckProgram(ref moduleGraph);
+
+      // `@precompile` runs between the two layers rather than inside either. It
+      // needs pass D's resolved types, so it cannot run before typecheck ends;
+      // and its failures are diagnostics with source locations, which codegen
+      // has no channel for. It folds each decorated const and puts the LITERAL
+      // it produced back in the AST, so codegen reads an ordinary constant.
+      runPrecompilePass(ref prog, ref moduleGraph);
+
       if (reportDiagnostics(ref prog) > 0) {
         return 1;
       }

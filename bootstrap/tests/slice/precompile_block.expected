@@ -1,0 +1,5 @@
+SQUARES=0,1,4,9,16,25,36,49
+SUM=140
+TIP=(140,-140)
+LABEL=sum is 140
+exit=0

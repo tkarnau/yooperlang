@@ -551,7 +551,7 @@ export function moduleGlobalTypeOf(ref cx: Cx, name: string): string {
     case Option.None: { return ""; }
     case Option.Some { value: symId }: {
       switch (symbolAt(cx.prog, symId)) {
-        case Symbol.Global { typeId: t, intVal: v }: { return llvmType(cx.prog, t); }
+        case Symbol.Global { typeId: t, intVal: v, mutable: mu }: { return llvmType(cx.prog, t); }
         default: { return ""; }
       }
     }

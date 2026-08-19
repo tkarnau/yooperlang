@@ -866,6 +866,44 @@ suite function aVoidMainCarriesCsEntryPointSignature(): void {
   }
 }
 
+// A module-level `const` whose value is not something there IS to inline is
+// backed by a real global, and its initializer runs in the module's init
+// function. `const` is about immutability; the inlining is a fast path for the
+// literal shapes and not what the keyword means.
+suite function aConstThatCannotInlineBecomesAGlobal(): void {
+  let test theory: Case = t.asserts("a literal const still inlines, with no global and no init") {
+    disposable e: Emitted = emitSource(
+      "const N: int32 = 7;\nfunction main(): int32 { return N; }"
+    );
+    const ir = text.view(ref e.ir);
+    theory.isSuccessful = occurrences(ir, "@test__N") == 0 && occurrences(ir, "module_init") == 0;
+    theory.detail = `codegen said "${e.error}"; the fast path grew storage`;
+  }
+
+  let test theory: Case = t.asserts("a call-initialized const gets a zeroed global and a run-time store") {
+    disposable e: Emitted = emitSource(
+      "function five(): int32 { return 5; }\nconst N: int32 = five();\nfunction main(): int32 { return N; }"
+    );
+    const ir = text.view(ref e.ir);
+    theory.isSuccessful =
+      occurrences(ir, "@test__N = internal global i32 zeroinitializer, align 8") == 1 &&
+      occurrences(ir, "store i32 %t1, ptr @test__N") == 1 &&
+      occurrences(ir, "define internal void @test__module_init0() {") == 1;
+    theory.detail = `codegen said "${e.error}"; the const did not land as an initialized global`;
+  }
+
+  // And a READ of one is a load, which is the half that would otherwise still
+  // be looking for an immediate to inline.
+  let test theory: Case = t.asserts("reading it is a load rather than an inlined immediate") {
+    disposable e: Emitted = emitSource(
+      "function five(): int32 { return 5; }\nconst N: int32 = five();\nfunction main(): int32 { return N; }"
+    );
+    const ir = text.view(ref e.ir);
+    theory.isSuccessful = occurrences(ir, "load i32, ptr @test__N") == 1;
+    theory.detail = `codegen said "${e.error}"; the read did not load the global`;
+  }
+}
+
 // `ref` on a module-level `let`. A global already IS storage, so a borrow of one
 // is its SYMBOL and costs no instruction - the same answer a local gets out of
 // its alloca, one address form over. Reading and writing a global already took

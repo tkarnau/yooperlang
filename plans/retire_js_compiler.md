@@ -16,11 +16,12 @@ Measured with a stage1 bootstrap built from the current tree, by
 
   surface (does codegen HANDLE the file):
     479 files, 458 done, 0 bad-ir, 21 refused, 19 distinct sites
-    now 460 done, 19 refused, 17 sites, with A3 and A4 below closed
+    now 494 done, ONE refused, one site - and it is A2 below rather than
+    anything about comptime. Every `@precompile` file compiles and runs.
 
   programs (does the program WORK, both compilers run and diffed):
     pass         244   204 ok   20 differ   19 bootgap
-                       now 22 differ, 17 bootgap - see below
+                       now 218 ok, 24 differ, 1 bootgap - see below
     intro          4     4 ok
     tour           5     5 ok
     modules_demo   1     1 ok
@@ -34,7 +35,19 @@ CONCENTRATED: 16 of the 19 refused files are one missing feature.
 
 Everything here is measured, not guessed. Each item names the probe evidence.
 
-### A1. Comptime evaluation (16 files, the whole headline gap)
+### A1. Comptime evaluation (13 files, and all of them `@precompile`)
+
+STATUS: five of the original sixteen are CLOSED, and not by an interpreter.
+Backing a non-inlinable module-level const with a real global - `const` meaning
+immutable rather than inlined - closed `dir_module/` (3 files),
+`comptime_enum_fold.yoop`, `module_init_folded.yoop` and
+`examples/playground/shader_demo/`. All five compile, run, and match the
+reference. What is left is `@precompile` alone. See
+[comptime_interpreter.md](comptime_interpreter.md).
+
+The original description follows.
+
+#### As originally measured (16 files)
 
 Three refusal messages, one missing subsystem: there is no comptime
 interpreter. The JS side has one in `src/jsyoopinterp/` (3990 lines: a lowering
@@ -266,9 +279,11 @@ undo step - deleting `src/` - comes last and comes with everything it needs.
      literal rounding, and pinned by a slice fixture.
   2. THE TWO SMALL BUGS. Both DONE - A3 (keyword member names) and A4 (`ref` on
      a module-level `let`, plus `ref g.field`).
-  3. A2, the task handle refcount retain.
-  4. THE COMPTIME INTERPRETER (A1). The big one, and the one that closes 16 of
-     21 refusals.
+  3. A2, the task handle refcount retain. NOW THE ONLY REFUSAL LEFT in the
+     whole corpus.
+  4. THE COMPTIME INTERPRETER (A1). DONE - all thirteen `@precompile` files
+     compile and run and match the reference. See
+     [comptime_interpreter.md](comptime_interpreter.md).
   5. DWARF DEBUG INFO (C).
   6. THE REMAINING DRIVER FLAGS (C): `--track-heap`, `--warn-disposable`,
      `--warn-std`, `--dump-ast-json`, `--list-attributes`.

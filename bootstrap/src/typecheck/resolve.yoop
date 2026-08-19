@@ -660,6 +660,27 @@ export function lookupField(ref prog: Program, structType: TypeId, name: string)
   }
 }
 
+// The i'th field of a struct, by POSITION. `lookupField` answers by name; a
+// value read back out of an aggregate is known only by where it sat.
+export type PositionalField {
+  name: string,
+  typeId: TypeId,
+  found: bool,
+}
+
+export function structFieldAt(ref prog: Program, structType: TypeId, i: usize): PositionalField {
+  switch (typeAt(ref prog, structType)) {
+    case Type.Struct { decl: d, fields: f, methods: mm, implementsTraits: it, generic: g }: {
+      if (i >= f.len) {
+        return { name: "", typeId: TYPE_ERROR_ID, found: false };
+      }
+      const field = vec.vecGet(ref f, i);
+      return { name: field.name, typeId: field.typeId, found: true };
+    }
+    default: { return { name: "", typeId: TYPE_ERROR_ID, found: false }; }
+  }
+}
+
 // How many fields a struct has, for the all-fields-present check.
 export function structFieldCount(ref prog: Program, structType: TypeId): usize {
   switch (typeAt(ref prog, structType)) {

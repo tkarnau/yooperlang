@@ -1,0 +1,51 @@
+module comptime;
+
+// What a comptime evaluation says when it cannot produce a value.
+//
+// One error type for the whole layer, because the two callers want the same
+// information and disagree only about what to DO with it:
+//
+//   * opportunistic module-init folding SWALLOWS it and leaves the decl to be
+//     initialized at run time. An ordinary program must never grow a build
+//     error out of the presence of a comptime engine, or every gap in this
+//     evaluator becomes a gap in the language.
+//   * `@precompile` REPORTS it. The user asked for compile-time evaluation, so
+//     a silent fallback would be a semantics change rather than a mercy.
+//
+// Which is why the message is written as though it will be read: the fold path
+// throwing it away costs nothing, and the other path has nothing to add.
+
+import { SourceLocation } from "../diagnostics";
+
+@derive(display)
+export type ComptimeError {
+  message: string,
+  sourceLoc: SourceLocation,
+  // A `?` that took its FAILURE branch is not an error - it is an early return
+  // from the enclosing function, travelling as one.
+  //
+  // It rides here because `?` is an EXPRESSION whose failure returns from the
+  // function around it, and `evalExpr` hands back a Result with no room for a
+  // third outcome. Carrying it as an error means the evaluator's own `?`
+  // unwinds it through every enclosing expression for free - which is exactly
+  // `?`'s scope - and `runFrame` catches it and turns it into the frame's
+  // return value. Nothing between the two has to know.
+  propagating: bool,
+  value: ValueId,
+}
+
+export function comptimeError(message: string, sourceLoc: SourceLocation): ComptimeError {
+  return { message: message, sourceLoc: sourceLoc, propagating: false, value: VALUE_NONE };
+}
+
+// A `?` returning `value` from the enclosing function. Carries a message too,
+// so that a propagation escaping past every frame - which would be a bug in
+// this layer rather than in the program - still reads as something.
+export function comptimePropagation(value: ValueId, sourceLoc: SourceLocation): ComptimeError {
+  return {
+    message: "a `?` propagated past the function that should have caught it",
+    sourceLoc: sourceLoc,
+    propagating: true,
+    value: value,
+  };
+}

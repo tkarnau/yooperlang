@@ -1,0 +1,45 @@
+// `@precompile { ... }` - the BLOCK form.
+//
+// A different mechanism from the initializer form rather than the same one with
+// a different target. That one produces ONE value for ONE binding; this one
+// runs statements and keeps what they wrote to the module's `let` globals.
+//
+// So the program STARTS with the table already filled: nothing in `main`
+// computes it, and no loop runs at startup to build it.
+
+type Point { x: int32, y: int32 }
+
+let SQUARES: int32[] = [0, 0, 0, 0, 0, 0, 0, 0];
+let SUM: int32 = 0;
+let TIP: Point = { x: 0, y: 0 };
+let LABEL: string = "";
+
+function square(x: int32): int32 { return x * x; }
+
+@precompile {
+  // Locals here exist only inside the evaluator. Annotations are mandatory:
+  // inference does not reach into a block body the way it does a function's.
+  let i: int32 = 0;
+  let acc: int32 = 0;
+  while (i < 8) {
+    SQUARES[i] = square(i);   // writes the module-level array
+    acc = acc + SQUARES[i];   // and reads it back
+    i = i + 1;
+  }
+  SUM = acc;
+  // A struct global, and a NEGATIVE field - which is spelled as a unary minus
+  // over the magnitude, because a flag on the literal is read by the const
+  // path and ignored where a global's initializer is emitted as instructions.
+  TIP = { x: SUM, y: 0 - SUM };
+  LABEL = `sum is ${SUM}`;
+}
+
+function main(): int {
+  let s: int32[] = SQUARES;
+  printf(`SQUARES=${s[0]},${s[1]},${s[2]},${s[3]},${s[4]},${s[5]},${s[6]},${s[7]}\n`);
+  printf(`SUM=${SUM}\n`);
+  let t: Point = TIP;
+  printf(`TIP=(${t.x},${t.y})\n`);
+  printf(`LABEL=${LABEL}\n`);
+  return 0;
+}

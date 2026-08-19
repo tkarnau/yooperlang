@@ -13,7 +13,7 @@ import { Vec }, * as vec from "std/core/vec.yoop";
 import { Map }, * as map from "std/collections/map.yoop";
 import { disposable } from "std/core/kinds.yoop";
 import { Option } from "std/core/types.yoop";
-import { AST, ASTNode, ASTNodeKind, NodeId, childAt, declOf, nodeAt } from "../ast";
+import { AST, ASTNode, ASTNodeKind, NodeId, attributeNameOf, childAt, declOf, nodeAt } from "../ast";
 import { Module } from "../source_graph";
 import { TokenTags } from "../lex";
 
@@ -145,7 +145,8 @@ function fillFileShells(
         fillTraitMethods(ref prog, ref tm, ref m.ast, declNode, moduleId);
       }
       case ASTNodeKind.CONST_DECL: {
-        fillModuleConst(ref prog, ref tm, ref m.ast, declNode);
+        fillModuleConst(ref prog, ref tm, ref m.ast, declNode,
+          str.stringEq(attributeNameOf(ref m.ast, childAt(ref m.ast, programNode, i)), "precompile"));
       }
       case ASTNodeKind.LET_DECL: {
         fillModuleGlobal(ref prog, ref tm, ref m.ast, declNode);
@@ -508,7 +509,8 @@ function fillModuleConst(
   ref prog: Program,
   ref tm: TypedModule,
   ref ast: AST,
-  declNode: ASTNode
+  declNode: ASTNode,
+  precompiled: bool
 ): void {
   const symId = lookupOwnName(ref tm, declNode.name);
   if (symId == SYMBOL_NONE_ID) {
@@ -526,24 +528,24 @@ function fillModuleConst(
   }
   const declared = resolveTypeAnnotation(ref prog, ref tm, ref ast, declNode.childA);
 
+  // `@precompile` promises the value is computed at BUILD time, so the decl
+  // stays an inlined const whatever its initializer looks like right now - the
+  // comptime pass replaces that initializer with the literal it folded to, and
+  // fails the build if it cannot. Routing it to a global instead would compile
+  // and silently do the work at startup, which is the one thing the attribute
+  // exists to prevent.
+  if (precompiled) {
+    setSymbol(ref prog, symId, Symbol.Value { typeId: declared, intVal: 0 });
+    return;
+  }
+
+  // Not inlinable, so the const is backed by a real GLOBAL and its initializer
+  // runs in the module's init function - the same path a `let` takes, and the
+  // only one available for a value like `vec.vecNew(8)` that is a heap
+  // allocation rather than anything an immediate could spell. `mutable: false`
+  // is what still refuses `NAME = ...` afterwards.
   if (!isInlinableConst(ref prog, ref ast, declNode.childB, declared)) {
-    // A CALL gets its own message. The reference FOLDS one at compile time, so
-    // "needs a literal" reads as a syntax complaint about a program that is
-    // perfectly well formed - the missing piece is a comptime interpreter, and
-    // saying so is what points at that rather than at the line.
-    if (isCallInitializer(ref ast, declNode.childB)) {
-      reportError(
-        ref prog,
-        `module-level const "${declNode.name}" is initialized by a CALL - the reference folds one at compile time and the bootstrap has no comptime interpreter, so there is nothing to inline`,
-        declNode.sourceLoc
-      );
-      return;
-    }
-    reportError(
-      ref prog,
-      `module-level const "${declNode.name}" needs a literal initializer of type ${formatType(ref prog, declared)} - the bootstrap inlines consts, so it has to be a number, a bool, a string, or an array of those`,
-      declNode.sourceLoc
-    );
+    setSymbol(ref prog, symId, Symbol.Global { typeId: declared, intVal: 0, mutable: false });
     return;
   }
 
@@ -594,7 +596,7 @@ function fillModuleGlobal(
   if (moduleGlobalIsBaked(ref prog, ref ast, declNode.childB, declared)) {
     constIntValue(ref ast, declNode.childB, ref value);
   }
-  setSymbol(ref prog, symId, Symbol.Global { typeId: declared, intVal: value });
+  setSymbol(ref prog, symId, Symbol.Global { typeId: declared, intVal: value, mutable: true });
 }
 
 // Whether a module-level `let`'s value is BAKED into the LLVM global rather

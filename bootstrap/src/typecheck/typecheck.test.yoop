@@ -207,7 +207,7 @@ suite function localsRejectBadPrograms(): void {
 
 // ----- module-level consts --------------------------------------------------
 
-suite function moduleConstsAreInlinedValues(): void {
+suite function moduleConstsAreImmutableValues(): void {
   let ok = checkSource("const N: int = 7;\nfunction main(): int { return N + 1; }");
   let test theory: Case = t.asserts("a module const is readable from a body") {
     theory.isSuccessful = ok.diagnostics.len == 0;
@@ -222,28 +222,38 @@ suite function moduleConstsAreInlinedValues(): void {
     theory.detail = `shadowing a module const reported: ${firstDiagnostic(ref shadowed)}`;
   }
 
-  // The initializer has to be something there IS to inline. A CALL says so in
-  // its own words: the reference FOLDS one, so the missing piece is a comptime
-  // interpreter rather than anything about the line.
+  // An initializer that is not something there IS to inline does not refuse the
+  // const - it backs it with a real GLOBAL whose value is stored by the
+  // module's init function, which is the only path open to a value like a call
+  // result. `const` means IMMUTABLE; the inlining is a fast path for the
+  // literal shapes and not the definition.
   let computed = checkSource("const N: int = other();\nfunction other(): int { return 1; }\nfunction main(): int { return N; }");
-  let test theory: Case = t.asserts("a call initializer names the missing comptime interpreter") {
-    theory.isSuccessful = diagnosticsMention(ref computed, "no comptime interpreter");
-    theory.detail = `wanted a const-eval refusal, got: ${firstDiagnostic(ref computed)}`;
+  let test theory: Case = t.asserts("a call initializer is accepted and backed by a global") {
+    theory.isSuccessful = computed.diagnostics.len == 0;
+    theory.detail = `a call-initialized const reported: ${firstDiagnostic(ref computed)}`;
   }
 
-  // Everything else in that bucket is a shape question, and the message lists
-  // what a const may be instead.
   let wrongShape = checkSource("type P { x: int }\nconst Q: P = { x: 1 };\nfunction main(): int { return Q.x; }");
-  let test theory: Case = t.asserts("a struct-literal initializer is refused by name") {
-    theory.isSuccessful = diagnosticsMention(ref wrongShape, "needs a literal initializer");
-    theory.detail = `wanted a const-shape refusal, got: ${firstDiagnostic(ref wrongShape)}`;
+  let test theory: Case = t.asserts("a struct-literal initializer is accepted the same way") {
+    theory.isSuccessful = wrongShape.diagnostics.len == 0;
+    theory.detail = `a struct-literal const reported: ${firstDiagnostic(ref wrongShape)}`;
   }
 
-  // The declared TYPE is what a literal is checked against, so a const cannot
-  // quietly become a zero of the wrong kind.
+  // Backed by a global or not, it is still a const: there is no assignment to
+  // it, and the reason has stopped being "it has no storage".
+  let writeBacked = checkSource("const N: int32 = other();\nfunction other(): int32 { return 1; }\nfunction main(): int { N = 2; return 0; }");
+  let test theory: Case = t.asserts("a const backed by a global still cannot be assigned") {
+    theory.isSuccessful = diagnosticsMention(ref writeBacked, "cannot assign to const");
+    theory.detail = `wanted a const-assignment refusal, got: ${firstDiagnostic(ref writeBacked)}`;
+  }
+
+  // The declared TYPE is still what the initializer is checked against, so a
+  // const cannot quietly become a zero of the wrong kind. It is the ORDINARY
+  // mismatch now rather than a const-shaped one, because the initializer is an
+  // ordinary expression pass D reads.
   let mismatched = checkSource(`const S: string = 5;\nfunction main(): int { return 0; }`);
-  let test theory: Case = t.asserts("a literal of the wrong type is refused by name") {
-    theory.isSuccessful = diagnosticsMention(ref mismatched, "needs a literal initializer of type string");
+  let test theory: Case = t.asserts("an initializer of the wrong type is still refused") {
+    theory.isSuccessful = diagnosticsMention(ref mismatched, "cannot assign untyped int to string");
     theory.detail = `wanted a const-type refusal, got: ${firstDiagnostic(ref mismatched)}`;
   }
 
@@ -3292,13 +3302,12 @@ suite function moduleGlobalsAreRealStorage(): void {
     theory.detail = `reported ${ok.diagnostics.len}: ${firstDiagnostic(ref ok)}`;
   }
 
-  // Writing a const is refused with a message that says WHY - "there is nothing
-  // to write to" rather than a generic const complaint, because the reason is
-  // that it has no storage at all.
+  // Writing a const is refused with a message that says WHY, and the why is
+  // immutability rather than a missing address: a const may well have one now.
   let writeConst = checkSource("const K: int32 = 1;\nfunction main(): int { K = 2; return 0; }");
   let test theory: Case = t.asserts("a module const cannot be assigned, and the message says why") {
-    theory.isSuccessful = diagnosticsMention(ref writeConst, "nothing to write to");
-    theory.detail = `wanted the no-storage message, got: ${firstDiagnostic(ref writeConst)}`;
+    theory.isSuccessful = diagnosticsMention(ref writeConst, "a module-level const is immutable");
+    theory.detail = `wanted the immutability message, got: ${firstDiagnostic(ref writeConst)}`;
   }
 
   // An INTEGER literal initializer is baked into the LLVM global. Anything else

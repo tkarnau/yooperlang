@@ -1,0 +1,925 @@
+// Tests for the `comptime` module - the compile-time evaluator.
+//
+// The value ARENA is what most of these are about, and it is worth testing
+// directly rather than only through a fold: a `ref` is a ValueId and an
+// assignment is a write into a slot, so aliasing and copying are decided here
+// and everything above inherits whatever this layer gets wrong.
+
+import.test;
+import * as t from "std/test.yoop";
+import { suite, test, Case } from "std/test.yoop";
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import * as str from "std/core/strings.yoop";
+import * as intr from "std/core/intrinsics.yoop";
+import { Result } from "std/core/types.yoop";
+import { AST, ASTNodeKind, NodeId, childAt, declOf, kindName, nodeAt, emptyArena } from "../ast";
+import { Module, ModuleGraph, LoadModuleResult, moduleFromSource, singleModuleGraph } from "../source_graph";
+import { Text }, * as text from "std/core/text.yoop";
+import { typecheckProgram, lookupOwnName, primBitWidth } from "../typecheck";
+import { codegenProgram } from "../codegen";
+import { runPrecompilePass } from "../comptime";
+import { ComptimeError, FoldedConsts, newFoldedConsts, recordFolded, foldExpression } from "../comptime";
+import { SourceLocation } from "../diagnostics";
+import { TokenTags } from "../lex";
+import { Program, TypeId, PrimKind, initProgram, primTypeId } from "../typecheck";
+import { floatBits, float32Bits, floatFromBits } from "../utils";
+import { ComptimeError, intBinary, intUnary, intCompare, floatBinary, floatCompare } from "../comptime";
+import { ValueArena, ValueId, ValueKind, ValueSlot, VALUE_NONE, newValueArena,
+  valueAt, setValue, childValueAt, intValue, boolValue, strValue, refValue,
+  aggregateValue, cloneValue } from "../comptime";
+
+// A struct-shaped aggregate over two ints, which is the shape nearly every
+// other assertion here needs one of.
+function pairOf(ref va: ValueArena, a: uint64, b: uint64): ValueId {
+  disposable parts: Vec<ValueId> = vec.vecNew(2);
+  vec.vecPush(ref parts, intValue(ref va, 0, a));
+  vec.vecPush(ref parts, intValue(ref va, 0, b));
+  return aggregateValue(ref va, ValueKind.STRUCT, 0, 0, ref parts);
+}
+
+suite function aScalarSlotCarriesItsPayloadAndItsKind(): void {
+  disposable va: ValueArena = newValueArena();
+  const n = intValue(ref va, 0, 42);
+  const b = boolValue(ref va, 0, true);
+  const s = strValue(ref va, 0, "yoop");
+
+  let test theory: Case = t.asserts("an int slot holds its bits") {
+    const slot = valueAt(ref va, n);
+    theory.isSuccessful = slot.kind == ValueKind.INT && slot.bits == 42;
+    theory.detail = `wanted INT 42, got ${slot.kind} ${slot.bits}`;
+  }
+
+  let test theory: Case = t.asserts("a bool is 1 or 0 in the same field") {
+    const slot = valueAt(ref va, b);
+    theory.isSuccessful = slot.kind == ValueKind.BOOL && slot.bits == 1;
+    theory.detail = `wanted BOOL 1, got ${slot.kind} ${slot.bits}`;
+  }
+
+  let test theory: Case = t.asserts("a string rides in `text` and never in `bits`") {
+    const slot = valueAt(ref va, s);
+    theory.isSuccessful = slot.kind == ValueKind.STR && slot.text.len == 4 && slot.bits == 0;
+    theory.detail = `wanted STR "yoop", got ${slot.kind} "${slot.text}"`;
+  }
+
+  // Id 0 is the sentinel, so no real value may land on it.
+  let test theory: Case = t.asserts("no real value is id 0") {
+    theory.isSuccessful = n != VALUE_NONE && b != VALUE_NONE && s != VALUE_NONE;
+    theory.detail = `ids were ${n}, ${b}, ${s}`;
+  }
+}
+
+suite function anAggregateNamesItsPartsInDeclaredOrder(): void {
+  disposable va: ValueArena = newValueArena();
+  const p = pairOf(ref va, 3, 4);
+
+  let test theory: Case = t.asserts("the run is as long as the parts it was built from") {
+    const slot = valueAt(ref va, p);
+    theory.isSuccessful = slot.kind == ValueKind.STRUCT && slot.childCount == 2;
+    theory.detail = `wanted a 2-field STRUCT, got ${slot.kind} with ${slot.childCount}`;
+  }
+
+  let test theory: Case = t.asserts("the parts come back in the order they went in") {
+    const slot = valueAt(ref va, p);
+    const first = valueAt(ref va, childValueAt(ref va, slot, 0));
+    const second = valueAt(ref va, childValueAt(ref va, slot, 1));
+    theory.isSuccessful = first.bits == 3 && second.bits == 4;
+    theory.detail = `fields read back as ${first.bits}, ${second.bits}`;
+  }
+
+  // Two aggregates built one after the other must not share a run. Building the
+  // second appends to the same child pool, so a splice that ran early would
+  // interleave them.
+  let test theory: Case = t.asserts("a second aggregate gets its own run") {
+    const q = pairOf(ref va, 7, 8);
+    const ps = valueAt(ref va, p);
+    const qs = valueAt(ref va, q);
+    const qFirst = valueAt(ref va, childValueAt(ref va, qs, 0));
+    theory.isSuccessful = ps.childStart != qs.childStart && qFirst.bits == 7;
+    theory.detail = `runs started at ${ps.childStart} and ${qs.childStart}`;
+  }
+}
+
+// The whole reason values live in an arena. A borrow names a slot, so writing
+// through it is visible to whoever else names that slot - which is what makes a
+// callee mutating `ref p: Point` mutate the caller's binding.
+suite function aBorrowNamesASlotRatherThanACopyOfIt(): void {
+  disposable va: ValueArena = newValueArena();
+  const p = pairOf(ref va, 1, 2);
+  const field = childValueAt(ref va, valueAt(ref va, p), 0);
+  const borrow = refValue(ref va, 0, field);
+
+  let test theory: Case = t.asserts("a borrow slot points at its target and copies nothing") {
+    const slot = valueAt(ref va, borrow);
+    theory.isSuccessful = slot.kind == ValueKind.REF && slot.target == field;
+    theory.detail = `wanted a REF at ${field}, got ${slot.kind} at ${slot.target}`;
+  }
+
+  let test theory: Case = t.asserts("writing through the borrow is visible through the struct") {
+    let written = valueAt(ref va, borrow);
+    let updated = valueAt(ref va, written.target);
+    updated.bits = 99;
+    setValue(ref va, written.target, updated);
+
+    const readBack = valueAt(ref va, childValueAt(ref va, valueAt(ref va, p), 0));
+    theory.isSuccessful = readBack.bits == 99;
+    theory.detail = `the struct's field read back as ${readBack.bits}, wanted 99`;
+  }
+}
+
+// The other half of the same rule: an assignment of an aggregate COPIES, so a
+// later write to one must not be visible through the other.
+suite function cloningAnAggregateBreaksEverySharedSlot(): void {
+  disposable va: ValueArena = newValueArena();
+  const original = pairOf(ref va, 5, 6);
+  const copy = cloneValue(ref va, original);
+
+  let test theory: Case = t.asserts("the copy reads the same values") {
+    const cs = valueAt(ref va, copy);
+    const first = valueAt(ref va, childValueAt(ref va, cs, 0));
+    const second = valueAt(ref va, childValueAt(ref va, cs, 1));
+    theory.isSuccessful = first.bits == 5 && second.bits == 6;
+    theory.detail = `the copy read back as ${first.bits}, ${second.bits}`;
+  }
+
+  let test theory: Case = t.asserts("a write to the copy is invisible through the original") {
+    const target = childValueAt(ref va, valueAt(ref va, copy), 0);
+    let updated = valueAt(ref va, target);
+    updated.bits = 77;
+    setValue(ref va, target, updated);
+
+    const originalFirst = valueAt(ref va, childValueAt(ref va, valueAt(ref va, original), 0));
+    const copyFirst = valueAt(ref va, childValueAt(ref va, valueAt(ref va, copy), 0));
+    theory.isSuccessful = originalFirst.bits == 5 && copyFirst.bits == 77;
+    theory.detail = `original ${originalFirst.bits}, copy ${copyFirst.bits}; wanted 5 and 77`;
+  }
+}
+
+// The stored form of an int is its raw N bits zero-extended into a uint64, and
+// every one of these is about that invariant holding under an operation. They
+// are worth having directly rather than only through a fold: a width bug here
+// reads as a wrong CONSTANT much later, in a program that compiles fine.
+suite function integerArithmeticRunsAtTheTypesWidth(): void {
+  disposable prog: Program = initProgram();
+  const u8 = primTypeId(PrimKind.UINT8);
+  const i8 = primTypeId(PrimKind.INT8);
+  const i32 = primTypeId(PrimKind.INT32);
+  const nowhere: SourceLocation = { pos: 0, line: 0, column: 0, length: 0 };
+
+  let test theory: Case = t.asserts("addition wraps at the operand's width") {
+    // 200 + 100 is 300, which is 44 in eight bits - the answer the emitted
+    // `add i8` gives, and not the 300 a wider evaluator would produce.
+    theory.isSuccessful = okInt(intBinary(ref prog, u8, TokenTags.PLUS, 200, 100, nowhere)) == 44;
+    theory.detail = `got ${okInt(intBinary(ref prog, u8, TokenTags.PLUS, 200, 100, nowhere))}, wanted 44`;
+  }
+
+  let test theory: Case = t.asserts("an unsigned compare reads the stored bits as unsigned") {
+    // 0xFF is 255 unsigned and -1 signed. The same bits, two answers.
+    theory.isSuccessful = okBool(intCompare(ref prog, u8, TokenTags.GT, 255, 1, nowhere));
+    theory.detail = "255 > 1 came out false at uint8";
+  }
+
+  let test theory: Case = t.asserts("a signed compare sign-extends first") {
+    theory.isSuccessful = okBool(intCompare(ref prog, i8, TokenTags.LT, 255, 1, nowhere));
+    theory.detail = "-1 < 1 came out false at int8";
+  }
+
+  let test theory: Case = t.asserts("`>>` is arithmetic on a signed type and logical on an unsigned one") {
+    // 0xF0 at int8 is -16; -16 >> 2 is -4, which is 0xFC.
+    const signed = okInt(intBinary(ref prog, i8, TokenTags.RSHIFT, 240, 2, nowhere));
+    // The same bits at uint8 are 240; 240 >> 2 is 60.
+    const unsigned = okInt(intBinary(ref prog, u8, TokenTags.RSHIFT, 240, 2, nowhere));
+    theory.isSuccessful = signed == 252 && unsigned == 60;
+    theory.detail = `signed gave ${signed} (wanted 252), unsigned gave ${unsigned} (wanted 60)`;
+  }
+
+  let test theory: Case = t.asserts("a signed divide rounds toward zero on both sides") {
+    // -7 / 2 is -3, which is 0xFFFFFFFD in 32 bits.
+    const q = okInt(intBinary(ref prog, i32, TokenTags.DIVIDE, 4294967289, 2, nowhere));
+    theory.isSuccessful = q == 4294967293;
+    theory.detail = `-7 / 2 gave ${q}, wanted 4294967293 (-3)`;
+  }
+
+  let test theory: Case = t.asserts("`~` complements only the operand's width") {
+    // ~0 at uint8 is 255, not 2^64 - 1.
+    theory.isSuccessful = okInt(intUnary(ref prog, u8, TokenTags.TILDE, 0, nowhere)) == 255;
+    theory.detail = `~0 at uint8 gave ${okInt(intUnary(ref prog, u8, TokenTags.TILDE, 0, nowhere))}`;
+  }
+}
+
+// The two arithmetic FAILURES. Both are things the emitted code would trap on
+// or leave undefined, so folding them has to stop rather than invent a value.
+suite function arithmeticThatHasNoAnswerIsRefused(): void {
+  disposable prog: Program = initProgram();
+  const i32 = primTypeId(PrimKind.INT32);
+  const nowhere: SourceLocation = { pos: 0, line: 0, column: 0, length: 0 };
+
+  let test theory: Case = t.asserts("division by zero is refused by name") {
+    theory.isSuccessful = errorMentions(
+      intBinary(ref prog, i32, TokenTags.DIVIDE, 1, 0, nowhere), "division by zero"
+    );
+    theory.detail = "dividing by zero produced a value";
+  }
+
+  let test theory: Case = t.asserts("a shift past the width is refused by name") {
+    theory.isSuccessful = errorMentions(
+      intBinary(ref prog, i32, TokenTags.LSHIFT, 1, 32, nowhere), "not less than the operand's width"
+    );
+    theory.detail = "a 32-bit shift of a 32-bit value produced a value";
+  }
+}
+
+// A float32 result is rounded THROUGH 32 bits, so a fold carries the value the
+// target computes rather than a more precise one the host could.
+suite function aFloat32FoldNarrowsTheWayTheTargetWould(): void {
+  disposable prog: Program = initProgram();
+  const f32 = primTypeId(PrimKind.FLOAT32);
+  const f64 = primTypeId(PrimKind.FLOAT64);
+  const nowhere: SourceLocation = { pos: 0, line: 0, column: 0, length: 0 };
+
+  let test theory: Case = t.asserts("0.1 + 0.2 differs between the two widths") {
+    const wide = okInt(floatBinary(ref prog, f64, TokenTags.PLUS,
+      floatBits(0.1), floatBits(0.2), nowhere));
+    const narrow = okInt(floatBinary(ref prog, f32, TokenTags.PLUS,
+      floatBits(0.1), floatBits(0.2), nowhere));
+    theory.isSuccessful = wide != narrow && narrow == float32Bits(floatFromBits(wide));
+    theory.detail = `wide and narrow bits were ${wide} and ${narrow}`;
+  }
+
+  let test theory: Case = t.asserts("a float compare reads the bits back as numbers") {
+    theory.isSuccessful = okBool(floatCompare(TokenTags.LT, floatBits(1.5), floatBits(2.5), nowhere));
+    theory.detail = "1.5 < 2.5 came out false";
+  }
+}
+
+// The three unwrappers the suites above lean on. A test that has to switch on a
+// Result inline reads as a test about Result.
+function okInt(r: Result<uint64, ComptimeError>): uint64 {
+  switch (r) {
+    case Result.Ok { value: v }: { return v; }
+    case Result.Err { error: e }: { return 0; }
+  }
+}
+
+function okBool(r: Result<bool, ComptimeError>): bool {
+  switch (r) {
+    case Result.Ok { value: v }: { return v; }
+    case Result.Err { error: e }: { return false; }
+  }
+}
+
+function errorMentions(r: Result<uint64, ComptimeError>, needle: string): bool {
+  switch (r) {
+    case Result.Ok { value: v }: { return false; }
+    case Result.Err { error: e }: {
+      return str.stringIndexOf(e.message, needle) < e.message.len;
+    }
+  }
+}
+
+// ----- folding whole expressions -------------------------------------------
+//
+// From here down the suites drive the REAL pipeline - parse, typecheck, then a
+// fold of one module-level const's initializer - and read the value back. That
+// is the level the evaluator is actually used at, and a unit test of `evalExpr`
+// over a hand-built AST would be testing a shape the parser never produces.
+//
+// Each suite runs in its own 1MB arena (std/test.yoop) and a whole typechecked
+// program is not cheap, so a fold happens ONCE per assertion and the outcome is
+// read twice. Suites are small for the same reason.
+
+suite function integerArithmeticFolds(): void {
+  const prec = foldLastConst("const N: int32 = 2 + 3 * 4;");
+  let test theory: Case = t.asserts("integer arithmetic folds with the right precedence") {
+    theory.isSuccessful = foldIs(prec, 14);
+    theory.detail = foldSaid(prec, 14);
+  }
+
+  const mask = foldLastConst("const N: int32 = 0xFF & 0xCAFE;");
+  let test theory: Case = t.asserts("the bitwise family folds") {
+    theory.isSuccessful = foldIs(mask, 254);
+    theory.detail = foldSaid(mask, 254);
+  }
+
+  const shifted = foldLastConst("const N: int32 = 1 << 10;");
+  let test theory: Case = t.asserts("a shift folds at the operand's width") {
+    theory.isSuccessful = foldIs(shifted, 1024);
+    theory.detail = foldSaid(shifted, 1024);
+  }
+
+  const complement = foldLastConst("const N: int32 = ~0xF;");
+  let test theory: Case = t.asserts("`~` complements within the type") {
+    theory.isSuccessful = foldIs(complement, 4294967280);
+    theory.detail = foldSaid(complement, 4294967280);
+  }
+}
+
+suite function comparisonsAndShortCircuitsFold(): void {
+  const eq = foldLastConst("const N: bool = (1 + 2) == 3;");
+  let test theory: Case = t.asserts("a comparison folds to a bool") {
+    theory.isSuccessful = foldIs(eq, 1);
+    theory.detail = foldSaid(eq, 1);
+  }
+
+  // `&&` must not evaluate its right side when the left decides the answer. The
+  // divide is the proof: evaluating it would be a comptime ERROR rather than a
+  // wrong number, so a short circuit that did not happen fails loudly.
+  const andShort = foldLastConst("const N: bool = false && (1 / 0) == 0;");
+  let test theory: Case = t.asserts("`&&` does not evaluate its right side when the left is false") {
+    theory.isSuccessful = foldIs(andShort, 0);
+    theory.detail = foldSaid(andShort, 0);
+  }
+
+  const orShort = foldLastConst("const N: bool = true || (1 / 0) == 0;");
+  let test theory: Case = t.asserts("`||` does not evaluate its right side when the left is true") {
+    theory.isSuccessful = foldIs(orShort, 1);
+    theory.detail = foldSaid(orShort, 1);
+  }
+}
+
+suite function castsConvertRatherThanReinterpret(): void {
+  const narrowed = foldLastConst("const N: uint8 = uint8(300);");
+  let test theory: Case = t.asserts("a narrowing cast masks to the target width") {
+    theory.isSuccessful = foldIs(narrowed, 44);
+    theory.detail = foldSaid(narrowed, 44);
+  }
+
+  const widened = foldLastConst("const N: int32 = int32(-1);");
+  let test theory: Case = t.asserts("a signed source sign-extends on the way out") {
+    theory.isSuccessful = foldIs(widened, 4294967295);
+    theory.detail = foldSaid(widened, 4294967295);
+  }
+}
+
+suite function directCallsRunRealBodies(): void {
+  const called = foldLastConst(
+    "function square(x: int32): int32 { return x * x; }\nconst N: int32 = square(6);");
+  let test theory: Case = t.asserts("a direct call binds its parameters and returns") {
+    theory.isSuccessful = foldIs(called, 36);
+    theory.detail = foldSaid(called, 36);
+  }
+
+  const nested = foldLastConst(
+    "function square(x: int32): int32 { return x * x; }\nconst N: int32 = square(square(2));");
+  let test theory: Case = t.asserts("calls nest, inner frame first") {
+    theory.isSuccessful = foldIs(nested, 16);
+    theory.detail = foldSaid(nested, 16);
+  }
+}
+
+suite function loopsAndBranchesRunToCompletion(): void {
+  // A `while` with a slot the body overwrites - the whole of the
+  // straight-line-plus-branching machinery in one function.
+  const fact = foldLastConst(
+    "function fact(n: int32): int32 { let r: int32 = 1; let i: int32 = 1; while (i <= n) { r = r * i; i = i + 1; } return r; }\nconst N: int32 = fact(8);");
+  let test theory: Case = t.asserts("a `while` loop runs to completion") {
+    theory.isSuccessful = foldIs(fact, 40320);
+    theory.detail = foldSaid(fact, 40320);
+  }
+
+  const branch = foldLastConst(
+    "function absDiff(a: int32, b: int32): int32 { let r: int32 = 0; if (a >= b) { r = a - b; } else { r = b - a; } return r; }\nconst N: int32 = absDiff(3, 10);");
+  let test theory: Case = t.asserts("`if` / `else` picks one arm") {
+    theory.isSuccessful = foldIs(branch, 7);
+    theory.detail = foldSaid(branch, 7);
+  }
+
+  const counted = foldLastConst(
+    "function upto(): int32 { let s: int32 = 0; for (let i: int32 = 0; i < 10; i = i + 1) { if (i == 4) { break; } s = s + i; } return s; }\nconst N: int32 = upto();");
+  let test theory: Case = t.asserts("a C-style `for` steps its counter and honours `break`") {
+    theory.isSuccessful = foldIs(counted, 6);
+    theory.detail = foldSaid(counted, 6);
+  }
+}
+
+suite function recursionWorksAndIsBounded(): void {
+  const fib = foldLastConst(
+    "function fib(n: int32): int32 { if (n < 2) { return n; } return fib(n - 1) + fib(n - 2); }\nconst N: int32 = fib(10);");
+  let test theory: Case = t.asserts("recursion works, and each frame binds its own parameter") {
+    theory.isSuccessful = foldIs(fib, 55);
+    theory.detail = foldSaid(fib, 55);
+  }
+
+  // The runaway guard. An infinite recursion has to STOP rather than hang: a
+  // hang reads as a slow machine, which is the worst failure a compiler has.
+  const runaway = foldLastConst(
+    "function forever(n: int32): int32 { return forever(n + 1); }\nconst N: int32 = forever(0);");
+  let test theory: Case = t.asserts("runaway recursion is stopped by name") {
+    theory.isSuccessful = foldRefused(runaway, "runaway recursion");
+    theory.detail = `wanted a depth-cap refusal, got: ${foldSaid(runaway, 0)}`;
+  }
+}
+
+suite function arraysFoldAndTheirPartsAreReachable(): void {
+  const indexed = foldLastConst("const A: int32[] = [10, 20, 30];\nconst N: int32 = A[1];");
+  let test theory: Case = t.asserts("an array literal folds and an index reads it") {
+    theory.isSuccessful = foldIs(indexed, 20);
+    theory.detail = foldSaid(indexed, 20);
+  }
+
+  // `.len` is not a field: an array value's length IS its child count.
+  const length = foldLastConst("const A: int32[] = [10, 20, 30];\nconst N: usize = A.len;");
+  let test theory: Case = t.asserts("`.len` answers from the value's own shape") {
+    theory.isSuccessful = foldIs(length, 3);
+    theory.detail = foldSaid(length, 3);
+  }
+
+  const oob = foldLastConst("const A: int32[] = [1, 2];\nconst N: int32 = A[5];");
+  let test theory: Case = t.asserts("an index past the end is refused rather than answered") {
+    theory.isSuccessful = foldRefused(oob, "past the end");
+    theory.detail = `wanted a bounds refusal, got: ${foldSaid(oob, 0)}`;
+  }
+
+  const written = foldLastConst(
+    "function bump(): int32 { let a: int32[] = [10, 20, 30]; a[1] = a[1] * 5; return a[0] + a[1] + a[2]; }\nconst N: int32 = bump();");
+  let test theory: Case = t.asserts("an element write is visible to a later read") {
+    theory.isSuccessful = foldIs(written, 140);
+    theory.detail = foldSaid(written, 140);
+  }
+
+  const walked = foldLastConst(
+    "function total(): int32 { let a: int32[] = [1, 2, 3, 4, 5]; let s: int32 = 0; for x in a { s = s + x; } return s; }\nconst N: int32 = total();");
+  let test theory: Case = t.asserts("`for x in arr` walks a folded array") {
+    theory.isSuccessful = foldIs(walked, 15);
+    theory.detail = foldSaid(walked, 15);
+  }
+}
+
+suite function structsFoldInDeclaredFieldOrder(): void {
+  // Written out of declared order on purpose: the value has to land in DECLARED
+  // order so a field read can index it positionally.
+  const reordered = foldLastConst(
+    "type P { x: int32, y: int32 }\nconst O: P = { y: 4, x: 3 };\nconst N: int32 = O.x;");
+  let test theory: Case = t.asserts("a struct literal normalizes to declared field order") {
+    theory.isSuccessful = foldIs(reordered, 3);
+    theory.detail = foldSaid(reordered, 3);
+  }
+
+  // Mutation through a `ref` parameter: the callee writes a field of what it
+  // was handed and the caller sees it. This is the property the value ARENA
+  // exists for.
+  const mutated = foldLastConst(
+    "type P { x: int32, y: int32 }\nfunction offset(ref p: P, dx: int32): void { p.x = p.x + dx; }\nfunction bumped(): P { let p: P = { x: 1, y: 2 }; offset(ref p, 3); return p; }\nconst O: P = bumped();\nconst N: int32 = O.x;");
+  let test theory: Case = t.asserts("a `ref` parameter mutates the caller's binding") {
+    theory.isSuccessful = foldIs(mutated, 4);
+    theory.detail = foldSaid(mutated, 4);
+  }
+}
+
+// An earlier const's value is visible to a later one, which is what makes a
+// TABLE of derived constants foldable rather than only a single expression.
+suite function anEarlierFoldIsVisibleToALaterOne(): void {
+  const derived = foldLastConst(
+    "const SHIFTED: int32 = 1 << 10;\nconst N: bool = (SHIFTED & 0x400) != 0;");
+  let test theory: Case = t.asserts("a const reads a const folded before it") {
+    theory.isSuccessful = foldIs(derived, 1);
+    theory.detail = foldSaid(derived, 1);
+  }
+
+  const passed = foldLastConst(
+    "function twice(x: int32): int32 { return x * 2; }\nconst SEED: int32 = 21;\nconst N: int32 = twice(SEED);");
+  let test theory: Case = t.asserts("a call whose argument is an earlier const folds") {
+    theory.isSuccessful = foldIs(passed, 42);
+    theory.detail = foldSaid(passed, 42);
+  }
+}
+
+suite function variantsConstructAndSwitchDispatchesOnTheTag(): void {
+  const VARIANT = "variant Shape { Circle { radius: int32 }, Square { side: int32 }, Triangle }\n";
+
+  // The payload is read back through a pattern binding, which is the only way
+  // in - a variant has no field access of its own.
+  const circle = foldLastConst(`${VARIANT}${"function area2(s: Shape): int32 { let r: int32 = 0; switch (s) { case Shape.Circle { radius: rr }: { r = 3 * rr * rr * 2; } case Shape.Square { side: x }: { r = x * x * 2; } case Shape.Triangle: { r = 0; } } return r; }\n"}${"const C: Shape = Shape.Circle { radius: 4 };\nconst N: int32 = area2(C);"}`);
+  let test theory: Case = t.asserts("a payload case constructs and its field binds in the arm") {
+    theory.isSuccessful = foldIs(circle, 96);
+    theory.detail = foldSaid(circle, 96);
+  }
+
+  const square = foldLastConst(`${VARIANT}${"function area2(s: Shape): int32 { let r: int32 = 0; switch (s) { case Shape.Circle { radius: rr }: { r = 3 * rr * rr * 2; } case Shape.Square { side: x }: { r = x * x * 2; } case Shape.Triangle: { r = 0; } } return r; }\n"}${"const S: Shape = Shape.Square { side: 5 };\nconst N: int32 = area2(S);"}`);
+  let test theory: Case = t.asserts("a second case takes its own arm") {
+    theory.isSuccessful = foldIs(square, 50);
+    theory.detail = foldSaid(square, 50);
+  }
+
+  // A payload-less case is a FIELD_ACCESS in the source, and reaching it means
+  // telling it from a struct field read of variant type. See eval_expr.yoop.
+  const bare = foldLastConst(`${VARIANT}${"function area2(s: Shape): int32 { let r: int32 = 7; switch (s) { case Shape.Circle { radius: rr }: { r = 1; } case Shape.Square { side: x }: { r = 2; } case Shape.Triangle: { r = 99; } } return r; }\n"}${"const T: Shape = Shape.Triangle;\nconst N: int32 = area2(T);"}`);
+  let test theory: Case = t.asserts("a payload-less case constructs and matches") {
+    theory.isSuccessful = foldIs(bare, 99);
+    theory.detail = foldSaid(bare, 99);
+  }
+
+  // `==` on two variants is a TAG comparison: two Circles of different radius
+  // are equal, which is the reference's rule and the emitted code's.
+  const tagEq = foldLastConst(`${VARIANT}${"const A: Shape = Shape.Circle { radius: 1 };\nconst B: Shape = Shape.Circle { radius: 2 };\nconst N: bool = A == B;"}`);
+  let test theory: Case = t.asserts("`==` on two variants compares tags and nothing else") {
+    theory.isSuccessful = foldIs(tagEq, 1);
+    theory.detail = foldSaid(tagEq, 1);
+  }
+}
+
+suite function switchOverIntsAndEnums(): void {
+  const CLASSIFY = "function classify(n: int32): int32 { let r: int32 = 0; switch (n) { case 0: { r = 100; } case 1, 2, 3: { r = n * 10; } default: { r = -1; } } return r; }\n";
+
+  const first = foldLastConst(`${CLASSIFY}${"const N: int32 = classify(0);"}`);
+  let test theory: Case = t.asserts("a literal pattern matches") {
+    theory.isSuccessful = foldIs(first, 100);
+    theory.detail = foldSaid(first, 100);
+  }
+
+  // Several patterns share one arm, and one match is enough.
+  const shared = foldLastConst(`${CLASSIFY}${"const N: int32 = classify(2);"}`);
+  let test theory: Case = t.asserts("an arm listing several patterns matches any of them") {
+    theory.isSuccessful = foldIs(shared, 20);
+    theory.detail = foldSaid(shared, 20);
+  }
+
+  // The default runs only when nothing else matched, wherever it is written.
+  const fallback = foldLastConst(`${CLASSIFY}${"const N: int32 = classify(99);"}`);
+  let test theory: Case = t.asserts("the default arm catches what nothing else did") {
+    theory.isSuccessful = foldIs(fallback, 4294967295);
+    theory.detail = foldSaid(fallback, 4294967295);
+  }
+
+  // A value enum is an alias over a primitive, so the case's constant IS the
+  // value and nothing enum-shaped is ever built.
+  const enumFold = foldLastConst(
+    "enum Level<int32> { Low 1, Mid 5, High 9 }\nconst N: int32 = int32(Level.High);");
+  let test theory: Case = t.asserts("an enum case folds to the constant it carries") {
+    theory.isSuccessful = foldIs(enumFold, 9);
+    theory.detail = foldSaid(enumFold, 9);
+  }
+
+  const enumSwitch = foldLastConst(
+    "enum Level<int32> { Low 1, Mid 5, High 9 }\nfunction rank(l: Level): int32 { let r: int32 = 0; switch (l) { case Level.Low: { r = 10; } case Level.Mid: { r = 20; } case Level.High: { r = 30; } } return r; }\nconst N: int32 = rank(Level.Mid);");
+  let test theory: Case = t.asserts("a switch over a value enum dispatches on its constant") {
+    theory.isSuccessful = foldIs(enumSwitch, 20);
+    theory.detail = foldSaid(enumSwitch, 20);
+  }
+}
+
+// A `break` in an arm leaves the SWITCH, not an enclosing loop. Getting this
+// backwards would turn a loop's first iteration into its last.
+suite function breakInASwitchArmLeavesOnlyTheSwitch(): void {
+  const src = "function total(): int32 { let s: int32 = 0; for (let i: int32 = 0; i < 4; i = i + 1) { switch (i) { case 1: { break; } default: { s = s + i; } } } return s; }\nconst N: int32 = total();";
+  const got = foldLastConst(src);
+  let test theory: Case = t.asserts("the loop keeps going after an arm breaks") {
+    theory.isSuccessful = foldIs(got, 5);
+    theory.detail = foldSaid(got, 5);
+  }
+}
+
+// ----- @precompile ----------------------------------------------------------
+//
+// These drive the WHOLE pipeline including codegen, because what `@precompile`
+// promises is a property of the emitted IR: the value is computed at build time
+// and the program never does the work. A fold that produced the right number
+// and still emitted the call would satisfy every test above and none of these.
+
+suite function precompileBakesItsValueAndEmitsNoWork(): void {
+  const out = precompiled(
+    "function square(x: int32): int32 { return x * x; }\n@precompile const N: int32 = square(7);\nfunction main(): int32 { return N; }");
+
+  let test theory: Case = t.asserts("the program compiles with no diagnostic") {
+    theory.isSuccessful = out.errors.len == 0 && out.ir.len > 0;
+    theory.detail = `precompiling reported: ${out.errors}`;
+  }
+
+  // The point of the attribute. `square` is still DEFINED - nothing prunes it -
+  // but nothing calls it, and the value is an immediate.
+  let test theory: Case = t.asserts("the folded value is an immediate and the call is gone") {
+    theory.isSuccessful = occurrences(out.ir, "ret i32 49") == 1 &&
+      occurrences(out.ir, "call i32 @test__square") == 0;
+    theory.detail = `wanted an immediate 49 and no call; the IR has ${occurrences(out.ir, "call i32 @test__square")} call(s)`;
+  }
+
+  // A const that inlines needs no storage and no init function, which is the
+  // difference between folding and merely computing early.
+  let test theory: Case = t.asserts("no global and no module_init are emitted") {
+    theory.isSuccessful = occurrences(out.ir, "@test__N") == 0 &&
+      occurrences(out.ir, "module_init") == 0;
+    theory.detail = "the precompiled const grew storage or an initializer";
+  }
+}
+
+suite function precompileFoldsAnArrayIntoABakedPayload(): void {
+  const out = precompiled(
+    "function sq(x: int32): int32 { return x * x; }\n@precompile const T: int32[] = [sq(1), sq(2), sq(3)];\nfunction main(): int32 { let t: int32[] = T; return t[2]; }");
+
+  // The elements were CALLS in the source. Folding turns the whole literal into
+  // a module datum whose bytes are already right.
+  let test theory: Case = t.asserts("an array of folded elements lands as a constant payload") {
+    theory.isSuccessful = occurrences(out.ir, "[3 x i32] [i32 1, i32 4, i32 9]") == 1 &&
+      occurrences(out.ir, "call i32 @test__sq") == 0;
+    theory.detail = `precompiling reported: ${out.errors}; the payload is not baked`;
+  }
+}
+
+// A GENERIC body is checked once with its type parameters left standing, so its
+// decoration says `T` rather than `uint8` - and a parameter has no width. The
+// operand VALUE's own type is what carries the concrete one inward.
+//
+// Without that the arithmetic runs unmasked: `200 + 100` at uint8 folds to 300,
+// and the answer is only corrected by whatever truncation happens downstream.
+// That is right by accident and wrong the moment the value is read back.
+suite function aFoldInsideAGenericRunsAtTheConcreteWidth(): void {
+  const out = precompiled(
+    "function addT<T>(a: T, b: T): T { return a + b; }\nconst A: uint8 = 200;\nconst B: uint8 = 100;\n@precompile const N: uint8 = addT(A, B);\nfunction main(): int32 { return int32(N); }");
+
+  let test theory: Case = t.asserts("uint8 arithmetic wraps at eight bits inside a generic") {
+    theory.isSuccessful = occurrences(out.ir, "i8 44") == 1 && occurrences(out.ir, "300") == 0;
+    theory.detail = `precompiling reported: ${out.errors}; wanted a wrapped 44 at i8 and no 300`;
+  }
+}
+
+// The BLOCK form runs statements and keeps what they wrote to the module's
+// globals. What it promises is that the program STARTS with the values, so
+// these read the emitted IR rather than the folded value.
+suite function aPrecompileBlockCommitsItsWritesToTheGlobals(): void {
+  const out = precompiled(
+    "let SUM: int32 = 0;\nlet TABLE: int32[] = [0, 0, 0];\nfunction sq(x: int32): int32 { return x * x; }\n@precompile {\n  let i: int32 = 0;\n  let acc: int32 = 0;\n  while (i < 3) {\n    TABLE[i] = sq(i + 1);\n    acc = acc + TABLE[i];\n    i = i + 1;\n  }\n  SUM = acc;\n}\nfunction main(): int32 { return SUM; }");
+
+  // An integer global's value rides in its SYMBOL, which is what codegen bakes
+  // into the LLVM global's own initializer - so the global is not zeroed.
+  let test theory: Case = t.asserts("an integer global is baked, not zeroed and stored") {
+    theory.isSuccessful = occurrences(out.ir, "@test__SUM = internal global i32 14") == 1;
+    theory.detail = `precompiling reported: ${out.errors}; SUM did not land as 14`;
+  }
+
+  let test theory: Case = t.asserts("an array global's payload holds the computed elements") {
+    theory.isSuccessful = occurrences(out.ir, "[3 x i32] [i32 1, i32 4, i32 9]") == 1;
+    theory.detail = `precompiling reported: ${out.errors}; the payload is not baked`;
+  }
+
+  // The loop ran at BUILD time, so nothing calls `sq` in the emitted program.
+  let test theory: Case = t.asserts("the work is gone from the program") {
+    theory.isSuccessful = occurrences(out.ir, "call i32 @test__sq") == 0;
+    theory.detail = "the precompiled loop is still being run at run time";
+  }
+}
+
+// `?` is an EXPRESSION whose failure returns from the enclosing FUNCTION, so
+// the propagation travels as a marked error and `runFrame` catches it. These
+// assert both halves: the value on the Ok path, and the early return on the Err
+// one.
+suite function questionMarkPropagatesAtCompileTime(): void {
+  const RES = "variant IntResult {\n  Ok { value: int32 },\n  Err { error: int32 },\n}\nfunction step(x: int32): IntResult {\n  if (x < 0) { return IntResult.Err { error: 0 - 1 }; }\n  return IntResult.Ok { value: x * 2 };\n}\nfunction pipeline(x: int32): IntResult {\n  let a: int32 = step(x)?;\n  let b: int32 = step(a)?;\n  return IntResult.Ok { value: b + 1 };\n}\nfunction unwrap(r: IntResult): int32 {\n  let out: int32 = 0;\n  switch (r) {\n    case IntResult.Ok { value: v }: { out = v; }\n    case IntResult.Err { error: _e }: { out = 0 - 9; }\n  }\n  return out;\n}\n";
+
+  const good = precompiled(`${RES}@precompile const N: int32 = unwrap(pipeline(3));\nfunction main(): int32 { return N; }`);
+  let test theory: Case = t.asserts("the Ok path yields the payload and carries on") {
+    // 3 -> 6 -> 12 -> +1 = 13.
+    theory.isSuccessful = occurrences(good.ir, "ret i32 13") == 1;
+    theory.detail = `precompiling reported: ${good.errors}; wanted an immediate 13`;
+  }
+
+  const bad = precompiled(`${RES}@precompile const N: int32 = unwrap(pipeline(0 - 5));\nfunction main(): int32 { return N; }`);
+  let test theory: Case = t.asserts("the Err path returns from the enclosing function, not from the `?`") {
+    // The first `?` sees Err and `pipeline` returns it, so `unwrap` takes its
+    // Err arm and answers -9 - which is 0xFFFFFFF7 at int32.
+    theory.isSuccessful = occurrences(bad.ir, "ret i32 -9") == 1;
+    theory.detail = `precompiling reported: ${bad.errors}; wanted an immediate -9`;
+  }
+}
+
+// A template literal has to render the way the RUNTIME would, or a folded
+// string says something the same program would not.
+suite function templateLiteralsRenderAsTheRuntimeWould(): void {
+  const rendered = precompiled(
+    "function label(n: int32): string { return `step ${n} of ${n + 1}`; }\n@precompile const S: string = label(3);\nfunction main(): int32 { return int32(S.len); }");
+  let test theory: Case = t.asserts("an interpolated integer renders in decimal") {
+    theory.isSuccessful = mentions(rendered.ir, "step 3 of 4");
+    theory.detail = `precompiling reported: ${rendered.errors}; the folded string is not in the IR`;
+  }
+
+  // A float is refused BY NAME. Reproducing a libc's `%g` exactly - its
+  // precision, its exponent threshold, its trailing-zero trimming - is a second
+  // answer to the same question, and a wrong string is worse than a refusal.
+  const floaty = precompiled(
+    "function label(x: float64): string { return `v=${x}`; }\n@precompile const S: string = label(1.5);\nfunction main(): int32 { return int32(S.len); }");
+  let test theory: Case = t.asserts("an interpolated float is refused rather than guessed at") {
+    theory.isSuccessful = mentions(floaty.errors, "renders only an integer, a bool or a string");
+    theory.detail = `wanted a rendering refusal, got: ${floaty.errors}`;
+  }
+}
+
+// `Name.member(...)` is four different things and none of them is a plain call.
+// These are the two that dispatch: a static trait call on a concrete receiver,
+// and a call THROUGH a vtable built over one.
+suite function traitAndVtableDispatchFold(): void {
+  const TRAITS = "trait Area {\n  function area(ref self): int32;\n}\ntype Rect implements Area {\n  w: int32,\n  h: int32,\n  function area(ref self): int32 { return self.w * self.h; }\n}\n";
+
+  const direct = precompiled(`${TRAITS}function rectArea(w: int32, h: int32): int32 { let r: Rect = { w: w, h: h }; return Area.area(ref r); }\n@precompile const N: int32 = rectArea(4, 7);\nfunction main(): int32 { return N; }`);
+  let test theory: Case = t.asserts("a static trait dispatch folds to the concrete method's answer") {
+    theory.isSuccessful = occurrences(direct.ir, "ret i32 28") == 1;
+    theory.detail = `precompiling reported: ${direct.errors}; wanted an immediate 28`;
+  }
+
+  // A vtable VALUE remembers the concrete type and where the value lives, which
+  // is what the emitted one holds too. The dispatch reads it back.
+  const OPS = "trait Op {\n  function apply(ref self, x: int32): int32;\n}\ntype Doubler implements Op {\n  factor: int32,\n  function apply(ref self, x: int32): int32 { return x * self.factor; }\n}\nvtable OpVT for Op {\n  apply: (x: int32) => int32,\n}\n";
+
+  const through = precompiled(`${OPS}function dispatch(ref v: OpVT, x: int32): int32 { return Op.apply(ref v, x); }\nfunction viaDoubler(x: int32, f: int32): int32 { let d: Doubler = { factor: f }; let vt: OpVT = OpVT.from(ref d); return dispatch(ref vt, x); }\n@precompile const N: int32 = viaDoubler(7, 5);\nfunction main(): int32 { return N; }`);
+  let test theory: Case = t.asserts("a call through a vtable folds to the impl it was built over") {
+    theory.isSuccessful = occurrences(through.ir, "ret i32 35") == 1;
+    theory.detail = `precompiling reported: ${through.errors}; wanted an immediate 35`;
+  }
+}
+
+// A PURE extern may be folded, and the math ones are not reimplemented - the
+// compiler calls the same libm the compiled program would, so a folded
+// `sqrt(2.0)` is bit-identical to the one the program would have computed.
+suite function pureExternsFoldAndImpureOnesAreRefused(): void {
+  const MATH = "extern \"C\" from library \"m\" {\n  function sqrt(x: float64): float64;\n  function pow(base: float64, exp: float64): float64;\n}\n";
+
+  const folded = precompiled(`${MATH}@precompile const R: float64 = sqrt(pow(3.0, 2.0) + pow(4.0, 2.0));\nfunction main(): int32 { return int32(R); }`);
+  let test theory: Case = t.asserts("a libm fold bakes the exact bits and emits no call") {
+    // 0x4014000000000000 is 5.0. The hex form is the point: a decimal
+    // rendering is the one thing two implementations disagree about.
+    theory.isSuccessful = occurrences(folded.ir, "0x4014000000000000") > 0 &&
+      occurrences(folded.ir, "call double @sqrt") == 0 &&
+      occurrences(folded.ir, "call double @pow") == 0;
+    theory.detail = `precompiling reported: ${folded.errors}; the libm calls survived`;
+  }
+
+  const strings = precompiled(
+    "extern \"C\" from \"string.h\" {\n  function strlen(s: string): int64;\n  function strcmp(a: string, b: string): int32;\n}\n@precompile const L: int64 = strlen(\"yoopalicious\");\n@precompile const C: int32 = strcmp(\"alpha\", \"beta\");\nfunction main(): int32 { return int32(L) + C; }");
+  let test theory: Case = t.asserts("strlen and strcmp fold, and strcmp normalizes to a sign") {
+    theory.isSuccessful = occurrences(strings.ir, "i64 12") > 0 &&
+      occurrences(strings.ir, "call i32 @strcmp") == 0;
+    theory.detail = `precompiling reported: ${strings.errors}`;
+  }
+
+  // Anything that is not pure is refused BY NAME. The program's runtime does
+  // not exist while it is being compiled, so there is nothing to call into.
+  const impure = precompiled(
+    "extern \"C\" from \"stdio.h\" {\n  function rand(): int32;\n}\n@precompile const N: int32 = rand();\nfunction main(): int32 { return N; }");
+  let test theory: Case = t.asserts("an extern that is not on the list is refused by name") {
+    theory.isSuccessful = mentions(impure.errors, "only a PURE one may be called at compile time");
+    theory.detail = `wanted an extern refusal, got: ${impure.errors}`;
+  }
+}
+
+// The policy that separates `@precompile` from opportunistic folding: a failure
+// is a BUILD ERROR. Falling back would compile a program that does the work at
+// startup, which is the one thing the attribute exists to prevent.
+suite function aPrecompileThatCannotFoldIsABuildError(): void {
+  const divZero = precompiled(
+    "function bad(x: int32): int32 { return x / 0; }\n@precompile const N: int32 = bad(3);\nfunction main(): int32 { return N; }");
+  let test theory: Case = t.asserts("a failing fold is reported rather than deferred") {
+    theory.isSuccessful = mentions(divZero.errors, "could not be folded")
+      && mentions(divZero.errors, "division by zero");
+    theory.detail = `wanted a fold failure, got: ${divZero.errors}`;
+  }
+
+  // A struct has no constant spelling to inline, so it is refused BY NAME
+  // rather than emitted as a zero.
+  const noSpelling = precompiled(
+    "type P { x: int32 }\nfunction mk(): P { return { x: 1 }; }\n@precompile const Q: P = mk();\nfunction main(): int32 { let q: P = Q; return q.x; }");
+  let test theory: Case = t.asserts("a value with no literal spelling is refused by name") {
+    theory.isSuccessful = mentions(noSpelling.errors, "no literal spelling");
+    theory.detail = `wanted a spelling refusal, got: ${noSpelling.errors}`;
+  }
+}
+
+// ----- the fold harness -----------------------------------------------------
+//
+// Parses and typechecks `src`, then folds every module-level const's
+// initializer IN DECLARATION ORDER, recording each success so a later one can
+// read it. The outcome reported is the one for `N`, which every source above
+// names as the const under test.
+
+@derive(display)
+type FoldOutcome {
+  ok: bool,
+  bits: uint64,
+  message: string,
+}
+
+function foldLastConst(src: string): FoldOutcome {
+  let graph: ModuleGraph = graphOfSource(src);
+  disposable prog: Program = typecheckProgram(ref graph);
+  disposable va: ValueArena = newValueArena();
+  disposable folded: FoldedConsts = newFoldedConsts();
+
+  let outcome: FoldOutcome = { ok: false, bits: 0, message: "no const named N was folded" };
+  if (graph.modules.len == 0) {
+    return { ok: false, bits: 0, message: "the source did not parse" };
+  }
+  let m = vec.vecGet(ref graph.modules, 0);
+  let tm = vec.vecGet(ref prog.modules, 0);
+
+  let f: usize = 0;
+  while (f < m.files.len) {
+    const programNode = nodeAt(ref m.ast, vec.vecGet(ref m.files, f).root);
+    let i: usize = 0;
+    while (i < programNode.childCount) {
+      const declId = declOf(ref m.ast, childAt(ref m.ast, programNode, i));
+      const declNode = nodeAt(ref m.ast, declId);
+      if (declNode.kind == ASTNodeKind.CONST_DECL && declNode.childB != 0) {
+        const symId = lookupOwnName(ref tm, declNode.name);
+        switch (foldExpression(ref prog, ref tm, ref m, ref graph, ref va, ref folded, declNode.childB)) {
+          case Result.Ok { value: v }: {
+            recordFolded(ref folded, symId, v);
+            if (str.stringEq(declNode.name, "N")) {
+              outcome = { ok: true, bits: valueAt(ref va, v).bits, message: "" };
+            }
+          }
+          case Result.Err { error: e }: {
+            if (str.stringEq(declNode.name, "N")) {
+              outcome = { ok: false, bits: 0, message: e.message };
+            }
+          }
+        }
+      }
+      i += 1;
+    }
+    f += 1;
+  }
+  return outcome;
+}
+
+function foldIs(got: FoldOutcome, expected: uint64): bool {
+  return got.ok && got.bits == expected;
+}
+
+function foldSaid(got: FoldOutcome, expected: uint64): string {
+  if (!got.ok) {
+    return `the fold failed: ${got.message}`;
+  }
+  return `folded to ${got.bits}, wanted ${expected}`;
+}
+
+function foldRefused(got: FoldOutcome, needle: string): bool {
+  if (got.ok) {
+    return false;
+  }
+  return str.stringIndexOf(got.message, needle) < got.message.len;
+}
+
+// Parses, typechecks, runs the `@precompile` pass, and emits IR - the whole
+// pipeline the driver runs, minus the link. `errors` is every diagnostic the
+// run reported, joined, so an assertion can look for one by name.
+@derive(display)
+type Precompiled propagates<disposable> {
+  ir: string,
+  errors: string,
+}
+
+function precompiled(src: string): Precompiled propagates<disposable> {
+  let graph: ModuleGraph = graphOfSource(src);
+  disposable prog: Program = typecheckProgram(ref graph);
+  runPrecompilePass(ref prog, ref graph);
+
+  disposable messages: Text = text.make(64);
+  let d: usize = 0;
+  while (d < prog.diagnostics.len) {
+    text.push(ref messages, vec.vecGet(ref prog.diagnostics, d).message);
+    text.push(ref messages, "\n");
+    d += 1;
+  }
+  if (prog.diagnostics.len > 0) {
+    return { ir: "", errors: text.view(ref messages) };
+  }
+  switch (codegenProgram(ref prog, ref graph)) {
+    case Result.Ok { value: out }: {
+      disposable emitted: Text = out.ir;
+      disposable libs: Vec<string> = out.linkLibraries;
+      return { ir: text.view(ref emitted), errors: "" };
+    }
+    case Result.Err { error: e }: { return { ir: "", errors: e }; }
+  }
+}
+
+function mentions(haystack: string, needle: string): bool {
+  return str.stringIndexOf(haystack, needle) < haystack.len;
+}
+
+// How many times `needle` appears in `haystack`.
+function occurrences(haystack: string, needle: string): usize {
+  let n: usize = 0;
+  let at: usize = 0;
+  while (at < haystack.len) {
+    const hit = text.indexOfFrom(haystack, needle, at);
+    if (hit >= haystack.len) {
+      return n;
+    }
+    n += 1;
+    at = hit + needle.len;
+  }
+  return n;
+}
+
+function graphOfSource(src: string): ModuleGraph {
+  let srcBuf: Vec<uint8> = vec.vecNew(src.len + 1);
+  vec.vecExtendFrom(ref srcBuf, intr.stringAsBytes(src));
+  switch (moduleFromSource("test", "test.yoop", srcBuf)) {
+    case LoadModuleResult.Ok { value: m }: { return singleModuleGraph(m); }
+    case LoadModuleResult.Err { error: e }: {
+      let empty: Module = {
+        id: "test", dir: "", name: "", ast: emptyArena(), files: vec.vecNew(1)
+      };
+      return singleModuleGraph(empty);
+    }
+  }
+}
+

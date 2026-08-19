@@ -168,22 +168,84 @@ function moduleConstType(ref prog: Program, ref tm: TypedModule, name: string): 
     case Symbol.Value { typeId: t, intVal: v }: { return t; }
     // A mutable global reads the same way; what differs is that it can be
     // WRITTEN, which checkAssignment asks about separately.
-    case Symbol.Global { typeId: t, intVal: v }: { return t; }
+    case Symbol.Global { typeId: t, intVal: v, mutable: mu }: { return t; }
     default: { return TYPE_ERROR_ID; }
   }
 }
 
-// The type of a module-level name that may be ASSIGNED to - a `let` global and
-// nothing else. TYPE_ERROR_ID for a const, which is what makes writing one an
-// error rather than a silent no-op.
+// The type of a module-level name that may be ASSIGNED to. TYPE_ERROR_ID for a
+// const, which is what makes writing one an error rather than a silent no-op -
+// and a const backed by a global is still a const, so the answer is about
+// `mutable` rather than about which symbol shape it landed in.
 function moduleGlobalType(ref prog: Program, ref tm: TypedModule, name: string): TypeId {
   const symId = lookupOwnName(ref tm, name);
   if (symId == SYMBOL_NONE_ID) {
     return TYPE_ERROR_ID;
   }
   switch (symbolAt(ref prog, symId)) {
-    case Symbol.Global { typeId: t, intVal: v }: { return t; }
+    case Symbol.Global { typeId: t, intVal: v, mutable: mu }: {
+      if (mu) { return t; }
+      return TYPE_ERROR_ID;
+    }
     default: { return TYPE_ERROR_ID; }
+  }
+}
+
+// The type of a module-level name backed by a global, ASSIGNABLE OR NOT.
+//
+// The twin of `moduleGlobalType` and deliberately a second function: one asks
+// "may this be written", which a const-backed global answers no to, and this
+// one asks "does this have storage whose initializer runs at run time", which
+// it answers yes to. Collapsing them made pass D skip decorating a const's
+// initializer, and the store codegen then emitted was typed `ptr` throughout.
+export function moduleGlobalStorageType(ref prog: Program, ref tm: TypedModule, name: string): TypeId {
+  const symId = lookupOwnName(ref tm, name);
+  if (symId == SYMBOL_NONE_ID) {
+    return TYPE_ERROR_ID;
+  }
+  switch (symbolAt(ref prog, symId)) {
+    case Symbol.Global { typeId: t, intVal: v, mutable: mu }: { return t; }
+    default: { return TYPE_ERROR_ID; }
+  }
+}
+
+// The type of ANY module-level value name - a const, inlined or not, and a
+// `let`. The union of the two lookups above, and the one the initializer WALK
+// wants: an initializer is an expression whichever storage its decl ended up
+// with, and it has to be typed before anything can read it.
+export function moduleLevelValueType(ref prog: Program, ref tm: TypedModule, name: string): TypeId {
+  const symId = lookupOwnName(ref tm, name);
+  if (symId == SYMBOL_NONE_ID) {
+    return TYPE_ERROR_ID;
+  }
+  switch (symbolAt(ref prog, symId)) {
+    case Symbol.Value { typeId: t, intVal: v }: { return t; }
+    case Symbol.Global { typeId: t, intVal: v, mutable: mu }: { return t; }
+    default: { return TYPE_ERROR_ID; }
+  }
+}
+
+// Whether this module-level decl is backed by a real LLVM global - every `let`,
+// and a `const` whose value was not inlinable.
+//
+// Exported because four walks have to agree on it and none of them can tell
+// from the DECL: a `const` is a global or an immediate depending on what its
+// initializer turned out to be, which is a fact about the symbol.
+export function declIsModuleGlobal(
+  ref prog: Program,
+  ref tm: TypedModule,
+  declNode: ASTNode
+): bool {
+  if (declNode.kind != ASTNodeKind.LET_DECL && declNode.kind != ASTNodeKind.CONST_DECL) {
+    return false;
+  }
+  const symId = lookupOwnName(ref tm, declNode.name);
+  if (symId == SYMBOL_NONE_ID) {
+    return false;
+  }
+  switch (symbolAt(ref prog, symId)) {
+    case Symbol.Global { typeId: t, intVal: v, mutable: mu }: { return true; }
+    default: { return false; }
   }
 }
 

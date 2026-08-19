@@ -1,0 +1,5 @@
+LIT=7 NAME=yoop TABLE=1,2,3
+CALLED=5
+ORIGIN=(3,4) originX=3
+SCALED=(30,40)
+exit=0

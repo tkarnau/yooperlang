@@ -1,0 +1,285 @@
+module comptime;
+
+// Integer and float arithmetic, at the width the type says.
+//
+// An INT value is carried as the raw N bits of its type, zero-extended into the
+// slot's `uint64`. That one invariant is what the rest of this file is about:
+//
+//   * every operation runs in 64 bits and is MASKED back down, which is what
+//     makes `uint8(200) + uint8(100)` wrap to 44 the way the emitted code does
+//   * anything that reads the value as a NUMBER - a signed compare, a signed
+//     divide, an arithmetic shift - sign-extends first, because the high bits
+//     of the slot are zeros and not the sign
+//
+// A FLOAT value is carried as the 64 bits of a double, for the reason
+// utils/float_bits.yoop spells out: there is no decimal rendering two
+// implementations agree on, and a float32 is a double that was rounded through
+// 32 bits rather than a separate representation.
+
+import { Result } from "std/core/types.yoop";
+import { SourceLocation } from "../diagnostics";
+import { TokenTags, tagName } from "../lex";
+import { Program, Type, TypeId, PrimKind, typeAt, primBitWidth, primIsSigned } from "../typecheck";
+import { floatBits, float32Bits, floatFromBits } from "../utils";
+
+// The low `width` bits of `raw`, which is how a value of that width is stored.
+// A width of 64 masks nothing, and shifting a uint64 by 64 is undefined, so the
+// full width is its own case rather than a clever expression.
+export function maskToWidth(raw: uint64, width: usize): uint64 {
+  // A width of 0 means the type is not an integer one at all - `primBitWidth`
+  // answers that for a float, and for anything undecorated. Masking by it would
+  // return ZERO, which is the worst possible answer: the value is destroyed and
+  // nothing says so, and every arithmetic step after it agrees. Leaving the
+  // bits alone is the safe direction, and the caller that had no business
+  // asking gets its value back unchanged.
+  if (width == 0 || width >= 64) {
+    return raw;
+  }
+  const one: uint64 = 1;
+  return raw & ((one << uint64(width)) - 1);
+}
+
+// `raw` re-read as a signed number of `width` bits. The stored form is
+// zero-extended, so a negative value's high bits have to be put back before
+// anything compares or divides it.
+export function signExtend(raw: uint64, width: usize): int64 {
+  if (width >= 64) {
+    return int64(raw);
+  }
+  const one: uint64 = 1;
+  const signBit: uint64 = one << uint64(width - 1);
+  if ((raw & signBit) == 0) {
+    return int64(raw);
+  }
+  // Set every bit above the width. `raw | ~mask` is the same value in two's
+  // complement, and stays inside uint64 the whole way.
+  const mask: uint64 = (one << uint64(width)) - 1;
+  return int64(raw | ~mask);
+}
+
+// The stored form of an int of `typeId`, whatever 64-bit pattern produced it.
+export function normalizeInt(ref prog: Program, typeId: TypeId, raw: uint64): uint64 {
+  return maskToWidth(raw, primBitWidth(ref prog, typeId));
+}
+
+// The same value as a signed number, for the operations that need one.
+export function asSigned(ref prog: Program, typeId: TypeId, raw: uint64): int64 {
+  return signExtend(raw, primBitWidth(ref prog, typeId));
+}
+
+// `a op b` for the operators whose result is the operand type. The signedness
+// only reaches DIV and REM: add, subtract and multiply have one two's-complement
+// answer, and masking it is the whole of the wrap.
+export function intBinary(
+  ref prog: Program,
+  typeId: TypeId,
+  op: TokenTags,
+  a: uint64,
+  b: uint64,
+  loc: SourceLocation
+): Result<uint64, ComptimeError> {
+  switch (op) {
+    case TokenTags.PLUS:  { return Result.Ok { value: normalizeInt(ref prog, typeId, a + b) }; }
+    case TokenTags.MINUS: { return Result.Ok { value: normalizeInt(ref prog, typeId, a - b) }; }
+    case TokenTags.MULT:  { return Result.Ok { value: normalizeInt(ref prog, typeId, a * b) }; }
+    case TokenTags.AMP:   { return Result.Ok { value: normalizeInt(ref prog, typeId, a & b) }; }
+    case TokenTags.PIPE:  { return Result.Ok { value: normalizeInt(ref prog, typeId, a | b) }; }
+    case TokenTags.CARET: { return Result.Ok { value: normalizeInt(ref prog, typeId, a ^ b) }; }
+
+    // A zero divisor is the one arithmetic FAILURE there is. The emitted code
+    // would trap; folding it has to stop rather than invent an answer.
+    case TokenTags.DIVIDE, TokenTags.MODULUS: {
+      if (b == 0) {
+        return Result.Err { error: comptimeError(
+          "division by zero at compile time", loc
+        )};
+      }
+      if (primIsSigned(ref prog, typeId)) {
+        const sa = asSigned(ref prog, typeId, a);
+        const sb = asSigned(ref prog, typeId, b);
+        let r: int64 = 0;
+        if (op == TokenTags.DIVIDE) { r = sa / sb; } else { r = sa % sb; }
+        return Result.Ok { value: normalizeInt(ref prog, typeId, uint64(r)) };
+      }
+      let r: uint64 = 0;
+      if (op == TokenTags.DIVIDE) { r = a / b; } else { r = a % b; }
+      return Result.Ok { value: normalizeInt(ref prog, typeId, r) };
+    }
+
+    // A shift COUNT at or past the operand's width is undefined in LLVM and in
+    // C, so it is refused rather than given an answer this evaluator invented.
+    case TokenTags.LSHIFT, TokenTags.RSHIFT: {
+      const width = primBitWidth(ref prog, typeId);
+      if (b >= uint64(width)) {
+        return Result.Err { error: comptimeError(
+          `shift count ${b} is not less than the operand's width of ${width}`, loc
+        )};
+      }
+      if (op == TokenTags.LSHIFT) {
+        return Result.Ok { value: normalizeInt(ref prog, typeId, a << b) };
+      }
+      // `>>` is ARITHMETIC on a signed type and LOGICAL on an unsigned one -
+      // the same split the emitted `ashr` / `lshr` makes.
+      if (primIsSigned(ref prog, typeId)) {
+        const shifted: int64 = asSigned(ref prog, typeId, a) >> int64(b);
+        return Result.Ok { value: normalizeInt(ref prog, typeId, uint64(shifted)) };
+      }
+      return Result.Ok { value: normalizeInt(ref prog, typeId, a >> b) };
+    }
+
+    default: {
+      return Result.Err { error: comptimeError(
+        `the comptime evaluator does not handle the integer operator ${tagName(op)}`, loc
+      )};
+    }
+  }
+}
+
+// `~a`, and `-a`. Both are the operand type; negation of the most negative
+// value wraps to itself, which is what the emitted `sub` does too.
+export function intUnary(
+  ref prog: Program,
+  typeId: TypeId,
+  op: TokenTags,
+  a: uint64,
+  loc: SourceLocation
+): Result<uint64, ComptimeError> {
+  switch (op) {
+    case TokenTags.TILDE: { return Result.Ok { value: normalizeInt(ref prog, typeId, ~a) }; }
+    case TokenTags.MINUS: { return Result.Ok { value: normalizeInt(ref prog, typeId, 0 - a) }; }
+    default: {
+      return Result.Err { error: comptimeError(
+        `the comptime evaluator does not handle the unary integer operator ${tagName(op)}`, loc
+      )};
+    }
+  }
+}
+
+// A comparison, whose result is a bool rather than the operand type. Signedness
+// decides here for the same reason it decides a divide: the stored form is
+// zero-extended, so an unsigned compare of a negative value would read it as a
+// very large one.
+export function intCompare(
+  ref prog: Program,
+  typeId: TypeId,
+  op: TokenTags,
+  a: uint64,
+  b: uint64,
+  loc: SourceLocation
+): Result<bool, ComptimeError> {
+  // Equality needs no sign: two values are the same bits or they are not.
+  if (op == TokenTags.EQEQ) { return Result.Ok { value: a == b }; }
+  if (op == TokenTags.NEQ)  { return Result.Ok { value: a != b }; }
+
+  // Ordering does. The stored form is zero-extended, so an unsigned compare of
+  // a negative value would read it as a very large one.
+  if (primIsSigned(ref prog, typeId)) {
+    const sa = asSigned(ref prog, typeId, a);
+    const sb = asSigned(ref prog, typeId, b);
+    switch (op) {
+      case TokenTags.LT:  { return Result.Ok { value: sa <  sb }; }
+      case TokenTags.LTE: { return Result.Ok { value: sa <= sb }; }
+      case TokenTags.GT:  { return Result.Ok { value: sa >  sb }; }
+      case TokenTags.GTE: { return Result.Ok { value: sa >= sb }; }
+      default: { return unhandledComparison(op, loc); }
+    }
+  }
+  switch (op) {
+    case TokenTags.LT:  { return Result.Ok { value: a <  b }; }
+    case TokenTags.LTE: { return Result.Ok { value: a <= b }; }
+    case TokenTags.GT:  { return Result.Ok { value: a >  b }; }
+    case TokenTags.GTE: { return Result.Ok { value: a >= b }; }
+    default: { return unhandledComparison(op, loc); }
+  }
+}
+
+function unhandledComparison(op: TokenTags, loc: SourceLocation): Result<bool, ComptimeError> {
+  return Result.Err { error: comptimeError(
+    `the comptime evaluator does not handle the comparison ${tagName(op)}`, loc
+  )};
+}
+
+// Float arithmetic, in and out of the bit pattern. A float32 result is rounded
+// THROUGH 32 bits and widened back, so a fold of `float32` arithmetic carries
+// the same value the emitted code would compute rather than a more precise one.
+export function floatBinary(
+  ref prog: Program,
+  typeId: TypeId,
+  op: TokenTags,
+  a: uint64,
+  b: uint64,
+  loc: SourceLocation
+): Result<uint64, ComptimeError> {
+  const x = floatFromBits(a);
+  const y = floatFromBits(b);
+  let r: float64 = 0.0;
+  switch (op) {
+    case TokenTags.PLUS:   { r = x + y; }
+    case TokenTags.MINUS:  { r = x - y; }
+    case TokenTags.MULT:   { r = x * y; }
+    case TokenTags.DIVIDE: { r = x / y; }
+    default: {
+      return Result.Err { error: comptimeError(
+        `the comptime evaluator does not handle the float operator ${tagName(op)}`, loc
+      )};
+    }
+  }
+  return Result.Ok { value: floatBitsFor(ref prog, typeId, r) };
+}
+
+export function floatUnary(
+  ref prog: Program,
+  typeId: TypeId,
+  op: TokenTags,
+  a: uint64,
+  loc: SourceLocation
+): Result<uint64, ComptimeError> {
+  if (op == TokenTags.MINUS) {
+    return Result.Ok { value: floatBitsFor(ref prog, typeId, 0.0 - floatFromBits(a)) };
+  }
+  return Result.Err { error: comptimeError(
+    `the comptime evaluator does not handle the unary float operator ${tagName(op)}`, loc
+  )};
+}
+
+export function floatCompare(
+  op: TokenTags,
+  a: uint64,
+  b: uint64,
+  loc: SourceLocation
+): Result<bool, ComptimeError> {
+  const x = floatFromBits(a);
+  const y = floatFromBits(b);
+  switch (op) {
+    case TokenTags.EQEQ: { return Result.Ok { value: x == y }; }
+    case TokenTags.NEQ:  { return Result.Ok { value: x != y }; }
+    case TokenTags.LT:   { return Result.Ok { value: x <  y }; }
+    case TokenTags.LTE:  { return Result.Ok { value: x <= y }; }
+    case TokenTags.GT:   { return Result.Ok { value: x >  y }; }
+    case TokenTags.GTE:  { return Result.Ok { value: x >= y }; }
+    default: {
+      return Result.Err { error: comptimeError(
+        `the comptime evaluator does not handle the float comparison ${tagName(op)}`, loc
+      )};
+    }
+  }
+}
+
+// The bits to STORE for a float result. A float64 keeps every bit it computed;
+// a float32 keeps only what survives the narrowing, which is the difference
+// between folding an expression and folding the expression the TARGET runs.
+export function floatBitsFor(ref prog: Program, typeId: TypeId, x: float64): uint64 {
+  if (isFloat32Type(ref prog, typeId)) {
+    return float32Bits(x);
+  }
+  return floatBits(x);
+}
+
+// Asked of the PrimKind rather than of `primBitWidth`, which is an INTEGER
+// width helper and answers 0 for both float widths.
+function isFloat32Type(ref prog: Program, typeId: TypeId): bool {
+  switch (typeAt(ref prog, typeId)) {
+    case Type.Prim { prim: p }: { return p == PrimKind.FLOAT32; }
+    default: { return false; }
+  }
+}

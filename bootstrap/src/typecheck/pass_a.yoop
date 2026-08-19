@@ -235,12 +235,18 @@ function registerFileShells(
         // different Symbol, because the two are emitted differently: a const is
         // inlined, this one gets an address.
         bindName(ref prog, ref tm, declNode,
-          Symbol.Global { typeId: TYPE_ERROR_ID, intVal: 0 }, exported);
+          Symbol.Global { typeId: TYPE_ERROR_ID, intVal: 0, mutable: true }, exported);
       }
       case ASTNodeKind.IMPORT_DECL: {
         // Pass B's job, and it needs no shell here: the name it binds is the
         // source module's SymbolId, which topological order guarantees already
         // exists. See pass_b.yoop.
+      }
+      case ASTNodeKind.BLOCK: {
+        // An `@precompile { ... }` block. It declares nothing, so there is no
+        // shell to register - its statements are checked by pass D and RUN by
+        // the comptime pass, which keeps whatever they wrote to the module's
+        // globals. See comptime/precompile.yoop.
       }
       default: {
         // Everything else is still parser-side work. Say so out loud rather

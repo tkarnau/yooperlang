@@ -1,0 +1,196 @@
+module comptime;
+
+// The externs a comptime fold is allowed to call.
+//
+// The interpreter cannot call an arbitrary extern: the program is being
+// COMPILED, so its runtime does not exist, its files are not open, and its
+// sockets are not connected. What is safe is the subset that is PURE - a
+// function whose answer depends only on its arguments - and that subset is
+// listed here by name. Anything else is refused, which under `@precompile` is a
+// build error naming the call.
+//
+// The math functions are not reimplemented: the compiler is a native binary, so
+// it calls the same libm the compiled program would. That is the only way to be
+// sure a folded `sqrt(2.0)` is bit-identical to the one the program would have
+// computed at run time - a reimplementation would be a second answer to the
+// same question, and the two would drift.
+//
+// `printf` and the `yoop_log_*` trio are the exception to the purity rule, and
+// deliberately so: a `@precompile` block that logs was written to say something
+// DURING THE BUILD, and refusing it would refuse the whole point. What they
+// write goes to the build's log marked `[comptime]`, never to the program's
+// output - the program is not running and its stdout does not exist yet.
+//
+// TWO DELIBERATE OMISSIONS, both from the reference's list, both refused here.
+// `yoop_now_ns` folds the BUILD's clock into the binary, which makes the output
+// depend on when it was built; `yoop_errno_get` reads a thread's errno, which
+// at compile time is the compiler's own. Neither is pure, and no program in the
+// corpus folds either.
+
+import.unsafe;
+
+import { Vec }, * as vec from "std/core/vec.yoop";
+import * as str from "std/core/strings.yoop";
+import * as log from "std/log.yoop";
+import * as intr from "std/core/intrinsics.yoop";
+import { Result } from "std/core/types.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import { NodeId } from "../ast";
+import { SourceLocation } from "../diagnostics";
+import { Program, TypeId, primIsSigned } from "../typecheck";
+import { floatFromBits } from "../utils";
+
+extern "C" from library "m" {
+  function sqrt(x: float64): float64;
+  function pow(base: float64, exp: float64): float64;
+  function floor(x: float64): float64;
+  function ceil(x: float64): float64;
+  function fabs(x: float64): float64;
+}
+
+// Is `name` a comptime-callable extern? Asked before the arguments are
+// evaluated, so an extern that is NOT on the list is refused without running
+// anything - the arguments to a call that cannot happen should not either.
+export function isWhitelistedExtern(name: string): bool {
+  return str.stringEq(name, "sqrt") || str.stringEq(name, "pow") ||
+         str.stringEq(name, "floor") || str.stringEq(name, "ceil") ||
+         str.stringEq(name, "fabs") || str.stringEq(name, "abs") ||
+         str.stringEq(name, "labs") || str.stringEq(name, "strlen") ||
+         str.stringEq(name, "strcmp") || str.stringEq(name, "printf") ||
+         str.stringEq(name, "yoop_log_info") || str.stringEq(name, "yoop_log_warn") ||
+         str.stringEq(name, "yoop_log_error");
+}
+
+// Call one, with the argument values already evaluated.
+export function callWhitelistedExtern(
+  ref cx: EvalCx,
+  name: string,
+  ref args: Vec<ValueId>,
+  resultTy: TypeId,
+  loc: SourceLocation
+): Result<ValueId, ComptimeError> {
+  // `printf` at compile time writes to the BUILD's log rather than to the
+  // program's output - the program is not running, and its stdout does not
+  // exist yet. Marked `[comptime]` so a line that appears during a build is not
+  // mistaken for one the compiled program printed.
+  //
+  // ONE argument only, and it has to be a string. A real format-string
+  // interpreter is a second implementation of libc's, and every `printf` in the
+  // corpus that is folded passes a single already-interpolated template.
+  if (str.stringEq(name, "printf")) {
+    if (args.len != 1) {
+      return Result.Err { error: comptimeError(
+        "a comptime `printf` takes exactly one already-formatted string - folding a format string would mean reimplementing libc's",
+        loc
+      )};
+    }
+    log.info(`[comptime] ${argText(ref cx, ref args, 0, loc)?}`);
+    return Result.Ok { value: intValue(cx.va, resultTy, 0) };
+  }
+
+  // std/log.yoop bottoms out in these. They are not pure either, and they are
+  // here for the same reason `printf` is: what the block was written to do IS
+  // to say something during the build.
+  if (str.stringEq(name, "yoop_log_info") || str.stringEq(name, "yoop_log_warn") ||
+      str.stringEq(name, "yoop_log_error")) {
+    log.info(`[comptime] ${argText(ref cx, ref args, 0, loc)?}`);
+    return Result.Ok { value: voidValue(cx.va) };
+  }
+
+  // The string pair first: they are the two that read `text` rather than bits.
+  if (str.stringEq(name, "strlen")) {
+    const s = argText(ref cx, ref args, 0, loc)?;
+    return Result.Ok { value: intValue(cx.va, resultTy,
+      normalizeInt(cx.prog, resultTy, uint64(s.len))) };
+  }
+  if (str.stringEq(name, "strcmp")) {
+    const a = argText(ref cx, ref args, 0, loc)?;
+    const b = argText(ref cx, ref args, 1, loc)?;
+    return Result.Ok { value: intValue(cx.va, resultTy,
+      normalizeInt(cx.prog, resultTy, uint64(compareStrings(a, b)))) };
+  }
+
+  // The integer pair. `abs` and `labs` differ only in the width C gives them,
+  // and the width here is whatever pass D resolved for the call.
+  if (str.stringEq(name, "abs") || str.stringEq(name, "labs")) {
+    const argTy = argTypeOf(ref cx, ref args, 0, loc)?;
+    const v = asSigned(cx.prog, argTy, argBits(ref cx, ref args, 0, loc)?);
+    let magnitude: int64 = v;
+    if (v < 0) {
+      magnitude = 0 - v;
+    }
+    return Result.Ok { value: intValue(cx.va, resultTy,
+      normalizeInt(cx.prog, resultTy, uint64(magnitude))) };
+  }
+
+  // And the libm family, called for real.
+  const x = floatFromBits(argBits(ref cx, ref args, 0, loc)?);
+  let r: float64 = 0.0;
+  if (str.stringEq(name, "sqrt")) { r = sqrt(x); }
+  else if (str.stringEq(name, "floor")) { r = floor(x); }
+  else if (str.stringEq(name, "ceil")) { r = ceil(x); }
+  else if (str.stringEq(name, "fabs")) { r = fabs(x); }
+  else if (str.stringEq(name, "pow")) {
+    r = pow(x, floatFromBits(argBits(ref cx, ref args, 1, loc)?));
+  } else {
+    return Result.Err { error: comptimeError(
+      `"${name}" is not on the comptime extern list`, loc
+    )};
+  }
+  return Result.Ok { value: floatValue(cx.va, resultTy, floatBitsFor(cx.prog, resultTy, r)) };
+}
+
+// `-1`, `0` or `1`, which is what the reference produces and what a caller may
+// rely on. Real `strcmp` promises only the SIGN, so normalizing is the answer
+// that cannot disagree with a libc.
+function compareStrings(a: string, b: string): int64 {
+  const ab: uint8[] = intr.stringAsBytes(a);
+  const bb: uint8[] = intr.stringAsBytes(b);
+  let i: usize = 0;
+  while (i < ab.len && i < bb.len) {
+    if (ab[i] != bb[i]) {
+      if (ab[i] < bb[i]) { return 0 - 1; }
+      return 1;
+    }
+    i += 1;
+  }
+  if (ab.len < bb.len) { return 0 - 1; }
+  if (ab.len > bb.len) { return 1; }
+  return 0;
+}
+
+// The three argument readers. Each is total: a missing argument is a refusal
+// rather than a zero, because a whitelist entry called with the wrong arity is
+// a compiler bug and folding it to a plausible number would hide one.
+function argBits(ref cx: EvalCx, ref args: Vec<ValueId>, i: usize, loc: SourceLocation): Result<uint64, ComptimeError> {
+  if (i >= args.len) {
+    return Result.Err { error: comptimeError(
+      "a comptime extern was called with too few arguments", loc
+    )};
+  }
+  return Result.Ok { value: valueAt(cx.va, vec.vecGet(ref args, i)).bits };
+}
+
+function argTypeOf(ref cx: EvalCx, ref args: Vec<ValueId>, i: usize, loc: SourceLocation): Result<TypeId, ComptimeError> {
+  if (i >= args.len) {
+    return Result.Err { error: comptimeError(
+      "a comptime extern was called with too few arguments", loc
+    )};
+  }
+  return Result.Ok { value: valueAt(cx.va, vec.vecGet(ref args, i)).typeId };
+}
+
+function argText(ref cx: EvalCx, ref args: Vec<ValueId>, i: usize, loc: SourceLocation): Result<string, ComptimeError> {
+  if (i >= args.len) {
+    return Result.Err { error: comptimeError(
+      "a comptime extern was called with too few arguments", loc
+    )};
+  }
+  const slot = valueAt(cx.va, vec.vecGet(ref args, i));
+  if (slot.kind != ValueKind.STR) {
+    return Result.Err { error: comptimeError(
+      "a comptime extern wanted a string argument and was given something else", loc
+    )};
+  }
+  return Result.Ok { value: slot.text };
+}
