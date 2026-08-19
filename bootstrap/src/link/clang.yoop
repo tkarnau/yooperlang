@@ -76,7 +76,10 @@ export function linkExecutable(
   }
 
   disposable cmd: Text = text.make(256);
-  text.push(ref cmd, `clang -Wno-override-module -o "${exePath}" "${irPath}"`);
+  // `-g` keeps the DWARF the IR carries. Without it clang drops the metadata on
+  // the way to the object file, and a binary compiled from debuggable IR is not
+  // debuggable - with nothing in the output saying so.
+  text.push(ref cmd, `clang -g -Wno-override-module -o "${exePath}" "${irPath}"`);
 
   if (needsRuntime) {
     const runtimeRoot = discoverRuntimeRoot(exeSelfPath);

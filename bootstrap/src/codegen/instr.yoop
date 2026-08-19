@@ -314,10 +314,44 @@ export function emitFunctionOpen(
     headerPart(ref cx, ".arg");
     i += 1;
   }
-  headerPart(ref cx, ") {");
+  headerPart(ref cx, ")");
+  // `!dbg` on the define is what ties the body's locations to a frame. Without
+  // it every DILocation inside names a scope the function does not declare, and
+  // the verifier rejects the module.
+  if (cx.e.dbgScope != 0) {
+    headerPart(ref cx, " !dbg ");
+    headerPart(ref cx, debugRef(cx.e.dbgScope));
+  }
+  headerPart(ref cx, " {");
   headerEnd(ref cx);
   headerPart(ref cx, "entry:");
   headerEnd(ref cx);
+}
+
+//   call void @llvm.dbg.declare(metadata ptr %pt.1.addr, metadata !12, metadata !DIExpression())
+//
+// The intrinsic that ties a stack slot to the variable a debugger should show
+// living there. `endInstr` adds the `!dbg` - LLVM requires one whose scope is
+// the enclosing subprogram, and refuses the module without it.
+export function emitDbgDeclare(ref cx: Cx, name: string, slotId: usize, varNode: usize): void {
+  declareDbgIntrinsic(cx.e);
+  startInstr(ref cx);
+  part(ref cx, "call void @llvm.dbg.declare(metadata ptr ");
+  slot(ref cx, name, slotId);
+  part(ref cx, ", metadata ");
+  part(ref cx, debugRef(varNode));
+  part(ref cx, ", metadata !DIExpression())");
+  endInstr(ref cx);
+}
+
+// Declared once for the module. Not through `externDeclare`: its parameters are
+// `metadata`, which is not a value type and has no place in that table.
+function declareDbgIntrinsic(ref e: Emitter): void {
+  if (e.declaredDbgIntrinsic) {
+    return;
+  }
+  e.declaredDbgIntrinsic = true;
+  text.push(ref e.globals, "declare void @llvm.dbg.declare(metadata, metadata, metadata)\n");
 }
 
 //   define internal void @main_0__module_init0() {

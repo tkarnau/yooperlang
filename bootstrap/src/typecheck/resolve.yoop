@@ -681,6 +681,22 @@ export function structFieldAt(ref prog: Program, structType: TypeId, i: usize): 
   }
 }
 
+// The i'th field of a UNION, by position. The union twin of `structFieldAt`,
+// and separate for the same reason the two types are: a union's fields all sit
+// at offset zero.
+export function unionFieldAt(ref prog: Program, unionType: TypeId, i: usize): PositionalField {
+  switch (typeAt(ref prog, unionType)) {
+    case Type.Union { decl: d, fields: f }: {
+      if (i >= f.len) {
+        return { name: "", typeId: TYPE_ERROR_ID, found: false };
+      }
+      const field = vec.vecGet(ref f, i);
+      return { name: field.name, typeId: field.typeId, found: true };
+    }
+    default: { return { name: "", typeId: TYPE_ERROR_ID, found: false }; }
+  }
+}
+
 // How many fields a struct has, for the all-fields-present check.
 export function structFieldCount(ref prog: Program, structType: TypeId): usize {
   switch (typeAt(ref prog, structType)) {

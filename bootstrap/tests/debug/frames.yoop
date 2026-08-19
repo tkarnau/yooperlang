@@ -1,0 +1,51 @@
+// The program src/debug.test.js drives a debugger against.
+//
+// Everything here exists to make ONE question answerable: does the DWARF the
+// bootstrap emits describe this file, or something a line or a frame away from
+// it? So the shape is deliberately dull - a nested call, a loop, and nothing
+// that could fail for a reason of its own.
+//
+// The `MARK:` comments are read BY THE TEST, which looks a line up rather than
+// hard-coding one. That is what keeps an edit to this file from turning into a
+// silently wrong assertion, and it is the point of the whole fixture: an
+// off-by-one in the line numbers still PRINTS a real line of source, so a test
+// that hard-codes the number it expects agrees with the bug.
+
+function inner(n: int32): int32 {
+  let acc: int32 = 0;
+  let i: int32 = 0;
+  while (i < n) {
+    acc = acc + i;  // MARK: breakpoint
+    i = i + 1;
+  }
+  return acc;
+}
+
+type Point { x: int32, y: int32 }
+
+variant Shape {
+  Dot,
+  Rect { w: int32 },
+}
+
+// The aggregate shapes, so the test can ask a debugger to READ them rather than
+// only to find them. A struct's fields, a string's text, an array's length and
+// a variant's tag by NAME are each described by a different piece of the type
+// side, and each would be silently absent on its own.
+function shapes(): int32 {
+  let pt: Point = { x: 3, y: 4 };
+  let who: string = "tom";
+  let nums: int32[] = [1, 2, 3];
+  let shape: Shape = Shape.Rect { w: 9 };
+  printf(`${pt.x}${who}${nums.len}\n`);  // MARK: locals
+  return pt.x;
+}
+
+function outer(n: int32): int32 {
+  return inner(n) * 2;  // MARK: callsite
+}
+
+function main(): int {  // MARK: main
+  printf(`sum=${outer(5)} shapes=${shapes()}\n`);
+  return 0;
+}

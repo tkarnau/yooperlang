@@ -73,6 +73,10 @@ export function emitStatement(
 ): EmitResult {
   terminated = false;
   const stmt = nodeAt(cx.ast, stmtId);
+  // Per STATEMENT rather than per expression: a debugger steps by line, and
+  // tagging each sub-expression with its own column makes one `next` stop
+  // several times inside one statement.
+  setDebugLine(ref cx, stmt.sourceLoc);
   switch (stmt.kind) {
     case ASTNodeKind.RETURN_STATEMENT: {
       terminated = true;
@@ -236,6 +240,8 @@ function emitVarDecl(ref cx: Cx, stmt: ASTNode, stmtId: NodeId): EmitResult {
   }
 
   const slotInfo = declareLocal(ref cx, stmt.name, ty);
+  noteLocalDebug(ref cx, stmt.name, slotInfo.id, resolvedTypeAt(ref cx, stmtId),
+    stmt.sourceLoc.line, 0);
   if (hasInit) {
     emitStore(ref cx, ty, value, stmt.name, slotInfo.id);
   }

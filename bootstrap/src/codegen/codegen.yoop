@@ -137,6 +137,11 @@ export function codegenProgram(ref prog: Program, ref graph: ModuleGraph): Resul
 function emitModule(ref e: Emitter, ref prog: Program, ref tm: TypedModule, m: Module): EmitResult {
   let f: usize = 0;
   while (f < m.files.len) {
+    // One DIFile and DICompileUnit per SOURCE FILE rather than per module: a
+    // directory module is several files, and a debugger resolves a frame to the
+    // file it was written in.
+    const absPath = vec.vecGet(ref m.files, f).absPath;
+    e.dbgFile = beginDebugModule(ref e.debug, debugPathDir(absPath), debugPathFile(absPath));
     emitFile(ref e, ref prog, ref tm, m, vec.vecGet(ref m.files, f).root, f)?;
     f += 1;
   }
@@ -358,6 +363,23 @@ function emitFunction(
   if (isMethod) {
     symbol = methodDefinitionSymbol(ref cx, declNode);
   }
+  // The frame this function's instructions belong to. Built here rather than
+  // earlier because the LINKAGE name is the mangled symbol, which is what a
+  // debugger matches against the binary's symbol table - and it is only known
+  // once `symbol` is.
+  e.dbgScope = debugSubprogram(ref e.debug, declNode.name, debugSymbolText(symbol),
+    declNode.sourceLoc.line, e.dbgFile, debugSubroutineText(ref cx, retTyId, ref params));
+  // The function's own line, in force until the first statement sets its own.
+  //
+  // Entry emits instructions before any statement is walked - the parameter
+  // spills, and the `llvm.dbg.declare` for each - and LLVM REFUSES a
+  // `dbg.declare` with no location. Leaving the cursor cleared here produced
+  // `invalid #dbg record DILocation`, but only for a function that HAS a
+  // parameter, which is why a fixture with one is what caught it.
+  e.dbgLoc = 0;
+  e.hasDbgLoc = false;
+  setDebugLine(ref cx, declNode.sourceLoc);
+
   // The C ENTRY POINT. Asked once and read twice, because the two readers want
   // different things from it: the scheduler's lifetime is `main` in a program
   // that has a task, and the exit status is `main` however the program is
@@ -497,6 +519,8 @@ function collectParams(ref cx: Cx, declNode: ASTNode, ref params: Vec<ParamInfo>
       ty: typeOf(ref cx, paramId),
       isRef: isRefAt(ref cx, paramId),
       pointeeTy: pointeeTypeOf(ref cx, paramId),
+      typeId: resolvedTypeAt(ref cx, paramId),
+      sourceLoc: paramNode.sourceLoc,
     });
     i += 1;
   }
@@ -523,6 +547,9 @@ function emitParamPrologue(ref cx: Cx, ref params: Vec<ParamInfo>): void {
     }
     const slotInfo = declareLocal(ref cx, p.name, p.ty);
     emitStoreArg(ref cx, p.ty, p.name, slotInfo.id);
+    // `i + 1` because DWARF numbers arguments from one, and a zero there means
+    // "not an argument" rather than "the first".
+    noteLocalDebug(ref cx, p.name, slotInfo.id, p.typeId, p.sourceLoc.line, i + 1);
     i += 1;
   }
 }

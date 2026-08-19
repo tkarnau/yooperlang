@@ -369,7 +369,7 @@ suite function anAsyncFunctionIsACoroutine(): void {
       `${ASYNC_KIND}async a(): int32 { return 1; } function plain(): int32 { return 2; }`
     );
     const ir = text.view(ref e.ir);
-    theory.isSuccessful = occurrences(ir, "define i32 @test__plain() {") == 1 &&
+    theory.isSuccessful = occurrences(ir, "define i32 @test__plain()") == 1 &&
       occurrences(ir, "presplitcoroutine") == 1;
     theory.detail = "the plain function did not keep the ordinary ABI";
   }
@@ -829,7 +829,7 @@ suite function aVoidMainCarriesCsEntryPointSignature(): void {
   let test theory: Case = t.asserts("a void main is `define i32 @main()` returning 0") {
     disposable e: Emitted = emitSource("function main(): void { }");
     const ir = text.view(ref e.ir);
-    theory.isSuccessful = occurrences(ir, "define i32 @main() {") == 1 &&
+    theory.isSuccessful = occurrences(ir, "define i32 @main()") == 1 &&
       occurrences(ir, "ret i32 0") == 1 &&
       occurrences(ir, "define void @main") == 0;
     theory.detail = `codegen said "${e.error}"; a void main did not get C's signature`;
@@ -841,7 +841,7 @@ suite function aVoidMainCarriesCsEntryPointSignature(): void {
   let test theory: Case = t.asserts("an explicit `return;` in a void main returns 0 too") {
     disposable e: Emitted = emitSource("function main(): void { return; }");
     const ir = text.view(ref e.ir);
-    theory.isSuccessful = occurrences(ir, "define i32 @main() {") == 1 &&
+    theory.isSuccessful = occurrences(ir, "define i32 @main()") == 1 &&
       occurrences(ir, "ret i32 0") == 1 &&
       occurrences(ir, "ret void") == 0;
     theory.detail = `codegen said "${e.error}"; the early return still says void`;
@@ -852,7 +852,7 @@ suite function aVoidMainCarriesCsEntryPointSignature(): void {
       "function f(): void { return; } function main(): int32 { f(); return 0; }"
     );
     const ir = text.view(ref e.ir);
-    theory.isSuccessful = occurrences(ir, "define void @test__f() {") == 1 &&
+    theory.isSuccessful = occurrences(ir, "define void @test__f()") == 1 &&
       occurrences(ir, "ret void") == 1;
     theory.detail = `codegen said "${e.error}"; the entry point's signature leaked into an ordinary function`;
   }
@@ -860,9 +860,157 @@ suite function aVoidMainCarriesCsEntryPointSignature(): void {
   let test theory: Case = t.asserts("a main DECLARED int32 is unchanged") {
     disposable e: Emitted = emitSource("function main(): int32 { return 7; }");
     const ir = text.view(ref e.ir);
-    theory.isSuccessful = occurrences(ir, "define i32 @main() {") == 1 &&
+    theory.isSuccessful = occurrences(ir, "define i32 @main()") == 1 &&
       occurrences(ir, "ret i32 7") == 1;
     theory.detail = `codegen said "${e.error}"`;
+  }
+}
+
+// DWARF. What these assert is the SHAPE of the metadata, because the shape is
+// what a debugger reads and because getting it wrong fails silently: clang
+// strips every DI node in a module that does not declare the two named ones,
+// and says so in a warning nobody reads. A program then compiles, runs, and is
+// not debuggable, with nothing in the output saying why.
+suite function emittedIrCarriesDwarfMetadata(): void {
+  disposable e: Emitted = emitSource(
+    "function pow(a: int32, b: int32): int32 { return a * b; }\nfunction main(): int32 { return pow(2, 3); }");
+  const ir = text.view(ref e.ir);
+
+  let test theory: Case = t.asserts("the two named nodes are emitted") {
+    theory.isSuccessful = occurrences(ir, "!llvm.dbg.cu = !{") == 1 &&
+      occurrences(ir, "!llvm.module.flags = !{") == 1 &&
+      occurrences(ir, "!\"Dwarf Version\", i32 4}") == 1 &&
+      occurrences(ir, "!\"Debug Info Version\", i32 3}") == 1;
+    theory.detail = `codegen said "${e.error}"; without these clang strips every DI node`;
+  }
+
+  let test theory: Case = t.asserts("the source file gets a DIFile and a distinct DICompileUnit") {
+    theory.isSuccessful = occurrences(ir, "!DIFile(filename: \"test.yoop\"") == 1 &&
+      occurrences(ir, "distinct !DICompileUnit(language: DW_LANG_C99") == 1 &&
+      occurrences(ir, "emissionKind: FullDebug") == 1;
+    theory.detail = `codegen said "${e.error}"; the compile unit is missing`;
+  }
+
+  // The LINKAGE name is the mangled symbol, which is what a debugger matches
+  // against the binary's symbol table - `pow` alone would not resolve.
+  let test theory: Case = t.asserts("each function gets a distinct DISubprogram naming its symbol") {
+    theory.isSuccessful =
+      occurrences(ir, "distinct !DISubprogram(name: \"pow\", linkageName: \"test__pow\"") == 1 &&
+      occurrences(ir, "distinct !DISubprogram(name: \"main\", linkageName: \"main\"") == 1;
+    theory.detail = `codegen said "${e.error}"; a subprogram is missing or misnamed`;
+  }
+
+  // Without `!dbg` on the define, every location inside names a scope the
+  // function does not declare and the verifier rejects the module.
+  let test theory: Case = t.asserts("the define lines carry their subprogram") {
+    theory.isSuccessful = occurrences(ir, "define i32 @main() !dbg !") == 1 &&
+      occurrences(ir, "define i32 @test__pow(i32 %a.arg, i32 %b.arg) !dbg !") == 1;
+    theory.detail = `codegen said "${e.error}"; a define is not tied to a frame`;
+  }
+
+  let test theory: Case = t.asserts("instructions are tagged with a source location") {
+    theory.isSuccessful = occurrences(ir, "!DILocation(line: 2, column: ") > 0 &&
+      occurrences(ir, ", !dbg !") > 0;
+    theory.detail = `codegen said "${e.error}"; no instruction carries a line`;
+  }
+}
+
+// The TYPE side. What these assert is that the description matches the layout
+// CODEGEN EMITS rather than the type as the source writes it - an `int32[]` is
+// not an array in DWARF's sense, it is the two-word fat pointer, and describing
+// it as anything else makes a debugger read the wrong bytes.
+suite function dwarfDescribesTheLayoutCodegenEmits(): void {
+  disposable e: Emitted = emitSource(
+    "type Point { x: int32, y: int32 }\nvariant Shape { Dot, Rect { w: int32 } }\nfunction main(): int32 {\n  let pt: Point = { x: 1, y: 2 };\n  let who: string = \"t\";\n  let nums: int32[] = [1, 2];\n  let shape: Shape = Shape.Rect { w: 3 };\n  return pt.x;\n}");
+  const ir = text.view(ref e.ir);
+
+  // A struct: one member per field, at the byte offset the layout gives it -
+  // in BITS, which is DWARF's unit.
+  let test theory: Case = t.asserts("a struct is a composite with a member per field") {
+    theory.isSuccessful =
+      occurrences(ir, "!DICompositeType(tag: DW_TAG_structure_type, name: \"Point\", size: 64") == 1 &&
+      occurrences(ir, "name: \"y\"") == 1 && occurrences(ir, "offset: 32)") > 0;
+    theory.detail = `codegen said "${e.error}"; the struct is not described`;
+  }
+
+  // `string` is a typedef over char*, which is what makes a debugger print the
+  // TEXT rather than the address.
+  let test theory: Case = t.asserts("a string is a typedef over char*") {
+    theory.isSuccessful =
+      occurrences(ir, "!DIDerivedType(tag: DW_TAG_typedef, name: \"string\"") == 1 &&
+      occurrences(ir, "!DIBasicType(name: \"char\", size: 8, encoding: DW_ATE_signed_char)") == 1;
+    theory.detail = `codegen said "${e.error}"; a string would print as an address`;
+  }
+
+  let test theory: Case = t.asserts("an array is the two-word fat pointer") {
+    theory.isSuccessful =
+      occurrences(ir, "!DICompositeType(tag: DW_TAG_structure_type, name: \"int32[]\", size: 128") == 1 &&
+      occurrences(ir, "name: \"len\"") > 0;
+    theory.detail = `codegen said "${e.error}"; the array descriptor is not described`;
+  }
+
+  // The tag is an ENUMERATION so a debugger prints `tag = Rect` rather than
+  // `tag = 1`.
+  let test theory: Case = t.asserts("a variant is a tag enumeration plus a payload") {
+    theory.isSuccessful =
+      occurrences(ir, "!DICompositeType(tag: DW_TAG_enumeration_type, name: \"Shape.tag\"") == 1 &&
+      occurrences(ir, "!DIEnumerator(name: \"Rect\", value: 1)") == 1 &&
+      occurrences(ir, "name: \"Shape.payload\"") == 1;
+    theory.detail = `codegen said "${e.error}"; the variant tag would print as a number`;
+  }
+
+  // Every local gets a variable and a declare tying it to its slot.
+  let test theory: Case = t.asserts("each local gets a DILocalVariable and a dbg.declare") {
+    theory.isSuccessful =
+      occurrences(ir, "!DILocalVariable(name: \"pt\"") == 1 &&
+      occurrences(ir, "!DILocalVariable(name: \"who\"") == 1 &&
+      occurrences(ir, "!DILocalVariable(name: \"nums\"") == 1 &&
+      occurrences(ir, "!DILocalVariable(name: \"shape\"") == 1 &&
+      occurrences(ir, "call void @llvm.dbg.declare(metadata ptr") == 4;
+    theory.detail = `codegen said "${e.error}"; a local is not declared to the debugger`;
+  }
+}
+
+// A parameter is described too, and its subprogram carries a real signature
+// rather than an empty tuple - which is what makes a backtrace show `inner(n=5)`
+// instead of `inner()`.
+suite function dwarfDescribesParametersAndSignatures(): void {
+  disposable e: Emitted = emitSource(
+    "function twice(n: int32): int32 { return n * 2; }\nfunction main(): int32 { return twice(4); }");
+  const ir = text.view(ref e.ir);
+
+  let test theory: Case = t.asserts("a parameter is a DILocalVariable with a 1-based arg index") {
+    theory.isSuccessful = occurrences(ir, "!DILocalVariable(name: \"n\", arg: 1") == 1;
+    theory.detail = `codegen said "${e.error}"; the parameter is not described`;
+  }
+
+  let test theory: Case = t.asserts("the subroutine type carries the return and parameter types") {
+    theory.isSuccessful = occurrences(ir, "!DISubroutineType(types: !{}") == 0 &&
+      occurrences(ir, "!DISubroutineType(types: !{!") > 0;
+    theory.detail = `codegen said "${e.error}"; the signature is still an empty tuple`;
+  }
+}
+
+// A LABEL goes through the same line-ending path an instruction does, and a
+// `switch` spans several lines. Both would produce invalid IR if the `!dbg`
+// were attached blindly - `Lfoo:, !dbg !5` is not a label, and a tag on the
+// opening line of a switch lands inside the bracket.
+suite function dwarfTagsOnlyWhereAnInstructionEnds(): void {
+  disposable e: Emitted = emitSource(
+    "function classify(n: int32): int32 { let r: int32 = 0; switch (n) { case 0: { r = 1; } case 1, 2: { r = 2; } default: { r = 3; } } return r; }\nfunction main(): int32 { return classify(1); }");
+  const ir = text.view(ref e.ir);
+
+  let test theory: Case = t.asserts("a label is not tagged") {
+    theory.isSuccessful = occurrences(ir, ":, !dbg") == 0;
+    theory.detail = "a label line was given a source location";
+  }
+
+  // The tag belongs after the closing bracket, which is where the instruction
+  // actually ends.
+  let test theory: Case = t.asserts("a switch is tagged at its close, not at its open") {
+    theory.isSuccessful = occurrences(ir, "[, !dbg") == 0 &&
+      occurrences(ir, "], !dbg !") > 0;
+    theory.detail = "the switch's location landed inside the bracket";
   }
 }
 

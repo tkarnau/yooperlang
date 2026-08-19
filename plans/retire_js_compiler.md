@@ -189,11 +189,47 @@ left to notice them against.
 These are compiler FEATURES rather than language features, and each one is a
 capability the toolchain loses on the day `src/` is deleted.
 
-  * DWARF DEBUG INFO. `src/jsyoopcodegen/debugInfo.js` (625 lines), emitted
-    unconditionally, and the driver links with `-g -O0`. The bootstrap emits no
-    `!dbg`, no `DISubprogram`, nothing. Covered by 24 unit tests and 5 `dwarf:`
-    e2e tests today. Deleting the reference means Yoop programs stop being
-    debuggable until the bootstrap grows this.
+  * DWARF DEBUG INFO. PART DONE - see `codegen/debug_info.yoop`.
+    What works: a DIFile and DICompileUnit per source file, a DISubprogram per
+    function carrying its MANGLED symbol as the linkage name, a DILocation per
+    STATEMENT, and the two named nodes without which clang silently strips
+    every bit of it. clang links with `-g`. Verified against a real debugger
+    rather than only as IR text: gdb resolves `main` to `hello.yoop:16`, a
+    `break hello.yoop:9` stops on the right statement, and a backtrace names
+    both frames with their own lines. 7 unit tests.
+    THE TYPE SIDE IS DONE TOO - `codegen/debug_types.yoop`. What it describes is
+    the layout CODEGEN EMITS rather than the type as the source writes it: an
+    `int32[]` is not an array in DWARF's sense, it is the two-word fat pointer,
+    and describing it as anything else makes a debugger read the wrong bytes.
+    Covered: the primitives, `string` as a typedef over char* (which is what
+    makes a debugger print the text), `ref` and `unsafe_ptr` as pointers, the
+    fat pointer, structs laid out field by field, a variant as a tag ENUMERATION
+    plus a payload, unions, value enums as a named typedef over the underlying,
+    vtables, and a `DILocalVariable` plus `llvm.dbg.declare` per local and
+    by-value parameter. Subprograms carry a real signature, so a backtrace shows
+    `inner (n=5)`.
+    The cache is keyed by TypeId, which is the one place the bootstrap is
+    simpler than the reference: types are INTERNED here, so the id already IS
+    the structural key, and caching it before a composite's members are built is
+    what makes a self-referential type terminate.
+    NOT described: a `ref` PARAMETER, whose slot is the incoming pointer rather
+    than an alloca - there is no address of its own for `llvm.dbg.declare` to
+    name. A debugger omits it, which is the right failure; describing storage
+    that is not there is not.
+    A debugger-driven TEST exists: `src/debug.test.js` (`npm run test:debug`),
+    two assertions over `bootstrap/tests/debug/frames.yoop`. It drives gdb or
+    lldb, whichever is on PATH, and skips when neither is. It asserts what the
+    shape tests cannot - that the debugger resolves `main` to the line the
+    fixture declares it on, and that a source-line breakpoint stops on the
+    intended statement and unwinds to the intended caller.
+    The expected line numbers are LOOKED UP in the fixture by marker comment
+    rather than written into the test, because an off-by-one still prints a
+    real line of a real file: a test that hard-codes the number agrees with the
+    bug as soon as someone edits the fixture. Both assertions were confirmed to
+    FAIL with the off-by-one reintroduced.
+    It is deliberately a smoke check rather than a port of the reference's five
+    `dwarf:` tests; the locals half is what it grows into once the type side
+    exists.
   * `--track-heap`. Codegen emits `yoop_diag_record_alloc` /
     `yoop_diag_record_free` calls. No bootstrap equivalent. Note
     `examples/pass/track_heap_basic.yoop` COMPILES under the bootstrap - the
@@ -309,7 +345,8 @@ undo step - deleting `src/` - comes last and comes with everything it needs.
   4. THE COMPTIME INTERPRETER (A1). DONE - all thirteen `@precompile` files
      compile and run and match the reference. See
      [comptime_interpreter.md](comptime_interpreter.md).
-  5. DWARF DEBUG INFO (C).
+  5. DWARF DEBUG INFO (C). The frame-and-line half is DONE; the type-and-locals
+     half is not. See C.
   6. THE REMAINING DRIVER FLAGS (C): `--track-heap`, `--warn-disposable`,
      `--warn-std`, `--dump-ast-json`, `--list-attributes`.
   7. THE `.expected` CORPUS (E, decision 4), and the diagnostic fixture harness

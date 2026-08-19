@@ -1,0 +1,429 @@
+module codegen;
+
+/*
+  The DWARF description of a yoop TYPE.
+
+  What this describes is the LAYOUT CODEGEN ACTUALLY EMITS, not the type as the
+  source writes it. An `int32[]` is not an array in DWARF's sense - it is the
+  two-word fat pointer `{ ptr, i64 }` that `llvmType` produces - and describing
+  it as anything else makes a debugger read the wrong bytes. So every shape here
+  is derived from the same `sizeOfType` / `alignOfType` codegen lays out with.
+
+  A shape with no useful description answers NONE, and the caller then emits no
+  `llvm.dbg.declare` for that local. A debugger omitting a variable is a much
+  better failure than one printing garbage for it.
+*/
+
+import { Vec }, * as vec from "std/core/vec.yoop";
+import * as str from "std/core/strings.yoop";
+import * as fmt from "std/core/format.yoop";
+import * as map from "std/collections/map.yoop";
+import { Option } from "std/core/types.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import { Program, Type, TypeId, PrimKind, TYPE_ERROR_ID, TYPE_VOID_ID, typeAt,
+  sizeOfType, alignOfType, variantPayloadSize, unionPayloadSize, nominalNameOf,
+  structFieldAt, unionFieldAt, variantCaseNameAt, vtableSlotNameAt } from "../typecheck";
+
+// No description. 0 is a real node id, so absence is its own answer rather than
+// a sentinel - `debugTypeOf` hands back both.
+@derive(display)
+export type DebugType {
+  id: DebugNodeId,
+  found: bool,
+}
+
+export function noDebugType(): DebugType {
+  return { id: 0, found: false };
+}
+
+/*
+  The `!N` describing `typeId`, built once per type.
+
+  The cache is written BEFORE a composite's members are built. That is what
+  makes `type Node { next: ref Node }` terminate: the recursive walk into the
+  field finds the enclosing type's id already there and points at it, rather
+  than starting the same build again.
+*/
+export function debugTypeOf(ref cx: Cx, typeId: TypeId): DebugType {
+  if (typeId == TYPE_ERROR_ID || typeId == TYPE_VOID_ID) {
+    return noDebugType();
+  }
+  switch (map.mapGet(ref cx.e.debug.types, uint64(typeId))) {
+    case Option.Some { value: id }: { return { id: id, found: true }; }
+    case Option.None: {}
+  }
+
+  switch (typeAt(cx.prog, typeId)) {
+    case Type.Prim { prim: p }: { return cacheDebugType(ref cx, typeId, primDebugType(ref cx, p)); }
+    case Type.Ref { inner: inner }: {
+      const to = debugTypeOf(ref cx, inner);
+      return cacheDebugType(ref cx, typeId, debugPointerTo(ref cx, to, ""));
+    }
+    case Type.UnsafePtr { pointee: pointee }: {
+      if (pointee == 0) {
+        return cacheDebugType(ref cx, typeId, debugOpaquePointer(ref cx));
+      }
+      const to = debugTypeOf(ref cx, pointee);
+      return cacheDebugType(ref cx, typeId, debugPointerTo(ref cx, to, ""));
+    }
+    case Type.Array { elem: elem }: { return arrayDebugType(ref cx, typeId, elem); }
+    case Type.Struct { decl: d, fields: f, methods: mm, implementsTraits: it, generic: g }: {
+      return structDebugType(ref cx, typeId);
+    }
+    case Type.Variant { decl: d, cases: cs, methods: mm, implementsTraits: it, generic: g }: {
+      return variantDebugType(ref cx, typeId);
+    }
+    case Type.Union { decl: d, fields: f }: { return unionDebugType(ref cx, typeId); }
+    case Type.ValueEnum { decl: d, underlying: u, cases: cs, isOpen: o, methods: mm,
+                          implementsTraits: it }: {
+      return valueEnumDebugType(ref cx, typeId, u);
+    }
+    // A function value and a task handle are both pointer-shaped, and neither
+    // has bytes a debugger could usefully walk into: a `Task<T>` is a runtime
+    // struct whose layout belongs to the scheduler.
+    case Type.FuncPtr { params: p, ret: r }: {
+      return cacheDebugType(ref cx, typeId, debugOpaquePointer(ref cx));
+    }
+    case Type.Task { result: r }: {
+      return cacheDebugType(ref cx, typeId, debugOpaquePointer(ref cx));
+    }
+    case Type.VTable { decl: d, forTrait: ft, fields: f, methodOrder: mo }: {
+      return vtableDebugType(ref cx, typeId);
+    }
+    default: { return noDebugType(); }
+  }
+}
+
+function cacheDebugType(ref cx: Cx, typeId: TypeId, made: DebugType): DebugType {
+  if (made.found) {
+    map.mapInsert(ref cx.e.debug.types, uint64(typeId), made.id);
+  }
+  return made;
+}
+
+// A primitive. `string` is the one that is not a basic type: it is a `char*`,
+// and saying so is what makes a debugger print the TEXT rather than an address.
+function primDebugType(ref cx: Cx, p: PrimKind): DebugType {
+  if (p == PrimKind.STRING) {
+    const charTy = basicDebugType(ref cx, "char", 8, "DW_ATE_signed_char");
+    return debugTypedef(ref cx, "string", debugPointerTo(ref cx, charTy, ""));
+  }
+  return basicDebugType(ref cx, primDebugName(p), primDebugBits(p), primDebugEncoding(p));
+}
+
+function primDebugName(p: PrimKind): string {
+  switch (p) {
+    case PrimKind.INT8: { return "int8"; }
+    case PrimKind.INT16: { return "int16"; }
+    case PrimKind.INT32: { return "int32"; }
+    case PrimKind.INT64: { return "int64"; }
+    case PrimKind.ISIZE: { return "isize"; }
+    case PrimKind.UINT8: { return "uint8"; }
+    case PrimKind.UINT16: { return "uint16"; }
+    case PrimKind.UINT32: { return "uint32"; }
+    case PrimKind.UINT64: { return "uint64"; }
+    case PrimKind.USIZE: { return "usize"; }
+    case PrimKind.FLOAT32: { return "float32"; }
+    case PrimKind.FLOAT64: { return "float64"; }
+    case PrimKind.BOOL: { return "bool"; }
+    default: { return "string"; }
+  }
+}
+
+function primDebugBits(p: PrimKind): usize {
+  switch (p) {
+    case PrimKind.INT8, PrimKind.UINT8: { return 8; }
+    case PrimKind.INT16, PrimKind.UINT16: { return 16; }
+    case PrimKind.INT32, PrimKind.UINT32, PrimKind.FLOAT32: { return 32; }
+    case PrimKind.BOOL: { return 8; }
+    default: { return 64; }
+  }
+}
+
+function primDebugEncoding(p: PrimKind): string {
+  switch (p) {
+    case PrimKind.FLOAT32, PrimKind.FLOAT64: { return "DW_ATE_float"; }
+    case PrimKind.BOOL: { return "DW_ATE_boolean"; }
+    case PrimKind.UINT8, PrimKind.UINT16, PrimKind.UINT32, PrimKind.UINT64,
+         PrimKind.USIZE: { return "DW_ATE_unsigned"; }
+    default: { return "DW_ATE_signed"; }
+  }
+}
+
+// `int32[]` - the fat pointer, which is what an array VALUE is.
+function arrayDebugType(ref cx: Cx, typeId: TypeId, elem: TypeId): DebugType {
+  const id = reserveDebugNode(ref cx.e.debug);
+  map.mapInsert(ref cx.e.debug.types, uint64(typeId), id);
+
+  const elemTy = debugTypeOf(ref cx, elem);
+  disposable members: Vec<DebugNodeId> = vec.vecNew(2);
+  vec.vecPush(ref members, debugMember(ref cx, id, "data", debugPointerTo(ref cx, elemTy, ""), 8, 8, 0));
+  vec.vecPush(ref members, debugMember(ref cx, id, "len",
+    basicDebugType(ref cx, "usize", 64, "DW_ATE_unsigned"), 8, 8, 8));
+
+  disposable name: Vec<string> = vec.vecNew(2);
+  vec.vecPush(ref name, nominalOrPrimName(ref cx, elem));
+  vec.vecPush(ref name, "[]");
+  finishComposite(ref cx, id, "DW_TAG_structure_type",
+    str.stringConcatAll(vec.vecAsArray(ref name)), 16, 8, ref members);
+  return { id: id, found: true };
+}
+
+// A struct, laid out the way LLVM lays out a non-packed one: every field bumped
+// to its own alignment and the whole rounded up to the widest.
+function structDebugType(ref cx: Cx, typeId: TypeId): DebugType {
+  const id = reserveDebugNode(ref cx.e.debug);
+  map.mapInsert(ref cx.e.debug.types, uint64(typeId), id);
+
+  disposable members: Vec<DebugNodeId> = vec.vecNew(4);
+  let offset: usize = 0;
+  let maxAlign: usize = 1;
+  let i: usize = 0;
+  while (true) {
+    const field = structFieldAt(cx.prog, typeId, i);
+    if (!field.found) {
+      i = i;
+      break;
+    }
+    const fieldAlign = alignOfType(cx.prog, field.typeId);
+    const fieldSize = sizeOfType(cx.prog, field.typeId);
+    if (fieldAlign > maxAlign) {
+      maxAlign = fieldAlign;
+    }
+    offset = roundUpTo(offset, fieldAlign);
+    vec.vecPush(ref members, debugMember(ref cx, id, field.name,
+      debugTypeOf(ref cx, field.typeId), fieldSize, fieldAlign, offset));
+    offset += fieldSize;
+    i += 1;
+  }
+
+  finishComposite(ref cx, id, "DW_TAG_structure_type", nominalNameOf(cx.prog, typeId),
+    sizeOfType(cx.prog, typeId), maxAlign, ref members);
+  return { id: id, found: true };
+}
+
+// A variant is a TAG plus a payload union, which is what codegen emits. The tag
+// is described as an ENUMERATION so a debugger prints `tag = Circle` rather
+// than `tag = 0`.
+function variantDebugType(ref cx: Cx, typeId: TypeId): DebugType {
+  const id = reserveDebugNode(ref cx.e.debug);
+  map.mapInsert(ref cx.e.debug.types, uint64(typeId), id);
+
+  const name = nominalNameOf(cx.prog, typeId);
+  disposable members: Vec<DebugNodeId> = vec.vecNew(2);
+  vec.vecPush(ref members, debugMember(ref cx, id, "tag",
+    variantTagEnumType(ref cx, typeId, name), 4, 4, 0));
+
+  let payloadSize = variantPayloadSize(cx.prog, typeId);
+  if (payloadSize == 0) {
+    payloadSize = 1;
+  }
+  vec.vecPush(ref members, debugMember(ref cx, id, "payload",
+    debugOpaqueBlob(ref cx, name, payloadSize), payloadSize, 4, 4));
+
+  finishComposite(ref cx, id, "DW_TAG_structure_type", name,
+    roundUpTo(4 + payloadSize, 4), 4, ref members);
+  return { id: id, found: true };
+}
+
+// The tag's enumerators, in declaration order - the same stable integers
+// codegen emits as the discriminator.
+function variantTagEnumType(ref cx: Cx, typeId: TypeId, name: string): DebugType {
+  disposable enumerators: Vec<DebugNodeId> = vec.vecNew(4);
+  let i: usize = 0;
+  while (true) {
+    const caseName = variantCaseNameAt(cx.prog, typeId, i);
+    if (caseName.len == 0) {
+      i = i;
+      break;
+    }
+    const eid = reserveDebugNode(ref cx.e.debug);
+    disposable parts: Vec<string> = vec.vecNew(4);
+    vec.vecPush(ref parts, "!DIEnumerator(name: \"");
+    vec.vecPush(ref parts, caseName);
+    vec.vecPush(ref parts, "\", value: ");
+    vec.vecPush(ref parts, fmt.uintToString(uint64(i)));
+    vec.vecPush(ref parts, ")");
+    setDebugNode(ref cx.e.debug, eid, str.stringConcatAll(vec.vecAsArray(ref parts)));
+    vec.vecPush(ref enumerators, eid);
+    i += 1;
+  }
+
+  const id = reserveDebugNode(ref cx.e.debug);
+  disposable parts: Vec<string> = vec.vecNew(8);
+  vec.vecPush(ref parts, "!DICompositeType(tag: DW_TAG_enumeration_type, name: \"");
+  vec.vecPush(ref parts, name);
+  vec.vecPush(ref parts, ".tag\", baseType: ");
+  vec.vecPush(ref parts, debugRef(basicDebugType(ref cx, "int32", 32, "DW_ATE_signed").id));
+  vec.vecPush(ref parts, ", size: 32, elements: !{");
+  vec.vecPush(ref parts, debugRefList(ref enumerators));
+  vec.vecPush(ref parts, "})");
+  setDebugNode(ref cx.e.debug, id, str.stringConcatAll(vec.vecAsArray(ref parts)));
+  return { id: id, found: true };
+}
+
+// A `union` - every field at offset zero, the whole as wide as the widest.
+function unionDebugType(ref cx: Cx, typeId: TypeId): DebugType {
+  const id = reserveDebugNode(ref cx.e.debug);
+  map.mapInsert(ref cx.e.debug.types, uint64(typeId), id);
+
+  disposable members: Vec<DebugNodeId> = vec.vecNew(4);
+  let widest: usize = 1;
+  let maxAlign: usize = 1;
+  let i: usize = 0;
+  while (true) {
+    const field = unionFieldAt(cx.prog, typeId, i);
+    if (!field.found) {
+      i = i;
+      break;
+    }
+    const fieldSize = sizeOfType(cx.prog, field.typeId);
+    const fieldAlign = alignOfType(cx.prog, field.typeId);
+    if (fieldSize > widest) { widest = fieldSize; }
+    if (fieldAlign > maxAlign) { maxAlign = fieldAlign; }
+    vec.vecPush(ref members, debugMember(ref cx, id, field.name,
+      debugTypeOf(ref cx, field.typeId), fieldSize, fieldAlign, 0));
+    i += 1;
+  }
+
+  finishComposite(ref cx, id, "DW_TAG_union_type", nominalNameOf(cx.prog, typeId),
+    widest, maxAlign, ref members);
+  return { id: id, found: true };
+}
+
+// A value enum IS its underlying primitive at run time, so that is what a
+// debugger has to read. The NAME is kept through a typedef, which costs nothing
+// and is what makes `Level` print as `Level` rather than as `int32`.
+function valueEnumDebugType(ref cx: Cx, typeId: TypeId, underlying: TypeId): DebugType {
+  const base = debugTypeOf(ref cx, underlying);
+  if (!base.found) {
+    return noDebugType();
+  }
+  return cacheDebugType(ref cx, typeId,
+    debugTypedef(ref cx, nominalNameOf(cx.prog, typeId), base));
+}
+
+// A vtable is a context pointer followed by one function pointer per method, in
+// the declaration order codegen stores them in.
+function vtableDebugType(ref cx: Cx, typeId: TypeId): DebugType {
+  const id = reserveDebugNode(ref cx.e.debug);
+  map.mapInsert(ref cx.e.debug.types, uint64(typeId), id);
+
+  disposable members: Vec<DebugNodeId> = vec.vecNew(4);
+  vec.vecPush(ref members, debugMember(ref cx, id, "ctx", debugOpaquePointer(ref cx), 8, 8, 0));
+  let i: usize = 0;
+  while (true) {
+    const slot = vtableSlotNameAt(cx.prog, typeId, i);
+    if (slot.len == 0) {
+      i = i;
+      break;
+    }
+    vec.vecPush(ref members, debugMember(ref cx, id, slot,
+      debugOpaquePointer(ref cx), 8, 8, (i + 1) * 8));
+    i += 1;
+  }
+
+  finishComposite(ref cx, id, "DW_TAG_structure_type", nominalNameOf(cx.prog, typeId),
+    members.len * 8, 8, ref members);
+  return { id: id, found: true };
+}
+
+// The name an element type contributes to `int32[]` or `Point[]`. A nominal
+// type has one; a primitive is spelled by its own name.
+function nominalOrPrimName(ref cx: Cx, typeId: TypeId): string {
+  const nominal = nominalNameOf(cx.prog, typeId);
+  if (nominal.len > 0) {
+    return nominal;
+  }
+  switch (typeAt(cx.prog, typeId)) {
+    case Type.Prim { prim: p }: { return primDebugName(p); }
+    default: { return "T"; }
+  }
+}
+
+// `!DISubroutineType(types: !{!4, !7})` - the return type then the parameters.
+//
+// A `null` in any slot is legal and reads as "unspecified", which is what a
+// void return is and what an undescribable parameter degrades to. That is
+// better than omitting the tuple: a frame with a partial signature still shows
+// the arguments it can describe.
+export function debugSubroutineText(ref cx: Cx, retTy: TypeId, ref params: Vec<ParamInfo>): string {
+  disposable parts: Vec<string> = vec.vecNew(params.len * 2 + 3);
+  vec.vecPush(ref parts, "!DISubroutineType(types: !{");
+  vec.vecPush(ref parts, debugBaseRef(debugTypeOf(ref cx, retTy)));
+  let i: usize = 0;
+  while (i < params.len) {
+    vec.vecPush(ref parts, ", ");
+    vec.vecPush(ref parts, debugBaseRef(debugTypeOf(ref cx, vec.vecGet(ref params, i).typeId)));
+    i += 1;
+  }
+  vec.vecPush(ref parts, "})");
+  return str.stringConcatAll(vec.vecAsArray(ref parts));
+}
+
+export function roundUpTo(value: usize, align: usize): usize {
+  if (align <= 1) {
+    return value;
+  }
+  const rem = value % align;
+  if (rem == 0) {
+    return value;
+  }
+  return value + (align - rem);
+}
+
+/*
+  A local, as a debugger sees it.
+
+      call void @llvm.dbg.declare(metadata ptr %pt.1.addr, metadata !12,
+                                  metadata !DIExpression()), !dbg !9
+
+  The intrinsic says "the variable described by !12 lives at this address". So
+  it needs a real stack slot to point at, which is why a `ref` PARAMETER is
+  skipped: its slot is the incoming pointer rather than an alloca, and there is
+  no address of its own to name. A debugger then omits it, which is the right
+  failure - the alternative is describing storage that is not there.
+
+  `argIndex` is 1-based and 0 means "not an argument", which is DWARF's own
+  convention rather than a choice made here.
+*/
+export function noteLocalDebug(
+  ref cx: Cx,
+  name: string,
+  slotId: usize,
+  typeId: TypeId,
+  line: usize,
+  argIndex: usize
+): void {
+  if (cx.e.dbgScope == 0 || slotId == ARG_PTR_SLOT) {
+    return;
+  }
+  const varType = debugTypeOf(ref cx, typeId);
+  // A shape with no description gets no variable at all rather than one whose
+  // type slot is `null` - a debugger would print bytes for it.
+  if (!varType.found) {
+    return;
+  }
+
+  const id = reserveDebugNode(ref cx.e.debug);
+  disposable parts: Vec<string> = vec.vecNew(12);
+  vec.vecPush(ref parts, "!DILocalVariable(name: \"");
+  vec.vecPush(ref parts, name);
+  vec.vecPush(ref parts, "\"");
+  if (argIndex > 0) {
+    vec.vecPush(ref parts, ", arg: ");
+    vec.vecPush(ref parts, fmt.uintToString(uint64(argIndex)));
+  }
+  vec.vecPush(ref parts, ", scope: ");
+  vec.vecPush(ref parts, debugRef(cx.e.dbgScope));
+  vec.vecPush(ref parts, ", file: ");
+  vec.vecPush(ref parts, debugRef(cx.e.dbgFile));
+  vec.vecPush(ref parts, ", line: ");
+  vec.vecPush(ref parts, fmt.uintToString(uint64(dwarfLine(line))));
+  vec.vecPush(ref parts, ", type: ");
+  vec.vecPush(ref parts, debugRef(varType.id));
+  vec.vecPush(ref parts, ")");
+  setDebugNode(ref cx.e.debug, id, str.stringConcatAll(vec.vecAsArray(ref parts)));
+
+  emitDbgDeclare(ref cx, name, slotId, id);
+}

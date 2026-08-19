@@ -162,7 +162,9 @@ check on a change, and say so when you do.
   [docs/writing_yoop.md](docs/writing_yoop.md) section 4.
 - Bootstrap: `npm run test:slice` (end-to-end executables, ~18s),
   `npm run test:parity` (layer dumps vs the JS reference, ~3s),
-  `npm run test:selfhost` (the three-stage build and its fixpoint, ~18s), and
+  `npm run test:selfhost` (the three-stage build and its fixpoint, ~18s),
+  `npm run test:debug` (gdb or lldb reads the DWARF the bootstrap emits, ~9s;
+  SKIPS when neither is on PATH), and
   `node src/yoopiler.js --test bootstrap/src` for every Yoop unit test at once
   (965 of them, ~9s, ONE build of the graph - the five per-module
   `--test bootstrap/src/<module>` commands rebuild it five times and take ~15s
