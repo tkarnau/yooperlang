@@ -43,9 +43,9 @@ function isBinaryOp(tag) {
   );
 }
 
-// Clause keywords that are still RESERVED WORDS, so a tag alone identifies
-// them. `requires` and `layout` used to be here and are now contextual idents
-// (see CONTEXTUAL_KIND_CLAUSES below and the note in lexer.js) - the caller
+// Clause keywords that are RESERVED WORDS, so a tag alone identifies them.
+// `requires` and `layout` are contextual idents instead (see
+// CONTEXTUAL_KIND_CLAUSES below and the note in lexer.js) - the caller
 // checks both.
 function isKindClauseStartTag(tag) {
   return (
@@ -63,16 +63,16 @@ function isKindClauseStartTag(tag) {
 // `requires` be a struct field and `layout` a local everywhere else.
 const CONTEXTUAL_KIND_CLAUSES = new Set(["requires", "layout"]);
 
-// Identifier text -> deferred-feature error message. Used inside kind { ... }
-// to produce a precise "not yet supported" error for clause keywords that
-// later sub-phases will introduce; today they lex as plain idents.
+// Identifier text -> unsupported-clause error message. Used inside
+// kind { ... } to produce a precise error for clause keywords that are not
+// supported; they lex as plain idents.
 const DeferredKindClauseMessages = {
   // `autoJoin` was only ever `mustCall wait beforeScopeEnd` under another
   // name; `joined` in std/core/kinds.yoop spells it that way now.
   autoJoin:
     "autoJoin is not a clause - write `mustCall wait beforeScopeEnd;` instead",
   restricts:
-    "iteration restrictions deferred until for-in iteration lands (phase 7)",
+    "restricts is not a supported kind clause",
 };
 
 const Precedence = {
@@ -84,9 +84,9 @@ const Precedence = {
   [TokenTags.oror]: 20,
   [TokenTags.andand]: 30,
   [TokenTags.pipe]: 35,
-  // Phase 9: bitwise XOR sits between OR and AND (C-style precedence).
+  // Bitwise XOR sits between OR and AND (C-style precedence).
   [TokenTags.caret]: 36,
-  // Phase 9: bitwise AND. `&` is also the prefix address-of and the
+  // Bitwise AND. `&` is also the prefix address-of and the
   // kind-composition operator; both of those are parsed in non-binary
   // positions so the precedence entry doesn't conflict.
   [TokenTags.amp]: 37,
@@ -96,7 +96,7 @@ const Precedence = {
   [TokenTags.gt]: 40,
   [TokenTags.lte]: 40,
   [TokenTags.gte]: 40,
-  // Phase 9: shifts bind tighter than comparisons, looser than additive.
+  // Shifts bind tighter than comparisons, looser than additive.
   [TokenTags.lshift]: 45,
   [TokenTags.rshift]: 45,
   [TokenTags.plus]: 50,
@@ -135,7 +135,7 @@ checking and code generation.
 export function parse(src) {
   let pos = 0;
   let current = null; // current token
-  // Phase 7.1: when a closing `>` is needed inside a type-application and the
+  // When a closing `>` is needed inside a type-application and the
   // next token is `>>` (rshift), we consume the rshift and remember that one
   // virtual `>` remains. The next call to `consumeClosingGt()` returns without
   // advancing. The flag is only consulted by `consumeClosingGt`; other parser
@@ -153,11 +153,10 @@ export function parse(src) {
   // Set while parsing the RHS of `for ITEM in EXPR { ... }`, where a `{` after
   // an `IDENT.IDENT` path is ambiguous: it can open a variant constructor's
   // payload (`Shape.Circle { r: 5 }`) or the loop's own body (`for x in
-  // self.items {`). The constructor used to win unconditionally, so
-  // `for x in self.f {` was a parse error and callers had to prebind the RHS to
-  // a local first (the workaround @derive still carries for arrays). Inside the
-  // RHS the brace must LOOK like a payload to be read as one - see
-  // looksLikeVariantPayload.
+  // self.items {`). Inside the RHS the brace must LOOK like a payload to be
+  // read as one - see looksLikeVariantPayload; otherwise `for x in self.f {`
+  // would be a parse error and callers would have to prebind the RHS to a
+  // local first.
   let inForInIterExpr = false;
 
   // helper functions for token stream management
@@ -205,7 +204,7 @@ export function parse(src) {
     return tok;
   }
 
-  // Phase 6.5: given that peekAhead(openIdx) is a `(`, walk forward over
+  // Given that peekAhead(openIdx) is a `(`, walk forward over
   // balanced parens and return the peek-ahead index of the matching `)`.
   // Returns -1 on EOF before a match.
   function findMatchingRparen(openIdx) {
@@ -221,7 +220,7 @@ export function parse(src) {
     return i - 1;
   }
 
-  // Phase 6.5: true if the current tokens look like a *named* kind-prefixed
+  // True if the current tokens look like a *named* kind-prefixed
   // binding start: `IDENT IDENT :` / `IDENT IDENT =` or the kind-with-args
   // forms `IDENT ( ... ) IDENT :` / `IDENT ( ... ) IDENT =`. Used for both
   // statement-start dispatch (implicit-const form) and the `let|const`
@@ -253,10 +252,10 @@ export function parse(src) {
   // `someKind name = ...`: a kind-prefixed binding is rejected at module level
   // anyway, so `kind Name = ...` there can only be the declaration.
   //
-  // Reserving the word cost more than it bought - it was legal as a struct
-  // FIELD and illegal as a local or parameter, so `Room.kind` compiled and
-  // `specialFor(kind: uint8)` did not, and the collision surfaced nowhere near
-  // where the name was chosen (yooperdoom-takeaways 2.2).
+  // Reserving the word costs more than it buys: as a reserved word it is
+  // legal as a struct FIELD and illegal as a local or parameter, so
+  // `Room.kind` compiles and `specialFor(kind: uint8)` does not, and the
+  // collision surfaces nowhere near where the name was chosen.
   function looksLikeKindDecl() {
     if (!identTextIs("kind")) return false;
     if (peekAhead(1).tag !== TokenTags.ident) return false;
@@ -367,7 +366,7 @@ export function parse(src) {
     );
   }
 
-  // Phase 6.5: consume `IDENT ( argList )?` and return a kindPrefix record.
+  // Consume `IDENT ( argList )?` and return a kindPrefix record.
   // Used at every kind-use site (bindings, parameters, type-decl prefixes).
   function consumeKindPrefixWithArgs() {
     const kindTok = expect(TokenTags.ident);
@@ -440,7 +439,7 @@ export function parse(src) {
     return new ASTNode(kind, posToSourceLocation(src, pos));
   }
 
-  // Phase 7.1: consume the closing `>` of a type application or type-param
+  // Consume the closing `>` of a type application or type-param
   // list, splitting a `>>` token in two if needed.
   function consumeClosingGt() {
     if (pendingGtFromRshift) {
@@ -463,7 +462,7 @@ export function parse(src) {
     );
   }
 
-  // Phase 7.1: peek at "the next closing-gt-equivalent". Returns true if the
+  // Peek at "the next closing-gt-equivalent". Returns true if the
   // current token is `gt`, `rshift`, or a pending split-rshift gt.
   function atClosingGt() {
     if (pendingGtFromRshift) return true;
@@ -473,7 +472,7 @@ export function parse(src) {
   // load first token
   advance();
 
-  // Phase 6.4: shared parser for `propagates<K1, K2, ...>` and `contains<K1, ...>`
+  // Shared parser for `propagates<K1, K2, ...>` and `contains<K1, ...>`
   // clauses. Lives on struct decls and function return types. The current token
   // must be `propagates` or `contains` when this is called.
   //
@@ -505,7 +504,7 @@ export function parse(src) {
     while (peek().tag !== TokenTags.gt && peek().tag !== TokenTags.eof) {
       const nameTok = expect(TokenTags.ident);
       const name = src.substring(nameTok.start, nameTok.start + nameTok.length);
-      // Phase 6.5: optional kind arguments - `propagates<K(args)>`
+      // Optional kind arguments - `propagates<K(args)>`
       let args = null;
       if (peek().tag === TokenTags.lparen) {
         advance();
@@ -606,14 +605,14 @@ export function parse(src) {
       base.kindPrefixes = kindPrefixes;
       return base;
     }
-    // Phase 9.G: function value type `(p1: T1, p2: T2, ...) => RetT`. The
+    // Function value type `(p1: T1, p2: T2, ...) => RetT`. The
     // disambiguator from a parenthesized type group is that function-type
     // param lists always start with `(` followed by `)` (no params), `ref`
     // (a ref param), or `IDENT :` (a named param). The unnamed-param form
     // `(T) => R` would be ambiguous with a `(T)` group - we require named
     // params for clarity and to match the function-decl surface.
     //
-    // Phase 10.K: anything else after `(` is a parenthesized type *group*,
+    // Anything else after `(` is a parenthesized type *group*,
     // whose only purpose is to attach an array suffix: `((p: T) => R)[]` is
     // the way to spell an array of function pointers. (A bare
     // `(p: T) => R[]` binds the `[]` to the return type, since the return
@@ -658,7 +657,7 @@ export function parse(src) {
       name = src.substring(nameTok.start, nameTok.start + nameTok.length);
     }
     let annot;
-    // Phase 7.1: any identifier followed by `<` parses as a generic type
+    // Any identifier followed by `<` parses as a generic type
     // application. The closing `>` may be the first half of a `>>` token -
     // consumeClosingGt() handles the split.
     if (peek().tag === TokenTags.lt) {
@@ -710,7 +709,7 @@ export function parse(src) {
     return annot;
   }
 
-  // Phase 9.G: parse `(p1: T1, p2: T2, ...) => RetT` as a function value
+  // Parse `(p1: T1, p2: T2, ...) => RetT` as a function value
   // type annotation. The leading `(` has already been peeked. Params are
   // required to be named for parity with the function-decl surface; the
   // names themselves are discarded after parse (the param list at the
@@ -720,7 +719,7 @@ export function parse(src) {
     const params = [];
     if (peek().tag !== TokenTags.rparen) {
       while (true) {
-        // Phase 10.I: optional `ref` modifier on the param. Required when
+        // Optional `ref` modifier on the param. Required when
         // mirroring a trait method's `ref T` arg in a vtable field FPT
         // (e.g. `Reader.read: (ref buf: uint8[]) => ...`).
         let isRef = false;
@@ -748,7 +747,7 @@ export function parse(src) {
     return { kind: "functionType", params, returnType };
   }
 
-  // Phase 7.1: parse `<T, U, V>` after a decl name. Returns an array of
+  // Parse `<T, U, V>` after a decl name. Returns an array of
   // TYPE_PARAM AST nodes (possibly empty if no `<` follows).
   function parseTypeParamList() {
     if (peek().tag !== TokenTags.lt) return [];
@@ -779,7 +778,7 @@ export function parse(src) {
         posToSourceLocation(src, nameTok.start),
       );
       node.name = paramName;
-      // Phase 7.2 / 9.J: optional `implements` bound list on the param.
+      // Optional `implements` bound list on the param.
       // Single bound: `T implements Display`. Multiple bounds (9.J):
       // `T implements (Foo, Bar)`. Stored uniformly as `bounds: TraitAnnotation[]`
       // - empty when no bound, length 1 for single, length N for the
@@ -808,7 +807,7 @@ export function parse(src) {
           node.bounds.push(annot);
         };
         if (peek().tag === TokenTags.lparen) {
-          // Phase 9.J: `T implements (A, B, C)` - at least one bound.
+          // `T implements (A, B, C)` - at least one bound.
           advance(); // consume `(`
           if (peek().tag === TokenTags.rparen) {
             throw parseError(
@@ -848,7 +847,7 @@ export function parse(src) {
     const node = buildSourcedNode(ASTNodeKind.PROGRAM);
     try {
       node.body = [];
-      // Phase 8.A: `import.unsafe;` enables `unsafe_ptr<T>` and friends.
+      // `import.unsafe;` enables `unsafe_ptr<T>` and friends.
       // Defaults to false; set true if the module opts in at top.
       node.allowsUnsafe = false;
       // testing-via-kinds: `import.test;` marks this module as a test module.
@@ -863,7 +862,7 @@ export function parse(src) {
       // ordinary identifier everywhere else - bootstrap/src/contracts.yoop uses
       // it as a struct field name. `IDENT IDENT ;` has no other meaning at top
       // level (a kind-prefixed binding needs `=`, a function needs `(`), so the
-      // three-token lookahead is unambiguous. See plans/modules-as-directories.md.
+      // three-token lookahead is unambiguous.
       node.moduleName = null;
       if (
         peek().tag === TokenTags.ident &&
@@ -914,7 +913,7 @@ export function parse(src) {
               if (seenNonImport) {
                 throw parseError("imports must come before other declarations");
               }
-              // Phase 8.A: `import.unsafe;` - module-level opt-in for raw
+              // `import.unsafe;` - module-level opt-in for raw
               // pointers. Sets a flag on the PROGRAM node; doesn't push a
               // body entry (it's an attribute, not a declaration).
               if (peekAhead(1).tag === TokenTags.dot) {
@@ -983,10 +982,10 @@ export function parse(src) {
             break;
           case TokenTags.at:
             {
-              // Phase 11.A: `@<name>(args?) target` attribute at top level.
+              // `@<name>(args?) target` attribute at top level.
               seenNonImport = true;
               const attrNode = parseAttribute();
-              // Phase 11.C: an attribute decorating a let/const decl
+              // An attribute decorating a let/const decl
               // at the top level still produces a module-level decl
               // from the typechecker's perspective. Forward the
               // `isModuleLevel` flag through the wrapper so symbol
@@ -1006,7 +1005,7 @@ export function parse(src) {
           case TokenTags.let:
           case TokenTags.const:
             {
-              // Phase 8.E: module-level mutable state. The full VarDecl
+              // Module-level mutable state. The full VarDecl
               // grammar inside parseVarDecl is fine to reuse; we add a
               // post-condition that forbids the constructs that don't
               // make sense at module top (kind prefix, no initializer,
@@ -1062,7 +1061,7 @@ export function parse(src) {
     return src.substring(tok.start + 1, tok.start + tok.length - 1);
   }
 
-  // Phase 11.A: `@<name>(args?) target` attribute. Parses the prefix,
+  // `@<name>(args?) target` attribute. Parses the prefix,
   // optional arg list, and the decorated target (block, let/const decl,
   // or bare ; for argless statement-shaped attributes). Looks up the
   // attribute in the registry and runs its parsePhase handler; unknown
@@ -1325,8 +1324,8 @@ export function parse(src) {
         node.clauses.push(parsePausableClause());
         continue;
       }
-      // Surface a precise message for deferred-feature clause keywords
-      // (they currently lex as plain idents).
+      // Surface a precise message for unsupported clause keywords (they lex
+      // as plain idents).
       if (peek().tag === TokenTags.ident) {
         const text = src.substring(
           peek().start,
@@ -1368,8 +1367,8 @@ export function parse(src) {
   }
 
   // True when the current token starts a kind clause, by reserved tag OR by
-  // contextual identifier text. Every caller that used to test
-  // `isKindClauseStartTag(peek().tag)` goes through this instead.
+  // contextual identifier text. Callers go through this rather than testing
+  // `isKindClauseStartTag(peek().tag)` directly.
   function atKindClauseStart() {
     if (isKindClauseStartTag(peek().tag)) return true;
     return CONTEXTUAL_KIND_CLAUSES.has(identText(peek()));
@@ -1485,8 +1484,8 @@ export function parse(src) {
 
   // testing-via-kinds: `signature (p: T) => R;` constrains the shape of a
   // function carrying an `appliesTo function` kind. The annotation goes
-  // through the ordinary type-annotation parser, so it is exactly the Phase
-  // 9.G function-value type - no separate grammar for signatures.
+  // through the ordinary type-annotation parser, so it is exactly the
+  // function-value type - no separate grammar for signatures.
   function parseSignatureClause() {
     const node = buildSourcedNode(ASTNodeKind.KIND_SIGNATURE_CLAUSE);
     advance(); // signature
@@ -1588,11 +1587,9 @@ export function parse(src) {
               ? src.substring(tok.start, tok.start + tok.length)
               : inverseTokenTags[tok.tag];
           // Contextual idents, kept usable as ordinary identifiers
-          // everywhere else. `region` was always one; `binding`, `parameter`
-          // and `field` were reserved words until yooperdoom-takeaways 2.2
-          // pointed out they are three of the most natural parameter names in
-          // a compiler, and an appliesTo list is the only place they mean
-          // anything.
+          // everywhere else. `binding`, `parameter` and `field` are three of
+          // the most natural parameter names in a compiler, and an appliesTo
+          // list is the only place they mean anything.
           //
           // A region kind governs a lexical scope rather than a named value -
           // it is used in the anonymous `<kind> EXPR { ... }` / `<kind> EXPR;`
@@ -1645,7 +1642,7 @@ export function parse(src) {
           ? src.substring(tok.start, tok.start + tok.length)
           : inverseTokenTags[tok.tag];
       throw parseError(
-        `mustNotEscape ${name} not yet supported in phase 6.2; only 'scope' is accepted`,
+        `mustNotEscape ${name} is not supported; only 'scope' is accepted`,
         tok.start,
         tok.length,
       );
@@ -1668,7 +1665,7 @@ export function parse(src) {
         tok.tag === TokenTags.ident
           ? src.substring(tok.start, tok.start + tok.length)
           : inverseTokenTags[tok.tag];
-      // Phase 9.J: `acrossThreads` joins `acrossScopes` as a legal target.
+      // `acrossThreads` joins `acrossScopes` as a legal target.
       // Lexes as a plain ident (no dedicated TokenTag); recognized contextually
       // here.
       if (name === "acrossThreads") {
@@ -1691,7 +1688,7 @@ export function parse(src) {
     expectContextual("layout");
     expect(TokenTags.lcurly);
     node.alignExpr = null;
-    // Phase 8.B: opt-in marker that this layout mirrors a C struct's ABI.
+    // Opt-in marker that this layout mirrors a C struct's ABI.
     // Currently contractual only - yoop's natural struct layout already
     // matches C for trivially-aligned structs.
     node.abiC = false;
@@ -1713,7 +1710,7 @@ export function parse(src) {
         expect(TokenTags.semicolon);
         continue;
       }
-      // Phase 8.B: `abi "C";` - match by ident name since `abi` isn't a
+      // `abi "C";` - match by ident name since `abi` isn't a
       // tokenized keyword. Reserved per SPEC §14 so user code shouldn't
       // shadow it accidentally.
       if (tok.tag === TokenTags.ident) {
@@ -1785,8 +1782,7 @@ export function parse(src) {
               ? src.substring(tok.start, tok.start + tok.length)
               : inverseTokenTags[tok.tag];
           // `io` is a contextual ident - two characters, and far too useful a
-          // parameter name to reserve for one clause (yooperdoom-takeaways
-          // 2.2).
+          // parameter name to reserve for one clause.
           if (name === "io") {
             cat = "io";
             break;
@@ -1839,11 +1835,11 @@ export function parse(src) {
   function parseMustCallClause() {
     const node = buildSourcedNode(ASTNodeKind.KIND_MUSTCALL_CLAUSE);
     expect(TokenTags.mustCall);
-    // The disjunction/block form `mustCall { a; b; } beforeScopeEnd;` is
-    // reserved for later sub-phases.
+    // The disjunction/block form `mustCall { a; b; } beforeScopeEnd;` is not
+    // supported.
     if (peek().tag === TokenTags.lcurly) {
       throw parseError(
-        "mustCall block form (alternation) not yet supported in phase 6.1; single function name only",
+        "mustCall block form (alternation) is not supported; single function name only",
         peek().start,
         peek().length,
       );
@@ -1861,7 +1857,7 @@ export function parse(src) {
       );
       if (text === "beforeAny" || text === "afterAny") {
         throw parseError(
-          `mustCall ${node.methodName} ${text} not yet supported in phase 6.1; use 'beforeScopeEnd'`,
+          `mustCall ${node.methodName} ${text} is not supported; use 'beforeScopeEnd'`,
           peek().start,
           peek().length,
         );
@@ -2032,7 +2028,7 @@ export function parse(src) {
         break;
       case TokenTags.let:
       case TokenTags.const:
-        // Phase 8.E: `export let|const` - same restrictions as the bare
+        // `export let|const` - same restrictions as the bare
         // module-level form. Mark isModuleLevel so the typechecker can
         // route to the global-state pass.
         node.decl = parseVarDecl();
@@ -2085,10 +2081,10 @@ export function parse(src) {
 
     node.name = parseIdentAsName();
 
-    // Phase 7.1: optional type parameter list - `trait Iter<T> { ... }`.
+    // Optional type parameter list - `trait Iter<T> { ... }`.
     node.typeParams = parseTypeParamList();
 
-    // Phase 9.J: `trait Child extends Parent[, Parent2]?`. Stored as a list
+    // `trait Child extends Parent[, Parent2]?`. Stored as a list
     // of type annotations (each typically a typeName or typeApplication for a
     // generic parent). Resolved into TraitTypes in typecheck pass C.1.
     node.extends = [];
@@ -2135,7 +2131,7 @@ export function parse(src) {
     return node;
   }
 
-  // Phase 9.G: `vtable Name for TraitName { method: (params) => ret, ... }`.
+  // `vtable Name for TraitName { method: (params) => ret, ... }`.
   // Each field's type annotation must be a function-pointer type (`=>`) whose
   // signature matches the corresponding trait method minus `ref self`. The
   // implicit `ctx: unsafe_ptr<void>` first slot is added by codegen - the user
@@ -2342,8 +2338,8 @@ export function parse(src) {
     // captures any postfix tightly, then *falls through* to the binary +
     // assignment loop below. Returning early here was a parser bug -
     // `!a && b` would terminate after `!a` and the trailing `&& b` would
-    // hit "expected semicolon, got andand" (see plans/archive/yoopbinder-papercuts.md
-    // Issue 1). Chained into the same prefix if/else group as
+    // hit "expected semicolon, got andand". Chained into the same prefix
+    // if/else group as
     // `amp`/`mult`/`null` below so the trailing `else { primary chain }`
     // is only entered when no prefix matched.
     if (peek().tag === TokenTags.minus) {
@@ -2364,14 +2360,14 @@ export function parse(src) {
         node = minusNode;
       }
     } else if (peek().tag === TokenTags.bang) {
-      // Phase 9.B: prefix `!x` - logical NOT.
+      // Prefix `!x` - logical NOT.
       advance();
       const notNode = buildSourcedNode(ASTNodeKind.UNARY_EXPRESSION);
       notNode.op = "not";
       notNode.operand = parseExpression(70);
       node = notNode;
     } else if (peek().tag === TokenTags.tilde) {
-      // Phase 9: prefix `~x` - bitwise NOT. Restricted to integer
+      // Prefix `~x` - bitwise NOT. Restricted to integer
       // operands by the typechecker.
       advance();
       const bitnotNode = buildSourcedNode(ASTNodeKind.UNARY_EXPRESSION);
@@ -2420,7 +2416,7 @@ export function parse(src) {
       awaitNode.operand = operand;
       return awaitNode;
     } else if (peek().tag === TokenTags.amp) {
-      // Phase 8.A: prefix `&x` - address-of an lvalue. Same tight precedence
+      // Prefix `&x` - address-of an lvalue. Same tight precedence
       // as `ref` so postfixes bind to the operand. The `&` token also serves
       // as bitwise-AND in binary position; that's parsed by the precedence
       // climber and never reaches this primary path. We fall through to the
@@ -2431,14 +2427,14 @@ export function parse(src) {
       addrNode.operand = parseExpression(70);
       node = addrNode;
     } else if (peek().tag === TokenTags.mult) {
-      // Phase 8.A: prefix `*p` - pointer dereference. Falls through so that
+      // Prefix `*p` - pointer dereference. Falls through so that
       // `*p = v` and `*p.field` work via the postfix + assignment path.
       advance();
       const derefNode = buildSourcedNode(ASTNodeKind.DEREF_EXPRESSION);
       derefNode.operand = parseExpression(70);
       node = derefNode;
     } else if (peek().tag === TokenTags.null) {
-      // Phase 8.A: `null` literal. Type pinned by context.
+      // `null` literal. Type pinned by context.
       advance();
       node = buildSourcedNode(ASTNodeKind.NULL_LITERAL);
     } else if (peek().tag === TokenTags.intLiteral) {
@@ -2483,11 +2479,11 @@ export function parse(src) {
       expect(TokenTags.rbracket);
     } else if (peek().tag === TokenTags.ident) {
       const name = parseIdentAsName();
-      // Phase 8.A: `unsafe_ptr.cast<U>(p)` / `unsafe_ptr.toInt(p)` /
+      // `unsafe_ptr.cast<U>(p)` / `unsafe_ptr.toInt(p)` /
       // `unsafe_ptr.fromInt<T>(n)` - explicit type-arg intrinsics.
       // Recognized only by literal token shape so we don't have to weaken
       // the "no `<` in expression position" invariant elsewhere.
-      // Phase 8.D: `errno.get()` / `errno.set(v)` / `errno.message(c)` -
+      // `errno.get()` / `errno.set(v)` / `errno.message(c)` -
       // thread-local errno bridge. Recognized as a literal token shape
       // for the same reason the `unsafe_ptr.*` namespace below is - to
       // avoid weakening the no-`<`-in-expression-position invariant.
@@ -2549,7 +2545,7 @@ export function parse(src) {
           }
           expect(TokenTags.lparen);
           castNode.operand = parseExpression();
-          // Phase 8.C: toArray takes a second arg - the length.
+          // toArray takes a second arg - the length.
           castNode.lengthOperand = null;
           if (opName === "toArray") {
             expect(TokenTags.comma);
@@ -2591,7 +2587,7 @@ export function parse(src) {
       node = buildSourcedNode(ASTNodeKind.IDENT);
       node.name = "self";
     } else if (peek().tag === TokenTags.lparen) {
-      // Phase 9.A: parenthesized subexpression - `(a + b) * c`. Plain
+      // Parenthesized subexpression - `(a + b) * c`. Plain
       // grouping; no tuple syntax. Postfix chain (`.field`, `[i]`, `?`,
       // `(args)`) continues to apply to the inner expression.
       advance(); // consume (
@@ -2605,7 +2601,7 @@ export function parse(src) {
       //
       // The shape that hits this most is a helper inside a `suite` body, where
       // putting the helper next to the cases it serves is the natural
-      // instinct (yooperdoom-takeaways 2.5).
+      // instinct.
       throw parseError(
         `functions cannot be declared inside another function body - ` +
           `move it to module scope. Yoop has no nested functions or closures.`,
@@ -2645,7 +2641,7 @@ export function parse(src) {
         node = fieldAccessNode;
         continue;
       }
-      // phase 7.5: variant constructor - EnumName.Variant { fields }
+      // Variant constructor - EnumName.Variant { fields }
       // Only matches IDENT.IDENT followed by `{`. Bare `EnumName.Variant`
       // (no payload) stays a FIELD_ACCESS; the typechecker promotes it.
       if (
@@ -2679,8 +2675,8 @@ export function parse(src) {
         advance(); // consume '?'
         const tryOpNode = buildSourcedNode(ASTNodeKind.TRY_OP);
         tryOpNode.operand = node;
-        // Phase 10.E.2 (SPEC 11 "attaching context"): an optional context
-        // string after the `?`, prepended to the propagated error.
+        // SPEC 11 "attaching context": an optional context string after the
+        // `?`, prepended to the propagated error.
         //
         //   parseTypeParams(ref ps)? "type params"
         //   parseTypeParams(ref ps)? `type params for ${node.name}`
@@ -2690,7 +2686,7 @@ export function parse(src) {
         // ambiguous with subtraction, and a string can never continue an
         // expression, so this stays a zero-lookahead decision.
         tryOpNode.context = parseTryContext();
-        // Phase 10.E.3: `expr? e { ... }` - HANDLE the failure here instead
+        // `expr? e { ... }` - HANDLE the failure here instead
         // of propagating it. `e` names the Err payload inside the block,
         // which must diverge on every path (see diverge.js).
         //
@@ -2725,7 +2721,7 @@ export function parse(src) {
         continue;
       }
       // array indexing: xs[i]
-      // Phase 9.E: array slice xs[i..j], xs[..j], xs[i..], xs[..]
+      // Array slice xs[i..j], xs[..j], xs[i..], xs[..]
       if (peek().tag === TokenTags.lbracket) {
         advance(); // consume [
         // Sniff the start: either expression or bare `..` for an open start.
@@ -2769,7 +2765,7 @@ export function parse(src) {
 
     // assignment - lvalue is whatever the primary+postfix chain produced.
     // valid targets: IDENT, FIELD_ACCESS, INDEX_EXPRESSION, DEREF_EXPRESSION
-    // Phase 8.A: only consume assignment at top-level expression precedence.
+    // Only consume assignment at top-level expression precedence.
     // When parseExpression is called recursively (e.g. as the operand of
     // a unary `*` with minPrecedence=70), assignment must stay outside our
     // grammar - otherwise `*p = v` parses as `*(p = v)`.
@@ -2793,7 +2789,7 @@ export function parse(src) {
       return assignNode;
     }
 
-    // Phase 9: compound assignment - `x += y`, `x -= y`, `x *= y`, `x /= y`,
+    // Compound assignment - `x += y`, `x -= y`, `x *= y`, `x /= y`,
     // `x %= y`. Stored as a dedicated AST node so codegen evaluates the
     // lvalue once even if it contains side-effecting subexpressions.
     const compoundOpMap = {
@@ -2865,7 +2861,7 @@ export function parse(src) {
     return node;
   }
 
-  // Phase 10.E.2: the optional context clause on a postfix `?`. Returns the
+  // The optional context clause on a postfix `?`. Returns the
   // context expression node, or null when the `?` has no context. Only a
   // double-quoted string or a backtick template is accepted - see the call
   // site for why this isn't a general expression.
@@ -3031,7 +3027,7 @@ export function parse(src) {
         return parseSwitchStatement();
       }
       case TokenTags.at: {
-        // Phase 11.A: `@<name>(args?) target` attribute at statement
+        // `@<name>(args?) target` attribute at statement
         // position. Body of `@precompile { ... }` etc. lives inside a
         // function body via this path.
         return parseAttribute();
@@ -3049,9 +3045,9 @@ export function parse(src) {
         // through parseExpression from an initializer or argument, not from
         // here. A bare one as a statement would be a no-op anyway.
         //
-        // See yooperdoom-takeaways 2.4b - whether to SUPPORT a bare block
-        // (it is the natural way to scope a `disposable` tightly) is an open
-        // design question. Describing it accurately is not.
+        // Whether to SUPPORT a bare block (it is the natural way to scope a
+        // `disposable` tightly) is an open design question. Describing it
+        // accurately is not.
         throw parseError(
           `a bare "{ ... }" block is not a statement - a block belongs to ` +
             `something: a function body, an if/else, a loop, a switch arm, ` +
@@ -3064,7 +3060,7 @@ export function parse(src) {
       }
       case TokenTags.ident: {
         // kind-prefixed binding form: `IDENT IDENT : ...` / `IDENT IDENT = ...`
-        // or `IDENT(args) IDENT : ...` (phase 6.5; inferred `=` form added later).
+        // or `IDENT(args) IDENT : ...`.
         if (looksLikeKindPrefixedBindingStart()) {
           return parseVarDecl();
         }
@@ -3090,7 +3086,7 @@ export function parse(src) {
   }
 
   // verifies code like `let {x, y} = someExpr;`
-  // no renaming or nested destructuring for now, no types declared
+  // no renaming or nested destructuring, no types declared
   function parseDestructureDecl(varToken, declKind) {
     const node = buildSourcedNode(ASTNodeKind.DESTRUCTURE_DECL);
     node.declKind = declKind;
@@ -3219,7 +3215,7 @@ export function parse(src) {
     return node;
   }
 
-  // Phase 8.E: enforce MVP restrictions on module-level let/const decls.
+  // Enforce MVP restrictions on module-level let/const decls.
   // Throws a parseError on violation. The decl AST is already built; we
   // inspect its shape and reject what we don't support yet.
   function validateModuleLevelDecl(decl) {
@@ -3295,7 +3291,7 @@ export function parse(src) {
 
   function parseForStatement() {
     expect(TokenTags.for);
-    // Phase 9.D: dispatch between the classic C-style `for (i = ...; ...; ...)`
+    // Dispatch between the classic C-style `for (i = ...; ...; ...)`
     // and the new `for ITEM in EXPR { ... }` element-walking form. The
     // disambiguator is one token of lookahead after `for`:
     //   `for (`         -> classic
@@ -3363,9 +3359,8 @@ export function parse(src) {
     return node;
   }
 
-  // Phase 9.D: `for item in xs { ... }`. The expression after `in` is parsed
-  // with parseExpression(0); typecheck enforces it resolves to an array (and,
-  // in a later phase, to any type implementing Iterable<T>).
+  // `for item in xs { ... }`. The expression after `in` is parsed
+  // with parseExpression(0); typecheck enforces it resolves to an array.
   function parseForInStatement() {
     const node = buildSourcedNode(ASTNodeKind.FOR_IN_LOOP);
     node.loopVar = parseIdentAsName();
@@ -3463,7 +3458,7 @@ export function parse(src) {
     const node = buildSourcedNode(ASTNodeKind.FUNCTION_DECL);
     node.isTask = false;
     node.name = parseIdentAsName();
-    // Phase 7.1: optional type parameter list - `function map<T, U>(...)`.
+    // Optional type parameter list - `function map<T, U>(...)`.
     node.typeParams = parseTypeParamList();
     expect(TokenTags.lparen);
     node.params = [];
@@ -3483,13 +3478,13 @@ export function parse(src) {
     expect(TokenTags.rparen);
     expect(TokenTags.colon);
     node.returnTypeAnnotation = parseTypeAnnotation();
-    // Phase 6.4: optional `propagates<...>` clause on return type.
+    // Optional `propagates<...>` clause on return type.
     parsePropagationClauses(node);
     node.body = parseBlock();
     return node;
   }
 
-  // Phase 7.1: parse a single trait reference inside an `implements ...` clause.
+  // Parse a single trait reference inside an `implements ...` clause.
   // Accepts either `TraitName` or `TraitName<T1, T2, ...>`.
   function parseImplementsClauseRef() {
     const nameTok = expect(TokenTags.ident);
@@ -3525,10 +3520,10 @@ export function parse(src) {
     const node = buildSourcedNode(ASTNodeKind.TYPE_DECL);
     // name
     node.name = parseIdentAsName();
-    // Phase 7.1: optional type parameter list - `type Box<T> { ... }`.
+    // Optional type parameter list - `type Box<T> { ... }`.
     node.typeParams = parseTypeParamList();
 
-    // Phase 6.5: optional single kind prefix on the type declaration,
+    // Optional single kind prefix on the type declaration,
     // e.g. `type Vec4 aligned(32) implements Disposable { ... }`.
     // Detected when the next token is an IDENT that is NOT `implements` and
     // is not the start of a propagates/contains clause - i.e. an IDENT
@@ -3555,9 +3550,9 @@ export function parse(src) {
       }
     }
 
-    // Phase 7.1: implements clause now accepts generic trait applications, e.g.
+    // Implements clause accepts generic trait applications, e.g.
     // `implements Container<int32>`. Each entry is a record { name, typeArgs }
-    // where typeArgs is null for non-generic trait references (backward-compatible).
+    // where typeArgs is null for non-generic trait references.
     node.implements = [];
     if (peek().tag === TokenTags.implements) {
       advance();
@@ -3575,7 +3570,7 @@ export function parse(src) {
       }
     }
 
-    // Phase 6.4: optional `propagates<...>` / `contains<...>` clauses.
+    // Optional `propagates<...>` / `contains<...>` clauses.
     parsePropagationClauses(node);
 
     if (peek().tag === TokenTags.lcurly) {
@@ -3642,15 +3637,15 @@ export function parse(src) {
     return node;
   }
 
-  // Phase 7.5 (renamed in Phase 12): variant declaration - tagged sum type.
+  // Variant declaration - tagged sum type.
   //   variant Name<TParams?> implements (T, U)? propagates<K>? contains<K>? {
   //       Case1 { f: T, ... },
   //       Case2,
   //       function method(ref self, ...): R { ... },
   //       ...
   //   }
-  // Phase 13.B: variants can now implement traits and declare propagates /
-  // contains clauses, mirroring `type` decls. The body interleaves variant
+  // Variants may implement traits and declare propagates / contains
+  // clauses, mirroring `type` decls. The body interleaves variant
   // cases and method bodies; methods are only legal when the variant
   // declares an `implements` clause.
   function parseVariantDecl() {
@@ -3659,7 +3654,7 @@ export function parse(src) {
     node.name = parseIdentAsName();
     node.typeParams = parseTypeParamList();
 
-    // Phase 13.B: implements clause - same shape as `parseTypeDecl`.
+    // Implements clause - same shape as `parseTypeDecl`.
     node.implements = [];
     if (peek().tag === TokenTags.implements) {
       advance();
@@ -3677,7 +3672,7 @@ export function parse(src) {
       }
     }
 
-    // Phase 13.B: optional `propagates<...>` / `contains<...>` clauses.
+    // Optional `propagates<...>` / `contains<...>` clauses.
     parsePropagationClauses(node);
 
     node.variants = [];
@@ -3734,7 +3729,7 @@ export function parse(src) {
       } else {
         // no-payload variant
         variant.fields = null;
-        // Phase 13.D: `Special MyType` is NOT payload syntax - a case payload
+        // `Special MyType` is NOT payload syntax - a case payload
         // is always a record. Without this check the case name and the type
         // silently parse as TWO payload-less cases (`Special` and `MyType`),
         // since the separating comma is optional; nothing errors at the decl
@@ -3778,7 +3773,7 @@ export function parse(src) {
     return node;
   }
 
-  // Phase 12: value enum declaration - C-style named primitive constants.
+  // Value enum declaration - C-style named primitive constants.
   //   enum Name { Case1, Case2 (value)?, ... }            // default int32
   //   enum Name<int64> { Case 0 }
   //   enum Name<string> { Asc "A", Desc "D" }
@@ -3886,24 +3881,24 @@ export function parse(src) {
     return node;
   }
 
-  // Phase 7.5: union declaration - untagged overlapping-memory aggregate.
+  // Union declaration - untagged overlapping-memory aggregate.
   //   union Name { field: Type, ... }
   function parseUnionDecl() {
     expect(TokenTags.union);
     const node = buildSourcedNode(ASTNodeKind.UNION_DECL);
     node.name = parseIdentAsName();
-    // Reject generics on unions - deferred (see plans/phase-7-5-sum-types-and-unions.md).
+    // Reject generics on unions - not supported.
     if (peek().tag === TokenTags.lt) {
       throw parseError(
-        `generic unions are not yet supported (deferred)`,
+        `generic unions are not supported`,
         peek().start,
         peek().length,
       );
     }
-    // Reject `implements` on unions - deferred.
+    // Reject `implements` on unions - not supported.
     if (peek().tag === TokenTags.implements) {
       throw parseError(
-        `union types cannot implement traits in this phase (deferred)`,
+        `union types cannot implement traits`,
         peek().start,
         peek().length,
       );
@@ -3930,7 +3925,7 @@ export function parse(src) {
     return node;
   }
 
-  // Phase 7.5: switch statement with optional variant patterns.
+  // Switch statement with optional variant patterns.
   //   switch (expr) { case Pat: { ... }  default: { ... } }
   function parseSwitchStatement() {
     expect(TokenTags.switch);
@@ -3997,7 +3992,7 @@ export function parse(src) {
     return node;
   }
 
-  // Phase 7.5: parse a single arm pattern. Accepts:
+  // Parse a single arm pattern. Accepts:
   //   - INT_LITERAL / CHAR_LITERAL / BOOL_LITERAL        → LITERAL_PATTERN
   //   - `_`                                              → VARIANT_PATTERN { isWildcard: true }
   //   - IDENT.IDENT { fieldBindings? }                   → VARIANT_PATTERN
@@ -4173,7 +4168,7 @@ export function parse(src) {
     node.kindPrefix = null;
 
     // Detect kind prefix: IDENT followed by (IDENT or ref) means kind-prefixed param.
-    // Also supports `IDENT(args) IDENT|ref` (phase 6.5 parameterized kinds).
+    // Also supports `IDENT(args) IDENT|ref` (parameterized kinds).
     // Examples: `scoped h: ref FileHandle`, `scoped ref h: FileHandle`,
     //           `aligned(32) v: Vec4`.
     if (!node.kindPrefix && peek().tag === TokenTags.ident) {
@@ -4197,7 +4192,7 @@ export function parse(src) {
           const next2 = peekAhead(1);
           if (next2.tag === TokenTags.ident) {
             throw parseError(
-              "a parameter may carry at most one kind prefix in phase 6.5",
+              "a parameter may carry at most one kind prefix",
               peek().start,
               peek().length,
             );
@@ -4231,7 +4226,7 @@ export function parse(src) {
   // Reserved words a user is most likely to reach for as a name, with the
   // reason each one has to stay reserved. These three carry real grammar in
   // positions where an identifier is also legal, so unlike `kind` / `field` /
-  // `io` (yooperdoom-takeaways 2.2) they cannot be made contextual.
+  // `io` they cannot be made contextual.
   const RESERVED_NAME_HINTS = {
     in: "it separates the two halves of `for x in xs`",
     from: "it introduces the path in `import ... from` and `extern ... from`",

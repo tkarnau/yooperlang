@@ -1,0 +1,14 @@
+function main(): int32 {
+    let xs: int32[] = [10, 20, 30];
+    let k: int32 = 0;
+    while (k < xs.len) {
+        k = k + 1;
+    }
+    return 0;
+}
+
+// Fails because `xs.len` is a usize and `k` is an int32, and there is no
+// implicit widening between named numeric types. The counted-loop head
+// (`for (let k = 0; k < xs.len; k += 1)`) is the one place a counter takes
+// its type from the loop CONDITION rather than the literal, which is why
+// that spelling compiles and this one does not.

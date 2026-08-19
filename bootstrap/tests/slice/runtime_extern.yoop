@@ -6,10 +6,9 @@
 // Nothing here goes through a lowering: every runtime call below is an ORDINARY
 // call to a symbol this file declared, so the only thing that can put the
 // runtime's C sources on the clang line is the `from` clause itself. Without
-// that, the link fails with `"_yoop_float_to_string", referenced from`, which
-// was 2.3 in plans/bootstrap-completion.md and 18 of the 420 files in the
-// surface probe (std/debug, std/env, std/runtime, std/core/atomic and friends
-// are all in exactly this shape).
+// that, the link fails with `"_yoop_float_to_string", referenced from`.
+// std/debug, std/env, std/runtime, std/core/atomic and friends are all in
+// exactly this shape.
 //
 // The two spellings of `from` still mean different things: `from library "m"`
 // would put `-lyoop_runtime` on the line and fail to find an archive that does
@@ -17,8 +16,7 @@
 //
 // `yoop_float_to_string` is `snprintf(..., "%g", x)` and nothing else, so its
 // output is C's and is the same on both compilers. It is also the function
-// std/core/format.yoop reaches for, which is what made two std files land in
-// this bucket the moment floats compiled.
+// std/core/format.yoop reaches for, which puts two std files in this shape.
 
 extern "C" from "stdio.h" {
   function printf(fmt: string, ...): int32;

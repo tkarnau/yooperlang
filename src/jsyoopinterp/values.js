@@ -1,4 +1,4 @@
-// Phase 11.B: wrapped values for the comptime interpreter.
+// Wrapped values for the comptime interpreter.
 //
 // Every value the interpreter manipulates is a `{ ty, v }` pair where
 // `ty` is a yoop `Type` (from src/jsyooptypecheck/types.js) and `v` is
@@ -14,10 +14,9 @@
 //   float32 / float64                                       - JS number
 //   string                                                  - JS string
 //
-// Wider types (struct / array / ref / enum / Task / vtable) land in
-// later sub-phases. The interpreter's value layer is intentionally
-// kept narrow today so the path from AST → bytecode → result for
-// primitive arithmetic is easy to read.
+// Composite types wrap the same way, with `v` holding a JS structure of
+// wrapped values: a field-name map for a struct, `{ buf, len }` for an
+// array, a variant record for an enum, and so on.
 
 import { typeKinds, getBitWidthOfIntPrim } from "../jsyooptypecheck/types.js";
 

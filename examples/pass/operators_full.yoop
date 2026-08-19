@@ -1,4 +1,4 @@
-// Phase 9: full operator coverage - bitwise & ^ ~ << >> binary, ~ prefix,
+// Full operator coverage - bitwise & ^ ~ << >> binary, ~ prefix,
 // and compound assignment += -= *= /= %= on IDENT / FIELD / INDEX lvalues.
 
 extern "C" from "stdio.h" {

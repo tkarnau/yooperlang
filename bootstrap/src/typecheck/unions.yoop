@@ -68,9 +68,9 @@ export function fillUnionFields(
       f += 1;
       continue;
     }
-    // `carriedKind` is filled the same way a struct's fields are (item 5.18),
-    // though nothing reads it for a union yet: propagated disposal is a
-    // per-field obligation and a union has no idea which field is live. Filling
+    // `carriedKind` is filled the same way a struct's fields are, though
+    // nothing reads it for a union: propagated disposal is a per-field
+    // obligation and a union has no idea which field is live. Filling
     // it keeps every `Field` construction site uniform rather than leaving one
     // that silently defaults.
     vec.vecPush(ref fields, {

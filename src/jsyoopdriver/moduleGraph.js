@@ -7,13 +7,13 @@ import { moduleIdFor, directoryModuleIdFor } from "./moduleId.js";
 import { lowerRangeExprs } from "./lower_range.js";
 import { STD_ROOT } from "../install_root.js";
 
-// Phase 9.C: the std/ import root. Resolution of the installed location (repo
+// The std/ import root. Resolution of the installed location (repo
 // checkout, npm install, or packaged binary) lives in install_root.js. The
 // driver can still override via the options bag, which is what tests that
 // point at a stub std/ directory use.
 const DEFAULT_STD_ROOT = STD_ROOT;
 
-// modules-folder: the program-owned import root. `modules/<name>` resolves
+// The program-owned import root. `modules/<name>` resolves
 // against the nearest `modules` directory at or above the IMPORTING file.
 //
 // This root is PROGRAM-relative and never install-relative, which is why it is
@@ -24,8 +24,7 @@ const DEFAULT_STD_ROOT = STD_ROOT;
 // one import line work in two places without rewriting. A module authored at
 // `json-repo/json/` with its dev dependencies at `json-repo/modules/` writes
 // `import ... from "modules/http"`; the same file, copied into a consumer at
-// `app/modules/json/`, resolves the same line against `app/modules/`. See
-// plans/modules-folder.md.
+// `app/modules/json/`, resolves the same line against `app/modules/`.
 const MODULES_DIR = "modules";
 const MODULES_PREFIX = `${MODULES_DIR}/`;
 
@@ -155,7 +154,7 @@ function notFoundMessage(sourcePath, fromAbsPath, modulesRoot) {
 // module. Identity is the resolved directory path; the declared name is only a
 // label. Cycle detection is at module granularity, which is the payoff: files
 // inside one module do not import each other, so intra-module cycles stop
-// existing as a category. See plans/modules-as-directories.md.
+// existing as a category.
 //
 // Options:
 //   readFile(absPath) -> string | null
@@ -183,10 +182,10 @@ export function loadModuleGraph(entryAbsPath, options = {}) {
   // pass C validates its grafted toString against Display's method table,
   // which is only filled once the traits module's own pass C has run.
   // std/core/kinds.yoop rides along too: it declares the concurrency core
-  // (`task`, `async`, `joined`, `pooled`, `Task`), which used to be reserved
-  // words and so was always in scope. Autoloading keeps that true now that
-  // they are ordinary kind decls, and gives the typechecker something to
-  // assert the required core against. See plans/kinds-in-std.md.
+  // (`task`, `async`, `joined`, `pooled`, `Task`). Those are ordinary kind
+  // decls rather than reserved words, so autoloading is what keeps them
+  // always in scope, and it gives the typechecker something to assert the
+  // required core against.
   const autoload = [
     path.resolve(stdRoot, "core", "format.yoop"),
     path.resolve(stdRoot, "core", "strings.yoop"),
@@ -402,8 +401,8 @@ export function loadModuleGraph(entryAbsPath, options = {}) {
     }
   }
 
-  // Phase 9.C: `std/...` paths resolve against the std root, not relative
-  // to the importing file. modules-folder: `modules/...` resolves against the
+  // `std/...` paths resolve against the std root, not relative
+  // to the importing file. `modules/...` resolves against the
   // nearest `modules` directory at or above the importing file. Everything else
   // must be `./...`, `../...`, or absolute - preserves the SPEC §1 relative-only
   // contract for non-std imports. A path may name a `.yoop` source file or, for

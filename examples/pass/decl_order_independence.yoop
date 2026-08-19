@@ -1,8 +1,8 @@
 // Declaration order must not change whether a program compiles or what it does.
 //
-// Every type below is USED above the line that declares it. Each shape used to
-// fail differently, and all four were the same root cause: a type reference
-// resolved against a pass-A shell that pass C had not filled yet.
+// Every type below is USED above the line that declares it. Each shape fails
+// differently when it regresses, and all four share one root cause: a type
+// reference resolved against a pass-A shell that pass C had not filled yet.
 //
 //   1. concrete struct field  -> the compiler CRASHED with
 //      `TypeError: fieldType.fields is not iterable` out of detectRecursiveField
@@ -13,12 +13,13 @@
 //      snapshot was taken from an empty one
 //   4. generic in a variant   -> same as 3, through a payload
 //
-// Fixes: struct shells are unfrozen and filled in place (fillStructShell in
-// jsyooptypecheck/types.js), detectRecursiveField tolerates a shell, and pass C
+// What holds them: struct shells are unfrozen and filled in place
+// (fillStructShell in jsyooptypecheck/types.js), detectRecursiveField
+// tolerates a shell, and pass C
 // resolves every generic TYPE body before any concrete decl. Across the source
-// files of a directory module case 1 did not even error - it silently
-// miscompiled - so this fixture guards a real correctness property, not a
-// diagnostic nicety. See plans/modules-as-directories.md.
+// files of a directory module case 1 does not even error - it silently
+// miscompiles - so this fixture guards a real correctness property, not a
+// diagnostic nicety.
 
 // ----- 1. concrete struct field naming a later struct -----------------------
 type Holder { inner: Leaf, tag: int32 }

@@ -168,9 +168,9 @@ describe("lsp server: end-to-end", () => {
     });
   });
 
-  // yooperdoom-takeaways 4.1: the comment above a declaration is
-  // documentation, and hover shows it. Same file first, then the case that
-  // actually motivates the feature - a call site in another file.
+  // The comment above a declaration is documentation, and hover shows it.
+  // Same file first, then the case that actually motivates the feature - a
+  // call site in another file.
   it("hover appends the doc comment written above the declaration", async () => {
     const { uri, src } = writeFixture(`// Adds two numbers, the boring way.
 // Second line of the doc.
@@ -385,8 +385,8 @@ function main(): int32 {
     });
   });
 
-  // yooperdoom-takeaways 4.1: the doc arrives while you are picking the name,
-  // not after. Same scanner as hover, on the LSP `documentation` field.
+  // The doc arrives while you are picking the name, not after. Same scanner
+  // as hover, on the LSP `documentation` field.
   it("completion carries the doc comment, including for a namespace import", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "yoop_lsp_comp_"));
     fs.writeFileSync(

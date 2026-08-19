@@ -49,10 +49,10 @@ export const ASTNodeKind = Object.freeze({
   DISCARD_STATEMENT: "DISCARD_STATEMENT",
   TRY_OP: "TRY_OP",
 
-  // phase 4: refs, arrays, control flow
+  // refs, arrays, control flow
   FOR_LOOP: "FOR_LOOP",
-  // phase 9.D: `for item in xs { ... }` - element-walking loop over an array
-  // (default sequential iteration; trait-driven iteration is a later phase).
+  // `for item in xs { ... }` - element-walking loop over an array
+  // (sequential iteration; trait-driven iteration is not supported).
   FOR_IN_LOOP: "FOR_IN_LOOP",
   // `a..b` - a half-open integer range. Sugar only: the driver rewrites every
   // RANGE_EXPR into a call to `exclusive` in std/core/range.yoop before
@@ -65,27 +65,27 @@ export const ASTNodeKind = Object.freeze({
   INDEX_EXPRESSION: "INDEX_EXPRESSION",
   REF_EXPRESSION: "REF_EXPRESSION",
 
-  // phase 5: traits
+  // traits
   TRAIT_DECL: "TRAIT_DECL",
   METHOD_SIG: "METHOD_SIG",
   METHOD_DECL: "METHOD_DECL",
-  // Phase 9.G: `vtable Name for TraitName { field: (params) => ret, ... }`.
+  // `vtable Name for TraitName { field: (params) => ret, ... }`.
   // A vtable decl is a type-erased shape backing a trait - codegen emits it
   // as a LLVM struct of `{ ctx, methodPtr1, methodPtr2, ... }`.
   VTABLE_DECL: "VTABLE_DECL",
 
-  // phase 6: kinds
+  // kinds
   KIND_DECL: "KIND_DECL",
   KIND_APPLIES_TO_CLAUSE: "KIND_APPLIES_TO_CLAUSE",
   KIND_REQUIRES_CLAUSE: "KIND_REQUIRES_CLAUSE",
   KIND_MUSTCALL_CLAUSE: "KIND_MUSTCALL_CLAUSE",
   KIND_OWNSBLOCK_CLAUSE: "KIND_OWNSBLOCK_CLAUSE",
   CLEANUP_CALL: "CLEANUP_CALL",
-  // phase 6.2: escape and sharing
+  // escape and sharing
   KIND_MUST_NOT_ESCAPE_CLAUSE: "KIND_MUST_NOT_ESCAPE_CLAUSE",
   KIND_MUST_NOT_SHARE_CLAUSE: "KIND_MUST_NOT_SHARE_CLAUSE",
   KIND_FORBIDS_CLAUSE: "KIND_FORBIDS_CLAUSE",
-  // phase 6.5: layout / composition / parameterized kinds
+  // layout / composition / parameterized kinds
   KIND_LAYOUT_CLAUSE: "KIND_LAYOUT_CLAUSE",
   // clearance kinds: marker polarity (conferred | restrictive)
   KIND_MARKER_CLAUSE: "KIND_MARKER_CLAUSE",
@@ -99,8 +99,7 @@ export const ASTNodeKind = Object.freeze({
   KIND_ENUMERABLE_CLAUSE: "KIND_ENUMERABLE_CLAUSE",
   // `refcounted <retain> <release>;` - the kind's value is reference
   // counted, and these two methods of its `requires` trait are what the
-  // compiler calls. Replaces the old hardcoded `refcounted: true` boolean,
-  // which named nothing and left codegen to assume the runtime calls.
+  // compiler calls.
   KIND_REFCOUNTED_CLAUSE: "KIND_REFCOUNTED_CLAUSE",
   // `provides <Kind>;` - a function-position kind that rewrites the
   // call-site result type. `task` uses it: the body returns T, the call
@@ -111,7 +110,7 @@ export const ASTNodeKind = Object.freeze({
   // worker thread. This is what forces the `await` calling convention.
   KIND_PAUSABLE_CLAUSE: "KIND_PAUSABLE_CLAUSE",
 
-  // phase 6.3: task / concurrency sugar
+  // task / concurrency sugar
   WAIT_EXPRESSION: "WAIT_EXPRESSION",
   // `await g(...)` - drive an async callee inline, propagating its
   // suspension into the enclosing coroutine frame. Distinct from
@@ -121,13 +120,12 @@ export const ASTNodeKind = Object.freeze({
   TASK_RELEASE: "TASK_RELEASE",
   TASK_RETAIN: "TASK_RETAIN",
 
-  // phase 7.1: generics
+  // generics
   TYPE_PARAM: "TYPE_PARAM",
 
-  // phase 7.5: switch / patterns / sum types / unions
-  // Phase 12: ENUM_DECL renamed to VARIANT_DECL (sum types); ENUM_VARIANT
-  // renamed to VARIANT_CASE (one case inside a variant decl). The `enum`
-  // keyword is reserved for the value-enum construct below.
+  // switch / patterns / sum types / unions
+  // VARIANT_DECL is a sum type; VARIANT_CASE is one case inside a variant
+  // decl. The `enum` keyword is reserved for the value-enum construct below.
   SWITCH_STATEMENT: "SWITCH_STATEMENT",
   SWITCH_ARM: "SWITCH_ARM",
   LITERAL_PATTERN: "LITERAL_PATTERN",
@@ -137,7 +135,7 @@ export const ASTNodeKind = Object.freeze({
   UNION_DECL: "UNION_DECL",
   VARIANT_CONSTRUCTOR: "VARIANT_CONSTRUCTOR",
 
-  // Phase 12: value enums - C-style named constants of a primitive
+  // value enums - C-style named constants of a primitive
   // underlying type (default int32). `enum<T> Name { Case (value)? , ... }`.
   // ENUM_CASE is one case inside an ENUM_DECL; its valueExpr is parsed as a
   // normal expression and const-evaluated at typecheck. The constructor and
@@ -146,19 +144,19 @@ export const ASTNodeKind = Object.freeze({
   ENUM_DECL: "ENUM_DECL",
   ENUM_CASE: "ENUM_CASE",
 
-  // phase 8.A: unsafe pointers
+  // unsafe pointers
   ADDRESS_OF_EXPRESSION: "ADDRESS_OF_EXPRESSION",
   DEREF_EXPRESSION: "DEREF_EXPRESSION",
   NULL_LITERAL: "NULL_LITERAL",
   UNSAFE_PTR_CAST: "UNSAFE_PTR_CAST",
 
-  // phase 8.D: errno intrinsics
+  // errno intrinsics
   ERRNO_INTRINSIC: "ERRNO_INTRINSIC",
 
-  // phase 9.E: array slice syntax `xs[i..j]`
+  // array slice syntax `xs[i..j]`
   SLICE_EXPRESSION: "SLICE_EXPRESSION",
 
-  // phase 9: compound assignments `x += y`, `x -= y`, etc. Stored as a
+  // compound assignments `x += y`, `x -= y`, etc. Stored as a
   // dedicated node so codegen can address the lvalue once (no double-eval
   // of expressions inside `xs[f()] += 1`).
   COMPOUND_ASSIGNMENT: "COMPOUND_ASSIGNMENT",
@@ -166,14 +164,13 @@ export const ASTNodeKind = Object.freeze({
   // test undefined kind handling for iteration tests
   FAIL_TEST_KIND: "FAIL_TEST_KIND",
 
-  // phase 11.A: `@<name>(args?) target` compile-time / static-analysis
-  // attribute. The `target` field carries the AST node the attribute
-  // decorates (a decl, statement, block, or null for bare attribute
-  // statements). Per-attribute behavior lives in
-  // src/jsyoopattributes/registry.js - the AST node itself is just the
-  // carrier. Codegen must consume every ATTRIBUTE node before emission;
-  // any that survive are an internal-error. Phase 13.C: @derive attributes
-  // are consumed earlier still - the pre-typecheck expansion in
+  // `@<name>(args?) target` compile-time / static-analysis attribute. The
+  // `target` field carries the AST node the attribute decorates (a decl,
+  // statement, block, or null for bare attribute statements). Per-attribute
+  // behavior lives in src/jsyoopattributes/registry.js - the AST node itself
+  // is just the carrier. Codegen must consume every ATTRIBUTE node before
+  // emission; any that survive are an internal-error. @derive attributes are
+  // consumed earlier still - the pre-typecheck expansion in
   // src/jsyoopderive/expand.js unwraps them; one surviving past it is an
   // internal error.
   ATTRIBUTE: "ATTRIBUTE",

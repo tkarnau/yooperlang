@@ -1,6 +1,6 @@
 import { ASTNodeKind } from "../contracts.js";
 
-// Phase 10.E.3 - "does control flow always leave this statement?"
+// "Does control flow always leave this statement?"
 //
 // Written for the handler form of `?` (`expr? e { ... }`), whose block is
 // required to diverge on every path: the block runs INSTEAD of producing a

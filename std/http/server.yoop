@@ -13,14 +13,14 @@ module http;
 //   serveConcurrent  a task per connection, bounded by a caller-owned
 //                    `ServeState` that doubles as the introspection surface
 //
-// Three things changed from the first cut and are worth knowing:
+// Three properties of the loop are worth knowing:
 //
-//   1. **The loop is not generic.** It takes a `Dispatcher`, the Phase 9.G
-//      vtable for `Handler`, so there is one copy of the serve machinery no
-//      matter how many handler types a program has - and the per-connection
-//      work could finally be split into named functions, which a generic
-//      calling a generic across module boundaries would not survive.
-//   2. **A bad client no longer kills the server.** A malformed request gets
+//   1. **The loop is not generic.** It takes a `Dispatcher`, the vtable for
+//      `Handler`, so there is one copy of the serve machinery no matter how
+//      many handler types a program has - and the per-connection work is
+//      split into named functions, which a generic calling a generic across
+//      module boundaries would not survive.
+//   2. **A bad client does not kill the server.** A malformed request gets
 //      the status its error carries (400, 413, 501, 505) and the connection
 //      is dropped; the accept loop keeps going. Only a failure of the
 //      listener itself ends `serve`.
@@ -44,9 +44,9 @@ module http;
 // **Nothing below the accept boundary knows what a socket is.** Every reader
 // and writer parameter here is a `Reader` / `Writer` - the type-erased vtables
 // from std/core/traits.yoop - so the same code serves a TcpStream, an
-// in-memory buffer (examples/pass/http_no_socket), or a TlsStream once one
-// exists. The concrete stream is erased in exactly three places: `serve`,
-// `connectionTask`, and the client's `send`. See plans/tls.md phase 0.
+// in-memory buffer (examples/pass/http_no_socket), or a TlsStream. The
+// concrete stream is erased in exactly three places: `serve`,
+// `connectionTask`, and the client's `send`.
 //
 // One known limitation, stated plainly.
 //

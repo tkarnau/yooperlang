@@ -1,4 +1,4 @@
-// Phase 7.1: instantiation registry for generic structs, functions, and traits.
+// Instantiation registry for generic structs, functions, and traits.
 //
 // A generic decl is described by:
 //   - decl id (a stable string used as the originDecl for its TypeParamTypes)
@@ -52,14 +52,14 @@ export function mangleType(t) {
       return "void";
     case typeKinds.typeParam:
       return `tp_${t.originDecl}_${t.name}`;
-    // Everything below used to fall through to `unk_<kind>`, which is not a
-    // key - it is the SAME key for every type of that kind. Two distinct
-    // value enums both mangled to `unk_valueEnum`, so `Vec<K>` / `K[]` and
-    // `Vec<Name>` / `Name[]` shared one cached instantiation and the second
-    // one reported "cannot assign enum K[] to enum Name[]". The same
-    // collision was latent for unions, vtables, function pointers and
+    // Everything below needs its own spelling. A shared `unk_<kind>` is not
+    // a key - it is the SAME key for every type of that kind. Two distinct
+    // value enums would both mangle to `unk_valueEnum`, so `Vec<K>` / `K[]`
+    // and `Vec<Name>` / `Name[]` would share one cached instantiation and the
+    // second one would report "cannot assign enum K[] to enum Name[]". The
+    // same collision is available to unions, vtables, function pointers and
     // unsafe_ptr. Kept distinct from the struct/variant spelling above so
-    // existing mangled symbols are unchanged.
+    // mangled symbols do not collide across the two.
     case typeKinds.valueEnum:
       return t.moduleId ? `ve_${t.moduleId}__${t.name}` : `ve_${t.name}`;
     case typeKinds.union:
@@ -107,7 +107,7 @@ export function instantiateStruct(registry, genericDecl, argTypes) {
   if (argTypes.length !== genericDecl.paramNames.length) {
     return ErrorType();
   }
-  // Phase 7.2: registry-level bound checks. The typechecker installs
+  // Registry-level bound checks. The typechecker installs
   // `boundChecker` so the pure-types layer stays out of the way.
   runBoundChecks(registry, genericDecl, argTypes);
 
@@ -117,7 +117,7 @@ export function instantiateStruct(registry, genericDecl, argTypes) {
     genericDecl.paramNames,
     argTypes,
   );
-  // Phase 10.C.3: a generic struct's methods may reference the struct
+  // A generic struct's methods may reference the struct
   // itself by name (e.g. `function next(ref self): IterStep<T>` where
   // `self` is the open `MapIter<K, V>`). Substituting through those
   // method sigs re-instantiates the struct with concrete args - which
@@ -163,7 +163,7 @@ export function instantiateStruct(registry, genericDecl, argTypes) {
   return inst;
 }
 
-// Phase 10.A: instantiate a generic enum decl at concrete `argTypes`.
+// Instantiate a generic enum decl at concrete `argTypes`.
 // Mirrors instantiateStruct - substitutes type params in variant payload
 // fields, returns a frozen monomorphic VariantType, caches by (declId, argKey).
 //   genericDecl: {
@@ -213,9 +213,9 @@ export function instantiateVariant(registry, genericDecl, argTypes) {
   return inst;
 }
 
-// Phase 7.1: a registry-aware instantiator closure suitable for the
+// A registry-aware instantiator closure suitable for the
 // `instantiator` argument of substituteTypeParams.
-// Phase 10.A: dispatches on the recorded `genericKind` slot of the genericDecl
+// Dispatches on the recorded `genericKind` slot of the genericDecl
 // so enums route to instantiateVariant and structs to instantiateStruct. The
 // field is named `genericKind` (not `kind`) to avoid colliding with the
 // generic AST-walking heuristic in codegen.
@@ -287,7 +287,7 @@ export function instantiateTrait(registry, genericTraitDecl, argTypes) {
   for (const [name, sig] of genericTraitDecl.genericMethods) {
     methods.set(name, substituteTypeParams(sig, sub));
   }
-  // Phase 9.J: generic-trait extends - `BatchIterable<T> extends Iterable<T>`
+  // Generic-trait extends - `BatchIterable<T> extends Iterable<T>`
   // means the BatchIterable<int32> instance must extend Iterable<int32>.
   // The genericDecl stores the parent as a (possibly-open) TraitType whose
   // type args reference the decl's own TypeParamType. To substitute, look up
@@ -312,14 +312,14 @@ export function instantiateTrait(registry, genericTraitDecl, argTypes) {
   );
   registry.traits.set(key, inst);
   registry.traitArgsByInstance.set(inst, argTypes);
-  // Phase 9.J: index the generic-trait decl by id so substituteParentTrait
+  // Index the generic-trait decl by id so substituteParentTrait
   // can re-instantiate the parent when child args change.
   if (!registry.genericDeclById) registry.genericDeclById = new Map();
   registry.genericDeclById.set(genericTraitDecl.id, genericTraitDecl);
   return inst;
 }
 
-// Phase 9.J: substitute type params in a parent-trait reference and re-route
+// Substitute type params in a parent-trait reference and re-route
 // generic-trait parents through the instantiation cache. The parent was
 // resolved during pass C as either:
 //   - a non-generic TraitType - no type args, just carry through; OR
@@ -364,25 +364,24 @@ export function createInstantiationRegistry() {
     structs: new Map(),
     funcs: new Map(),
     traits: new Map(),
-    // Phase 10.A: per-instantiation variant (tagged sum) cache, parallel to
-    // `structs`. Renamed in Phase 12 from `enums` to match the `variant` keyword.
+    // Per-instantiation variant (tagged sum) cache, parallel to `structs`.
     variants: new Map(),
     byMangledName: new Map(),
     funcInstancesByDecl: new Map(),
     structInstancesByDecl: new Map(),
-    // Phase 10.A: per-decl enum instance list - used by codegen to walk
+    // Per-decl enum instance list - used by codegen to walk
     // concrete instances and emit one LLVM enum struct + per-variant payload
     // struct per instantiation.
     variantInstancesByDecl: new Map(),
     traitArgsByInstance: new Map(),
-    // Phase 7.2: callback installed by the typechecker. Receives
+    // Callback installed by the typechecker. Receives
     // ({ genericDecl, argTypes, paramIndex, paramName, requiredTrait }) and
     // pushes a typecheck error if the arg doesn't satisfy the bound.
     boundChecker: null,
   };
 }
 
-// Phase 7.2 / 9.J: walk a generic decl's typeParam AST nodes and call the
+// Walk a generic decl's typeParam AST nodes and call the
 // registry's `boundChecker` for every bound the param carries. With multiple
 // bounds, the arg must satisfy each - fire one check per bound. Best-effort:
 // even on failure we proceed with the instantiation so dependent type checking
@@ -408,7 +407,7 @@ function runBoundChecks(registry, genericDecl, argTypes) {
   }
 }
 
-// Phase 7.1: resolve a type annotation using a typeContext (as built by
+// Resolve a type annotation using a typeContext (as built by
 // typecheckProgram in pass D). This wraps the multi-module resolver and
 // supplies the registry + the typeContext's typeParamScope. Used in
 // checkStatement.js and checkExpr.js where the historical resolver took only
@@ -460,7 +459,7 @@ function resolveAnnotMulti(annot, typeContext, extraScope) {
     if (annot.name === "unsafe_ptr") {
       return UnsafePtrType(null);
     }
-    // Phase 12: namespace-qualified type name. Routes through the imported
+    // Namespace-qualified type name. Routes through the imported
     // namespace's source module instead of the local tables.
     if (annot.namespace) {
       const env = typeContext.moduleEnv.get(typeContext.currentModId);
@@ -482,15 +481,15 @@ function resolveAnnotMulti(annot, typeContext, extraScope) {
     if (local && local.fields !== null) return local;
     const prim = primTypeFromName(annot.name);
     if (prim) return prim;
-    // Phase 7.5: variant / union tables.
+    // Variant / union tables.
     const localVariant = env.variantTable?.get(annot.name);
     if (localVariant) return localVariant;
     const localUnion = env.unionTable?.get(annot.name);
     if (localUnion) return localUnion;
-    // Phase 12: value-enum nominal lookup.
+    // Value-enum nominal lookup.
     const localValueEnum = env.enumTable?.get(annot.name);
     if (localValueEnum) return localValueEnum;
-    // Phase 9.G: vtable nominal lookup.
+    // Vtable nominal lookup.
     const localVtable = env.vtableTable?.get(annot.name);
     if (localVtable) return localVtable;
     const imp = env.importedNames?.get(annot.name);
@@ -506,7 +505,7 @@ function resolveAnnotMulti(annot, typeContext, extraScope) {
     }
     return local ?? null;
   }
-  // Phase 9.G: function value type - `(p: T, ...) => R`.
+  // Function value type - `(p: T, ...) => R`.
   if (annot.kind === "functionType") {
     const params = [];
     for (const p of annot.params) {
@@ -543,12 +542,12 @@ function resolveAnnotMulti(annot, typeContext, extraScope) {
     if (annot.name === "Task" && argTypes.length === 1) {
       return TaskType(argTypes[0]);
     }
-    // Phase 8.A: built-in unsafe_ptr<T>.
+    // Built-in unsafe_ptr<T>.
     if (annot.name === "unsafe_ptr" && argTypes.length === 1) {
       return UnsafePtrType(argTypes[0]);
     }
     if (!typeContext.registry) return null;
-    // Phase 12: namespace-qualified generic application.
+    // Namespace-qualified generic application.
     if (annot.namespace) {
       const env = typeContext.moduleEnv.get(typeContext.currentModId);
       const imp = env.importedNames?.get(annot.namespace);
@@ -681,7 +680,7 @@ function resolveAnnotSingle(annot, typeContext, extraScope) {
     if (annot.name === "Task" && argTypes.length === 1) {
       return TaskType(argTypes[0]);
     }
-    // Phase 8.A: built-in unsafe_ptr<T>.
+    // Built-in unsafe_ptr<T>.
     if (annot.name === "unsafe_ptr" && argTypes.length === 1) {
       return UnsafePtrType(argTypes[0]);
     }

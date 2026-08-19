@@ -27,8 +27,8 @@
 // call-argument slots. A cross-module callee's annotations are resolved against
 // ITS OWN module's kind table via `crossModuleCallee` (imported kinds share
 // object identity, so the markers line up with the consuming module's). Field-
-// position sources (a `tainted` struct field surfacing through `x.field`) are
-// still a follow-up (see plans/clearance-kinds.md).
+// position sources (a `tainted` struct field surfacing through `x.field`)
+// are not tracked.
 
 import { ASTNodeKind } from "../contracts.js";
 import { pushError } from "./errors.js";

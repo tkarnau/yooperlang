@@ -1,6 +1,5 @@
 // Safe, generic dynamic array.
 //
-// Ownership redesign (2026-06-17, plans/ownership-and-typestate-redesign.md):
 // `propagates<disposable>` is ADVISORY guidance, not an enforced contract. The
 // compiler does not error on an undisposed binding or an undeclared return.
 //
@@ -10,7 +9,7 @@
 //     carries a dispose obligation. It is a hint, not a gate.
 //   - `new_dynarray<T>(...): DynArray<T> propagates<disposable>`:
 //     factory whose return clause advertises that the result owns a resource.
-//     The clause is optional - omitting it no longer rejects the return.
+//     The clause is optional - omitting it does not reject the return.
 //   - At a call site (main) the binding's `disposable` keyword is the one
 //     piece with teeth: it opts into auto-cleanup, so the compiler injects
 //     `Disposable.dispose(ref arr)` at scope end. A plain `let arr: ... = ...`

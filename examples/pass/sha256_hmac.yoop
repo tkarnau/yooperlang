@@ -1,8 +1,8 @@
 // std/crypto against the published vectors: FIPS 180-4 for SHA-256 and
 // RFC 4231 for HMAC-SHA-256.
 //
-// plans/yooperdoom-takeaways.md 4.2 - "request signing is table stakes for
-// cloud APIs". Every expected value here is checkable against
+// Request signing is table stakes for cloud APIs. Every expected value here
+// is checkable against
 // `openssl dgst -sha256` or Node's crypto in one line, which is the point: a
 // hash implementation that is only tested against itself is not tested.
 //

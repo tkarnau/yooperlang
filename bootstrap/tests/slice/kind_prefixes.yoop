@@ -89,12 +89,12 @@ enum Color implements Coded {
 
 // A TOP-LEVEL declaration takes the prefix-and-keyword spelling too, and that
 // is the spelling every `*.test.yoop` in this tree uses (`suite function
-// addsNumbers(): void`). It used to be a parse error - "unexpected token at top
-// level: IDENT" - because the top-level prefix run stopped on IDENT-then-
-// FUNCTION where the METHOD run consumed the keyword. Both go through one
-// function now, which is why this fixture asserts both in one program: the
-// keyword has to be consumed rather than taken for the function's NAME, and a
-// run that stopped one token early would emit a function called `function`.
+// addsNumbers(): void`). A top-level prefix run that stopped on IDENT-then-
+// FUNCTION where the METHOD run consumed the keyword would report "unexpected
+// token at top level: IDENT". Both go through one function, which is why this
+// fixture asserts both in one program: the keyword has to be consumed rather
+// than taken for the function's NAME, and a run that stopped one token early
+// would emit a function called `function`.
 // `traced` declares `signature () => void`, and the reference enforces that on
 // a TOP-LEVEL function (it does not on a method), so these two take nothing and
 // return nothing and report through a module-level global instead.

@@ -12,11 +12,11 @@ import { wantsOpenGL, wantsTls } from "./toolchain.js";
 // (e.g. older e2e helpers that pass a single -c arg).
 export const RUNTIME_C = path.resolve(runtimeDir, "yoop_runtime.c");
 
-// Phase 8.F.2: the I/O multiplexer lives in its own translation unit so
+// The I/O multiplexer lives in its own translation unit so
 // programs that don't use it still link cleanly. Callers that need full
 // runtime functionality should compile every entry in this list.
-// yoop_net.c (Library Phase B): a couple of platform-dependent socket
-// helpers (SOL_SOCKET / SO_REUSEADDR constants differ Linux vs macOS).
+// yoop_net.c: a couple of platform-dependent socket helpers (SOL_SOCKET /
+// SO_REUSEADDR constants differ Linux vs macOS).
 export const RUNTIME_SOURCES = [
   RUNTIME_C,
   // The I/O multiplexer: a platform-neutral core plus one event engine per
@@ -28,11 +28,11 @@ export const RUNTIME_SOURCES = [
   path.resolve(runtimeDir, "yoop_io_kqueue.c"),
   path.resolve(runtimeDir, "yoop_io_epoll.c"),
   path.resolve(runtimeDir, "yoop_io_windows.c"),
-  // Filesystem + directory helpers (mkdir/stat/realpath/dirent). Split out of
-  // yoop_io.c, which was carrying two unrelated concerns.
+  // Filesystem + directory helpers (mkdir/stat/realpath/dirent). Separate
+  // from yoop_io.c, which is a different concern.
   path.resolve(runtimeDir, "yoop_fs.c"),
   path.resolve(runtimeDir, "yoop_net.c"),
-  // Phase 10.D: panic/unreachable + log_info/warn/error helpers.
+  // Panic/unreachable + log_info/warn/error helpers.
   path.resolve(runtimeDir, "yoop_debug.c"),
   // yoop_float_to_string - backs std/core/format.yoop's float shim.
   path.resolve(runtimeDir, "yoop_format.c"),
@@ -92,7 +92,7 @@ export function glueSourcesForLinkFlags(linkFlagNames) {
   // This is also why std/tls is its own module rather than a file inside
   // std/net: link flags are collected PROGRAM-WIDE, so an `extern from library
   // "ssl"` inside std/net would make every program that opens a socket link
-  // OpenSSL. See plans/tls.md D4.
+  // OpenSSL.
   if (wantsTls(linkFlagNames)) {
     out.push(path.resolve(runtimeDir, "yoop_tls.c"));
   }

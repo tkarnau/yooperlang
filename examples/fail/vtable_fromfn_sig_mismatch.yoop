@@ -1,4 +1,4 @@
-// Phase 10.K: `VTableName.fromFn(...)` requires each named function's
+// `VTableName.fromFn(...)` requires each named function's
 // signature to match the corresponding method slot (trait method minus
 // `ref self`). Here `wrongReturn` returns int32 where the slot wants bool,
 // so the typechecker rejects the fromFn argument.

@@ -3,14 +3,14 @@
 # The surface probe: compile every non-test .yoop under std/, examples/pass/ and
 # bootstrap/src/ with a bootstrap compiler, and report what stops each one.
 #
-# This is the measurement the bootstrap-completion plan is steered by, so it
-# gets run many times a day. It is PARALLEL because it is subprocess-bound
+# This is the headline measurement of bootstrap progress, so it gets run many
+# times a day. It is PARALLEL because it is subprocess-bound
 # rather than compute-bound: the compiler itself is fast and most of the wall
 # clock is spent waiting on clang, so a serial run uses about 15% of one core
 # on a 14-core machine. Ten workers takes it from ~7 minutes to well under one.
 #
 # It also does NOT LINK. `--emit-ir` stops the compiler one step short of
-# clang, and the two things the link used to answer as a side effect are asked
+# clang, and the two things a link would answer as a side effect are asked
 # directly instead: `clang -S -emit-llvm` says whether the IR is valid, and the
 # IR itself says whether there is a `main` to link. That is the whole
 # difference between `ok` and `no-main`, and reading it off a `define` line is
@@ -63,7 +63,7 @@ export YOOP_RUNTIME_ROOT="${YOOP_RUNTIME_ROOT:-$ROOT/runtime}"
 # This probe runs many times a day against a compiler that is being actively
 # changed, and the failure mode that costs the most is not a wrong answer, it is
 # a compiler that does not terminate: a lexer that stops advancing or a resolver
-# that cycles pins a core at 100% and nothing here used to stop it. With
+# that cycles pins a core at 100% and nothing else here would stop it. With
 # `xargs -P 12` that is up to twelve of them, and they outlive an interrupted
 # probe. A minute is many times the slowest file in the corpus
 # (typecheck/pass_d.yoop, at about 3 seconds), so nothing healthy comes near it.
@@ -109,9 +109,9 @@ export -f limit_run
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
-# One file. Each worker needs its OWN output path - they all used to write
-# /tmp/sp, which is a race the moment this went parallel and would have shown up
-# as a flaky link failure rather than as anything obviously wrong. The stale
+# One file. Each worker needs its OWN output path - one shared /tmp/sp is a
+# race in a parallel run, and would show up as a flaky link failure rather than
+# as anything obviously wrong. The stale
 # `.ll` is removed BEFORE the compile as well as after, because a PID can be
 # reused and a leftover from the previous holder of this name would be read as
 # this file's output.
@@ -139,7 +139,7 @@ probe_one() {
   fi
 
   # Codegen succeeded, so the file's CODE is handled. What is left is the two
-  # questions the link used to answer by failing: is the IR valid, and is there
+  # questions a link would answer by failing: is the IR valid, and is there
   # a `main`? `-S -emit-llvm` parses and verifies without generating code, and
   # it names the offending instruction where "clang failed (exit 256)" named
   # nothing.

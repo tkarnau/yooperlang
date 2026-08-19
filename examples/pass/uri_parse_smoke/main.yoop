@@ -1,4 +1,4 @@
-// Phase 10.I: smoke test for std/net/uri.yoop. Parses a small handful of
+// Smoke test for std/net/uri.yoop. Parses a small handful of
 // URL shapes and prints the components so the e2e test can pattern-match.
 
 import { Result } from "../../../std/core/types.yoop";

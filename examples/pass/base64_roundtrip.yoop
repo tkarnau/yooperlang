@@ -2,10 +2,9 @@
 // cases real input actually presents: URL-safe alphabet, missing padding,
 // line wrapping, and full-byte-range binary.
 //
-// plans/yooperdoom-takeaways.md 4.2 - "not needed here, but no API auth or
-// binary payload works without it". HTTP Basic is base64(user:pass), a JWT is
-// three base64url segments, and every JSON API carrying bytes carries them
-// this way.
+// No API auth and no binary payload works without it: HTTP Basic is
+// base64(user:pass), a JWT is three base64url segments, and every JSON API
+// carrying bytes carries them this way.
 
 import { Disposable, disposable } from "std/core/kinds.yoop";
 import { Result } from "std/core/types.yoop";

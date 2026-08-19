@@ -1,4 +1,4 @@
-// Phase 9.G: a vtable field's function-pointer signature must match the
+// A vtable field's function-pointer signature must match the
 // underlying trait method's signature (minus `ref self`). The compiler
 // rejects vtables whose field signatures don't line up.
 

@@ -1,9 +1,9 @@
 // Bounded socket I/O: accept and read that give up instead of hanging.
 //
-// Before this landed, every std/net operation parked on the runtime
-// multiplexer with no way out. A listener with no inbound connection,
-// or a peer that stopped talking mid-request, held its thread for the
-// life of the process. The `TimeoutMs` variants put a ceiling on that.
+// A plain std/net operation parks on the runtime multiplexer with no
+// way out. A listener with no inbound connection, or a peer that stops
+// talking mid-request, holds its thread for the life of the process.
+// The `TimeoutMs` variants put a ceiling on that.
 //
 // The three-way `IoOutcome` / `AcceptOutcome` is deliberate: "no data
 // yet" and "the socket broke" are different situations and a caller
@@ -51,7 +51,7 @@ function main(): int32 {
             printf("accept: connected\n");
 
             // 3. The client connected but never sent a byte - exactly
-            //    the slow-loris shape that used to wedge a worker.
+            //    the slow-loris shape that wedges a worker with no deadline.
             let buf: uint8[] = [0, 0, 0, 0, 0, 0, 0, 0];
             switch (tcp.tcpReadTimeoutMs(ref srv, ref buf, 120)) {
                 case IoOutcome.Bytes { n: n1 }:      { printf("read: unexpected bytes\n"); }

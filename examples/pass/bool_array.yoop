@@ -1,4 +1,4 @@
-// Phase 9.B: bool[] works through every standard array path - literal,
+// bool[] works through every standard array path - literal,
 // indexed read/write, conditional use, .len, and Vec<bool> / heapAlloc<bool>.
 // This regression fixture pins those guarantees so we notice if someone breaks
 // any of them in a future codegen change.
@@ -26,7 +26,7 @@ function main(): int32 {
         printf(`zero is true\n`);
     }
 
-    // Phase 9.B bonus: `!` prefix operator binds tighter than postfix index.
+    // Bonus: `!` prefix operator binds tighter than postfix index.
     if (!flags[3]) {
         printf(`three is false\n`);
     }

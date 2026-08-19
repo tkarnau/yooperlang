@@ -66,10 +66,9 @@ export enum ASTNodeKind implements Display {
   // at the top of a `let`.
   TRY_OP,
 
-  // phase 4 refs, arrays, control flow
+  // refs, arrays, control flow
   FOR_LOOP,
-  // phase 9.D `for item in xs { ... }` - element-walking loop over an array
-  // (default sequential iteration; trait-driven iteration is a later phase).
+  // `for item in xs { ... }` - element-walking loop over an array
   FOR_IN_LOOP,
   BREAK_STATEMENT,
   CONTINUE_STATEMENT,
@@ -77,27 +76,27 @@ export enum ASTNodeKind implements Display {
   INDEX_EXPRESSION,
   REF_EXPRESSION,
 
-  // phase 5 traits
+  // traits
   TRAIT_DECL,
   METHOD_SIG,
   METHOD_DECL,
-  // Phase 9.G `vtable Name for TraitName { field (params) => ret, ... }`.
+  // `vtable Name for TraitName { field (params) => ret, ... }`.
   // A vtable decl is a type-erased shape backing a trait - codegen emits it
   // as a LLVM struct of `{ ctx, methodPtr1, methodPtr2, ... }`.
   VTABLE_DECL,
 
-  // phase 6 kinds
+  // kinds
   KIND_DECL,
   KIND_APPLIES_TO_CLAUSE,
   KIND_REQUIRES_CLAUSE,
   KIND_MUSTCALL_CLAUSE,
   KIND_OWNSBLOCK_CLAUSE,
   CLEANUP_CALL,
-  // phase 6.2 escape and sharing
+  // escape and sharing
   KIND_MUST_NOT_ESCAPE_CLAUSE,
   KIND_MUST_NOT_SHARE_CLAUSE,
   KIND_FORBIDS_CLAUSE,
-  // phase 6.5 layout / composition / parameterized kinds
+  // layout / composition / parameterized kinds
   KIND_LAYOUT_CLAUSE,
   // clearance kinds marker polarity (conferred | restrictive)
   KIND_MARKER_CLAUSE,
@@ -113,7 +112,7 @@ export enum ASTNodeKind implements Display {
   // closing brace. childA is the subject expression, childB the block.
   KIND_REGION,
 
-  // phase 6.3 task / concurrency sugar
+  // task / concurrency sugar
   WAIT_EXPRESSION,
   TASK_AUTO_WAIT,
   TASK_RELEASE,
@@ -125,13 +124,12 @@ export enum ASTNodeKind implements Display {
   // thing from WAIT_EXPRESSION, which joins a task HANDLE from ordinary code.
   AWAIT_EXPRESSION,
 
-  // phase 7.1 generics
+  // generics
   TYPE_PARAM,
 
-  // phase 7.5 switch / patterns / sum types / unions
-  // Phase 12 ENUM_DECL renamed to VARIANT_DECL (sum types); ENUM_VARIANT
-  // renamed to VARIANT_CASE (one case inside a variant decl). The `enum`
-  // keyword is reserved for the value-enum construct below.
+  // switch / patterns / sum types / unions. VARIANT_DECL is a sum type and
+  // VARIANT_CASE is one case inside one; the `enum` keyword is reserved for the
+  // value-enum construct below.
   SWITCH_STATEMENT,
   SWITCH_ARM,
   LITERAL_PATTERN,
@@ -141,7 +139,7 @@ export enum ASTNodeKind implements Display {
   UNION_DECL,
   VARIANT_CONSTRUCTOR,
 
-  // Phase 12 value enums - C-style named constants of a primitive
+  // Value enums - C-style named constants of a primitive
   // underlying type (default int32). `enum<T> Name { Case (value)? , ... }`.
   // ENUM_CASE is one case inside an ENUM_DECL; its valueExpr is parsed as a
   // normal expression and const-evaluated at typecheck. The constructor and
@@ -150,19 +148,19 @@ export enum ASTNodeKind implements Display {
   ENUM_DECL,
   ENUM_CASE,
 
-  // phase 8.A unsafe pointers
+  // unsafe pointers
   ADDRESS_OF_EXPRESSION,
   DEREF_EXPRESSION,
   NULL_LITERAL,
   UNSAFE_PTR_CAST,
 
-  // phase 8.D errno intrinsics
+  // errno intrinsics
   ERRNO_INTRINSIC,
 
-  // phase 9.E array slice syntax `xs[i..j]`
+  // array slice syntax `xs[i..j]`
   SLICE_EXPRESSION,
 
-  // phase 9 compound assignments `x += y`, `x -= y`, etc. Stored as a
+  // compound assignments `x += y`, `x -= y`, etc. Stored as a
   // dedicated node so codegen can address the lvalue once (no double-eval
   // of expressions inside `xs[f()] += 1`).
   COMPOUND_ASSIGNMENT,
@@ -170,7 +168,7 @@ export enum ASTNodeKind implements Display {
   // test undefined kind handling for iteration tests
   FAIL_TEST_KIND,
 
-  // phase 11.A `@<name>(args?) target` compile-time / static-analysis
+  // `@<name>(args?) target` compile-time / static-analysis
   // attribute. The `target` field carries the AST node the attribute
   // decorates (a decl, statement, block, or null for bare attribute
   // statements). Per-attribute behavior lives in

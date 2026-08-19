@@ -1,4 +1,4 @@
-// Phase 9.F: a struct that doesn't implement `Display` still can't be
+// A struct that doesn't implement `Display` cannot be
 // interpolated in a template literal. The diagnostic mentions Display
 // so the fix-it is one trait impl away.
 

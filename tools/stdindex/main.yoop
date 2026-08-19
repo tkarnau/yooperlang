@@ -8,7 +8,6 @@
 // digit loop in four others; one of them zero-padded a number by hand, which
 // is exactly `padStart(intToString(n), 4, "0")`. Nothing was missing. The
 // project just never found the parts of the library that already existed.
-// See plans/yooperdoom-takeaways.md 4.1.
 //
 // So this reads what each module already says about itself - the comment block
 // at the top of the file - and turns it into one page you can scan. Generating
@@ -20,10 +19,10 @@
 //   summary   the first line of the header comment, minus the `<path> - `
 //             prefix the convention already uses.
 //   exports   a LINE SCAN for `export ...`, not a parse. That is deliberate:
-//             this tool must keep working while the parser is being rewritten
-//             for the bootstrap, and an index that is approximately right is
-//             worth more than one that cannot run. Anything it misses is
-//             invisible rather than wrong.
+//             this tool must keep working even when the parser cannot be
+//             relied on, and an index that is approximately right is worth
+//             more than one that cannot run. Anything it misses is invisible
+//             rather than wrong.
 //
 // WHAT COUNTS AS A MODULE. What you can IMPORT, which is not the same as what
 // is on disk:

@@ -15,25 +15,25 @@ export const typeKinds = {
   trait: "trait",
   kind: "kind",
   task: "task",
-  // Phase 7.1: a reference to a generic type parameter in a generic decl.
+  // A reference to a generic type parameter in a generic decl.
   typeParam: "typeParam",
-  // Phase 7.5: tagged sum and C-style overlapping union.
-  // Phase 12: tagged sum renamed from `enum` to `variant`. The new `enum`
+  // Tagged sum and C-style overlapping union.
+  // Tagged sum renamed from `enum` to `variant`. The new `enum`
   // keyword introduces a value-enum: a nominal alias over a primitive
   // underlying type (int*/uint*/string) with named-constant cases.
   variant: "variant",
   union: "union",
   valueEnum: "valueEnum",
-  // Phase 8.A: raw FFI pointer. Distinct from `ref T` (which is non-null and
+  // Raw FFI pointer. Distinct from `ref T` (which is non-null and
   // does not participate in arithmetic).
   unsafePtr: "unsafePtr",
-  // Phase 8.A: literal-placeholder for `null`, similar to untypedInt/Float.
+  // Literal-placeholder for `null`, similar to untypedInt/Float.
   // Pinned by context (assignment target, return, call arg, equality side).
   untypedNull: "untypedNull",
-  // Phase 9.G: a value-shaped function pointer. The `=>` form in a type
+  // A value-shaped function pointer. The `=>` form in a type
   // annotation. Distinct from `func` (which describes named function decls).
   functionPointer: "functionPointer",
-  // Phase 9.G: a type-erased trait shape. See VTableType.
+  // A type-erased trait shape. See VTableType.
   vtable: "vtable",
 };
 
@@ -62,7 +62,7 @@ export const primAnnotations = {
   string: "string",
   usize: "usize",
   isize: "isize",
-  // Phase 8.A: platform pointer-width unsigned integer. Lowered to i64 on
+  // Platform pointer-width unsigned integer. Lowered to i64 on
   // 64-bit targets (the only ones we currently support). Distinct from usize
   // in source for documentation purposes - mirrors C uintptr_t vs size_t.
   uintptr: "uintptr",
@@ -136,11 +136,11 @@ export function isFloatPrim(name) {
 
 export const PrimType = (name) => freezerWrap(typeKinds.prim, { name });
 
-// moduleId: the module that defines this struct (for IR name mangling). null for legacy/test usage. Also adding implementsTraits and methods
-// propagatedKinds (phase 6.4): list of KindApplication, kinds this struct propagates
+// moduleId: the module that defines this struct (for IR name mangling). null for test usage. Also carries implementsTraits and methods.
+// propagatedKinds: list of KindApplication, kinds this struct propagates
 // to bindings of this type. A field whose type carries a propagated kind is
 // what the struct is "surfacing" upward.
-// kindApplication (phase 6.5): optional KindApplication attached via a
+// kindApplication: optional KindApplication attached via a
 // type-decl kind prefix (e.g. `type Vec4 aligned(32) { ... }`). Layout
 // information is read off this at every binding site.
 export const StructType = (
@@ -151,7 +151,7 @@ export const StructType = (
   methods = new Map(),
   propagatedKinds = [],
   kindApplication = null,
-  // Phase 7.1: when this struct was produced by instantiating a generic decl,
+  // When this struct was produced by instantiating a generic decl,
   // `genericInstance: { declId, args }` captures the original generic decl
   // and the type-args used. Substitution uses this to re-instantiate when
   // args are themselves type-params (open instantiation -> concrete).
@@ -170,17 +170,17 @@ export const StructType = (
 // An UNFROZEN struct shell for pass A, filled in place by pass C via
 // fillStructShell.
 //
-// Identity is the whole point. Pass C used to build a fresh StructType and
-// REPLACE the table entry, which left any field that had already resolved to
-// this struct pointing at the empty shell - and `sizeOfType` on an empty struct
-// reports no fields, so every enclosing struct was undersized and the emitted
-// IR read its own fields at the wrong offsets. Inside one file that surfaced as
+// Identity is the whole point. If pass C instead built a fresh StructType and
+// REPLACED the table entry, any field that had already resolved to this struct
+// would point at the empty shell - and `sizeOfType` on an empty struct reports
+// no fields, so every enclosing struct comes out undersized and the emitted IR
+// reads its own fields at the wrong offsets. Inside one file that surfaces as
 // the misleading `type "T" has no field "f"` papercut; across the source files
-// of one directory module it SILENTLY MISCOMPILED (a sqlite `RawStmt` handle
-// came back as a shifted pointer and segfaulted in libsqlite3).
+// of one directory module it SILENTLY MISCOMPILES (a sqlite `RawStmt` handle
+// comes back as a shifted pointer and segfaults in libsqlite3).
 //
-// Same fix already applied to variant shells (Phase 13.A) and vtable shells
-// (9.G). `fields` stays null until filled so the "is this a shell?" checks
+// Variant shells and vtable shells are built the same way, for the same
+// reason. `fields` stays null until filled so the "is this a shell?" checks
 // across the checker keep working.
 export const StructShell = (name, moduleId = null) => ({
   kind: typeKinds.struct,
@@ -208,7 +208,7 @@ export function fillStructShell(shell, fields, propagatedKinds, kindApplication)
 export const RefType = (inner) => freezerWrap(typeKinds.ref, { inner });
 export const ArrayType = (elem) => freezerWrap(typeKinds.array, { elem });
 // variadic: true for C variadic externs (e.g. printf). Skips arity check past fixed params.
-// returnPropagatedKinds (phase 6.4): list of KindType the function's return
+// returnPropagatedKinds: list of KindType the function's return
 // type propagates. Mirrors the StructType.propagatedKinds slot so callers see
 // the kinds without re-resolving the return type.
 // isAsync: the function is a coroutine. It may only be called through
@@ -216,7 +216,7 @@ export const ArrayType = (elem) => freezerWrap(typeKinds.array, { elem });
 // a task body, which is implicitly async). That pair of rules is what
 // makes the coloring checkable locally - there is no path to an async
 // function except from an async caller, so a suspend always has a frame
-// to propagate into. See plans/async-coroutines.md.
+// to propagate into. See docs/writing_yoop.md on async coloring.
 export const FuncType = (
   params,
   returnType,
@@ -238,9 +238,9 @@ export const NamespaceType = (moduleId, exports) =>
 export const UntypedIntType = () => freezerWrap(typeKinds.untypedInt, {});
 export const UntypedFloatType = () => freezerWrap(typeKinds.untypedFloat, {});
 export const ErrorType = () => freezerWrap(typeKinds.error, {});
-// Phase 7.1: trait types carry an optional type-param list for generic traits.
+// Trait types carry an optional type-param list for generic traits.
 // `typeParams` is a list of TypeParamType. For non-generic traits, it's [].
-// Phase 9.J: `extendsTraits` is the list of parent traits a `trait Child extends A, B`
+// `extendsTraits` is the list of parent traits a `trait Child extends A, B`
 // declaration names. The list itself is mutable (constructed empty in pass A,
 // populated in pass C.1 once parent-trait shells are resolvable), so the
 // outer freezerWrap is unchanged. Method resolution walks this chain
@@ -261,19 +261,19 @@ export const TraitType = (
     extendsTraits,
   });
 
-// Phase 7.5 (renamed Phase 12): tagged sum type. Source-level keyword is
+// Tagged sum type. Source-level keyword is
 // `variant`. AST kind is VARIANT_DECL.
 //   variants: Map<caseName, { fields: [{name, type}] | null, ordinal: number }>
 //   fields === null means a payload-less case (e.g. `Empty`).
 //   ordinal: stable 0-indexed integer from declaration order; used as the
 //     LLVM discriminator value at codegen time.
-// Phase 10.A: `genericInstance: { declId, args } | null` tags instantiations
+// `genericInstance: { declId, args } | null` tags instantiations
 // of a generic variant decl, mirroring StructType. Substitution re-instantiates
 // open instances via the registry.
-// Phase 13.A: `variants` is populated in-place by pass C (mutates the shell
+// `variants` is populated in-place by pass C (mutates the shell
 // the table registered in pass A) so back-references captured during struct
 // field resolution see the populated cases at codegen time.
-// Phase 13.B: variants can `implements Trait propagates<K>` like structs.
+// Variants can `implements Trait propagates<K>` like structs.
 // `implementsTraits`, `methods`, and `propagatedKinds` are mutable slots
 // populated by pass C / pass C.1; the outer object stays frozen.
 export const VariantType = (
@@ -295,7 +295,7 @@ export const VariantType = (
     propagatedKinds,
   });
 
-// Phase 7.5: untagged C-style union - every field starts at offset 0,
+// Untagged C-style union - every field starts at offset 0,
 // size = max(sizeof(field)), alignment = max(alignof(field)). No tag.
 export const UnionType = (name, fields, moduleId = null) =>
   freezerWrap(typeKinds.union, { name, fields, moduleId });
@@ -317,7 +317,7 @@ export function fillUnionShell(shell, fields) {
   return Object.freeze(shell);
 }
 
-// Phase 12: a value enum - nominal alias over a primitive underlying type
+// A value enum - nominal alias over a primitive underlying type
 // (any signed/unsigned int width, or string). Each case is a named compile-
 // time constant of the underlying type.
 //   underlying: PrimType (int*/uint*/string)
@@ -358,7 +358,7 @@ export function fillValueEnumShell(shell, underlying, cases, isOpen) {
   return Object.freeze(shell);
 }
 
-// Phase 9.G: a first-class function value type - what `(p: T) => R` resolves
+// A first-class function value type - what `(p: T) => R` resolves
 // to in a type annotation. Distinct from FuncType (which describes a named
 // function decl) so call resolution can tell the two apart: FuncType callees
 // resolve to a global mangled symbol, FunctionPointerType callees lower to
@@ -371,7 +371,7 @@ export function fillValueEnumShell(shell, underlying, cases, isOpen) {
 export const FunctionPointerType = (params, returnType, isAsync = false) =>
   freezerWrap(typeKinds.functionPointer, { params, returnType, isAsync });
 
-// Phase 9.G: a type-erased shape for a trait. Conceptually a struct with one
+// A type-erased shape for a trait. Conceptually a struct with one
 // `ctx` pointer + one function-pointer field per trait method. The compiler
 // owns the field layout; the user only writes the method-pointer fields in
 // the `vtable T for Trait { ... }` body. Two vtables are typesEqual if their
@@ -382,11 +382,11 @@ export const FunctionPointerType = (params, returnType, isAsync = false) =>
 // NOT frozen, unlike every other type but KindType / TypeParamType. Pass A
 // registers a shell (no trait module, no fields, no methodOrder) and pass
 // C.3b fills it in ON THE SAME OBJECT. Building a fresh populated type and
-// swapping the table entry, which is what this used to do, left any struct
-// field that had already resolved `d: MyVtable` pointing at the shell - and a
-// shell has no method slots, so a same-module `MyVtable.method(ref x.d, ...)`
-// failed with "vtable has no slot for trait method". Same shell-mutation
-// pattern variants use (Phase 13.A) and for the same reason.
+// swapping the table entry would leave any struct field that had already
+// resolved `d: MyVtable` pointing at the shell - and a shell has no method
+// slots, so a same-module `MyVtable.method(ref x.d, ...)` would fail with
+// "vtable has no slot for trait method". Same shell-mutation pattern
+// variants use, and for the same reason.
 export const VTableType = (name, traitName, traitModuleId, fields, methodOrder, moduleId = null) => ({
   kind: typeKinds.vtable,
   name,
@@ -397,7 +397,7 @@ export const VTableType = (name, traitName, traitModuleId, fields, methodOrder, 
   moduleId,
 });
 
-// Phase 8.A: raw, nullable, arithmetic-capable pointer for FFI. Gated by
+// Raw, nullable, arithmetic-capable pointer for FFI. Gated by
 // `import.unsafe;` at module top. Lowers to LLVM opaque `ptr`; the
 // typechecker still tracks pointee identity so arithmetic / deref are
 // strongly typed in source.
@@ -412,18 +412,18 @@ export const VTableType = (name, traitName, traitModuleId, fields, methodOrder, 
 export const UnsafePtrType = (pointee) =>
   freezerWrap(typeKinds.unsafePtr, { pointee });
 
-// Phase 8.A: placeholder for the `null` literal. Pinned to an
+// Placeholder for the `null` literal. Pinned to an
 // UnsafePtrType<T> by context (similar to untypedInt/Float).
 export const UntypedNullType = () => freezerWrap(typeKinds.untypedNull, {});
 
-// Phase 7.1: TypeParamType is a placeholder appearing inside a generic decl's
+// TypeParamType is a placeholder appearing inside a generic decl's
 // resolved types (struct field types, function param/return types, trait
 // method signatures). It is replaced via substituteTypeParams at every
 // instantiation site. `originDecl` is a stable per-decl id so two unrelated
 // `T`s never compare equal.
-// Phase 7.2 / 9.J: `bounds` is populated later in pass C if the param has an
+// `bounds` is populated later in pass C if the param has an
 // `implements` clause. Empty list means unbounded; single-bound is a list of
-// length 1; multi-bound `<T implements (A, B)>` (9.J) is a list of length N.
+// length 1; multi-bound `<T implements (A, B)>` is a list of length N.
 // Unlike other types in this file, TypeParamType is mutable for that one slot
 // - see CLAUDE.md cross-cutting invariants.
 export function TypeParamType(name, originDecl) {
@@ -433,20 +433,20 @@ export function TypeParamType(name, originDecl) {
   this.bounds = []; // TraitType[]
 }
 
-// Phase 6.3: compiler-builtin Task<T>. Not user-declarable; produced as the
+// Compiler-builtin Task<T>. Not user-declarable; produced as the
 // rewritten return type of any function declared with the `task` modifier.
 export const TaskType = (resultType) =>
   freezerWrap(typeKinds.task, { resultType });
 
-// KindType is a language-level "kind" decl (phase 6.1: `disposable`). Unlike
+// KindType is a language-level "kind" decl (e.g. `disposable`). Unlike
 // other types in this file, KindType is mutable during pass C.2 - clauses
 // resolve trait references and method names after the shell is registered in
-// pass A. The shape mirrors the plan in plans/phase-6-1-disposable.md §4.a.
+// pass A.
 export function KindType(name, moduleId) {
   this.kind = typeKinds.kind;
   this.name = name;
   this.moduleId = moduleId;
-  this.appliesTo = new Set();              // 6.2: Set<"binding"|"parameter"|"field"|"type"> (was scalar)
+  this.appliesTo = new Set();              // Set<"binding"|"parameter"|"field"|"type">
   this.requires = [];                       // array of TraitType
   this.mustCall = [];                       // array of { methodName, timing, traitType }
   this.ownsBlock = false;
@@ -462,16 +462,14 @@ export function KindType(name, moduleId) {
   // with a matching signature shape are NOT authorized.
   this.clearedBy = null;                   // string | null (only on restrictive)
   this.appliedBy = null;                 // string | null (only on conferred)
-  // Concurrency-core clauses (plans/kinds-in-std.md). These used to be
-  // hardcoded booleans on objects in builtinKinds.js; they are populated
-  // from real clauses now.
+  // Concurrency-core clauses, populated from real kind clauses.
   this.pausable = false;                   // `pausable;`  - function is a coroutine
   this.provides = null;                    // `provides X;` - call-site result rewrite
   this.refcounted = null;                  // `refcounted <retain> <release>;`
-  this.mustNotEscape = false;              // 6.2: true iff mustNotEscape clause is present
-  this.mustNotShare = [];                  // 6.2: array of "acrossScopes" (stored, not enforced)
-  this.forbids = [];                       // 6.2: array of "io"|"globalState" (stored, not enforced)
-  // 6.5: parameter list, layout-align slot, composition diagnostics.
+  this.mustNotEscape = false;              // true iff mustNotEscape clause is present
+  this.mustNotShare = [];                  // array of "acrossScopes" (stored, not enforced)
+  this.forbids = [];                       // array of "io"|"globalState" (stored, not enforced)
+  // Parameter list, layout-align slot, composition diagnostics.
   this.params = [];                         // [{ name, type, sourceLoc }]
   this.layoutAlign = null;                  // { kind: "const", value } | { kind: "param", name } | null
   this.composedFrom = null;                 // KindRef[] | null (diagnostics only)
@@ -485,7 +483,7 @@ export function KindType(name, moduleId) {
   this.enumerableAs = null;                 // string | null
 }
 
-// Phase 6.5: a KindApplication is a `KindType` paired with the constant
+// A KindApplication is a `KindType` paired with the constant
 // arguments supplied at a use site (`aligned(32)` => { kindType: aligned, args: [32] }).
 // Use sites store the application on their AST node so codegen can read
 // per-site layout without re-resolving.
@@ -510,7 +508,7 @@ export const TraitSelfPlaceholder = Object.freeze({
   kind: "trait_self_placeholder",
 });
 
-// Phase 8.B: C-portable integer aliases. Resolution-time synonyms - the
+// C-portable integer aliases. Resolution-time synonyms - the
 // alias *is* the target type for every downstream purpose (typesEqual,
 // assignability, codegen). Hardcoded to LP64 (Linux + macOS); Windows
 // LLP64 mapping waits on real target-triple awareness in the compiler.
@@ -597,7 +595,7 @@ export function lookupAlias(namespace, name, modId, moduleEnv) {
 
 // Resolve a structured type annotation object (from parseTypeAnnotation) to a Type.
 //
-// Phase 7.1: ctx may carry:
+// ctx may carry:
 //   - typeParamScope: Map<paramName, TypeParamType> for resolving bare names
 //     to type-params when inside a generic decl
 //   - instantiateGeneric: function(name, argTypes, annot) used to handle
@@ -605,7 +603,7 @@ export function lookupAlias(namespace, name, modId, moduleEnv) {
 export function resolveTypeAnnotation(annot, structTable, ctx) {
   if (!annot) return null;
   if (annot.kind === "typeName") {
-    // Phase 7.1: look up type-params in scope first.
+    // Look up type-params in scope first.
     if (ctx?.typeParamScope) {
       const tp = ctx.typeParamScope.get(annot.name);
       if (tp) return tp;
@@ -647,7 +645,7 @@ export function resolveTypeAnnotation(annot, structTable, ctx) {
     if (annot.name === "Task" && argTypes.length === 1) {
       return TaskType(argTypes[0]);
     }
-    // Phase 8.A: unsafe_ptr<T> is a built-in pointer type, not a generic
+    // unsafe_ptr<T> is a built-in pointer type, not a generic
     // struct. Gating against `import.unsafe;` is enforced by the caller
     // when ctx.allowsUnsafe === false (see typecheck.js).
     if (annot.name === "unsafe_ptr" && argTypes.length === 1) {
@@ -666,7 +664,7 @@ export function resolveTypeAnnotation(annot, structTable, ctx) {
     }
     return ctx.selfType;
   }
-  // Phase 9.G: `(p: T) => R` function value type.
+  // `(p: T) => R` function value type.
   if (annot.kind === "functionType") {
     const params = [];
     for (const p of annot.params) {
@@ -731,7 +729,7 @@ function bitWidthOf(name) {
 }
 
 // Returns true if a numeric cast from src to dst is valid (both must be numeric prims).
-// Phase 12: an integer-backed value enum is castable to/from any numeric prim
+// An integer-backed value enum is castable to/from any numeric prim
 // via its underlying primitive. String-backed enums are not castable.
 export function isCastableTo(src, dst) {
   if (!src || !dst) return false;
@@ -861,7 +859,7 @@ export function typesEqual(a, b) {
   throw new Error(`Unknown type kind: ${a.kind}`);
 }
 
-// Phase 7.1: walk a type, replacing every TypeParamType matched in
+// Walk a type, replacing every TypeParamType matched in
 // `substitution` (a Map<originDecl-string, Map<paramName, Type>>) with the
 // substituted Type. For frozen primitives, just returns the input. New
 // composite types are constructed and frozen.
@@ -907,7 +905,7 @@ export function substituteTypeParams(type, substitution, instantiator = null) {
       );
     }
     case typeKinds.struct: {
-      // Phase 7.1: if this struct is a generic instantiation, substitute its
+      // If this struct is a generic instantiation, substitute its
       // type args and re-instantiate via the registry. This is what turns an
       // open `Box<T>` (inside a generic body) into the concrete `Box<int32>`
       // at codegen time.
@@ -942,7 +940,7 @@ export function substituteTypeParams(type, substitution, instantiator = null) {
       );
     }
     case typeKinds.variant: {
-      // Phase 10.A: mirror the struct branch. Open instances (carrying
+      // Mirror the struct branch. Open instances (carrying
       // genericInstance with TypeParamType args) re-route through the
       // registry once their args have concrete substitutions.
       if (type.genericInstance && inst) {
@@ -959,7 +957,7 @@ export function substituteTypeParams(type, substitution, instantiator = null) {
       return type;
     }
     case typeKinds.functionPointer: {
-      // Phase 10.X.2: FPT carries plain-type params + return. Walk both.
+      // FPT carries plain-type params + return. Walk both.
       const newParams = type.params.map((p) =>
         substituteTypeParams(p, substitution, inst),
       );

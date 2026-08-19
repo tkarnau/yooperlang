@@ -445,11 +445,11 @@ function distance(p: Point): int32 {
     assert.deepEqual(fieldNames.sort(), ["x", "y"]);
   });
 
-  // An extern block used to contribute NOTHING to the outline. A file that is
-  // all extern - std/core/intrinsics.yoop, std/net/socket_ffi.yoop, the sdl.yoop
-  // under examples/playground/nebula_arena - came back with zero symbols, and a
-  // mixed file listed only its non-extern half. FFI signatures are exactly what
-  // one goes hunting for by name, so hiding them was the wrong default.
+  // An extern block has to contribute to the outline. A file that is all
+  // extern - std/core/intrinsics.yoop, std/net/socket_ffi.yoop, the sdl.yoop
+  // under examples/playground/nebula_arena - would otherwise come back with
+  // zero symbols, and a mixed file would list only its non-extern half. FFI
+  // signatures are exactly what one goes hunting for by name.
   it("emits an extern block as one entry holding its signatures", () => {
     const src = `extern "C" from library "SDL2" {
     type SDL_Window;
@@ -493,12 +493,11 @@ function main(): int32 {
   });
 });
 
-// modules-as-directories: the LSP has to keep working when the file under the
-// cursor is one SOURCE FILE of a directory module. Everything below is a
-// property that only exists because a source file stays the compilation unit
-// while the namespace moves to the directory - if `moduleEnv` had been keyed per
-// file, or diagnostics keyed by moduleId, these would break.
-// See plans/modules-as-directories.md.
+// The LSP has to keep working when the file under the cursor is one SOURCE
+// FILE of a directory module. Everything below is a property that only exists
+// because a source file stays the compilation unit while the namespace belongs
+// to the directory - `moduleEnv` keyed per file, or diagnostics keyed by
+// moduleId, would break these.
 function writeDirModuleFixture(files, moduleDirName = "geom") {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "yoop_dirmod_"));
   const dir = path.join(root, moduleDirName);
@@ -626,9 +625,9 @@ export function capB(): usize {
   });
 });
 
-// yooperdoom-takeaways 4.1: the comment above a declaration is documentation,
-// and the editor should show it. The scan runs on raw source, because comments
-// are eaten by the lexer and never reach the token stream.
+// The comment above a declaration is documentation, and the editor shows it.
+// The scan runs on raw source, because comments are eaten by the lexer and
+// never reach the token stream.
 describe("nav: docCommentAt", () => {
   // Anchor is the declaration's NAME offset, which is what locOfDecl computes
   // and what goto-definition already jumps to.

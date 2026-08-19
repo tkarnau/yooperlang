@@ -154,8 +154,8 @@ suite function floatLiteralsDecodeExactly(): void {
 }
 
 // Which spellings are one FLOATLITERAL and which are something else. Every one
-// of these was checked against the reference; `1E5` is the one the bootstrap
-// used to get wrong, splitting it into INTLITERAL(1) and IDENT(E5).
+// of these is checked against the reference; `1E5` is the easy one to get
+// wrong, by splitting it into INTLITERAL(1) and IDENT(E5).
 suite function floatLiteralFormsMatchTheReference(): void {
   let test theory: Case = t.asserts("1e5 is one float token") {
     theory.isSuccessful = isOneFloat("1e5");

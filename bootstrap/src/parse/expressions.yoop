@@ -285,10 +285,9 @@ export function parseExpression(ref ps: ParserState, minPrecedence: int): Parsin
     // in the prefix switch, a field in the DOT branch below. So reaching this
     // means the callee is an arbitrary expression, which nothing lowers.
     //
-    // Refused rather than left alone, because leaving it produced a SILENT
-    // miscompile: the arguments were dropped and the function pointer itself
-    // was the value. It only became reachable when function-type annotations
-    // landed and `((k: K) => V)[]` started parsing.
+    // Refused rather than left alone, because leaving it is a SILENT
+    // miscompile: the arguments are dropped and the function pointer itself
+    // becomes the value.
     if (postfixTag == TokenTags.LPAREN) {
       return Result.Err { error: SelfLexing.createParsingError(
         ref ps,

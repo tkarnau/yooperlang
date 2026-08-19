@@ -1,4 +1,4 @@
-// Phase 10.E.2: `expr? "context"` on a structured Err payload via the
+// `expr? "context"` on a structured Err payload via the
 // `WithContext<T>` trait.
 //
 // A struct Err payload has no single "the error string" to prepend to, so

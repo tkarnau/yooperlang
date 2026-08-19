@@ -1,0 +1,55 @@
+// A kind is the third axis. A type says what a value IS, a trait says what it
+// CAN DO, a kind says how the BINDING must be USED. Same type, two bindings,
+// different obligations.
+//
+// `disposable` is not built in. This is its entire declaration, from
+// std/core/kinds.yoop:
+//
+//   export kind disposable {
+//     appliesTo binding;                  // attaches to a let/const site
+//     requires Disposable;                // the type must implement it
+//     mustCall dispose beforeScopeEnd;    // inject the call at scope exit
+//     ownsBlock;                          // may take a trailing { } block
+//   }
+
+import { Disposable, disposable } from "std/core/kinds.yoop";
+
+type Conn implements Disposable {
+  id: int32,
+  function dispose(ref self): void {
+    printf(`  close ${self.id}\n`);
+  }
+}
+
+// A plain binding carries no obligation, so nothing is injected - and nothing
+// complains. Ownership is advisory until you ask for it.
+function plain(): void {
+  printf("plain:\n");
+  let c: Conn = { id: 1 };
+  printf(`  use ${c.id}\n`);
+}
+
+// One word of difference, and the compiler places the dispose call for you.
+function kinded(): void {
+  printf("kinded:\n");
+  disposable c: Conn = { id: 2 };
+  printf(`  use ${c.id}\n`);
+}
+
+// Including on the early return. You declare the obligation once instead of
+// remembering it on every branch.
+function bail(early: bool): void {
+  printf("bail:\n");
+  disposable c: Conn = { id: 3 };
+  if (early) {
+    return;
+  }
+  printf("  not reached\n");
+}
+
+function main(): int32 {
+  plain();
+  kinded();
+  bail(true);
+  return 0;
+}

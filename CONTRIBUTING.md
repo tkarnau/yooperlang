@@ -59,17 +59,11 @@ The pipeline is: source `.yoop` -> lex -> parse -> typecheck -> codegen (LLVM IR
 - `src/yoopiler.js` - the entry point
 
 For the full subsystem map, the cross-cutting invariants, and the design notes
-that are not obvious from any single file, read [CLAUDE.md](CLAUDE.md). It is the
-de facto architecture document for this repo.
-
-## The phase model
-
-Features land phase by phase. The current focus and the small consolidated plan
-live in [plans/](plans/); per-phase write-ups for shipped work are in
-[plans/completed/](plans/completed/), and the full historical roadmap is at
-[plans/archive/roadmap.md](plans/archive/roadmap.md). Code is annotated with phase comments
-(`// Phase 7.1:`, `// 6.5:`) marking the version a piece of logic became
-correct - treat those as load-bearing breadcrumbs.
+that are not obvious from any single file, read
+[docs/compiler_internals.md](docs/compiler_internals.md). The other two docs
+worth knowing: [SPEC.md](SPEC.md) is the grammar and semantics authority, and
+[docs/writing_yoop.md](docs/writing_yoop.md) is how to write Yoop itself (std,
+the bootstrap compiler, tools, examples).
 
 ## Reporting issues
 

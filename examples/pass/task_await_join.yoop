@@ -14,8 +14,6 @@
 // below is itself a task, and it waits on two more. Under a blocking join the
 // single worker would be held by `joiner` while the tasks it is waiting for
 // sat unstarted in the queue - a deadlock, not a slowdown.
-//
-// See plans/task-combinators.md.
 
 import * as conc from "std/core/concurrency.yoop";
 

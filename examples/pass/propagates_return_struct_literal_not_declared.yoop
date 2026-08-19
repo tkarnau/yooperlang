@@ -1,8 +1,6 @@
-// Ownership redesign (2026-06-17, plans/ownership-and-typestate-redesign.md):
-// returning a struct literal that moves a propagating binding into a field
+// Returning a struct literal that moves a propagating binding into a field
 // needs no propagates<K> on the function. Obligations are advisory; this
-// typechecks cleanly. (Formerly
-// examples/fail/propagates_return_struct_literal_not_declared.)
+// typechecks cleanly.
 
 trait Disposable {
     function dispose(ref self): void;

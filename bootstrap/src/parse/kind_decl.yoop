@@ -23,8 +23,8 @@ module parse;
   function carrying the kind.
 
   NOTHING ENFORCES KINDS. Clauses are recorded by their leading word rather than
-  interpreted, exactly as kind prefixes have been since they landed. That keeps
-  the limitation "not enforced" instead of "not parsed", which is the difference
+  interpreted, exactly as kind prefixes are. That keeps the limitation
+  "not enforced" instead of "not parsed", which is the difference
   between a program that compiles with its annotations intact and one that does
   not compile at all.
 */
@@ -108,7 +108,7 @@ function parseKindParams(ref ps: ParserState): Result<NodeId, ParsingError> {
 //                   no `appliesTo` is exactly a clause list, so there is
 //                   nothing to name and nothing to look up.
 //
-// This used to consume the operands and record NOTHING, which compiled a
+// Consuming the operands and recording NOTHING would compile a
 // `scoped_alt h: Vec3 = ...` binding to no scope-end call at all - a promise
 // dropped rather than refused.
 function parseKindComposition(ref ps: ParserState, node: ASTNode): Result<NodeId, ParsingError> {

@@ -116,10 +116,9 @@ function main() {
     return;
   }
 
-  // Phase 11.E.4: --list-attributes - dump the registry's known
-  // attribute names + each entry's handler phases. Useful for
-  // tooling (editor LSP completions, doc generation) and the
-  // human-typing-an-@-by-mistake workflow.
+  // --list-attributes - dump the registry's known attribute names + each
+  // entry's handler phases. Useful for tooling (editor LSP completions, doc
+  // generation) and the human-typing-an-@-by-mistake workflow.
   if (values["list-attributes"]) {
     const names = knownAttributeNames();
     if (names.length === 0) {
@@ -308,13 +307,12 @@ function main() {
       ? warnings
       : warnings.filter((w) => !isStdPath(ownerOf(w)?.absPath));
     // `unhandled-disposable` is OPT-IN on the command line. The ownership model
-    // is advisory by design (plans/ownership-and-typestate-redesign.md), and the
-    // warning has two known false-positive classes it cannot yet tell apart
-    // from a real leak: a value living in an arena scope, where NOT disposing is
-    // the point, and a copy read back out of a container, where disposing would
-    // double-free. It stays on in the LSP, which is where that doc says the
-    // advisory belongs; `--warn-disposable` surfaces it in a build when you
-    // want to audit for leaks.
+    // is advisory by design, and the warning has two known false-positive
+    // classes it cannot tell apart from a real leak: a value living in an
+    // arena scope, where NOT disposing is the point, and a copy read back out
+    // of a container, where disposing would double-free. It stays on in the
+    // LSP, which is where an advisory belongs; `--warn-disposable` surfaces
+    // it in a build when you want to audit for leaks.
     if (!values["warn-disposable"]) {
       reported = reported.filter((w) => w.code !== "unhandled-disposable");
     }
@@ -333,15 +331,15 @@ function main() {
   }
   console.log("typecheck: ok");
 
-  // Phase 11.B: opportunistic module-init folding. Each module-level
+  // Opportunistic module-init folding. Each module-level
   // `let` / `const` whose initializer the interpreter can evaluate is
   // stamped with `decl.comptimeFolded = true` + `decl.comptimeValue`;
   // codegen consumes those to emit an LLVM `@global` with a literal
   // initial value (skipping the runtime `module_init` call entirely
-  // for that decl). Failures are silent - the existing runtime path
-  // handles the unfoldable cases the same way it does today.
+  // for that decl). Failures are silent - the runtime path handles the
+  // unfoldable cases.
   //
-  // Phase 11.C: this pass runs BEFORE the attribute pass so the
+  // This pass runs BEFORE the attribute pass so the
   // `@precompile` consumer can read each decl's `comptimeFolded` flag
   // and surface a hard error if the user-declared comptime
   // requirement wasn't met.
@@ -350,10 +348,9 @@ function main() {
     dumpBC: !!values["dump-bc"],
   });
 
-  // Phase 11.A + 11.C: attribute dispatch pass. `@precompile` now
-  // surfaces fold failures as hard errors (the opportunistic
-  // fallback was the wrong shape for an explicitly user-marked
-  // comptime decl). Future attribute consumers plug into this hook.
+  // Attribute dispatch pass. `@precompile` surfaces fold failures as hard
+  // errors: the opportunistic fallback is the wrong shape for an explicitly
+  // user-marked comptime decl.
   const attrErrors = [];
   runAttributePass(modules, attrErrors);
   if (attrErrors.length > 0) {

@@ -1,14 +1,13 @@
 // An HTTP server and three concurrent clients, all on ONE worker thread.
 //
-// This is the end of the async story: `std/net` and `std/http` are async
-// top to bottom, so every accept, read, and write suspends the calling
-// task rather than parking its worker. The e2e case runs this with
-// YOOP_NUM_WORKERS=1.
+// `std/net` and `std/http` are async top to bottom, so every accept, read,
+// and write suspends the calling task rather than parking its worker. The
+// e2e case runs this with YOOP_NUM_WORKERS=1.
 //
-// Under the old blocking runtime this deadlocks rather than fails: the
-// single worker parks inside the server's accept(), and no client task
-// ever gets a turn to connect. Concurrency used to cost one thread per
-// in-flight connection; now it costs one coroutine frame.
+// On a blocking runtime this deadlocks rather than fails: the single worker
+// parks inside the server's accept(), and no client task ever gets a turn to
+// connect. Concurrency there costs one thread per in-flight connection; here
+// it costs one coroutine frame.
 //
 // Note what did NOT have to become async: `Handler.handle`. It takes a
 // fully-buffered request and fills a response, so there is nothing for it

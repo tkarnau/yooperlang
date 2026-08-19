@@ -1,6 +1,6 @@
-// Phase 9.J: a generic function bounded on a parent trait can be called with
-// a type that only declares it implements the child trait — the extends chain
-// satisfies the bound. The function body invokes the parent trait's method
+// A generic function bounded on a parent trait can be called with a type that
+// only declares it implements the child trait - the extends chain satisfies
+// the bound. The function body invokes the parent trait's method
 // directly via `Parent.method(ref t)`.
 
 trait Animal {

@@ -1,12 +1,12 @@
-// Phase 11.B: opportunistic module-init folding. The interpreter
+// Opportunistic module-init folding. The interpreter
 // evaluates the initializer at compile time and codegen emits the
 // LLVM @global with the literal value baked in, skipping the
 // runtime `<modid>__module_init` path entirely for that decl.
 //
-// Folded today (11.B.0 through 11.B.12):
+// Folded:
 //   - integer literal arithmetic                            (i32)
 //   - bool literals                                         (i1)
-//   - string literals                                       (ptr → [N x i8])
+//   - string literals                                       (ptr -> [N x i8])
 //   - struct literals with primitive fields                 (named-struct aggregate)
 //   - array literals with primitive elements                (fat-pointer to private backing buffer)
 //   - bitwise / shift / comparison / logical / unary ops    (all primitive-typed)

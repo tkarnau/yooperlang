@@ -21,7 +21,6 @@
 //   3. The per-task context: the save/load/store the scheduler uses to make
 //      the ambient allocator follow a coroutine across suspends instead of
 //      staying behind on whichever worker happened to run the last step.
-//      See plans/async-allocator-context.md.
 
 #include "yoop_alloc.h"
 
@@ -260,7 +259,7 @@ static size_t yoop_align_up(size_t n, size_t align) {
   return (n + (align - 1)) & ~(align - 1);
 }
 
-// Bump the cursor, honoring alignment. Returns NULL on overflow (v1 has no
+// Bump the cursor, honoring alignment. Returns NULL on overflow (there is no
 // region growth; an out-of-space alloc fails rather than mallocing behind the
 // caller's back).
 //

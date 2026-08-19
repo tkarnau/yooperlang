@@ -1,8 +1,6 @@
-// Ownership redesign (2026-06-17, plans/ownership-and-typestate-redesign.md):
-// obligations are ADVISORY. A binding of a propagating type that is never
-// disposed and never declares the kind keyword is no longer an error - it
-// typechecks cleanly. (Formerly examples/fail/propagates_binding_missing_kind:
-// "binding 'w' has unsatisfied obligation from propagates<disposable>".)
+// Obligations are ADVISORY. A binding of a propagating type that is never
+// disposed and never declares the kind keyword is not an error - it
+// typechecks cleanly.
 
 trait Disposable {
     function dispose(ref self): void;

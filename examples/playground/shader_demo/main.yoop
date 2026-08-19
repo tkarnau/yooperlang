@@ -3,10 +3,10 @@
 // Opens an SDL window with an OpenGL 3.2 Core context, compiles a
 // vertex + fragment shader pair into a program, sets up a single
 // fullscreen-quad VAO/VBO, and renders one frame per loop tick. The
-// fragment shader generates the same fiery-sun look the sun_moon
-// CPU shader did, but now on the GPU.
+// fragment shader generates the same fiery-sun look as the sun_moon
+// CPU shader, on the GPU.
 //
-// macOS-only today. Linux would need a GL function loader
+// macOS-only. Linux would need a GL function loader
 // (SDL_GL_GetProcAddress) for the modern GL entry points; on macOS
 // OpenGL.framework exposes the GL 4.1 core surface as direct symbols
 // so we can link them with `framework:OpenGL`.

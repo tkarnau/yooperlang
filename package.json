@@ -21,7 +21,7 @@
     "language"
   ],
   "engines": {
-    "node": ">=18"
+    "node": ">=22"
   },
   "bin": {
     "yoopiler_alpha": "src/yoopiler.js"
@@ -46,7 +46,8 @@
     "build:sea": "node scripts/build_sea.mjs",
     "package": "node scripts/package_release.mjs",
     "package:boot": "node scripts/package_bootstrap.mjs",
-    "gen:index": "node scripts/gen_std_index.mjs"
+    "gen:index": "node scripts/gen_std_index.mjs",
+    "gen:web": "node scripts/gen_web.mjs"
   },
   "devDependencies": {
     "esbuild": "^0.28.1",

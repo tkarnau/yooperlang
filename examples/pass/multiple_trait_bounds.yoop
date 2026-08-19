@@ -1,4 +1,4 @@
-// Phase 9.J: a type parameter with multiple trait bounds
+// A type parameter with multiple trait bounds
 // `<T implements (A, B)>`. Inside the body, methods from both bounds are
 // callable; at the call site, the concrete type must implement every bound.
 

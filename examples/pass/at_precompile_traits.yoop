@@ -1,4 +1,4 @@
-// Phase 11.D.5: trait method calls fold through the comptime
+// Trait method calls fold through the comptime
 // interpreter. The interpreter's traitMethodResolver walks the
 // receiver struct's TYPE_DECL to find the method's AST, lowers it
 // like any other function (with `self` bound to register 0 as a

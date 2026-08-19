@@ -1,4 +1,4 @@
-// Phase 11.D: comptime-allowed extern functions.
+// Comptime-allowed extern functions.
 //
 // The interpreter cannot call into real libc / OS extern functions at
 // compile time - the user's program is being compiled, not run; the
@@ -180,7 +180,7 @@ WHITELIST.set("yoop_log_info", makeLogSink("info"));
 WHITELIST.set("yoop_log_warn", makeLogSink("warn"));
 WHITELIST.set("yoop_log_error", makeLogSink("error"));
 
-// Phase 11.E.3: comptime printf. Writes to stderr with a
+// Comptime printf. Writes to stderr with a
 // `[comptime] ` prefix so debug output from a `@precompile { ... }`
 // block doesn't intermingle with the compiler's own diagnostics or
 // the compiled program's stdout. Format-spec strings ("%d\n", "%s")
@@ -194,8 +194,7 @@ WHITELIST.set("yoop_log_error", makeLogSink("error"));
 // string register by the time printf sees its arg. Legacy
 // `printf("%d\n", x)` lands here too - each arg gets concatenated
 // with the literal `%d` left in place, so the output is approximate
-// but functional. A future sub-phase could parse the format spec
-// properly if a real need shows up.
+// but functional; the format spec is not parsed.
 WHITELIST.set("printf", {
   impl(args, _loc, returnType) {
     let out = "";

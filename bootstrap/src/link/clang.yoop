@@ -2,9 +2,9 @@ module link;
 
 // Layer 6: LLVM IR text -> executable, by shelling out to clang.
 //
-// This layer is identical in both implementations by design - the contracts doc
-// calls it the one that does not deviate. The only wrinkle is that yoop has no
-// process API yet, so we reach for libc's `system` directly. That is why this
+// This layer is identical in both implementations by design - it is the one
+// layer that does not deviate. The only wrinkle is that yoop has no process
+// API, so we reach for libc's `system` directly. That is why this
 // file is `import.unsafe`.
 //
 // A program that only touches libc needs no yoop runtime, which is what keeps
@@ -26,8 +26,8 @@ extern "C" from "stdlib.h" {
 }
 
 // Which platform we are building for. The reference reads `process.platform`;
-// this is the bootstrap's equivalent, and the three rules below that used to be
-// unconditional are the reason it exists. Values mirror YOOP_PLATFORM_* in
+// this is the bootstrap's equivalent, and the three platform-dependent rules
+// below are the reason it exists. Values mirror YOOP_PLATFORM_* in
 // runtime/yoop_runtime.h - see yoop_runtime_platform there for why an int.
 //
 // Declared here rather than reached for through std/runtime.yoop deliberately:
@@ -128,7 +128,7 @@ export function linkExecutable(
 // asking for it there is a hard "cannot open input file 'm.lib'".
 //
 // `pthread` goes on both POSIX platforms for parity with the reference, even
-// though a current glibc no longer needs it (2.34 merged libpthread into libc)
+// though a current glibc does not need it (2.34 merged libpthread into libc)
 // and macOS never did. It costs nothing on either and is what an older glibc
 // wants.
 // Takes the platform rather than reading it, so a test can assert all three on
@@ -157,10 +157,9 @@ function pushRuntimeLibraries(ref cmd: Text): void {
 //   * `framework:NAME` is an APPLE linker concept and lowers to
 //     `-framework NAME` there. Off Apple it drops, with one exception:
 //     `framework:OpenGL` names the platform's OpenGL and every platform has
-//     one, so it becomes `-lopengl32` on Windows and `-lGL` on Linux. This used
-//     to be emitted unconditionally, because the bootstrap had no way to ask
-//     what it was building for; `yoop_runtime_platform` is that way, and closes
-//     the gap the comment here used to describe.
+//     one, so it becomes `-lopengl32` on Windows and `-lGL` on Linux. Deciding
+//     that needs a way to ask what is being built for, which is what
+//     `yoop_runtime_platform` is.
 //   * `ssl` and `crypto` each mean BOTH. libssl is the protocol and libcrypto
 //     is everything underneath it, and libssl cannot link without it; making a
 //     user name both would be a papercut whose failure mode is a wall of
@@ -168,9 +167,8 @@ function pushRuntimeLibraries(ref cmd: Text): void {
 //   * everything else is `-lNAME`.
 //
 // Where clang LOOKS for those libraries is search_paths.yoop, which is a
-// separate question and a separate file. It used to be missing on the grounds
-// that nothing in the corpus needed it; the program probe found
-// `examples/pass/https_client/main.yoop`, which does.
+// separate question and a separate file. The corpus needs it:
+// `examples/pass/https_client/main.yoop` does not link without it.
 function pushLinkLibraries(ref cmd: Text, ref libs: Vec<string>): void {
   let i: usize = 0;
   while (i < libs.len) {

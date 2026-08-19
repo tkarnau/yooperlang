@@ -1,4 +1,4 @@
-// Phase 13.C: @derive(display) - pre-typecheck expansion.
+// @derive(display) - pre-typecheck expansion.
 //
 // For each module-top-level `@derive(display)`-wrapped TYPE_DECL, generate a
 // `Display.toString` method AS YOOP SOURCE TEXT from the decl's field
@@ -74,9 +74,9 @@ export function expandDerives(modules, errors) {
         continue;
       }
       if ((typeDecl.typeParams ?? []).length > 0) {
-        // Generic variants additionally need method substitution through the
-        // instantiation registry, which does not exist yet; generic structs
-        // need type-param-aware interpolation. Both stay manual for now.
+        // Generic variants would need method substitution through the
+        // instantiation registry, and generic structs type-param-aware
+        // interpolation. Neither is supported, so both stay manual.
         errors.push({
           message: `@derive(display) on generic ${isVariant ? "variant" : "type"} "${typeDecl.name}" is not yet supported - write the Display impl manually`,
           sourceLoc: typeDecl.sourceLoc,
@@ -261,7 +261,7 @@ function generateStructBody(typeDecl, labels) {
   return lines;
 }
 
-// Phase 13.D: an arm-per-case switch over `self`. Payload fields bind to
+// An arm-per-case switch over `self`. Payload fields bind to
 // generated locals (user field names could collide with our temporaries) and
 // print with the same per-field rules as struct fields. Output mirrors the
 // constructor syntax - `Shape.Circle { r: 5 }` / `Shape.Dot` - so a dump

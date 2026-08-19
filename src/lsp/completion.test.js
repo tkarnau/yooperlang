@@ -2,16 +2,15 @@
 //
 // The scope-walking half (locals, params, module decls, imports) is covered
 // end-to-end through the server in server.test.js, which drives real documents.
-// What has no coverage there, and what actually drifted, is the hardcoded
-// `PRIM_TYPES` list: it is the one part of the LSP that restates a fact the
-// typechecker already owns, and a comment saying "kept in sync" is not a
-// mechanism.
+// What has no coverage there is the hardcoded `PRIM_TYPES` list: it is the
+// one part of the LSP that restates a fact the typechecker already owns, and
+// a comment saying "kept in sync" is not a mechanism.
 //
-// It had fallen eight names behind. Phase 8.B added the C-portable integer
-// aliases (`c_int`, `c_size_t`, `c_ssize_t`, ...) and every `extern "C"` block
-// in std, the bootstrap and the examples is written in them - so completion
-// went quiet in exactly the position where a C signature is being typed, which
-// is the position least likely to be remembered from memory.
+// Drift there is easy to miss. The C-portable integer aliases (`c_int`,
+// `c_size_t`, `c_ssize_t`, ...) are what every `extern "C"` block in std, the
+// bootstrap and the examples is written in - so a missing name makes
+// completion go quiet in exactly the position where a C signature is being
+// typed, which is the position least likely to be remembered from memory.
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";

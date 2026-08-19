@@ -14,7 +14,7 @@ describe("attributeRegistry", () => {
     assert.equal(getAttributeHandler("nonexistent"), null);
   });
 
-  it("returns @derive as a known attribute (Phase 13.C)", () => {
+  it("returns @derive as a known attribute", () => {
     assert.ok(knownAttributeNames().includes("derive"));
     assert.ok(getAttributeHandler("derive"));
   });

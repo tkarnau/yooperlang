@@ -102,6 +102,6 @@ body format.
 - No JSON request bodies (no parser).
 - No auth, no pagination cursors, no ETags.
 - One connection at a time: the accept loop does not spawn a task per
-  connection yet, so a slow client blocks the next one.
+  connection, so a slow client blocks the next one.
 - Strings built while parsing a request are never freed, so memory grows with
   the number of distinct header values a long-lived process has seen.

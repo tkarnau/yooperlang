@@ -1,4 +1,4 @@
-// Phase 10.A: generic enum with a no-payload variant. Exercises bare
+// Generic enum with a no-payload variant. Exercises bare
 // `EnumName.Variant` promotion + pinning through a typed binding.
 
 extern "C" from "stdio.h" {

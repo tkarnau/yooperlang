@@ -1,0 +1,14 @@
+type Point {
+    x: int32,
+    y: int32,
+}
+
+function main(): int32 {
+    const p = { x: 1, y: 2 };
+    return p.x;
+}
+
+// Fails because a struct literal carries no type of its own: inference flows
+// from the initializer to the binding, and a bare `{ ... }` has nothing to
+// flow. Give the literal a target - an annotation (`const p: Point = ...`),
+// a return type, or a parameter type - and it typechecks.

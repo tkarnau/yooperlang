@@ -1,4 +1,4 @@
-// Phase 10.K: an array of function pointers. The element type is a
+// An array of function pointers. The element type is a
 // parenthesized function-value type - `((p: T) => R)[]` - which the grouping
 // parens make spellable (a bare `(p: T) => R[]` would bind the `[]` to the
 // return type). No vtable, no struct, no ctx: each element is a plain

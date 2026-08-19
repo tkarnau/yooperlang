@@ -73,7 +73,7 @@ redraws after input, so per-line texture creation costs nothing while idle.
 ## Notes / limitations
 
 - Only top-level functions (including `export function`) are listed; trait/type
-  methods are not yet surfaced.
+  methods are not surfaced.
 - A handful of expression kinds (template literals, some patterns) render as
   placeholders; unknown node kinds degrade to a `<KIND>` line rather than crash.
 - Notation is intentionally ASCII (the repo avoids non-keyboard glyphs in source);

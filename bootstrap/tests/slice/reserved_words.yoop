@@ -2,9 +2,9 @@
 //
 // C headers are full of arguments and members spelled `type`, `kind`, `enum`
 // and `in`, and an extern signature mirrors a C ABI it does not get to rename -
-// so a generated binding used to need a hand edit on the first collision. The
-// positions that accept one are the positions where the keyword's grammar role
-// cannot reach: a struct, variant or enum FIELD or CASE name, an extern
+// so refusing one there means a generated binding needs a hand edit on the
+// first collision. The positions that accept one are the positions where the
+// keyword's grammar role cannot reach: a struct, variant or enum FIELD or CASE name, an extern
 // PARAMETER name, the right of a `.`, and a struct-literal field name.
 //
 // This has to reach an executable rather than stopping at the parser, because

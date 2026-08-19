@@ -41,7 +41,7 @@ type Results implements (Collects, Disposable) propagates<disposable> {
 
 // `Recorder.from(ref r)` stores &r as the vtable's ctx, so every copy of a
 // Recorder dispatches back into the same Results. This is the one indirection
-// the language gives you today - a `ref` or `unsafe_ptr` struct field cannot
+// the language gives you - a `ref` or `unsafe_ptr` struct field cannot
 // be handed on to a `ref`-taking function.
 vtable Recorder for Collects {
   record: (line: string) => void,

@@ -75,12 +75,10 @@ describe("comptime: int32 literal + arithmetic fold", () => {
 describe("comptime: refuses to lower unsupported AST shapes", () => {
   it("throws ComptimeError for an unsupported node kind", () => {
     // Hand-crafted AST node with a kind the lowerer doesn't handle.
-    // Originally this used TEMPLATE_LITERAL (which now lowers as of
-    // 11.E.3); the fallback path keeps a real test by reaching for
-    // a kind the interpreter is unlikely to ever support directly
-    // (DISCARD_STATEMENT belongs to the statement dispatcher, never
-    // appears in expression position - exactly the kind of shape
-    // the catch-all guard exists to reject).
+    // The node kind has to be one the interpreter is unlikely to ever
+    // support directly (DISCARD_STATEMENT belongs to the statement
+    // dispatcher, never appears in expression position - exactly the kind
+    // of shape the catch-all guard exists to reject).
     const fakeNode = {
       kind: "DISCARD_STATEMENT",
       resolvedType: { kind: "prim", name: "int32" },

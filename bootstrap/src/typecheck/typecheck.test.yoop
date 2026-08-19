@@ -59,8 +59,8 @@ suite function parametersBindAsLocals(): void {
 }
 
 // Shadowing is a NESTED-block question and redeclaration is a same-block one.
-// The two used to be one test - any visible name refused a declaration - and
-// separating them is what let `let v = 7; if (c) { let v = 99; }` compile.
+// They are two questions rather than one: answering "any visible name refuses a
+// declaration" would refuse `let v = 7; if (c) { let v = 99; }`.
 suite function anInnerBlockShadowsAndAnOuterOneSnapsBack(): void {
   let inner = checkSource(
     "function main(): int { let v: int = 7; if (true) { let v: int = 9; return v; } return v; }"
@@ -2652,8 +2652,8 @@ suite function functionValuesAreTheirSignatures(): void {
 
 // A Func has no canonical TypeId, so a Func WRAPPED in something structural has
 // no canonical id either - and every wrapper has to be walked through to reach
-// it. `((a: int32) => int32)[]` written in two places used to report
-// "X is not X" because the compare stopped at the Array.
+// it. A compare that stops at the Array reports "X is not X" for
+// `((a: int32) => int32)[]` written in two places.
 //
 // Every accepting case here is a pair of SEPARATE annotations, which is the
 // whole point: one annotation used twice would compare equal by id and prove
@@ -2774,9 +2774,9 @@ suite function pointerWideningIsTopLevelOnly(): void {
   }
 }
 
-// A type in a diagnostic has to READ as the type. Every one of these used to
-// come out as "<type>", which turns a real mismatch into "X is not X" - the
-// exact confusion that hid the wrapper bug above.
+// A type in a diagnostic has to READ as the type. One coming out as "<type>"
+// turns a real mismatch into "X is not X" - the exact confusion the wrapper
+// compare above is prone to.
 suite function everyTypeRendersInADiagnostic(): void {
   let ptr = checkSource("import.unsafe;\nfunction takes(p: unsafe_ptr<uint8>): int { return 0; } function main(): int { let q: unsafe_ptr<int32> = null; return takes(q); }");
   let test theory: Case = t.asserts("a typed pointer renders with its pointee") {
@@ -3302,11 +3302,10 @@ suite function moduleGlobalsAreRealStorage(): void {
   }
 
   // An INTEGER literal initializer is baked into the LLVM global. Anything else
-  // used to be refused by name; it is now a RUN-TIME initializer, stored by the
-  // module's init function before `main` runs a line of user code. So the
-  // refusal this pair used to assert is gone, and what replaces it is that the
-  // initializer is accepted and still CHECKED - it is an ordinary expression
-  // pass D reads now, so the annotation is what it has to satisfy.
+  // is a RUN-TIME initializer, stored by the module's init function before
+  // `main` runs a line of user code. So the initializer is accepted and still
+  // CHECKED - it is an ordinary expression pass D reads, so the annotation is
+  // what it has to satisfy.
   let computed = checkSource("function f(): int32 { return 1; }\nlet N: int32 = f();\nfunction main(): int { return 0; }");
   let test theory: Case = t.asserts("a non-literal initializer is accepted") {
     theory.isSuccessful = computed.diagnostics.len == 0;

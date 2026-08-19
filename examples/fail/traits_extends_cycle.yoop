@@ -1,4 +1,4 @@
-// Phase 9.J: a cycle in the extends graph is rejected. Two traits that
+// A cycle in the extends graph is rejected. Two traits that
 // extend each other have no consistent topological order and would let
 // method resolution recurse forever.
 

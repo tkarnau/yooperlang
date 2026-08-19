@@ -1,18 +1,17 @@
-// Phase 10.F.2: external cancellation via `cancel(h)`.
+// External cancellation via `cancel(h)`.
 //
 // A `cancel(h)` call sets the cancel byte in h's handle prefix and
 // broadcasts so any `waitUntil` parked on the handle wakes immediately
-// and observes `WaitResult.Cancelled`. The task body itself is not yet
-// cooperative (in-body polling lands in 10.F.2.b) - the worker keeps
-// running it to natural completion. The cancellation semantics this
-// sub-phase provides is "abandon-the-wait": the caller stops waiting,
+// and observes `WaitResult.Cancelled`. The task body itself is not
+// cooperative - the worker keeps running it to natural completion.
+// The cancellation semantics is "abandon-the-wait": the caller stops waiting,
 // the task's result (when it eventually arrives) is unobserved.
 //
 // Fixture shape:
 //   1. Spawn `slow()` (sleeps 200ms then returns 99).
 //   2. From a second pooled task, sleep 30ms then `cancel(slow)`.
 //   3. Main calls `conc.waitUntil(slow, now+1s)` - the 1s deadline is huge,
-//      so the only path to Cancelled is through the cancel(h) at t≈30ms.
+//      so the only path to Cancelled is through the cancel(h) at about 30ms.
 // Final `wait slow` drains the still-running task so its handle frees
 // cleanly (same pattern as the wait_until_smoke fixture).
 

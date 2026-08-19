@@ -1,14 +1,15 @@
 // The ambient allocator follows a TASK, not a worker thread.
 //
-// Two ways this used to break, both completely silent:
+// Two ways this breaks if the context rides the worker instead, both
+// completely silent:
 //
-//   1. A task that suspended inside an arena scope left its arena installed
-//      on the worker it handed back, so the next unrelated task that worker
-//      picked up allocated out of a region it knows nothing about - a region
+//   1. A task that suspends inside an arena scope leaves its arena installed
+//      on the worker it hands back, so the next unrelated task that worker
+//      picks up allocates out of a region it knows nothing about - a region
 //      that is then destroyed by whoever owns the scope.
-//   2. A task that resumed on a DIFFERENT worker found that worker's
-//      allocator rather than its own, so everything it allocated after the
-//      await escaped its region into malloc. Arena-shaped code never frees,
+//   2. A task that resumes on a DIFFERENT worker finds that worker's
+//      allocator rather than its own, so everything it allocates after the
+//      await escapes its region into malloc. Arena-shaped code never frees,
 //      so that is a leak.
 //
 // The "resumed" line catches (2) at any worker count. The "neighbor" line
@@ -16,10 +17,9 @@
 // dispatching it re-entrantly from `wait`, which is scheduling-dependent -
 // hence the e2e cases pinning YOOP_NUM_WORKERS to both 1 and 4.
 //
-// The fix is one slot swapped at one funnel: run_task_step saves the
+// It is one slot swapped at one funnel: run_task_step saves the
 // thread's allocator context and installs the task's around every step,
-// exactly as it already did for the current-task pointer. See
-// plans/async-allocator-context.md.
+// exactly as it does for the current-task pointer.
 
 import.unsafe;
 import * as mem from "std/core/alloc.yoop";

@@ -1,4 +1,4 @@
-// Phase 11.D.18: a `@precompile { ... }` block that hits a
+// A `@precompile { ... }` block that hits a
 // non-whitelisted extern at fold time surfaces as a hard build
 // error - same policy as the init form (`@precompile const X = ...`).
 // The user's explicit `@precompile` is a commitment that the

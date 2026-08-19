@@ -1,4 +1,4 @@
-// Phase 7.4: central mangler for trait-method symbols.
+// Central mangler for trait-method symbols.
 //
 // Symbol shape: `<structModuleId>__<StructName>__<TraitName>__<methodName>`.
 //

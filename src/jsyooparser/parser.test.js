@@ -82,7 +82,7 @@ describe("parse: expressions", () => {
     assert.equal(e.args.length, 2);
   });
 
-  // Phase 9.A: parenthesized subexpressions
+  // Parenthesized subexpressions
   it("parens around a single literal", () => {
     const e = exprOf("(42)");
     assert.equal(e.kind, ASTNodeKind.INT_LITERAL);
@@ -132,9 +132,8 @@ describe("parse: expressions", () => {
     assert.equal(e.operand.kind, ASTNodeKind.BINARY_EXPRESSION);
   });
 
-  // Regression: unary prefixes used to return early instead of falling
-  // through to the binary loop, so `!a && b`, `-a + b`, `~a & b` failed
-  // to parse. See plans/archive/yoopbinder-papercuts.md Issue 1.
+  // Regression: a unary prefix must fall through to the binary loop rather
+  // than returning early, or `!a && b`, `-a + b`, `~a & b` fail to parse.
   it("`!a && b` parses as `&&((!a), b)` not as a syntax error", () => {
     const e = exprOf("!a && b");
     assert.equal(e.kind, ASTNodeKind.BINARY_EXPRESSION);
@@ -178,7 +177,7 @@ describe("parse: expressions", () => {
     assert.equal(e.operand.kind, ASTNodeKind.INDEX_EXPRESSION);
   });
 
-  // Phase 9.E: array slice syntax
+  // Array slice syntax
   it("plain index parses as INDEX_EXPRESSION", () => {
     const e = exprOf("xs[5]");
     assert.equal(e.kind, ASTNodeKind.INDEX_EXPRESSION);
@@ -267,10 +266,10 @@ describe("parse: statements", () => {
   });
 });
 
-// Phase 9.D: `for ITEM in EXPR { ... }` element-walking loop. The classic
+// `for ITEM in EXPR { ... }` element-walking loop. The classic
 // C-style `for (i = 0; ...)` form still parses unchanged; the dispatcher
 // looks at whether the token after `for` is `(` or `IDENT in`.
-describe("Phase 9.D: for ... in loop", () => {
+describe("for ... in loop", () => {
   function bodyOf(src) {
     return parse(`function f(): int32 { ${src} return 0; }`).body[0].body.body;
   }
@@ -301,9 +300,9 @@ describe("Phase 9.D: for ... in loop", () => {
     assert.equal(stmts2[0].iterExpr.kind, ASTNodeKind.CALL_EXPRESSION);
   });
 
-  // A `{` after an `IDENT.IDENT` RHS used to be swallowed as a variant
-  // constructor's payload, making `for x in self.items {` a parse error that
-  // callers had to work around by prebinding the RHS to a local.
+  // A `{` after an `IDENT.IDENT` RHS must not be swallowed as a variant
+  // constructor's payload: that makes `for x in self.items {` a parse error
+  // callers can only work around by prebinding the RHS to a local.
   it("a field-access RHS does not swallow the loop body's brace", () => {
     const stmts = bodyOf("for x in self.items { }");
     assert.equal(stmts[0].kind, ASTNodeKind.FOR_IN_LOOP);
@@ -417,7 +416,7 @@ describe("range operator: `a..b`", () => {
     assert.throws(() => exprOf("0..2..4"), /cannot be chained/);
   });
 
-  it("leaves the Phase 9.E slice form alone", () => {
+  it("leaves the slice form alone", () => {
     // Inside brackets `i..j` is the slice separator, never a range value.
     const s = exprOf("xs[1..3]");
     assert.equal(s.kind, ASTNodeKind.SLICE_EXPRESSION);
@@ -443,10 +442,10 @@ describe("range operator: `a..b`", () => {
   });
 });
 
-// Phase 9.G.1: function value types in type position - `(p: T) => R`. The
+// Function value types in type position - `(p: T) => R`. The
 // annotation parses to `{ kind: "functionType", params: [...], returnType }`
 // and may appear anywhere a type annotation does.
-describe("Phase 9.G.1: `=>` function value type annotations", () => {
+describe("`=>` function value type annotations", () => {
   it("parses a struct field of function-pointer type", () => {
     const ast = parse(
       "type Handler { handle: (req: int32) => int32 }",
@@ -483,7 +482,7 @@ describe("Phase 9.G.1: `=>` function value type annotations", () => {
   });
 });
 
-describe("parse: phase 2 - postfix '?'", () => {
+describe("parse: postfix '?'", () => {
   function exprOf(src) {
     const ast = parse(`function f(): int32 { return ${src}; }`);
     return ast.body[0].body.body[0].value;
@@ -533,7 +532,7 @@ describe("parse: phase 2 - postfix '?'", () => {
     assert.equal(t.operand.object.kind, ASTNodeKind.TRY_OP);
   });
 
-  // Phase 10.E.3 - the handler form.
+  // The handler form.
   it("'f()? e { ... }' attaches the binding name and the block", () => {
     const stmts = bodyOf("let v: int32 = f()? e { return 0; };");
     const t = stmts[0].assignment;
@@ -574,7 +573,7 @@ describe("parse: phase 2 - postfix '?'", () => {
     assert.throws(() => bodyOf("r? = 5;"), /invalid assignment target: TRY_OP/);
   });
 
-  // Phase 10.E.2: the optional context clause.
+  // The optional context clause.
   it("'f()?' has a null context", () => {
     assert.equal(exprOf("f()?").context, null);
   });
@@ -616,7 +615,7 @@ describe("parse: phase 2 - postfix '?'", () => {
   });
 });
 
-describe("parse: phase 2 - destructuring decl", () => {
+describe("parse: destructuring decl", () => {
   function bodyOf(src) {
     return parse(`function f(): int32 { ${src} return 0; }`).body[0].body.body;
   }
@@ -654,7 +653,7 @@ describe("parse: phase 2 - destructuring decl", () => {
   });
 });
 
-describe("parse: phase 2 - discard statement", () => {
+describe("parse: discard statement", () => {
   function bodyOf(src) {
     return parse(`function f(): int32 { ${src} return 0; }`).body[0].body.body;
   }
@@ -684,7 +683,7 @@ describe("parse: phase 2 - discard statement", () => {
   });
 });
 
-describe("parse: phase 5 - traits", () => {
+describe("parse: traits", () => {
   it("trait Disposable { function dispose(ref self): void; } parses properly", () => {
     const stmts = parse(
       "trait Disposable { function dispose(ref self): void; }",
@@ -876,7 +875,7 @@ describe("parse: phase 5 - traits", () => {
     assert.equal(type.implements[1].name, "MyTrait2");
   });
   describe("reject cases", () => {
-    it("parses generic traits (phase 7.1)", () => {
+    it("parses generic traits", () => {
       const ast = parse(
         "trait MyTrait<T> { function method(ref self, x: T): void; }",
       );
@@ -886,7 +885,7 @@ describe("parse: phase 5 - traits", () => {
       assert.equal(tr.typeParams.length, 1);
       assert.equal(tr.typeParams[0].name, "T");
     });
-    // Phase 9.J: `extends` is supported.
+    // `extends` is supported.
     it("parses single extends", () => {
       const ast = parse(
         "trait MyTrait extends BaseTrait { function method(ref self): void; }",
@@ -959,7 +958,7 @@ describe("parse: phase 5 - traits", () => {
   });
 });
 
-describe("parse: phase 6.1 - kind decls", () => {
+describe("parse: kind decls", () => {
   it("full clause set parses, clauses preserved in order", () => {
     const stmts = parse(
       `kind disposable {
@@ -1037,7 +1036,7 @@ describe("parse: phase 6.1 - kind decls", () => {
         /duplicate appliesTo clause/,
       );
     });
-    // testing-via-kinds: `appliesTo function` parses now. The requirement that
+    // testing-via-kinds: `appliesTo function` parses. The requirement that
     // it also declare `signature` + `enumerable as` is a typecheck rule, not a
     // grammar one, so the parser accepts the bare site.
     it("accepts appliesTo function site", () => {
@@ -1107,7 +1106,7 @@ describe("parse: phase 6.1 - kind decls", () => {
           parse(
             "kind k { appliesTo binding; mustCall dispose beforeAny; }",
           ),
-        /mustCall dispose beforeAny not yet supported/,
+        /mustCall dispose beforeAny is not supported/,
       );
     });
     it("rejects mustCall block (alternation) form", () => {
@@ -1116,7 +1115,7 @@ describe("parse: phase 6.1 - kind decls", () => {
           parse(
             "kind k { appliesTo binding; mustCall { wait; abandon; } beforeScopeEnd; }",
           ),
-        /mustCall block form \(alternation\) not yet supported/,
+        /mustCall block form \(alternation\) is not supported/,
       );
     });
     it("rejects requires list form", () => {
@@ -1134,14 +1133,14 @@ describe("parse: phase 6.1 - kind decls", () => {
         /ownsBlock takes no arguments/,
       );
     });
-    it("accepts parameterized kind decl (phase 6.5)", () => {
+    it("accepts parameterized kind decl", () => {
       const ast = parse("kind k(n: usize) { appliesTo binding; }");
       const k = ast.body[0];
       assert.equal(k.name, "k");
       assert.equal(k.params.length, 1);
       assert.equal(k.params[0].name, "n");
     });
-    it("accepts kind composition (phase 6.5)", () => {
+    it("accepts kind composition", () => {
       const ast = parse("kind slow = a & b;");
       const k = ast.body[0];
       assert.equal(k.name, "slow");
@@ -1174,8 +1173,8 @@ describe("parse: phase 6.1 - kind decls", () => {
         /inline kind body must contain at least one clause/,
       );
     });
-    // `provides <Kind>` is implemented now - it is what lets `task` rewrite
-    // its call-site result type to Task<T>. See plans/kinds-in-std.md.
+    // `provides <Kind>` is what lets `task` rewrite its call-site result
+    // type to Task<T>.
     it("parses a provides clause", () => {
       const ast = parse("kind k { appliesTo function; provides Task; }");
       const clause = ast.body[0].clauses.find(
@@ -1197,8 +1196,8 @@ describe("parse: phase 6.1 - kind decls", () => {
       assert.equal(clause.releaseMethod, "release");
     });
 
-    // autoJoin was only ever `mustCall wait beforeScopeEnd` spelled
-    // differently; the diagnostic now says so.
+    // autoJoin is only `mustCall wait beforeScopeEnd` spelled differently;
+    // the diagnostic says so.
     it("rejects autoJoin with a pointer at mustCall", () => {
       assert.throws(
         () => parse("kind k { appliesTo binding; autoJoin beforeScopeEnd; }"),
@@ -1209,10 +1208,10 @@ describe("parse: phase 6.1 - kind decls", () => {
       assert.throws(
         () =>
           parse("kind k { appliesTo binding; mustNotEscape; }"),
-        /mustNotEscape semicolon not yet supported/,
+        /mustNotEscape semicolon is not supported/,
       );
     });
-    // Phase 9.J: `mustNotShare acrossThreads` joins `acrossScopes` as a legal
+    // `mustNotShare acrossThreads` joins `acrossScopes` as a legal
     // target.
     it("accepts mustNotShare acrossThreads", () => {
       const ast = parse(
@@ -1244,7 +1243,7 @@ describe("parse: phase 6.1 - kind decls", () => {
   });
 });
 
-describe("parse: phase 6.1 - kind-prefixed bindings", () => {
+describe("parse: kind-prefixed bindings", () => {
   // run a single body statement through the parser by wrapping it in a function
   function stmtOf(src) {
     const ast = parse(`function f(): int32 { ${src} return 0; }`);
@@ -1308,7 +1307,7 @@ describe("parse: phase 6.1 - kind-prefixed bindings", () => {
   });
 
   // Inferred-type named binding: `disposable a = expr` (no `: T`). The
-  // recognizer now accepts the `=` shape alongside `:`.
+  // recognizer accepts the `=` shape alongside `:`.
   it("named binding infers its type when the annotation is omitted (implicit block)", () => {
     const s = stmtOf("disposable a = make_handle();");
     assert.equal(s.kind, ASTNodeKind.CONST_DECL);
@@ -1376,7 +1375,7 @@ describe("parse: region kinds - anonymous block bindings", () => {
   });
 });
 
-describe("parse: phase 7.2 / 9.J - trait bounds on type params", () => {
+describe("parse: trait bounds on type params", () => {
   it("parses single bound on a generic function param", () => {
     const ast = parse(
       "function drain<T implements Iterable<T>>(ref it: T): void { }",
@@ -1421,7 +1420,7 @@ describe("parse: phase 7.2 / 9.J - trait bounds on type params", () => {
     assert.deepEqual(params[1].bounds, []);
     assert.equal(params[2].bounds[0].name, "Iterable");
   });
-  // Phase 9.J: parenthesized multi-bound form.
+  // Parenthesized multi-bound form.
   it("parses multiple trait bounds on one param", () => {
     const ast = parse(
       "function f<T implements (Display, Iterable<T>)>(ref x: T): void { }",
@@ -1454,7 +1453,7 @@ describe("parse: phase 7.2 / 9.J - trait bounds on type params", () => {
   });
 });
 
-describe("Phase 7.5: variant declarations", () => {
+describe("variant declarations", () => {
   it("parses a variant with payload + no-payload cases", () => {
     const ast = parse(
       "variant Shape { Circle { radius: float32 }, Rectangle { w: float32, h: float32 }, Empty, }",
@@ -1512,7 +1511,7 @@ describe("Phase 7.5: variant declarations", () => {
   });
 });
 
-describe("Phase 12: value enum declarations", () => {
+describe("value enum declarations", () => {
   it("parses a default-int32 value enum with bare cases", () => {
     const ast = parse("enum Color { Red, Green, Blue }");
     assert.equal(ast.body.length, 1);
@@ -1578,7 +1577,7 @@ describe("Phase 12: value enum declarations", () => {
   });
 });
 
-describe("Phase 7.5: union declarations", () => {
+describe("union declarations", () => {
   it("parses a union with multiple field types", () => {
     const ast = parse(
       "union Color { rgba: uint32, channels: Channels }",
@@ -1594,7 +1593,7 @@ describe("Phase 7.5: union declarations", () => {
   it("rejects generic unions", () => {
     assert.throws(
       () => parse("union U<T> { x: T }"),
-      /generic unions are not yet supported/,
+      /generic unions are not supported/,
     );
   });
 
@@ -1619,7 +1618,7 @@ describe("Phase 7.5: union declarations", () => {
   });
 });
 
-describe("Phase 7.5: switch statement", () => {
+describe("switch statement", () => {
   function switchOf(src) {
     const ast = parse(`function f(): void { ${src} }`);
     return ast.body[0].body.body[0];
@@ -1737,7 +1736,7 @@ describe("Phase 7.5: switch statement", () => {
   });
 });
 
-describe("Phase 7.5: variant constructor expression", () => {
+describe("variant constructor expression", () => {
   function exprOf(src) {
     const ast = parse(`function f(): void { let _x: T = ${src}; }`);
     return ast.body[0].body.body[0].assignment;
@@ -1883,11 +1882,10 @@ describe("parse: reserved keywords in name-only positions", () => {
     assert.equal(vc.fields[0].name, "type");
   });
 
-  it("user-defined function param still rejects keyword names, and names the word", () => {
-    // Still rejected; the message is what changed. It used to read `expected
-    // rparen, got type`, which describes the parser's state rather than the
-    // mistake, and left the reader to notice that their parameter name is a
-    // keyword (yooperdoom-takeaways 2.2).
+  it("user-defined function param rejects keyword names, and names the word", () => {
+    // The message names the mistake. `expected rparen, got type` would
+    // describe the parser's state instead, leaving the reader to notice that
+    // their parameter name is a keyword.
     assert.throws(
       () => parse("function f(type: int32): void { return; }"),
       /"type" is a reserved word and cannot be used as a name/,
@@ -1908,8 +1906,8 @@ describe("parse: reserved keywords in name-only positions", () => {
     }
   });
 
-  // yooperdoom-takeaways 2.5 / 2.4b: two shapes Yoop does not have, where the
-  // old diagnostic described the parser's state instead of the rule.
+  // Two shapes Yoop does not have, where a generic diagnostic would describe
+  // the parser's state instead of the rule.
   it("a nested function declaration says to move it to module scope", () => {
     assert.throws(
       () => parse("function f(): void { function g(): void { return; } }"),
@@ -1936,9 +1934,8 @@ describe("parse: reserved keywords in name-only positions", () => {
     assert.equal(decl.assignment.fields.length, 2);
   });
 
-  // The other half of 2.2: these WERE reserved and are now contextual, so
-  // they work as ordinary parameter names.
-  it("accepts the demoted contextual keywords as parameter names", () => {
+  // These are contextual keywords, so they work as ordinary parameter names.
+  it("accepts the contextual keywords as parameter names", () => {
     for (const word of [
       "kind", "requires", "propagates", "binding", "parameter",
       "field", "scope", "io", "layout", "align", "library", "contains",
@@ -1954,7 +1951,7 @@ describe("parse: reserved keywords in name-only positions", () => {
   });
 });
 
-// Phase 10.K: a parenthesized type group lets `[]` attach to a function type,
+// A parenthesized type group lets `[]` attach to a function type,
 // which is the only way to spell an array of function pointers.
 describe("parse: parenthesized type groups (array of function pointers)", () => {
   function paramType(srcLine) {
@@ -2002,7 +1999,7 @@ describe("parse: parenthesized type groups (array of function pointers)", () => 
   });
 });
 
-describe("Phase 13.C: @derive attribute targets", () => {
+describe("@derive attribute targets", () => {
   it("parses @derive(display) on a type decl", () => {
     const ast = parse(
       `@derive(display)\ntype Point {\n  x: int32,\n}\n`,
@@ -2026,10 +2023,10 @@ describe("Phase 13.C: @derive attribute targets", () => {
     assert.equal(attr.target.decl.kind, ASTNodeKind.TYPE_DECL);
   });
 
-  it("rejects deferred derive names with a not-yet-supported message", () => {
+  it("rejects unsupported derive names with a clear message", () => {
     assert.throws(
       () => parse(`@derive(eq)\ntype P {\n  x: int32,\n}\n`),
-      /@derive\(eq\) is not yet supported - only @derive\(display\)/,
+      /@derive\(eq\) is not supported - @derive\(display\) is the only one/,
     );
   });
 
@@ -2062,7 +2059,7 @@ describe("Phase 13.C: @derive attribute targets", () => {
   });
 });
 
-describe("Phase 13.D: @derive on variant decls", () => {
+describe("@derive on variant decls", () => {
   it("parses @derive(display) on a variant decl", () => {
     const ast = parse(
       `@derive(display)\nvariant Shape {\n  Circle { r: int32 },\n  Dot,\n}\n`,
@@ -2085,10 +2082,10 @@ describe("Phase 13.D: @derive on variant decls", () => {
 
 });
 
-describe("Phase 13.D: variant case payload must be a record", () => {
-  // `Special MyType` used to parse silently as TWO payload-less cases
-  // (the separating comma is optional), so the only symptom was a phantom
-  // "missing variants: MyType" from a later exhaustiveness check.
+describe("variant case payload must be a record", () => {
+  // Without the check `Special MyType` parses silently as TWO payload-less
+  // cases (the separating comma is optional), so the only symptom is a
+  // phantom "missing variants: MyType" from a later exhaustiveness check.
   it("rejects a bare-type payload with a fix-it", () => {
     assert.throws(
       () =>

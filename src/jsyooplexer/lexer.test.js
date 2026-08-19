@@ -79,11 +79,11 @@ describe("lexer: keywords vs identifiers", () => {
     assert.equal(tokens[0].tag, tag("beforeScopeEnd"));
   });
 
-  // yooperdoom-takeaways 2.2: these were reserved words and are now
-  // CONTEXTUAL - recognized by the parser from their position, and ordinary
-  // identifiers everywhere else. `kind` is the one that cost the most: it was
-  // legal as a struct FIELD and illegal as a local or parameter, so
-  // `Room.kind` compiled and `specialFor(kind: uint8)` did not.
+  // These words are CONTEXTUAL - recognized by the parser from their
+  // position, and ordinary identifiers everywhere else. `kind` is the one
+  // that matters most: reserved, it is legal as a struct FIELD and illegal
+  // as a local or parameter, so `Room.kind` compiles and
+  // `specialFor(kind: uint8)` does not.
   for (const word of [
     "kind",
     "requires",

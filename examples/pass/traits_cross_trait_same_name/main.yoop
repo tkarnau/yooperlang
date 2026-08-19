@@ -8,7 +8,7 @@ trait Farewell {
     function greet(ref self): void;
 }
 
-// Phase 7.4: a single impl body can satisfy two traits that require the
+// A single impl body can satisfy two traits that require the
 // same method name. Each call site qualifies through the trait, so codegen
 // emits a separate LLVM symbol per (trait, method) - both pointing at the
 // same body - without ambiguity.

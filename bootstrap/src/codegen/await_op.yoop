@@ -7,8 +7,7 @@ module codegen;
 // `llvm.coro.suspend` suspends the CURRENT function's frame only, so for a task
 // blocked four calls deep to give its worker thread back, every frame in the
 // chain has to be a coroutine that propagates the suspend upward. That is what
-// this lowering does, and it is the reference's, validated as hand-written IR
-// before either compiler had any of it (plans/async-coroutines.md):
+// this lowering does, and it is the reference's:
 //
 //     %sc.1.addr = alloca i32              ; the result slot, in OUR frame
 //     %t5 = call ptr @m__inner(i32 %t4, ptr %sc.1.addr)

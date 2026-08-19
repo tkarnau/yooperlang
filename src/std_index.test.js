@@ -4,8 +4,8 @@
 // checked in, which is the arrangement that rots: someone adds a module, the
 // index does not mention it, and a reader concludes the library does not have
 // the thing. That failure is exactly what the index exists to prevent - a
-// 15,000 line project hand-rolled digit loops in four files because it never
-// found std/core/format.yoop (plans/yooperdoom-takeaways.md 4.1).
+// large project can hand-roll digit loops in four files because it never
+// found std/core/format.yoop.
 //
 // This does NOT re-run the generator: that needs clang, and a check that only
 // runs in the e2e suite is a check that runs less often than the mistake. It

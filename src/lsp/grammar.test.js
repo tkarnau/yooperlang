@@ -100,11 +100,11 @@ describe("vscode grammar", () => {
     }
   });
 
-  // yooperdoom-takeaways 2.2 demoted a batch of reserved words to contextual
-  // keywords so they could be ordinary names. The grammar has to follow: a
-  // bare \b(kind)\b rule would colour every `kind: uint8` field as a keyword,
-  // which is exactly the silent failure the `module` rule above exists to
-  // prevent. Same shape of guard, same reason.
+  // A batch of reserved words are contextual keywords so they can be ordinary
+  // names. The grammar has to follow: a bare \b(kind)\b rule would colour
+  // every `kind: uint8` field as a keyword, which is exactly the silent
+  // failure the `module` rule above exists to prevent. Same shape of guard,
+  // same reason.
   function ruleMatching(fragment) {
     const g = loadGrammar();
     const rule = g.repository.keywords.patterns.find(
@@ -205,7 +205,7 @@ describe("vscode grammar", () => {
     assert.deepEqual(missing, [], `keywords with no rule in the grammar: ${missing.join(", ")}`);
   });
 
-  it("no longer colours `kind` or `library` via the bare declaration-keyword rule", () => {
+  it("does not colour `kind` or `library` via the bare declaration-keyword rule", () => {
     const g = loadGrammar();
     const decl = g.repository.keywords.patterns.find(
       (p) => typeof p.match === "string" && p.match.includes("let|const|function"),

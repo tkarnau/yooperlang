@@ -10,8 +10,6 @@
 // The generated entry goes through the ordinary pipeline. There is no second
 // codegen path and no test-mode typechecker - the module graph accepts it via
 // the `readFile` overlay that already exists for the LSP's unsaved buffers.
-//
-// See plans/testing-via-kinds.md.
 
 import fs from "node:fs";
 import path from "node:path";
@@ -124,7 +122,7 @@ export function collectSuiteModules(absPaths, rootDir) {
 // namespace, for two reasons: two test files may each define a `setup`, and a
 // namespaced function reference in VALUE position (`m0.addsNumbers`) currently
 // crashes codegen with `llvmType: unhandled yooper type kind "func"` - the
-// Phase 10.X.2 fn-as-value lift covered bare names only.
+// fn-as-value lift covers bare names only.
 export function generateEntrySource(suiteModules) {
   const lines = [];
   const aliases = [];

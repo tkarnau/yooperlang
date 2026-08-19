@@ -19,8 +19,7 @@ import { skipWhitespace } from "./charEaters.js";
 // tokens have different meanings in different contexts, but this will
 // be an exhaustive list of potential tokens
 
-// note: ONLY adding the bare minimum from test input files. Expanding as we go.
-// the tags will eventually be listed out of order, and that's fine for now
+// note: the tags are not listed in any particular order, and that is fine
 export const TokenTags = {
   // atoms
   eof: "eof",
@@ -43,7 +42,7 @@ export const TokenTags = {
   else: "else",
   while: "while",
   for: "for",
-  // Phase 9.D: `for item in xs { ... }` iteration form.
+  // `for item in xs { ... }` iteration form.
   in: "in",
   type: "type",
   import: "import",
@@ -64,7 +63,7 @@ export const TokenTags = {
   implements: "implements",
   self: "self",
   extends: "extends",
-  // Phase 9.G: `vtable Name for TraitName { ... }` - declares the
+  // `vtable Name for TraitName { ... }` - declares the
   // type-erased shape of a trait. Pairs with the `=>` token (`fatArrow`)
   // for field type annotations.
   vtable: "vtable",
@@ -76,7 +75,7 @@ export const TokenTags = {
   ownsBlock: "ownsBlock",
   beforeScopeEnd: "beforeScopeEnd",
   binding: "binding",
-  // phase 6.2: escape and sharing
+  // escape and sharing
   mustNotEscape: "mustNotEscape",
   mustNotShare: "mustNotShare",
   forbids: "forbids",
@@ -86,7 +85,7 @@ export const TokenTags = {
   field: "field",
   io: "io",
   globalState: "globalState",
-  // phase 6.3: task/concurrency.
+  // task/concurrency.
   //
   // `task`, `async`, `joined` and `pooled` are deliberately NOT here: they
   // are kind names declared in std/core/kinds.yoop and lex as ordinary
@@ -98,21 +97,21 @@ export const TokenTags = {
   // declaration prefixes, so there is no kind for them to be.
   wait: "wait",
   await: "await",
-  // phase 6.4: containment / propagation
+  // containment / propagation
   propagates: "propagates",
   contains: "contains",
-  // phase 6.5: layout / composition
+  // layout / composition
   layout: "layout",
   align: "align",
   amp: "amp", // standalone & (composition operator), distinct from &&
-  // phase 7.5: switch / patterns / sum types / unions
+  // switch / patterns / sum types / unions
   switch: "switch",
   case: "case",
   default: "default",
   enum: "enum",
   variant: "variant",
   union: "union",
-  // phase 8.A: unsafe pointers
+  // unsafe pointers
   null: "null",
 
   // punctuation / operators
@@ -143,27 +142,27 @@ export const TokenTags = {
   modulus: "modulus",
   dot: "dot",
   question: "question",
-  // Phase 9.E: array slice syntax - `xs[i..j]`, `xs[..j]`, `xs[i..]`, `xs[..]`.
+  // Array slice syntax - `xs[i..j]`, `xs[..j]`, `xs[i..]`, `xs[..]`.
   dotdot: "dotdot",
-  // Phase 9.B: logical NOT prefix - `!flag`. Lexer's longest-first sort keeps
+  // Logical NOT prefix - `!flag`. Lexer's longest-first sort keeps
   // `!=` (`neq`) winning over `!` for the binary case.
   bang: "bang",
-  // Phase 9: bitwise XOR (`^`) binary, bitwise NOT (`~`) prefix.
+  // Bitwise XOR (`^`) binary, bitwise NOT (`~`) prefix.
   caret: "caret",
   tilde: "tilde",
-  // Phase 9: compound assignments - `x += y` shorthand for `x = x + y`,
+  // Compound assignments - `x += y` shorthand for `x = x + y`,
   // implemented as dedicated AST nodes so the lvalue is addressed once.
   plusEq: "plusEq",
   minusEq: "minusEq",
   multEq: "multEq",
   divideEq: "divideEq",
   modulusEq: "modulusEq",
-  // Phase 9.G: `=>` separator for function value types in type position.
+  // `=>` separator for function value types in type position.
   // Only legal in type annotations (struct fields, parameter / return types,
   // vtable fields). Expression-position `=>` is reserved for a future
   // closure-literal syntax and is currently a parse error there.
   fatArrow: "fatArrow",
-  // Phase 11.A: `@` prefix introducing a compile-time / static-analysis
+  // `@` prefix introducing a compile-time / static-analysis
   // attribute (e.g. `@precompile`, `@test`, `@verify`). Always a
   // compile-time directive - never queryable from runtime code.
   at: "at",
@@ -208,14 +207,14 @@ export const tokenScanList = [
   { str: "*", tag: TokenTags.mult },
   { str: "/", tag: TokenTags.divide },
   { str: "%", tag: TokenTags.modulus },
-  // Phase 9: compound-assignment two-char operators. Longest-first sort puts
+  // Compound-assignment two-char operators. Longest-first sort puts
   // these before the single-char arithmetic ops above.
   { str: "+=", tag: TokenTags.plusEq },
   { str: "-=", tag: TokenTags.minusEq },
   { str: "*=", tag: TokenTags.multEq },
   { str: "/=", tag: TokenTags.divideEq },
   { str: "%=", tag: TokenTags.modulusEq },
-  // Phase 9.G: function value type separator. Longest-first sort puts this
+  // Function value type separator. Longest-first sort puts this
   // before `=` and before `>=` / `>`; the lexer's existing logic handles
   // the disambiguation against `==`.
   { str: "=>", tag: TokenTags.fatArrow },
@@ -224,7 +223,7 @@ export const tokenScanList = [
   { str: "...", tag: TokenTags.dotdotdot },
   { str: "[", tag: TokenTags.lbracket },
   { str: "]", tag: TokenTags.rbracket },
-  // Phase 11.A: attribute prefix `@`.
+  // Attribute prefix `@`.
   { str: "@", tag: TokenTags.at },
 ].toSorted((a, b) => b.str.length - a.str.length);
 
@@ -250,13 +249,13 @@ export const tokenScanList = [
 //   layout align              only as a type-decl clause
 //   library                   only after `from` in an extern block
 //
-// The last eight of those were reserved words until the yooperdoom takeaways
-// (2.2) reported the cost: `kind` is legal as a struct FIELD but illegal as a
-// local or parameter, so `Room.kind` compiles and `specialFor(kind: uint8)`
-// does not, and the collision surfaces nowhere near where the name was
-// chosen. `field`, `scope`, `io`, `align`, and `requires` are the same trap
-// with a lower hit rate. Each is unambiguous from its position, so none of
-// them needed to be reserved.
+// Reserving the last eight would cost more than it buys: a reserved `kind`
+// is legal as a struct FIELD but illegal as a local or parameter, so
+// `Room.kind` compiles and `specialFor(kind: uint8)` does not, and the
+// collision surfaces nowhere near where the name was chosen. `field`,
+// `scope`, `io`, `align`, and `requires` are the same trap with a lower hit
+// rate. Each is unambiguous from its position, so none of them has to be
+// reserved.
 //
 // The compound clause verbs (`appliesTo`, `mustCall`, `ownsBlock`,
 // `beforeScopeEnd`, `mustNotEscape`, `mustNotShare`, `forbids`,
@@ -521,8 +520,6 @@ function lexCharLiteral(src, pos) {
 **************************
 This is the main logic function for lexing input source code into tokens, it is called in a loop until the input file is consumed, usually. It calls the eater functions.
 It returns a LexResult structure/obj
-For now I'm replicating the v1 yooper lexer but in a js fashion
-so that it is a little more human readable. I had moved too quickly to bootstrapping and the lexer logic was very hard to understand, even with LLM help.
 **************************
 */
 export function lexNext(src, pos) {
@@ -560,7 +557,7 @@ export function lexNext(src, pos) {
     }
   }
 
-  // char literal - single quote owns these now (one Unicode scalar)
+  // char literal - single quote owns these (one Unicode scalar)
   if (ch === "'") {
     return lexCharLiteral(src, p);
   }

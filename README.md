@@ -1,19 +1,21 @@
 # Yooperlang
 
-A systems language with a TypeScript feel - for myself and folks who want to try
-a stab at a systems language attempt that looks like something they are more 
-familiar with.
+A systems language attempt with a TypeScript syntax feel - for myself and folks who want to try a stab at a systems language attempt that looks like something they are more familiar with.
 
-- **Kinds** - you declare a compile-time rule (`mustCall dispose beforeScopeEnd`,
-  `mustNotEscape scope`, `mustNotShare acrossThreads`) and the compiler enforces
-  it. The language's own `disposable` / `async` / `task` are written this way, in
-  std, not baked into the compiler. See [A taste](#a-taste).
 - No garbage collector, but you can opt in to / build one
 - No classes - structs plus free functions
 - Traits for shared behaviour, without inheritance
 - Compiles to LLVM IR and shells out to `clang` to produce a native executable
+- **Kinds** - you declare a compile-time rule (`mustCall dispose beforeScopeEnd`,
+  `mustNotEscape scope`, `mustNotShare acrossThreads`) and the compiler enforces
+  it. The language's own `disposable` / `async` / `task` are written this way, in
+  std, not baked into the compiler. See [A taste](#a-taste).
 
 ("Yooper" is what you call someone from Michigan's Upper Peninsula. The name is a bit of a joke, and so is this language.)
+
+## Personal Objective
+
+The main objective with this project, is to help me avoid making unreadable and overabstracted code. This language discourages deeply nested abstractions and forces call-site obligations, which is maybe not a good thing, I don't know. The secondary objective is to learn about compilers. This one is so heavily built up with AI bridging real gaps, that I will need to make another language still to understand better, but I am still enjoying working on it. If other folks help out at some point, these personal stories will likely be abstracted away.
 
 ## Status
 
@@ -21,7 +23,7 @@ This is a re-imagining of a version I first wrote in C and have since abandoned.
 
 The workflow is - that I write as much as I "know" and have AI help me understand some of the deep topics and bring the current version into a working state and I scrutinize how it works and try to understand more and more. I eventually rewrite the feature in the bootstrap side or take another pass at it myself to learn. The emitted LLVM IR is relatively simple, but each new concept is harder and harder to understand.
 
-What works today: a "working" chunk of the pipeline (lex, parse, typecheck, codegen, link). That covers structs, traits, kinds, generics, enums and unions, error handling, tasks and concurrency, and a starting standard library (`std/core`, `std/net`, `std/http`, `std/collections`). Self-hosting (rewriting the compiler in Yooperlang itself) is the current focus, to unlock some iteration on a bytecode layer and feel the language out. See [plans/](plans/) for what is being worked on now, and [plans/archive/roadmap.md](plans/archive/roadmap.md) for the full historical phase map.
+What works today: a "working" chunk of the pipeline (lex, parse, typecheck, codegen, link). That covers structs, traits, kinds, generics, enums and unions, error handling, tasks and concurrency, and a starting standard library (`std/core`, `std/net`, `std/http`, `std/collections`). Self-hosting (rewriting the compiler in Yooperlang itself) is the current focus, to unlock some iteration on a bytecode layer and feel the language out; the bootstrap compiler under [bootstrap/](bootstrap/) already compiles itself.
 
 Typically I will begin writing a small document about the next portion of the language to work on and have a few iterations with LLMs to build out a plan and some pseudocode and begin implementation from there. Ideally very little of the compiler is AI generated, but there are some parts of codegen and LLVM and the C-runtime edges that I will lean on some AI implementation to get a better understanding to see it working in the context of this language.
 
@@ -246,14 +248,15 @@ There are also hundreds of feature fixtures under [examples/pass/](examples/pass
 ## Learn the language
 
 - [SPEC.md](SPEC.md) - the language specification (syntax first, with examples)
-- A browsable language reference site lives in [web/](web/) (see Getting Started for how to view it)
+- <https://tkarnau.github.io/yooperlang/> - the site: a five-program tour that starts at downloading the compiler, a compiler-pipeline explorer, the language reference, and a generated standard-library browser (source in [web/](web/), regenerate its data with `npm run gen:web`)
 - [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md) - install, first program, where to go next
 - [tools/mcp-reference/](tools/mcp-reference/) - an MCP server that exposes the spec and standard library to AI assistants (Claude, Cursor, ...) so they can search the reference while you write Yooperlang
 
 ## Contributing / hacking on the compiler
 
 - [CONTRIBUTING.md](CONTRIBUTING.md) - how to run the tests and the lay of the land
-- [CLAUDE.md](CLAUDE.md) - the architecture deep-dive (subsystem map, invariants, design notes)
+- [docs/compiler_internals.md](docs/compiler_internals.md) - the architecture deep-dive (subsystem map, invariants, design notes)
+- [docs/writing_yoop.md](docs/writing_yoop.md) - how to write Yooperlang itself (std, the bootstrap compiler, tools, examples)
 
 Run the tests:
 

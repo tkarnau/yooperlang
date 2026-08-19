@@ -5,9 +5,9 @@ import { Holder, makeHolder } from "./lib.yoop";
 // Regression fixture: a Display-bound generic whose T is inferred from a
 // struct that reaches this module only through an imported instantiation
 // (the elem type inside Holder's Vec<Point> field). The captured elem type
-// used to be a pass-A shell with empty implementsTraits/methods, which
-// spuriously failed the call-site bound check and, once past typecheck,
-// crashed codegen's bound-method rewrite.
+// must not stay a pass-A shell with empty implementsTraits/methods: an empty
+// shell spuriously fails the call-site bound check and, once past typecheck,
+// crashes codegen's bound-method rewrite.
 function firstToString<T implements Display>(ref v: Vec<T>): string {
   let item: T = vec.vecGet(ref v, 0);
   return Display.toString(ref item);

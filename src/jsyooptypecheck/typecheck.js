@@ -78,7 +78,7 @@ export { formatType, coerceLiteralToType, isAssignable, unifyArith };
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
-// Phase 8.A: walks an annotation object (from parser) looking for any
+// Walks an annotation object (from parser) looking for any
 // `unsafe_ptr` reference. Returns true if any subtree names the type.
 function annotMentionsUnsafePtr(annot) {
   if (!annot) return false;
@@ -96,7 +96,7 @@ function annotMentionsUnsafePtr(annot) {
   return false;
 }
 
-// Phase 8.A: scan the whole AST of a module (which did NOT opt into
+// Scan the whole AST of a module (which did NOT opt into
 // `import.unsafe;`) for any use of the pointer surface, and emit a clear
 // diagnostic per occurrence. The walker is structural: it visits every key
 // on every plain object, recursing into arrays and child nodes. Cheap
@@ -175,7 +175,7 @@ function walkAstForUnsafe(node, errors, visited = new WeakSet()) {
 }
 
 // If decl is an EXPORT_DECL wrapper, unwrap to the inner decl; otherwise
-// return the decl itself. ATTRIBUTE nodes (phase 11.A) that decorate a
+// return the decl itself. ATTRIBUTE nodes that decorate a
 // concrete decl are also unwrapped so every existing decl-walking pass
 // sees the inner decl without having to know about attributes - the
 // attribute metadata stays on the wrapper, which downstream pieces
@@ -205,16 +205,16 @@ function resolveTypeInModule(name, modId, moduleEnv) {
   if (local && local.fields !== null) return local;
   const prim = primTypeFromName(name);
   if (prim) return prim;
-  // Phase 7.5: variant / union nominal lookup. Both are sibling nominal types
+  // Variant / union nominal lookup. Both are sibling nominal types
   // alongside struct.
   const localVariant = variantTable?.get(name);
   if (localVariant) return localVariant;
   const localUnion = unionTable?.get(name);
   if (localUnion) return localUnion;
-  // Phase 12: value-enum nominal lookup.
+  // Value-enum nominal lookup.
   const localValueEnum = enumTable?.get(name);
   if (localValueEnum) return localValueEnum;
-  // Phase 9.G: vtable nominal lookup.
+  // Vtable nominal lookup.
   const localVtable = vtableTable?.get(name);
   if (localVtable) return localVtable;
   const imp = importedNames.get(name);
@@ -233,7 +233,7 @@ function resolveTypeInModule(name, modId, moduleEnv) {
 
 // Resolve a structured type annotation within a multi-module context.
 //
-// Phase 7.1: ctx may carry:
+// ctx may carry:
 //   - typeParamScope: Map<paramName, TypeParamType> for resolving bare names
 //     to type-params when inside a generic decl
 //   - registry / programState: needed to call into the instantiation registry
@@ -241,7 +241,7 @@ function resolveTypeInModule(name, modId, moduleEnv) {
 function resolveTypeAnnotationInModule(annot, modId, moduleEnv, ctx) {
   if (!annot) return null;
   if (annot.kind === "typeName") {
-    // Phase 7.1: type-params in scope shadow normal type lookup.
+    // Type-params in scope shadow normal type lookup.
     if (ctx?.typeParamScope) {
       const tp = ctx.typeParamScope.get(annot.name);
       if (tp) return tp;
@@ -264,7 +264,7 @@ function resolveTypeAnnotationInModule(annot, modId, moduleEnv, ctx) {
         aliasStack: nextStack,
       });
     }
-    // Phase 12: `ns.TypeName` qualifies the lookup through an imported
+    // `ns.TypeName` qualifies the lookup through an imported
     // namespace's source module.
     if (annot.namespace) {
       return resolveNamespacedTypeName(annot.namespace, annot.name, modId, moduleEnv);
@@ -302,12 +302,12 @@ function resolveTypeAnnotationInModule(annot, modId, moduleEnv, ctx) {
     if (annot.name === "Task" && argTypes.length === 1) {
       return TaskType(argTypes[0]);
     }
-    // Phase 8.A: built-in unsafe_ptr<T>. Gating is enforced where the
+    // Built-in unsafe_ptr<T>. Gating is enforced where the
     // resolved type ends up bound to source (binding/parameter/return/field).
     if (annot.name === "unsafe_ptr" && argTypes.length === 1) {
       return UnsafePtrType(argTypes[0]);
     }
-    // Phase 12: `ns.GenericName<...>` - namespace-qualified generic.
+    // `ns.GenericName<...>` - namespace-qualified generic.
     if (annot.namespace) {
       return resolveNamespacedGenericApplication(
         annot.namespace, annot.name, argTypes, modId, moduleEnv, ctx,
@@ -321,7 +321,7 @@ function resolveTypeAnnotationInModule(annot, modId, moduleEnv, ctx) {
     }
     return ctx.selfType;
   }
-  // Phase 9.G: `(p: T) => R` function value type.
+  // `(p: T) => R` function value type.
   if (annot.kind === "functionType") {
     const params = [];
     for (const p of annot.params) {
@@ -338,9 +338,9 @@ function resolveTypeAnnotationInModule(annot, modId, moduleEnv, ctx) {
   );
 }
 
-// Phase 7.1: resolve `Name<Arg1, Arg2, ...>` by looking up the generic decl
+// Resolve `Name<Arg1, Arg2, ...>` by looking up the generic decl
 // in the module's generic tables (or imports) and instantiating it.
-// Phase 10.A: also reaches into genericVariantTable.
+// Also reaches into genericVariantTable.
 function resolveGenericApplication(name, argTypes, modId, moduleEnv, ctx) {
   const env = moduleEnv.get(modId);
   const registry = ctx?.registry;
@@ -359,7 +359,7 @@ function resolveGenericApplication(name, argTypes, modId, moduleEnv, ctx) {
     if (argTypes.length !== localTrait.paramNames.length) return null;
     return instantiateTrait(registry, localTrait, argTypes);
   }
-  // Local generic enum (Phase 10.A)
+  // Local generic enum.
   const localEnum = env.genericVariantTable?.get(name);
   if (localEnum) {
     if (argTypes.length !== localEnum.paramNames.length) return null;
@@ -390,7 +390,7 @@ function resolveGenericApplication(name, argTypes, modId, moduleEnv, ctx) {
   return null;
 }
 
-// Phase 12: resolve `ns.TypeName` in a type annotation. `ns` must be a local
+// Resolve `ns.TypeName` in a type annotation. `ns` must be a local
 // namespace binding; the name is looked up in the source module's nominal
 // type tables (struct / variant / value-enum / union / vtable).
 function resolveNamespacedTypeName(nsName, typeName, modId, moduleEnv) {
@@ -409,7 +409,7 @@ function resolveNamespacedTypeName(nsName, typeName, modId, moduleEnv) {
   );
 }
 
-// Phase 12: resolve `ns.GenericName<args>` by walking the source module's
+// Resolve `ns.GenericName<args>` by walking the source module's
 // generic tables for the looked-up name and instantiating.
 function resolveNamespacedGenericApplication(nsName, typeName, argTypes, modId, moduleEnv, ctx) {
   const env = moduleEnv.get(modId);
@@ -436,7 +436,7 @@ function resolveNamespacedGenericApplication(nsName, typeName, argTypes, modId, 
   return null;
 }
 
-// ─── propagation helpers (phase 6.4) ────────────────────────────────────────
+// ─── propagation helpers ────────────────────────────────────────────────────
 
 // Return the list of KindType instances that a struct field carries.
 // A field carries a kind iff:
@@ -444,7 +444,7 @@ function resolveNamespacedGenericApplication(nsName, typeName, argTypes, modId, 
 //   - its type is `Task<T>` (which inherently carries the `Task` builtin), OR
 //   - its type is itself a struct that propagates kinds (transitive - every
 //     kind the inner struct propagates is one this field carries).
-// Phase 6.5: propagatedKinds entries are KindApplications; we still match
+// propagatedKinds entries are KindApplications; we still match
 // by KindType identity (args don't affect propagation matching).
 export function fieldCarriedKinds(field) {
   const out = [];
@@ -455,7 +455,7 @@ export function fieldCarriedKinds(field) {
   }
   if (field.type?.kind === "struct" && field.type.propagatedKinds?.length) {
     for (const a of field.type.propagatedKinds) {
-      const k = a.kindType ?? a; // tolerate legacy bare-KindType during transition
+      const k = a.kindType ?? a; // tolerate a bare KindType in place of a KindApplication
       if (!out.includes(k)) out.push(k);
     }
   }
@@ -472,7 +472,7 @@ function lookupImportedTrait(name, mod, moduleEnv) {
   return srcEnv?.traitTable.get(imp.exportName) ?? null;
 }
 
-// Phase 9.J: walk a trait's `extends` chain transitively, yielding each
+// Walk a trait's `extends` chain transitively, yielding each
 // reachable ancestor (the trait itself is NOT yielded). Order is
 // breadth-first; duplicates (a diamond shape) are dropped via identity-set.
 export function* walkTraitExtends(trait) {
@@ -487,7 +487,7 @@ export function* walkTraitExtends(trait) {
   }
 }
 
-// Phase 9.J: cycle detection for the extends graph. `root` can be either a
+// Cycle detection for the extends graph. `root` can be either a
 // TraitType or a generic-trait decl record (since both carry `extendsTraits`).
 // Returns true if walking parents reaches `root` again.
 function traitExtendsHasCycle(root) {
@@ -518,7 +518,7 @@ function traitNominalEq(a, b) {
   return a.name === b.name && a.moduleId === b.moduleId;
 }
 
-// Phase 9.J: true if `subject` is `target` or transitively extends it.
+// True if `subject` is `target` or transitively extends it.
 function traitIsOrExtends(subject, target) {
   if (!subject || !target) return false;
   if (traitNominalEq(subject, target)) return true;
@@ -528,11 +528,11 @@ function traitIsOrExtends(subject, target) {
   return false;
 }
 
-// Phase 7.2: returns { ok: true } if `argType` satisfies `requiredTrait`,
+// Returns { ok: true } if `argType` satisfies `requiredTrait`,
 // otherwise { ok: false, message }. `mod` and `moduleEnv` aren't needed
 // today but are passed in for symmetry with the resolution helpers above -
 // future "trait impls registered in module X" lookups slot here.
-// Phase 9.J: TypeParamType bounds are a list (`bounds`); satisfaction is OR
+// TypeParamType bounds are a list (`bounds`); satisfaction is OR
 // across the list, walking each bound's `extends` chain transitively.
 export function checkBoundSatisfied(argType, requiredTrait, _mod, _moduleEnv) {
   if (!argType || !requiredTrait) {
@@ -542,9 +542,9 @@ export function checkBoundSatisfied(argType, requiredTrait, _mod, _moduleEnv) {
     // suppress secondary errors from a type that already failed to resolve
     return { ok: true };
   }
-  // Phase 13.D: variants carry the same `implementsTraits` surface as structs
-  // (13.B) and dispatch through the same mangling, so bound satisfaction is
-  // the identical check.
+  // Variants carry the same `implementsTraits` surface as structs and
+  // dispatch through the same mangling, so bound satisfaction is the
+  // identical check.
   if (
     argType.kind === typeKinds.struct ||
     argType.kind === typeKinds.variant
@@ -579,7 +579,7 @@ export function checkBoundSatisfied(argType, requiredTrait, _mod, _moduleEnv) {
   };
 }
 
-// Phase 7.2 / 9.J: resolve bound annotations on every type param of a generic
+// Resolve bound annotations on every type param of a generic
 // decl and mutate the existing TypeParamType in `genericDecl.paramScope` to
 // carry the resolved TraitType list. `astTypeParams` is the AST array (each
 // entry has a `bounds: TraitAnnotation[]` slot set by the parser). Idempotent -
@@ -624,7 +624,7 @@ function resolveAndAttachBounds(
   }
 }
 
-// Phase 7.2: resolve a `T implements TraitAnnot` bound. Runs in pass C so that
+// Resolve a `T implements TraitAnnot` bound. Runs in pass C so that
 // trait decls (incl. generic ones) and the current decl's own param scope are
 // both visible - `<T implements Iterable<T>>` must resolve the inner `T` to the
 // same TypeParamType that's already in scope.
@@ -681,7 +681,7 @@ function formatSig(sig) {
   return `${sig.isAsync ? "async " : ""}(${params}): ${formatType(sig.returnType)}`;
 }
 
-// Phase 9.G: validate a `vtable Name for TraitName { ... }` decl. The decl
+// Validate a `vtable Name for TraitName { ... }` decl. The decl
 // names a trait (by its name in the current module's scope) and declares
 // one function-pointer field per trait method. Each field's FPT signature
 // must match the trait method's signature minus the leading `ref self` (the
@@ -704,7 +704,7 @@ function validateVTableDecl(d, mod, moduleEnv, errors, programState) {
   }
   if (trait.isGenericTraitRef || (trait.typeParams ?? []).length > 0) {
     errors.push({
-      message: `vtable "${d.name}" cannot reference generic trait "${d.traitName}" (deferred - see plans/phase-9-g-vtables.md)`,
+      message: `vtable "${d.name}" cannot reference generic trait "${d.traitName}" (not supported)`,
       sourceLoc: d.sourceLoc,
     });
     return;
@@ -818,15 +818,14 @@ function validateVTableDecl(d, mod, moduleEnv, errors, programState) {
 
 function validateImplBlock(typeDecl, mod, moduleEnv, errors, programState) {
   const env = moduleEnv.get(mod.id);
-  // Phase 13.B: variants share the same impl-block validation pipeline
-  // as structs. The variant shell lives in `variantTable` and (since
-  // 13.A) is the canonical mutable object; we populate its
-  // implementsTraits + methods in place. Generic variants are deferred -
-  // there's no `genericDecl` path for them today and the open-self
-  // dance below is struct-shaped.
+  // Variants share the same impl-block validation pipeline
+  // as structs. The variant shell lives in `variantTable` and is the
+  // canonical mutable object; we populate its implementsTraits + methods
+  // in place. Generic variants are not supported: there's no `genericDecl`
+  // path for them and the open-self dance below is struct-shaped.
   const isVariant = typeDecl.kind === ASTNodeKind.VARIANT_DECL;
   const isEnum = typeDecl.kind === ASTNodeKind.ENUM_DECL;
-  // Phase 7.x: for generic structs, build an "open" struct shell by
+  // For generic structs, build an "open" struct shell by
   // instantiating the generic decl with its own TypeParamTypes as args.
   // This yields a StructType whose field slots carry TypeParamType, suitable
   // for serving as `self` during method-sig resolution and substitution.
@@ -871,7 +870,7 @@ function validateImplBlock(typeDecl, mod, moduleEnv, errors, programState) {
 
   // Step 1: resolve trait names.
   const resolvedImplements = [];
-  // Phase 7.1: implements entries are records { name, typeArgs }. For
+  // Implements entries are records { name, typeArgs }. For
   // generic trait implementations (typeArgs != null), instantiate the trait
   // and substitute its method sigs.
   for (const entry of typeDecl.implements) {
@@ -903,7 +902,7 @@ function validateImplBlock(typeDecl, mod, moduleEnv, errors, programState) {
       const resolvedArgs = [];
       let ok = true;
       for (const a of typeArgs) {
-        // Phase 10.C.3: thread the type-decl's own paramScope so type
+        // Thread the type-decl's own paramScope so type
         // arguments inside `implements Trait<...>` can mention the
         // decl's type params (e.g.
         // `MapIter<K, V> implements Iterable<MapEntry<K, V>>`).
@@ -938,7 +937,7 @@ function validateImplBlock(typeDecl, mod, moduleEnv, errors, programState) {
 
   const fields = structShell.fields ?? [];
 
-  // Phase 9.J: flatten the extends chain. A type implementing `Child` must
+  // Flatten the extends chain. A type implementing `Child` must
   // also provide methods declared on every ancestor; conversely, the type
   // implicitly implements every ancestor for downstream trait-method
   // dispatch. Walk each user-declared trait's extendsTraits transitively and
@@ -957,8 +956,8 @@ function validateImplBlock(typeDecl, mod, moduleEnv, errors, programState) {
 
   // Step 2: substitute self in each trait's required methods. Group by method
   // name so a single impl body can satisfy multiple traits that demand the
-  // same name and signature (Phase 7.4 - cross-trait same-name impls are now
-  // legal because every call site qualifies through the trait).
+  // same name and signature. Cross-trait same-name impls are legal
+  // because every call site qualifies through the trait.
   const requiredMethods = new Map(); // methodName -> Array<{traitName, sig}>
   for (const trait of flattenedImpls) {
     for (const [methodName, traitSig] of trait.methods) {
@@ -1026,7 +1025,7 @@ function validateImplBlock(typeDecl, mod, moduleEnv, errors, programState) {
     }
     methodDecl.resolvedFuncType = implSig;
     methodDecl.resolvedType = returnType;
-    // Phase 7.4: one impl body can satisfy multiple same-named trait methods;
+    // One impl body can satisfy multiple same-named trait methods;
     // codegen emits one LLVM `define` per (trait, method) using the trait-
     // qualified mangle scheme.
     methodDecl.implementsTraits = requiredList.map((r) => r.traitName);
@@ -1045,11 +1044,11 @@ function validateImplBlock(typeDecl, mod, moduleEnv, errors, programState) {
   }
 
   // Step 5: store the resolved impl info.
-  // Phase 9.J: store the flattened impls list (user-declared traits +
+  // Store the flattened impls list (user-declared traits +
   // every extends ancestor, deduped) so downstream trait-method dispatch
   // doesn't need to re-walk the extends chain on every lookup.
   if (isVariant || isEnum) {
-    // Phase 13.B: variants mutate the shell in place (same shape as the
+    // Variants mutate the shell in place (same shape as the
     // 13.A variants-Map fix). No fresh VariantType, no table replacement -
     // so struct fields that captured the shell during their own
     // resolution see the populated implementsTraits + methods on their
@@ -1077,7 +1076,7 @@ function validateImplBlock(typeDecl, mod, moduleEnv, errors, programState) {
     }
     return;
   }
-  // Phase 6.5: preserve propagatedKinds + kindApplication from the C-pass type.
+  // Preserve propagatedKinds + kindApplication from the C-pass type.
   const prev = typeDecl.resolvedType;
   const fullStruct = StructType(
     typeDecl.name,
@@ -1095,7 +1094,7 @@ function validateImplBlock(typeDecl, mod, moduleEnv, errors, programState) {
   env.structTable.set(typeDecl.name, fullStruct);
 }
 
-// ─── kind clause resolution (phase 6.1) ──────────────────────────────────────
+// ─── kind clause resolution ──────────────────────────────────────────────────
 
 // Populate a KindType from a list of clause AST nodes. Used by named-kind
 // resolution (pass C.2) and by inline-kind operands in compositions
@@ -1211,7 +1210,7 @@ function populateKindFromClauses(kt, clauses, displayName, mod, moduleEnv, error
         layoutSeen = true;
         const slot = resolveLayoutAlign(c.alignExpr, kt, errors);
         if (slot) kt.layoutAlign = slot;
-        // Phase 8.B: store the abi "C" marker. Currently contractual -
+        // Store the abi "C" marker. Currently contractual -
         // no downstream consumer yet, but persisted so future codegen /
         // ABI-validation passes can read it off the resolved kind.
         if (c.abiC) kt.layoutAbiC = true;
@@ -1488,7 +1487,7 @@ function resolveKindClauses(mod, moduleEnv, errors) {
   }
 }
 
-// ─── phase 6.5: layout / composition / parameterized kinds ──────────────────
+// ─── layout / composition / parameterized kinds ─────────────────────────────
 
 // Validate a `layout { align <expr>; }` align expression. Returns a slot
 // `{ kind: "const", value }` for integer literals or `{ kind: "param", name }`
@@ -1591,7 +1590,7 @@ function resolveKindApplication(kindPrefix, modEnv, errors) {
     const a = args[i];
     if (a.kind !== ASTNodeKind.INT_LITERAL) {
       pushError(errors, a,
-        `kind argument must be a constant in phase 6.5 (got ${a.kind})`);
+        `kind argument must be a constant (got ${a.kind})`);
       return null;
     }
     resolvedArgs.push(a.value);
@@ -1599,7 +1598,7 @@ function resolveKindApplication(kindPrefix, modEnv, errors) {
   return new KindApplication(kt, resolvedArgs);
 }
 
-// Phase 6.5: separate site-applicability check, runs after C.2 has populated
+// Separate site-applicability check, runs after C.2 has populated
 // every kind's `appliesTo` set.
 function validateKindAppSite(app, site, sourceLoc, errors) {
   if (!app) return;
@@ -1814,17 +1813,14 @@ export function effectiveLayoutAlign(app) {
 // block; the values are the stable declIds codegen dispatches on.
 //
 // An extern "intrinsic" declaration whose name isn't in this map is rejected
-// in pass A. A user-defined function with one of these names is allowed -
-// the auto-injection that used to shadow such names was removed when these
-// became opt-in via import.
+// in pass A. A user-defined function with one of these names is allowed:
+// intrinsics are opt-in via import, so nothing shadows such a name.
 // The concurrency kinds the compiler depends on. They are declared as
 // ordinary `kind { ... }` decls in std/core/kinds.yoop (autoloaded into
 // every module graph); this table is the carve-out that makes it a CHECKED
 // contract rather than a convention - each entry names the clauses the
 // compiler will actually consult, and a missing or reshaped decl is an
 // error naming the file.
-//
-// See plans/kinds-in-std.md.
 export const CORE_KINDS_MODULE = "std/core/kinds.yoop";
 export const REQUIRED_CORE_KINDS = new Map([
   ["task", {
@@ -1924,7 +1920,7 @@ function makeBuiltinGenericFuncs() {
     isBuiltin: true,
   };
 
-  // Phase 8.H: stringAsBytes(s: string): uint8[]
+  // stringAsBytes(s: string): uint8[]
   // Zero-copy view of a string's UTF-8 bytes as a fat-pointer array.
   // Sharing the string's storage; the view does not outlive the string.
   const asBytesDeclId = "$builtin__string_as_bytes";
@@ -1942,7 +1938,7 @@ function makeBuiltinGenericFuncs() {
     isBuiltin: true,
   };
 
-  // Phase 8.H: stringFromBytesUnchecked(buf: uint8[]): string
+  // stringFromBytesUnchecked(buf: uint8[]): string
   // Copies buf into a fresh malloc'd string, writes a nul terminator. Does
   // NOT validate UTF-8 - that's the wrapping `stringFromBytes` function's
   // job (lives in std/core/strings.yoop). This intrinsic is the building
@@ -1990,11 +1986,10 @@ function makeBuiltinGenericFuncs() {
     isBuiltin: true,
   };
 
-  // Phase 8.H: arraySlice<T>(xs: T[], start: usize, end: usize): T[]
+  // arraySlice<T>(xs: T[], start: usize, end: usize): T[]
   // Returns a borrowing fat-pointer view {xs.ptr + start, end - start}.
   // No allocation. Caller is responsible for keeping the parent alive.
-  // Matches the naming convention "_slice = view" from the intrinsics
-  // index (see plans/phase-8-h-string-bytes-vec.md).
+  // Matches the intrinsics naming convention "_slice = view".
   const sliceDeclId = "$builtin__array_slice";
   const sliceT = new TypeParamType("T", sliceDeclId);
   const sliceSig = FuncType(
@@ -2069,12 +2064,12 @@ function makeBuiltinGenericFuncs() {
 // Returns { modules, errors, moduleEnv }.
 export function typecheckProgram(modules) {
   const errors = [];
-  // Phase 13.C: @derive(display) expansion. Runs before pass A so grafted
+  // @derive(display) expansion. Runs before pass A so grafted
   // toString methods and appended `implements Display` clauses flow through
   // the ordinary passes; consumes every top-level derive ATTRIBUTE wrapper.
   expandDerives(modules, errors);
   const moduleEnv = new Map(); // moduleId -> { localSymbols, structTable, exports, importedNames, linkLibraries }
-  // Phase 7.1: program-wide instantiation registry, shared across modules.
+  // Program-wide instantiation registry, shared across modules.
   const programState = {
     registry: createInstantiationRegistry(),
   };
@@ -2089,7 +2084,7 @@ export function typecheckProgram(modules) {
     makeBuiltinGenericFuncs().map((d) => [d.name, d]),
   );
 
-  // Phase 7.2: install the bound checker. Every instantiate*() that hits the
+  // Install the bound checker. Every instantiate*() that hits the
   // cache for the first time calls back here with each bounded (param, arg)
   // pair. Source-location tracking happens via the call-site error path in
   // checkExpr; this back-channel catches instantiations triggered by type
@@ -2147,23 +2142,23 @@ export function typecheckProgram(modules) {
     if (!reused) {
       for (const [coreName, coreKind] of coreKinds) kindTable.set(coreName, coreKind);
     }
-    // Phase 7.1: generic decl tables - generic decls live here and never
+    // Generic decl tables - generic decls live here and never
     // enter structTable/localSymbols/traitTable (those are monomorphic only).
     const genericStructTable = reused?.genericStructTable ?? new Map();
     const genericFuncTable = reused?.genericFuncTable ?? new Map();
     const genericTraitTable = reused?.genericTraitTable ?? new Map();
-    // Phase 10.A: generic enum decls. Sibling of genericStructTable; variantTable
+    // Generic enum decls. Sibling of genericStructTable; variantTable
     // stays monomorphic.
     const genericVariantTable = reused?.genericVariantTable ?? new Map();
-    // Phase 7.5: variant / union tables. Like structTable, these hold a "shell"
+    // Variant / union tables. Like structTable, these hold a "shell"
     // value after pass A and are populated with field types in pass C.
     const variantTable = reused?.variantTable ?? new Map();
     const unionTable = reused?.unionTable ?? new Map();
-    // Phase 12: value-enum table - nominal aliases over primitive underlying
+    // Value-enum table - nominal aliases over primitive underlying
     // types. Separate from variantTable: different runtime shape (raw
     // primitive vs tagged payload) and different switch semantics.
     const enumTable = reused?.enumTable ?? new Map();
-    // Phase 9.G: vtable type table. Like structTable, the shell only carries
+    // Vtable type table. Like structTable, the shell only carries
     // a name in pass A; pass C resolves field types and trait references.
     const vtableTable = reused?.vtableTable ?? new Map();
     // Transparent type aliases (`type NodeId = usize;`). Maps the alias name to
@@ -2178,14 +2173,13 @@ export function typecheckProgram(modules) {
     // gate on membership here so that user code that hasn't imported the
     // intrinsics module can freely shadow these names.
     const builtinIntrinsicNames = reused?.builtinIntrinsicNames ?? new Set();
-    // `Task` used to be seeded here from a hardcoded object. It is declared
-    // in std/core/kinds.yoop now and arrives via the coreKinds seeding
-    // above, like `pooled` and `joined`.
+    // `Task` is declared in std/core/kinds.yoop and arrives via the
+    // coreKinds seeding above, like `pooled` and `joined`.
 
     for (const decl of mod.ast.body) {
       const d = innerDecl(decl);
-      // Phase 7.5: register an enum shell so pass C can resolve variant fields.
-      // Phase 10.A: generic enums register a genericDecl in genericVariantTable
+      // Register an enum shell so pass C can resolve variant fields.
+      // Generic enums register a genericDecl in genericVariantTable
       // (concrete tables stay monomorphic).
       if (d.kind === ASTNodeKind.VARIANT_DECL) {
         const hasTypeParams = d.typeParams && d.typeParams.length > 0;
@@ -2264,7 +2258,7 @@ export function typecheckProgram(modules) {
         if (decl.kind === ASTNodeKind.EXPORT_DECL) exports.add(d.name);
         continue;
       }
-      // Phase 12: value enum decl. Shell registered here; pass C resolves
+      // Value enum decl. Shell registered here; pass C resolves
       // the underlying type, const-evaluates each case value, and freezes.
       if (d.kind === ASTNodeKind.ENUM_DECL) {
         if (
@@ -2315,7 +2309,7 @@ export function typecheckProgram(modules) {
       } else if (d.kind === ASTNodeKind.TYPE_DECL) {
         const hasTypeParams = d.typeParams && d.typeParams.length > 0;
         if (hasTypeParams) {
-          // Phase 7.1: generic struct decl. Register in genericStructTable.
+          // Generic struct decl. Register in genericStructTable.
           if (genericStructTable.has(d.name) || structTable.has(d.name) || aliasTable.has(d.name)) {
             errors.push({
               message: `redeclaration of type "${d.name}"`,
@@ -2370,7 +2364,7 @@ export function typecheckProgram(modules) {
       if (funcDecl) {
         const hasTypeParams = funcDecl.typeParams && funcDecl.typeParams.length > 0;
         if (hasTypeParams) {
-          // Phase 7.1: generic function decl.
+          // Generic function decl.
           if (
             genericFuncTable.has(funcDecl.name) ||
             localSymbols.has(funcDecl.name)
@@ -2497,7 +2491,7 @@ export function typecheckProgram(modules) {
             sourceLoc: d.sourceLoc,
           });
         } else if (hasTypeParams) {
-          // Phase 7.1: generic trait decl.
+          // Generic trait decl.
           const declId = `${mod.id}__trait__${d.name}`;
           const paramNames = d.typeParams.map((p) => p.name);
           const paramScope = new Map();
@@ -2521,7 +2515,7 @@ export function typecheckProgram(modules) {
         if (decl.kind === ASTNodeKind.EXPORT_DECL) exports.add(d.name);
       }
 
-      // Phase 9.G: register vtable shell. The trait reference + field types
+      // Register vtable shell. The trait reference + field types
       // are resolved in pass C alongside other type bodies.
       if (d.kind === ASTNodeKind.VTABLE_DECL) {
         if (
@@ -2561,7 +2555,7 @@ export function typecheckProgram(modules) {
         } else {
           const kt = new KindType(d.name, mod.id);
           kt.sourceLoc = d.sourceLoc ?? null;
-          // Phase 6.5: record kind parameters on the shell so use-site
+          // Record kind parameters on the shell so use-site
           // resolution can validate arg counts during pass C.
           for (const p of d.params ?? []) {
             const annot = p.typeAnnotation;
@@ -2570,7 +2564,7 @@ export function typecheckProgram(modules) {
             if (!typeName || !allowed.includes(typeName)) {
               const display = typeName ?? "<complex>";
               errors.push({
-                message: `kind parameter type '${display}' not yet supported (use usize/int32/uint32 in phase 6.5)`,
+                message: `kind parameter type '${display}' is not supported (use usize/int32/uint32)`,
                 sourceLoc: p.sourceLoc,
               });
             }
@@ -2610,7 +2604,7 @@ export function typecheckProgram(modules) {
         if (decl.kind === ASTNodeKind.EXPORT_DECL) exports.add(d.name);
       }
 
-      // Phase 8.E: register module-level let/const shells so cross-module
+      // Register module-level let/const shells so cross-module
       // imports and intra-module references can find the name in pass B/C.
       // The real type is resolved in pass C; the initializer is checked in
       // pass D.0. The decl itself is stashed onto `mod.moduleInitDecls` so
@@ -2637,7 +2631,7 @@ export function typecheckProgram(modules) {
       }
     }
 
-    // Intrinsics are no longer auto-injected - they enter genericFuncTable /
+    // Intrinsics are not auto-injected - they enter genericFuncTable /
     // localSymbols only via an `extern "intrinsic" from "compiler"` block,
     // which user code triggers by importing std/core/intrinsics.yoop (or, for
     // waitUntil/cancel, std/core/concurrency.yoop).
@@ -2687,7 +2681,7 @@ export function typecheckProgram(modules) {
   // Stamps its own errors, since it reports per source FILE across a group.
   checkImportLocality(modules, moduleEnv, errors);
 
-  // Phase 8.A: `import.unsafe;` gating pass - scan each non-unsafe module
+  // `import.unsafe;` gating pass - scan each non-unsafe module
   // for any unsafe_ptr type annotation, address-of/deref/null/cast node, and
   // surface a precise diagnostic. Cheap recursive walk; runs once per module.
   for (const mod of modules) {
@@ -2711,13 +2705,12 @@ export function typecheckProgram(modules) {
   // The fix is to run pass C GROUP-MAJOR, STAGE-MINOR: group the source files by
   // module (topo order preserved, since a module's files are contiguous), and
   // inside a group run each stage for every file before starting the next stage.
-  // A single-file module is a group of one, so this is behavior-identical to the
-  // old single loop for every module that predates the feature - which is the
-  // reason to structure it this way rather than making all of pass C
-  // stage-major across modules. That stronger form was tried first and broke:
-  // trait signature resolution instantiates generic types, and instantiation
-  // snapshots the generic decl, so trait sigs cannot precede generic-body
-  // resolution program-wide. See plans/modules-as-directories.md.
+  // A single-file module is a group of one, so this is behavior-identical to a
+  // single flat loop for every single-file module - which is the reason to
+  // structure it this way rather than making all of pass C stage-major across
+  // modules. That stronger form does not work: trait signature resolution
+  // instantiates generic types, and instantiation snapshots the generic decl,
+  // so trait sigs cannot precede generic-body resolution program-wide.
   const passCGroups = [];
   {
     const groupById = new Map();
@@ -2748,11 +2741,9 @@ export function typecheckProgram(modules) {
     // source files of a directory module.
     //
     // So: every generic TYPE body in the group is resolved before any concrete
-    // decl in the group. This is the "broader use will need a pre-pass before
-    // field resolution" that the Phase 7.x comment below predicted, and it is
-    // the same shape as the Phase 7.2 generic-TRAIT pre-pass that already exists
-    // for exactly this reason. The unfrozen-shell fix in types.js handles the
-    // non-generic half of the same hazard.
+    // decl in the group. It is the same shape as the generic-TRAIT pre-pass
+    // that exists for exactly this reason. The unfrozen struct shell in
+    // types.js handles the non-generic half of the same hazard.
     for (const subStage of ["genericTypes", "rest"]) {
     for (const mod of group) {
     const errStart = errors.length;
@@ -2766,7 +2757,7 @@ export function typecheckProgram(modules) {
       typeParamScope: paramScope,
     });
 
-    // Phase 7.2 fix: generic-trait method sigs must be resolved BEFORE the
+    // Generic-trait method sigs must be resolved BEFORE the
     // main pass-C loop, because that loop resolves generic function/struct
     // `implements` bounds (resolveAndAttachBounds), which instantiate the
     // bound generic trait via the registry. instantiateTrait snapshots
@@ -2847,11 +2838,11 @@ export function typecheckProgram(modules) {
         continue;
       }
 
-      // Phase 7.1: generic struct decl - resolve field types with type params
+      // Generic struct decl - resolve field types with type params
       // in scope and stash on the genericDecl record.
       if (d.kind === ASTNodeKind.TYPE_DECL && d.genericDecl) {
         const gd = d.genericDecl;
-        // Phase 7.2: resolve `implements TraitAnnot` bounds onto the
+        // Resolve `implements TraitAnnot` bounds onto the
         // TypeParamTypes in paramScope before resolving field types.
         resolveAndAttachBounds(
           gd,
@@ -2891,7 +2882,7 @@ export function typecheckProgram(modules) {
           });
         }
         gd.genericFields = genericFields;
-        // Phase 7.x: resolve `propagates<K, ...>` on the generic struct decl
+        // Resolve `propagates<K, ...>` on the generic struct decl
         // and stash on the genericDecl so each instantiation inherits the
         // propagatedKinds. Mirrors the non-generic branch below.
         if (d.propagatesClause) {
@@ -2938,15 +2929,15 @@ export function typecheckProgram(modules) {
       }
 
       if (d.kind === ASTNodeKind.TYPE_DECL && !d.genericDecl && !d.targetType) {
-        // Phase 6.4: reject `contains<K>` at a single point.
+        // Reject `contains<K>` at a single point.
         if (d.containsClause) {
           errors.push({
-            message: `contains not yet supported (phase 6.5 or later)`,
+            message: `contains is not supported`,
             sourceLoc: d.containsClause.sourceLoc,
           });
         }
 
-        // Phase 6.4/6.5: resolve `propagates<K1, K2(args), ...>` into KindApplications.
+        // Resolve `propagates<K1, K2(args), ...>` into KindApplications.
         const propagatedKinds = [];
         if (d.propagatesClause) {
           const env2 = moduleEnv.get(mod.id);
@@ -2966,7 +2957,7 @@ export function typecheckProgram(modules) {
 
         const fields = [];
         for (const field of d.fields ?? []) {
-          // Phase 6.4: resolve field kind prefix against the kindTable.
+          // Resolve field kind prefix against the kindTable.
           let fieldKindType = null;
           if (field.kindPrefix) {
             fieldKindType = moduleEnv
@@ -3015,10 +3006,10 @@ export function typecheckProgram(modules) {
           fields.push({ name: field.name, type: fieldType, kindType: fieldKindType });
         }
 
-        // Phase 6.4: every kind-carrying field's kind must be in propagatedKinds.
+        // Every kind-carrying field's kind must be in propagatedKinds.
         // A field "carries kind K" if its kindPrefix resolves to K, or its type
         // is `Task<T>` (which inherently carries the builtin `Task` kind).
-        // Phase 6.5: propagatedKinds entries are KindApplications; compare by
+        // propagatedKinds entries are KindApplications; compare by
         // KindType identity.
         for (const f of fields) {
           const carried = fieldCarriedKinds(f);
@@ -3032,7 +3023,7 @@ export function typecheckProgram(modules) {
           }
         }
 
-        // Phase 6.5: type-decl kind prefix (e.g. `type Vec4 aligned(32) { ... }`).
+        // Type-decl kind prefix (e.g. `type Vec4 aligned(32) { ... }`).
         // Resolve the application now; site applicability is validated after C.2.
         let typeKindApp = null;
         if (d.kindPrefix) {
@@ -3058,8 +3049,8 @@ export function typecheckProgram(modules) {
         structTable.set(d.name, fullType);
       }
 
-      // Phase 7.5: resolve enum variant fields.
-      // Phase 10.A: generic enums get a separate branch - their variant fields
+      // Resolve enum variant fields.
+      // Generic enums get a separate branch - their variant fields
       // are resolved with a type-param scope and stashed on the genericDecl
       // for later instantiation. The genericDecl never produces a single
       // resolvedType.
@@ -3108,7 +3099,7 @@ export function typecheckProgram(modules) {
         }
         gd.genericVariants = genericVariants;
       } else if (d.kind === ASTNodeKind.VARIANT_DECL) {
-        // Phase 13.A: mutate the shell registered by pass A in place
+        // Mutate the shell registered by pass A in place
         // instead of constructing a fresh VariantType and replacing it.
         // Any struct field whose type was resolved earlier in pass C
         // captured the shell reference; if we swapped a new object into
@@ -3122,7 +3113,7 @@ export function typecheckProgram(modules) {
         // Skip body resolution rather than dereferencing the missing shell.
         if (!shell) continue;
 
-        // Phase 13.B: resolve `propagates<...>` on the variant decl and
+        // Resolve `propagates<...>` on the variant decl and
         // store on the shell. Same shape as the struct branch above.
         if (d.propagatesClause) {
           const env2 = moduleEnv.get(mod.id);
@@ -3182,7 +3173,7 @@ export function typecheckProgram(modules) {
         d.resolvedType = shell;
       }
 
-      // Phase 7.5: resolve union field types.
+      // Resolve union field types.
       if (d.kind === ASTNodeKind.UNION_DECL) {
         const fields = [];
         const seenNames = new Set();
@@ -3233,7 +3224,7 @@ export function typecheckProgram(modules) {
         unionTable.set(d.name, fullUnion);
       }
 
-      // Phase 12: resolve value-enum underlying type and const-eval each case.
+      // Resolve value-enum underlying type and const-eval each case.
       if (d.kind === ASTNodeKind.ENUM_DECL) {
         const underlying = resolveTypeAnnotationInModule(
           d.underlying,
@@ -3337,12 +3328,12 @@ export function typecheckProgram(modules) {
         funcDecl = d;
       }
       if (funcDecl) {
-        // Phase 7.1: generic functions are resolved with type params in scope
+        // Generic functions are resolved with type params in scope
         // and their signature is stashed on the genericDecl record. They are
         // NOT inserted into localSymbols.
         const isGenericFunc = !!funcDecl.genericDecl;
         if (isGenericFunc) {
-          // Phase 7.2: attach bounds to the type params before resolving the sig.
+          // Attach bounds to the type params before resolving the sig.
           resolveAndAttachBounds(
             funcDecl.genericDecl,
             funcDecl.typeParams,
@@ -3366,11 +3357,11 @@ export function typecheckProgram(modules) {
           ) ?? ErrorType();
         funcDecl.declaredReturnType = declaredReturnType;
 
-        // Phase 6.4: resolve `propagates<K1, K2, ...>` on the function return.
+        // Resolve `propagates<K1, K2, ...>` on the function return.
         // Reject `contains` on returns at the same point.
         if (funcDecl.containsClause) {
           errors.push({
-            message: `contains not yet supported (phase 6.5 or later)`,
+            message: `contains is not supported`,
             sourceLoc: funcDecl.containsClause.sourceLoc,
           });
         }
@@ -3510,7 +3501,7 @@ export function typecheckProgram(modules) {
       typeParamScope: paramScope,
     });
 
-    // Phase 9.J: resolve every trait's `extends` list first, before any
+    // Resolve every trait's `extends` list first, before any
     // method signatures. Method-sig resolution doesn't depend on parents'
     // method tables (extends is only consulted at impl-block validation and at
     // call dispatch), but the typecheck contract is "trait.extendsTraits is
@@ -3576,7 +3567,7 @@ export function typecheckProgram(modules) {
     for (const decl of mod.ast.body) {
       const d = innerDecl(decl);
       if (d.kind !== ASTNodeKind.TRAIT_DECL) continue;
-      // Phase 7.1: generic trait method sigs are resolved in the pre-pass
+      // Generic trait method sigs are resolved in the pre-pass
       // above (so generic bounds instantiate against a populated method map);
       // nothing left to do here.
       if (d.genericDecl) continue;
@@ -3670,20 +3661,20 @@ export function typecheckProgram(modules) {
       ) {
         continue;
       }
-      // Phase 7.x: generic structs now support `implements Trait`. validateImplBlock
+      // Generic structs support `implements Trait`. validateImplBlock
       // routes to the open-self code path when d.genericDecl is set. Note: this
       // runs *after* struct field resolution in pass C, so a struct field that
-      // references DynArray<int32> in the same module would have already been
-      // cached with empty implementsTraits. The current playground demo doesn't
-      // hit this case; broader use will need a pre-pass before field resolution.
-      // Phase 13.B: variants flow through the same validator. The shell
-      // mutation pattern (13.A) means struct fields that captured the
-      // variant before its impls landed will see the populated
+      // references DynArray<int32> in the same module has already been cached
+      // with empty implementsTraits. That case is not handled; covering it
+      // would take a pre-pass before field resolution.
+      // Variants flow through the same validator. The shell
+      // mutation pattern means struct fields that captured the variant
+      // before its impls were validated see the populated
       // implementsTraits + methods on their next read.
       validateImplBlock(d, mod, moduleEnv, errors, programState);
     }
 
-    // Phase 9.G: pass C.3b - validate vtable decls. Each field must be a
+    // Pass C.3b - validate vtable decls. Each field must be a
     // function-pointer type matching a trait method's signature minus the
     // leading `ref self`. We build a fresh fully-populated VTableType (the
     // pass-A shell only carried the trait name) and replace it in the table.
@@ -3693,7 +3684,7 @@ export function typecheckProgram(modules) {
       validateVTableDecl(d, mod, moduleEnv, errors, programState);
     }
 
-    // Phase 8.E: pass C.4 - resolve module-level let/const declared-type
+    // Pass C.4 - resolve module-level let/const declared-type
     // annotations and stash the decls onto mod.moduleInitDecls in source
     // order. The initializer expressions are typechecked in pass D.0 once
     // every function signature in this module has resolved (so initializers
@@ -3794,7 +3785,7 @@ export function typecheckProgram(modules) {
     // unimpeachable source is a bodyless decl: `runKindFlow` returns early on
     // anything with no body, so the decl-authority check never runs on an
     // extern, which is exactly what makes the allocating intrinsic the
-    // authority for `owned` (see plans/strings-ownership-and-ergonomics.md).
+    // authority for `owned`.
     // Without this the marker on `stringFromBytesUnchecked` would be
     // silently dropped at every call site.
     for (const decl of m.ast.body) {
@@ -3861,29 +3852,29 @@ export function typecheckProgram(modules) {
       importedNames,
       currentModId: mod.id,
       kindTable,
-      // Phase 7.4: trait-qualified call resolution needs the trait table.
+      // Trait-qualified call resolution needs the trait table.
       traitTable,
-      // Phase 7.1: needed for generic call-site inference and for resolving
+      // Needed for generic call-site inference and for resolving
       // typeApplication annotations inside function bodies.
       registry: programState.registry,
       genericFuncTable: env.genericFuncTable,
       genericStructTable: env.genericStructTable,
       genericTraitTable: env.genericTraitTable,
-      // Phase 10.A: generic enum table for variant-constructor pinning.
+      // Generic enum table for variant-constructor pinning.
       genericVariantTable: env.genericVariantTable,
-      // Phase 7.5: variant and union nominal tables.
+      // Variant and union nominal tables.
       variantTable: env.variantTable,
       unionTable: env.unionTable,
-      // Phase 12: value-enum nominal table.
+      // Value-enum nominal table.
       enumTable: env.enumTable,
-      // Phase 9.G: vtable nominal table.
+      // Vtable nominal table.
       vtableTable: env.vtableTable,
       // Names imported into this module via an `extern "intrinsic"` block.
       // Gates waitUntil/cancel special-cases in checkExpr.js.
       builtinIntrinsicNames: env.builtinIntrinsicNames,
-      // Phase 8.A: per-module unsafe opt-in flag (for kind-check / pure check).
+      // Per-module unsafe opt-in flag (for kind-check / pure check).
       allowsUnsafe: !!mod.ast.allowsUnsafe,
-      // Phase 8.A: callback that resolves a parser-emitted type annotation
+      // Callback that resolves a parser-emitted type annotation
       // to a Type in this module's scope. Used by expression-level type-arg
       // intrinsics (`unsafe_ptr.cast<U>(p)`, `unsafe_ptr.fromInt<T>(n)`).
       resolveTypeAnnotation: (annot) =>
@@ -3892,7 +3883,7 @@ export function typecheckProgram(modules) {
         }),
     };
 
-    // Phase 8.E: pass D.0 - typecheck module-level let/const initializers.
+    // Pass D.0 - typecheck module-level let/const initializers.
     // Runs before function bodies because module globals' types are needed
     // by IDENT resolution inside function bodies. Inits may freely call
     // functions defined in this module (their sigs were resolved in pass C).
@@ -3906,7 +3897,7 @@ export function typecheckProgram(modules) {
       validateModuleInit(d, typeContext, errors);
     }
 
-    // Phase 11.D.18 pass D.0.5: typecheck `@precompile { ... }`
+    // Pass D.0.5: typecheck `@precompile { ... }`
     // block-form bodies. These blocks are top-level, see only
     // module scope, and have no return type - same shape as
     // validateModuleInit but on a BLOCK statement. Done before
@@ -3926,14 +3917,14 @@ export function typecheckProgram(modules) {
     for (const decl of mod.ast.body) {
       const d = innerDecl(decl);
       if (d.kind === ASTNodeKind.FUNCTION_DECL) {
-        // Phase 7.1: generic functions are typechecked once with their type
+        // Generic functions are typechecked once with their type
         // params in scope. Per-instantiation IR emission happens in codegen.
         const tcForFn = d.genericDecl
           ? { ...typeContext, typeParamScope: d.genericDecl.paramScope }
           : typeContext;
         validateFunction(d, tcForFn, errors);
       } else if (d.kind === ASTNodeKind.TYPE_DECL && d.methods?.length > 0) {
-        // Phase 7.x: generic struct methods are typechecked once against the
+        // Generic struct methods are typechecked once against the
         // open self (with TypeParamType fields), then cloned + substituted per
         // instantiation at codegen time.
         const tcForMethod = d.genericDecl
@@ -3946,9 +3937,9 @@ export function typecheckProgram(modules) {
           }
         }
       } else if (d.kind === ASTNodeKind.VARIANT_DECL && d.methods?.length > 0) {
-        // Phase 13.B: variant methods are typechecked the same way as
+        // Variant methods are typechecked the same way as
         // struct methods, with `self` bound to the variant's shell.
-        // Generic variants are not yet supported on the impl side.
+        // Generic variants are not supported on the impl side.
         const selfShell = d.resolvedType;
         if (selfShell) {
           for (const method of d.methods) {
@@ -3998,7 +3989,7 @@ export function typecheckProgram(modules) {
           runKindFlow(method, errors, funcDeclTable, flowKindTable, d, resolveCrossModuleCallee, programState.registry, resolveVariantDecl);
         }
       } else if (d.kind === ASTNodeKind.VARIANT_DECL && d.methods?.length > 0) {
-        // Phase 13.B: variant methods participate in kind-check like
+        // Variant methods participate in kind-check like
         // struct methods.
         for (const method of d.methods) {
           runKindCheck(method, errors, funcDeclTable, programState.registry);
@@ -4137,12 +4128,12 @@ export function typecheck(ast) {
     moduleEnv: null,
     kindTable: new Map(),
   };
-  // Phase 8.A: expose a thin resolver hook so expression-level type-arg
+  // Expose a thin resolver hook so expression-level type-arg
   // intrinsics (`unsafe_ptr.cast<U>(p)`, `unsafe_ptr.fromInt<T>(n)`) can
   // resolve their explicit type arguments.
   typeContext.resolveTypeAnnotation = (annot) =>
     resolveTypeAnnotation(annot, structTable, { typeParamScope: null });
-  // Phase 8.A: gating - single-module path mirrors the typecheckProgram
+  // Gating - single-module path mirrors the typecheckProgram
   // walker. Modules that didn't opt into `import.unsafe;` cannot mention
   // any pointer surface.
   typeContext.allowsUnsafe = !!ast.allowsUnsafe;

@@ -24,7 +24,7 @@ let padded: string = str.padStart(str.intToString(n), 4, "0");
 - `std/collections/set.yoop` - generic hash set.
 - `std/core/alloc.yoop` - allocators and the ambient allocation context.
 - `std/core/atomic.yoop` - atomic integer counters shared across tasks.
-- `std/core/bytes.yoop` - Phase 8.H byte-buffer primitives.
+- `std/core/bytes.yoop` - byte-buffer primitives.
 - `std/core/cancel` - cancellation tokens: a cancelled flag, an optional deadline, and parent/child links, which blocking calls fold into their own timed waits. One module across two files; import the DIRECTORY.
 - `std/core/concurrency.yoop` - bounded-wait surface for Task<T>.
 - `std/core/format.yoop` - primitive `toString` shims.
@@ -32,11 +32,11 @@ let padded: string = str.padStart(str.intToString(n), 4, "0");
 - `std/core/kinds.yoop` - foundational trait + kind shared across std.
 - `std/core/numbers.yoop` - numeric parsing and small integer helpers.
 - `std/core/range.yoop` - the `a..b` integer range.
-- `std/core/strings.yoop` - Phase 8.H string primitives and bridges.
+- `std/core/strings.yoop` - string primitives and bridges.
 - `std/core/text.yoop` - the owned, growable string type.
 - `std/core/traits.yoop` - foundational traits used across std modules.
 - `std/core/types.yoop` - canonical algebraic types used across std.
-- `std/core/vec.yoop` - Phase 8.H growable vector type.
+- `std/core/vec.yoop` - growable vector type.
 - `std/crypto` - SHA-256 and HMAC-SHA-256, in pure yoop with no FFI.
 - `std/db/sqlite` - SQLite bindings: connections, prepared statements, and a `transaction` kind that commits or rolls back at the end of its block. One module across two files; import the DIRECTORY.
 - `std/debug.yoop` - assert / panic / unreachable.
@@ -148,7 +148,7 @@ Exports:
 
 ## `std/core/bytes.yoop`
 
-Phase 8.H byte-buffer primitives.
+byte-buffer primitives.
 
 Exports:
 
@@ -269,7 +269,7 @@ Exports:
 
 ## `std/core/strings.yoop`
 
-Phase 8.H string primitives and bridges.
+string primitives and bridges.
 
 Exports:
 
@@ -369,7 +369,7 @@ Exports:
 
 ## `std/core/vec.yoop`
 
-Phase 8.H growable vector type.
+growable vector type.
 
 Exports:
 

@@ -3,8 +3,8 @@ module source_graph;
 /*
   The std modules every graph gets whether anything imported them or not.
 
-  Two of them, and each is here because something that USED to be built into the
-  compiler now lives in std source:
+  Two of them, and each is here because something a compiler could build in
+  instead lives in std source:
 
     core/kinds.yoop    declares `async`, `task`, `joined`, `pooled`,
                        `disposable`, `ephemeral` and `owned`. These were

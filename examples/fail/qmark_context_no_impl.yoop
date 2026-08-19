@@ -1,4 +1,4 @@
-// Phase 10.E.2: a context string on a `?` whose Err payload is neither a
+// A context string on a `?` whose Err payload is neither a
 // plain `string` nor a `WithContext<RetErr>` implementer is rejected. The
 // diagnostic spells out the impl to add, including the method signature.
 

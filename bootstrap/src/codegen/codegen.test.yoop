@@ -4,9 +4,8 @@
 // source literals and small on-disk fixtures, then read the emitted IR TEXT.
 // Both things they are about are properties of the whole MODULE rather than of
 // any one instruction - which `declare` lines it holds, and whether linking it
-// needs the yoop runtime - and both used to be decided in three places that
-// could not see each other. That is 2.1 and 2.3 in
-// plans/bootstrap-completion.md.
+// needs the yoop runtime - and each has to be decided in ONE place, since the
+// four things that declare a C symbol cannot see each other.
 //
 // Anything that has to RUN belongs in bootstrap/tests/slice/ instead.
 
@@ -296,15 +295,12 @@ suite function aTopOfRangeUsizeConstKeepsItsValue(): void {
 // The async lowering is asserted on the IR TEXT rather than by running a
 // program, and that is not a shortcut: a coroutine can only be REACHED from
 // another coroutine (that is the whole coloring rule), and the only bridge from
-// `main` into one is `task` + `wait`, which the bootstrap refuses by name. So
-// there is no runnable async program to make a slice fixture out of yet - see
-// item 3.3 in plans/bootstrap-completion.md.
+// `main` into one is `task` + `wait` - so a program that RUNS pins the spawn,
+// while the shape of the frame is only visible in the IR.
 //
 // What IS asserted here is every part of the shape that would be silently wrong
 // if it were missing: the ABI, the frame, the trailer, the drive loop and the
-// bare suspend. The lowering was additionally verified end to end against a
-// hand-written C driver - two suspends propagating through two frames, resumed
-// from the top - which is recorded in the plan doc.
+// bare suspend. `tests/slice/async_coroutine.yoop` is the end-to-end half.
 
 const ASYNC_KIND: string = "kind async { appliesTo function; pausable; } ";
 const SUSPEND_INTRINSIC: string = "extern \"intrinsic\" from \"compiler\" { async function suspendNow(): void; } ";
@@ -455,8 +451,8 @@ suite function theTaskHandleStructMatchesTheRuntimeLayout(): void {
       "%Task_test__worker = type { ptr, i8, [3 x i8], i32, ptr, ptr, ptr, ptr, i32, i32 }") == 1;
     theory.detail = `codegen said "${e.error}"; the handle layout is not the runtime's`;
   }
-  // A task body IS a coroutine - that half landed with `async` - so this pins
-  // that a `provides Task` kind did not quietly turn it back into a function.
+  // A task body IS a coroutine, so this pins that a `provides Task` kind did
+  // not quietly turn it back into a function.
   let test theory: Case = t.asserts("the body is still emitted as a coroutine") {
     disposable e: Emitted = emitSource(src);
     theory.isSuccessful = occurrences(text.view(ref e.ir),

@@ -1,7 +1,5 @@
-// Phase 8.H headline demo: parse an HTTP/1.1 request line into method,
-// path, and version using only std/core/bytes + std/core/strings - no
-// `import.unsafe;`. This is the smoke test for "the library prereqs are
-// done" per plans/phase-8-h-string-bytes-vec.md.
+// Parse an HTTP/1.1 request line into method, path, and version using only
+// std/core/bytes + std/core/strings - no `import.unsafe;`.
 
 import { bytesIndexOf, bytesSlice } from "../../../std/core/bytes.yoop";
 import { stringFromBytes } from "../../../std/core/strings.yoop";

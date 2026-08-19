@@ -1,4 +1,4 @@
-// Phase 10.D.1: template literals with `${...}` interpolation can be
+// Template literals with `${...}` interpolation can be
 // used anywhere a `string` is expected - not just inside printf.
 // Lowering runs `${x}` through the matching `toString` shim in
 // std/core/format.yoop and concats the parts via `stringConcatAll`.

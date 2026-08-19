@@ -13,8 +13,7 @@
 // true lexical scoping means every deferred resolution has to remember which
 // FILE it came from (an alias RHS resolves "in the alias's home module", which
 // under per-file scope has to become "in the alias's home FILE"), which is a
-// much larger and riskier change through the checker's resolution plumbing. See
-// plans/modules-as-directories.md for the measured cost of that version.
+// much larger and riskier change through the checker's resolution plumbing.
 //
 // Two consequences of doing it this way, both conservative rejections rather
 // than unsoundness, and both arguably desirable on their own:

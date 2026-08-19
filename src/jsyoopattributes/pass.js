@@ -1,16 +1,9 @@
-// Phase 11.A: post-typecheck attribute dispatch pass.
+// Post-typecheck attribute dispatch pass.
 //
 // Walks every module's AST, finds ATTRIBUTE nodes, looks up their
-// handler in the registry, and runs the `comptimePhase` callback. For
-// Phase 11.A this is mostly a stub - `@precompile`'s handler errors out
-// with a "not yet implemented" diagnostic because the bytecode
-// interpreter doesn't land until 11.B/C. The pass itself is in place
-// so the integration point is real and the registry handlers actually
-// get invoked.
-//
-// Future phases (11.B for module-init folding, 11.C for full
-// `@precompile` evaluation) replace the stub handlers without touching
-// this pass.
+// handler in the registry, and runs the `comptimePhase` callback. All
+// per-attribute behavior lives in the registry handlers; this pass only
+// finds the nodes and dispatches.
 
 import { ASTNodeKind } from "../contracts.js";
 import { getAttributeHandler } from "./registry.js";

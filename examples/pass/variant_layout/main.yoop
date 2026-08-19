@@ -1,7 +1,8 @@
 // Layout regressions for values that live inside a variant payload or a Vec.
 //
-// Three shapes codegen used to size wrong. Each corrupted memory rather than
-// failing to compile, so they are checked by reading the values back.
+// Three shapes are easy for codegen to size wrong. Each corrupts memory
+// rather than failing to compile, so they are checked by reading the values
+// back.
 
 import { disposable, Disposable } from "../../../std/core/kinds.yoop";
 import { Result } from "../../../std/core/types.yoop";
@@ -57,8 +58,8 @@ type Entry {
     vt:   GreeterVt,
 }
 
-// (3) A module-level const string. Escape sequences in one used to be emitted
-// literally, so this was seven characters instead of five.
+// (3) A module-level const string. Escape sequences have to be decoded rather
+// than emitted literally, or this is seven characters instead of five.
 const GREETING: string = "hi\r\n!";
 
 function main(): int32 {

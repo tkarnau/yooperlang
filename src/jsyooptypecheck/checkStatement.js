@@ -57,7 +57,7 @@ function isNamespaceGenericCall(callExpr, ctx) {
 }
 import { lookupCoreKind, taskSatisfiesKind, isRefcountedKind } from "./coreKinds.js";
 
-// Phase 6.4: kind-prefix resolution walks both the local kindTable (user
+// Kind-prefix resolution walks both the local kindTable (user
 // kinds + the seeded `Task` builtin) and the builtin-kind table (joined /
 // pooled / Task). Returns null if neither matches.
 function resolveKindByName(name, typeContext) {
@@ -98,7 +98,7 @@ export function validateMethod(methodDecl, structType, typeContext, errors) {
   popScope(scope, errors);
 }
 
-// Phase 10.E.3: a function with a value to return must actually return on
+// A function with a value to return must actually return on
 // every path. Before this existed, falling off the end compiled and trapped
 // at runtime (codegen emits `unreachable`), so the failure showed up as a
 // SIGTRAP with no source location rather than as a diagnostic.
@@ -131,7 +131,7 @@ export function validateFunction(funcNode, typeContext, errors) {
     // ref params: binding type in scope is RefType(baseType)
     const t = param.isRef ? RefType(baseType) : baseType;
 
-    // Phase 6.2: resolve kind prefix on parameter.
+    // Resolve kind prefix on parameter.
     let paramKindType = null;
     if (param.kindPrefix) {
       const kt = resolveKindByName(param.kindPrefix.name, typeContext);
@@ -154,8 +154,8 @@ export function validateFunction(funcNode, typeContext, errors) {
           // associated type is validated by the binding-resolution path.
           paramKindType = kt;
         } else {
-          // Unwrap ref to get the underlying nominal type. Phase 13.B:
-          // variants are valid receivers for kind-tracked params too.
+          // Unwrap ref to get the underlying nominal type. Variants are
+          // valid receivers for kind-tracked params too.
           const structType = baseType.kind === typeKinds.ref ? baseType.inner : baseType;
           if (
             structType.kind !== typeKinds.struct &&
@@ -164,7 +164,7 @@ export function validateFunction(funcNode, typeContext, errors) {
             pushError(errors, param,
               `kind "${kt.name}" can only apply to struct or variant values, got ${formatType(baseType)}`);
           } else {
-            // Phase 6.4 strict propagates: a struct that propagates this kind
+            // Strict propagates: a struct that propagates this kind
             // satisfies the kind's requirement via its propagated fields, even
             // if it does not implement the required traits directly. Skip the
             // direct-implements check in that case.
@@ -188,7 +188,7 @@ export function validateFunction(funcNode, typeContext, errors) {
         }
       }
       param.resolvedKindType = paramKindType;
-      // Phase 6.5: build a KindApplication for the parameter site as well.
+      // Build a KindApplication for the parameter site as well.
       if (paramKindType) {
         const args = param.kindPrefix.args ?? [];
         if (args.length !== paramKindType.params.length) {
@@ -200,7 +200,7 @@ export function validateFunction(funcNode, typeContext, errors) {
           for (const a of args) {
             if (a.kind !== ASTNodeKind.INT_LITERAL) {
               pushError(errors, a,
-                `kind argument must be a constant in phase 6.5`);
+                `kind argument must be a constant`);
               ok = false;
               break;
             }
@@ -233,7 +233,7 @@ export function validateFunction(funcNode, typeContext, errors) {
   }
   funcNode.resolvedType = funcReturnType;
 
-  // Phase 6.3: inside a task function body, `return` statements type against
+  // Inside a task function body, `return` statements type against
   // the declared T (not Task<T>), and `wait` is rejected.
   const ctx = {
     funcReturnType,
@@ -256,7 +256,7 @@ export function validateFunction(funcNode, typeContext, errors) {
   popScope(scope, errors);
 }
 
-// Phase 8.E: typecheck a single module-level let/const decl's initializer
+// Typecheck a single module-level let/const decl's initializer
 // against its declared type. The scope is empty (module-level inits have
 // no locals); identifier lookups fall through to moduleSymbols, which by
 // pass D.0 holds both this module's bindings and any imported ones.
@@ -310,7 +310,7 @@ export function validateModuleInit(decl, typeContext, errors) {
   popScope(scope, errors);
 }
 
-// Phase 11.D.18: typecheck a top-level `@precompile { ... }` block.
+// Typecheck a top-level `@precompile { ... }` block.
 // The block has no params and no return type (its only effects are
 // writes to module-level state); local bindings declared inside the
 // block live only during comptime evaluation. Otherwise it's a
@@ -413,7 +413,7 @@ function reportUnreachable(node, ctx) {
 //   - if there's an initializer, type-check it against the declared type
 //   - bind the name in the current scope
 //
-// Phase 6.1: when `node.kindPrefix` is set, the binding is kind-prefixed
+// When `node.kindPrefix` is set, the binding is kind-prefixed
 // (e.g. `disposable a: FileHandle = ...`). We additionally:
 //   - resolve the kind name against ctx.typeContext.kindTable
 //   - validate the RHS struct type implements every trait in kind.requires
@@ -460,12 +460,11 @@ function canonicalizeStruct(type, ctx) {
 }
 
 function checkLetOrConst(node, scope, ctx) {
-  // Phase 6.3: `joined h = task_call();` / `pooled h = task_call();` -
+  // `joined h = task_call();` / `pooled h = task_call();` -
   // built-in kind prefix; type is inferred as Task<T> from the RHS.
-  // `joined` / `pooled` used to arrive with a parser-stamped `builtin`
-  // marker because they were lexer keywords. They are ordinary kind names
-  // now, so the task-binding path keys on the name resolving to a builtin
-  // kind instead.
+  // `joined` and `pooled` are ordinary kind names, not lexer keywords, so
+  // the task-binding path keys on the name resolving to a builtin kind
+  // rather than on a parser-stamped marker.
   const prefixName = node.kindPrefix?.name ?? null;
   // The task-handle binding forms (`joined d = f()` / `pooled h = f()`)
   // never carry a type annotation - Task<T> is compiler-internal, and the
@@ -539,7 +538,7 @@ function checkLetOrConst(node, scope, ctx) {
   declaredType = canonicalizeStruct(declaredType, ctx);
   node.resolvedType = declaredType;
 
-  // Resolve kind prefix (phase 6.1, args added in 6.5). null on plain let/const.
+  // Resolve kind prefix, with optional args. null on plain let/const.
   let kindType = null;
   let kindApp = null;
   if (node.kindPrefix) {
@@ -550,7 +549,7 @@ function checkLetOrConst(node, scope, ctx) {
     if (!kindType) {
       pushError(ctx.errors, node, `unknown kind "${node.kindPrefix.name}"`);
     } else {
-      // Phase 6.5: validate kind arguments (must be constants).
+      // Validate kind arguments (must be constants).
       const args = node.kindPrefix.args ?? [];
       if (args.length !== kindType.params.length) {
         pushError(ctx.errors, node,
@@ -561,7 +560,7 @@ function checkLetOrConst(node, scope, ctx) {
         for (const a of args) {
           if (a.kind !== ASTNodeKind.INT_LITERAL) {
             pushError(ctx.errors, a,
-              `kind argument must be a constant in phase 6.5`);
+              `kind argument must be a constant`);
             ok = false;
             break;
           }
@@ -584,7 +583,7 @@ function checkLetOrConst(node, scope, ctx) {
       ((typeof node.assignment.callee === "string" &&
         lookupGenericFunc(node.assignment.callee, ctx) !== null) ||
         isNamespaceGenericCall(node.assignment, ctx));
-    // Phase 6.3: immediate task call - `const x: T = compute(...);` where
+    // Immediate task call - `const x: T = compute(...);` where
     // compute returns Task<T>. Auto-spawn+wait inline; binding sees T.
     if (
       !kindType &&
@@ -619,12 +618,12 @@ function checkLetOrConst(node, scope, ctx) {
       pushError(ctx.errors, node,
         `trailing block on binding "${node.name}" requires a kind prefix that declares ownsBlock`);
     }
-    // Phase 6.2: reject aliasing a scoped binding under a non-scoped name.
+    // Reject aliasing a scoped binding under a non-scoped name.
     if (node.assignment) {
       const escapedName = findScopedIdentInExpr(node.assignment, scope);
       if (escapedName) {
         pushError(ctx.errors, node,
-          `cannot alias a scoped binding under a non-scoped name (phase 6.2): '${escapedName}' has mustNotEscape`);
+          `cannot alias a scoped binding under a non-scoped name: '${escapedName}' has mustNotEscape`);
       }
     }
   }
@@ -657,10 +656,10 @@ function checkLetOrConst(node, scope, ctx) {
   }
 }
 
-// Phase 6.3: typecheck `joined h = task_call();` / `pooled h = task_call();`.
+// Typecheck `joined h = task_call();` / `pooled h = task_call();`.
 // The RHS must be a call to a task function (whose external return type is
 // Task<T>); the binding's resolved type is Task<T>.
-// Phase 6.4: `pooled` additionally accepts a Task<T>-typed expression (e.g.
+// `pooled` additionally accepts a Task<T>-typed expression (e.g.
 // `pooled h3 = h2;` where h2 is pooled). Codegen detects the copy site and
 // emits a retain. `joined` still requires a fresh task call.
 function checkTaskBuiltinBinding(node, scope, ctx, kt) {
@@ -698,7 +697,7 @@ function checkTaskBuiltinBinding(node, scope, ctx, kt) {
   }
 
   // joined requires a fresh task call (allocates on stack, can't copy).
-  // pooled accepts both task calls and Task<T>-typed copies (phase 6.4).
+  // pooled accepts both task calls and Task<T>-typed copies.
   const rhsIsCall = node.assignment.kind === ASTNodeKind.CALL_EXPRESSION;
   if (!isRefcounted && !rhsIsCall) {
     pushError(ctx.errors, node,
@@ -733,7 +732,7 @@ function isTaskCallReturningType(callExpr, targetType, scope, ctx) {
   return true;
 }
 
-// Phase 6.2: Walk an expression and return the name of the first IDENT whose
+// Walk an expression and return the name of the first IDENT whose
 // scope binding carries mustNotEscape (a scoped sentinel). Returns null if none.
 function findScopedIdentInExpr(expr, scope) {
   if (!expr || typeof expr !== "object") return null;
@@ -793,7 +792,7 @@ function validateKindBinding(node, kindType, declaredType, scope, ctx) {
     pushError(ctx.errors, node,
       `kind '${kindType.name}' applies to a region and cannot be bound to a name; drop the name and use the anonymous form: '${kindType.name} EXPR { ... }' (or '${kindType.name} EXPR;')`);
   } else if (!kindType.appliesTo.has("binding")) {
-    // Phase 6.2: check appliesTo includes "binding".
+    // Check appliesTo includes "binding".
     const sites = [...kindType.appliesTo].join(", ") || "(none)";
     pushError(ctx.errors, node,
       `kind '${kindType.name}' does not apply to bindings (declared appliesTo: ${sites})`);
@@ -805,14 +804,14 @@ function validateKindBinding(node, kindType, declaredType, scope, ctx) {
     const existing = lookupInScope(scope, node.assignment.name);
     if (existing?.kindType) {
       pushError(ctx.errors, node,
-        `cannot re-bind a kind-tracked value under a new kind in phase 6.1`);
+        `cannot re-bind a kind-tracked value under a new kind`);
     }
   }
 
   // The value under a kind binding must be a plain nominal value (not a
-  // ref, not an array, not a primitive). Phase 13.B: variants count too -
-  // a variant that implements the kind's required traits binds the same
-  // way a struct would.
+  // ref, not an array, not a primitive). Variants count too: a variant
+  // that implements the kind's required traits binds the same way a
+  // struct would.
   if (declaredType.kind === typeKinds.error) return;
   if (
     declaredType.kind !== typeKinds.struct &&
@@ -823,7 +822,7 @@ function validateKindBinding(node, kindType, declaredType, scope, ctx) {
     return;
   }
 
-  // Phase 6.4 strict propagates: a struct that propagates this kind satisfies
+  // Strict propagates: a struct that propagates this kind satisfies
   // the kind's requirement via propagated fields, even if it does not
   // implement the required traits directly. Skip the direct-implements check
   // in that case - the obligation flows via the field walk in kindCheck.
@@ -1120,10 +1119,10 @@ function checkForLoop(node, scope, ctx) {
   if (node.initDeclares) popScope(loopScope, ctx.errors);
 }
 
-// Phase 9.D + 10.B: `for item in xs { ... }`. The RHS may be either:
+// `for item in xs { ... }`. The RHS may be either:
 //   - An array expression (`T[]`): the fast path. The element type T drives
 //     the body binding; codegen walks the fat-pointer.
-//   - A struct implementing `Iterable<U>` (Phase 10.B): the loop desugars
+//   - A struct implementing `Iterable<U>`: the loop desugars
 //     to a `while (true) { switch (Iterable.next(ref iter)) { ... } }` over
 //     `IterStep<U>`. The U from the impl's trait args drives the body binding.
 function checkForInLoop(node, scope, ctx) {
@@ -1212,7 +1211,7 @@ function checkForInLoop(node, scope, ctx) {
   popScope(inner, ctx.errors);
 }
 
-// Phase 7.5: typecheck a `switch` statement. Scrutinee is one of:
+// Typecheck a `switch` statement. Scrutinee is one of:
 //   - integer / bool / char prim  → arms carry LITERAL_PATTERNs
 //   - VariantType                    → arms carry VARIANT_PATTERNs
 // Exhaustiveness is enforced when the scrutinee is a bool or an enum.
@@ -1240,7 +1239,7 @@ function checkSwitch(node, scope, ctx) {
       scrutType.name === "char");
   const isBool = scrutType.kind === typeKinds.prim && scrutType.name === "bool";
   const isVariant = scrutType.kind === typeKinds.variant;
-  // Phase 12: value-enum scrutinee. Patterns use VARIANT_PATTERN with no
+  // Value-enum scrutinee. Patterns use VARIANT_PATTERN with no
   // field bindings. Exhaustiveness checked only when the enum is "closed"
   // (no operator-derived cases).
   const isValueEnum = scrutType.kind === typeKinds.valueEnum;
@@ -1336,7 +1335,7 @@ function checkSwitch(node, scope, ctx) {
         continue;
       }
       if (pat.kind === ASTNodeKind.VARIANT_PATTERN) {
-        // Phase 12: value-enum dispatch. Patterns are `Foo.Bar` with no
+        // Value-enum dispatch. Patterns are `Foo.Bar` with no
         // field bindings; we match by value equality at codegen time.
         if (isValueEnum) {
           if (pat.enumName !== scrutType.name) {
@@ -1384,7 +1383,7 @@ function checkSwitch(node, scope, ctx) {
           );
           continue;
         }
-        // Phase 10.A: scrutinee may be a generic-enum instantiation whose
+        // Scrutinee may be a generic-enum instantiation whose
         // mangled name differs from the user-written decl name. Match either
         // the concrete name or the generic decl's source name via the
         // registry-stamped genericInstance tag.
@@ -1538,7 +1537,7 @@ function checkSwitch(node, scope, ctx) {
         );
       }
     } else if (isValueEnum) {
-      // Phase 12: an "open" enum (any case derived via bitwise ops) requires
+      // An "open" enum (any case derived via bitwise ops) requires
       // a `default` since the reachable set is no longer the named cases. A
       // closed enum (every case is a literal) gets exhaustiveness over its
       // named cases.
@@ -1568,7 +1567,7 @@ function checkSwitch(node, scope, ctx) {
     }
   }
 
-  // Phase 10.E.3: record whether the arms cover every reachable value, so
+  // Record whether the arms cover every reachable value, so
   // `alwaysDiverges` (diverge.js) can decide that an arms-all-return switch
   // leaves no fallthrough path. Every branch above errors on a non-covering
   // switch, so a stamped-true node that was actually short a case can only
@@ -1582,7 +1581,7 @@ function checkSwitch(node, scope, ctx) {
 }
 
 function checkBreak(node, ctx) {
-  // Phase 7.5: `break` is also valid inside a switch arm - it falls out of the
+  // `break` is also valid inside a switch arm - it falls out of the
   // switch. We track the switch context independently from `inLoop` because
   // `continue` inside a switch arm still targets the enclosing loop.
   if (!ctx.inLoop && !ctx.inSwitch) {

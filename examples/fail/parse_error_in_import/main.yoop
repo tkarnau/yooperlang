@@ -1,7 +1,7 @@
-// The syntax error is in lib.yoop (a missing semicolon), NOT here. The driver
-// used to render every parse error against the ENTRY file, so this printed
-// main.yoop's source with a caret at lib.yoop's offsets - pointing at unrelated
-// code in the wrong file.
+// The syntax error is in lib.yoop (a missing semicolon), NOT here. A driver
+// that renders every parse error against the ENTRY file prints main.yoop's
+// source with a caret at lib.yoop's offsets - a caret on unrelated code in
+// the wrong file.
 import * as lib from "./lib.yoop";
 
 function main(): int32 {

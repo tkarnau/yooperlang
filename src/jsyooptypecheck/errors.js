@@ -52,7 +52,7 @@ export function formatType(t) {
     case typeKinds.prim:
       return t.name;
     case typeKinds.struct: {
-      // Phase 7.1: a generic instantiation has a mangled name like
+      // A generic instantiation has a mangled name like
       // `Box__int32`; the original decl name + concrete args are stashed on
       // `genericInstance`. Render the source-level form for diagnostics.
       if (t.genericInstance) {

@@ -1,4 +1,4 @@
-// Phase 11.D.13: vtable construct + indirect dispatch fold at
+// Vtable construct + indirect dispatch fold at
 // comptime. The interpreter:
 //   - At `VTable.from(ref x)`: pre-resolves each method's bytecode
 //     via the trait method resolver against the impl type, bakes

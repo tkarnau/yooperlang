@@ -155,7 +155,7 @@ export function findNodeAt(ast, offset, src, ancestry = null) {
       if (node.name === tok.text) consider(node, path);
       else if (node.kind === "CALL_EXPRESSION" && node.callee === tok.text) consider(node, path);
       else if (node.kind === "FIELD_ACCESS" && node.field === tok.text) consider(node, path);
-      // Phase 7.5 / 12: VARIANT_CONSTRUCTOR / VARIANT_PATTERN carry the
+      // VARIANT_CONSTRUCTOR / VARIANT_PATTERN carry the
       // qualifying type name on `enumName` and the case name on
       // `variantName`. The promotion path drops `node.object` / `node.field`
       // so the cursor only finds the node when we look at these slots.
@@ -238,13 +238,13 @@ function isIdentStart(code) {
 
 // The comment block immediately above a declaration, as documentation.
 //
-// yooperdoom-takeaways 4.1 is the reason this exists. A 15,000 line project
-// imported std/core/format.yoop in three files and hand-rolled a digit loop in
-// four others; `history.yoop` zero-padded a number by hand, which is exactly
-// `padStart(intToString(n), 4, "0")`. Nothing was missing from the library -
-// the project just never found the parts of it that existed. An index helps
-// once; showing a function's own header at the call site helps every time, and
-// it needs no new convention, because std already writes these comments.
+// The reason this exists: a large project can import std/core/format.yoop in
+// three files and hand-roll a digit loop in four others, zero-padding a number
+// by hand where `padStart(intToString(n), 4, "0")` already exists. Nothing is
+// missing from the library - it is that the parts of it that exist never get
+// found. An index helps once; showing a function's own header at the call site
+// helps every time, and it needs no new convention, because std already writes
+// these comments.
 //
 // `offset` should point at the declaration's NAME (which is what locOfDecl
 // computes, and what goto-definition already jumps to). The scan walks UP from
@@ -412,7 +412,7 @@ export function getHoverInfo(node, module) {
     case ASTNodeKind.FIELD_ACCESS: {
       const t = node.resolvedType;
       if (!t) return null;
-      // Phase 12: `ns.exportName` (non-call) - render in dotted form rather
+      // `ns.exportName` (non-call) - render in dotted form rather
       // than as a leading `.` field-access (there's no struct receiver to
       // hide the dot, so `palette.fire_color` reads more naturally).
       if (node.namespaceLookup) {
@@ -426,7 +426,7 @@ export function getHoverInfo(node, module) {
       if (t) return `${callee}(...): ${formatType(t)}`;
       return null;
     }
-    // Phase 7.5 / 12: a tagged-variant or value-enum constructor expression.
+    // A tagged-variant or value-enum constructor expression.
     // The constructor is hover-helpful: the case name + the resolved
     // (post-promotion) carrier type tells the reader which variant / value
     // they're looking at.
@@ -442,7 +442,7 @@ export function getHoverInfo(node, module) {
     }
     case ASTNodeKind.LET_DECL:
     case ASTNodeKind.CONST_DECL: {
-      // Phase 6: kind-prefixed bindings (`disposable arr: T = ...`) replace
+      // Kind-prefixed bindings (`disposable arr: T = ...`) replace
       // the `let`/`const` keyword with the kind name in the source. Hover
       // mirrors that so the kind is visible at a glance.
       const kw = node.resolvedKindType?.name
@@ -467,12 +467,12 @@ export function getHoverInfo(node, module) {
       return tps ? `type ${node.name}<${tps}>` : `type ${node.name}`;
     }
     case ASTNodeKind.VARIANT_DECL: {
-      // Phase 12: source-level keyword is `variant`, not `enum`.
+      // Source-level keyword is `variant`, not `enum`.
       const tps = (node.typeParams ?? []).map((p) => p.name).join(", ");
       return tps ? `variant ${node.name}<${tps}>` : `variant ${node.name}`;
     }
     case ASTNodeKind.ENUM_DECL: {
-      // Phase 12: value enum.
+      // Value enum.
       const ut = node.underlying?.name ?? "int32";
       return ut === "int32" ? `enum ${node.name}` : `enum ${node.name}<${ut}>`;
     }
@@ -490,11 +490,11 @@ export function getHoverInfo(node, module) {
       if (!node.resolvedType) return null;
       return `${node.name}: ${formatType(node.resolvedType)}`;
     }
-    // Phase 7.5: one case inside a variant decl.
+    // One case inside a variant decl.
     case ASTNodeKind.VARIANT_CASE: {
       return `case ${node.name}`;
     }
-    // Phase 12: one case inside a value enum decl.
+    // One case inside a value enum decl.
     case ASTNodeKind.ENUM_CASE: {
       return `case ${node.name}`;
     }
@@ -534,7 +534,7 @@ export function getHoverInfo(node, module) {
 //                      Enables type / kind table lookups.
 export function findDefinition(node, ctx) {
   const { module, modById, tokenText, tokenStart, cursorOffset, moduleEnv } = ctx;
-  // Phase 12: cursor on (or inside) an import decl - prefer file/file-
+  // Cursor on (or inside) an import decl - prefer file/file-
   // export navigation over the more general dotted-name sniff below.
   // This handles the path-string case (`"./lib.yoop"`) and also keeps
   // the dotted sniff from misinterpreting an identifier-shaped substring
@@ -569,7 +569,7 @@ export function findDefinition(node, ctx) {
       }
     }
   }
-  // Phase 12: dotted form sniff. When the cursor is on either side of a
+  // Dotted form sniff. When the cursor is on either side of a
   // `<ns>.<name>` in a type annotation (which isn't an AST node) we still
   // want goto-def to jump to the right place.
   if (tokenText && module?.src && typeof tokenStart === "number") {
@@ -583,7 +583,7 @@ export function findDefinition(node, ctx) {
     return tokenText ? findByName(tokenText, module, modById, moduleEnv) : null;
   }
 
-  // Phase 12: cursor on `import * as ns from "./m.yoop"` - jump into the
+  // Cursor on `import * as ns from "./m.yoop"` - jump into the
   // imported file. For `import { foo } from "./m.yoop"` cursor on `foo`,
   // jump to the export's decl in the source module.
   if (node.kind === ASTNodeKind.IMPORT_DECL) {
@@ -657,7 +657,7 @@ export function findDefinition(node, ctx) {
     }
   }
 
-  // Phase 12: `ns.exportedName` (non-call) - the typechecker stamped a
+  // `ns.exportedName` (non-call) - the typechecker stamped a
   // `namespaceLookup` slot pointing at the source module + the original
   // export. Jump straight to the decl by name in that module.
   if (node.kind === ASTNodeKind.FIELD_ACCESS && node.namespaceLookup) {
@@ -668,7 +668,7 @@ export function findDefinition(node, ctx) {
     }
   }
 
-  // Phase 7.5 / 12: a promoted variant / value-enum constructor / pattern.
+  // A promoted variant / value-enum constructor / pattern.
   // Cursor on the case name jumps to the case's decl inside the enum body;
   // cursor on the qualifying type name jumps to the decl itself.
   if (
@@ -739,7 +739,7 @@ export function findDefinition(node, ctx) {
 // resolve `<ns>.<name>` forms by sniffing the source around the cursor.
 export function hoverFromName(name, module, analysis, cursor) {
   if (!name || !module) return null;
-  // Phase 12: cursor on either half of `<ns>.<name>` - jump to the right
+  // Cursor on either half of `<ns>.<name>` - jump to the right
   // module before doing the by-name lookup.
   if (cursor?.src && typeof cursor.tokenStart === "number") {
     const dotted = readDottedAtCursor(cursor.src, cursor.tokenStart, name);
@@ -808,7 +808,7 @@ function summarizeDecl(decl) {
   }
 }
 
-// Phase 12: read a possible `<ns>.<name>` form around the cursor. Given the
+// Read a possible `<ns>.<name>` form around the cursor. Given the
 // cursor's token + its source offset, walk backwards over ident chars to
 // catch the case where the user is hovering on the second half of a dotted
 // name; walk forwards to catch the first-half case. Returns `{ ns, name,
@@ -994,7 +994,7 @@ function symbolFor(decl, src) {
         children,
       };
     }
-    // Phase 12: value enum decl. Each case becomes an EnumMember child so
+    // Value enum decl. Each case becomes an EnumMember child so
     // the outline view collapses cases under the parent enum.
     case ASTNodeKind.ENUM_DECL: {
       const children = [];

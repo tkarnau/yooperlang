@@ -1,4 +1,4 @@
-// Phase 13.D: @derive(display) on a variant generates an arm-per-case
+// @derive(display) on a variant generates an arm-per-case
 // switch. The escape hatch for per-case control is composition, not a
 // hand-written method: declare the payload type OUTSIDE the variant with
 // its own Display impl, and the derived arm's `${payload}` dispatches to

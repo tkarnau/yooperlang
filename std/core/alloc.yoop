@@ -6,10 +6,10 @@
 // runtime; `pushAllocator` / `popAllocator` swap it for a region of code, and
 // the standard library allocates from whatever is current.
 //
-// v1 scope: the malloc allocator, a bump arena, and the manual push/pop
-// context. The `arena` scope keyword, routing the std containers through the
-// context, and the temp allocator build on top of this. As with anything under
-// std/, value imports here use the namespace form:
+// This file holds the malloc allocator, a bump arena, and the manual
+// push/pop context. The `arena` scope keyword, routing the std containers
+// through the context, and the temp allocator build on top of this. As with
+// anything under std/, value imports here use the namespace form:
 //
 //     import * as mem from "std/core/alloc.yoop";
 //     let a: mem.Arena = mem.arenaNew(64 * 1024);
@@ -130,7 +130,7 @@ function arenaAllocFn(data: unsafe_ptr<void>, size: usize, alignment: usize): un
     return yoop_arena_alloc(data, size, alignment);
 }
 
-// v1 arena realloc: hand back a fresh region. Callers that must preserve old
+// Arena realloc: hand back a fresh region. Callers that must preserve old
 // contents (Vec growth) copy explicitly; the arena keeps the old bytes valid
 // until reset, so this is safe even without a copy here.
 function arenaReallocFn(data: unsafe_ptr<void>, ptr: unsafe_ptr<void>, oldSize: usize, newSize: usize, alignment: usize): unsafe_ptr<void> {

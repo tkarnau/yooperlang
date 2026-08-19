@@ -9,11 +9,10 @@ function isPrime(num: int32): bool {
 
 function main(): int32 {
     let n: int32 = 100;
-    // Arrays are stack-allocated fixed-size fat pointers in v0 - no `new`,
-    // no realloc. The language can't grow `primes` until heap allocation
-    // arrives via the `unsafe_ptr` kind (phase 6) or a stdlib Vec built on
-    // a future `Iterable` trait (phase 5+). Until then, pre-size to the
-    // worst case: π(100) = 25, so 30 slots is comfortable.
+    // An array literal is a stack-allocated fixed-size fat pointer - no
+    // `new`, no realloc - so this program cannot grow `primes`. Pre-size to
+    // the worst case instead: pi(100) = 25, so 30 slots is comfortable.
+    // (std/core/vec.yoop is the growable form, at the cost of an allocator.)
     let primes: int32[] = [
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0,

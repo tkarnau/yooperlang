@@ -72,17 +72,17 @@ void yoop_net_startup(void) { /* BSD sockets need no per-process setup */ }
 
 // ----- POSIX-shaped socket calls -------------------------------------------
 //
-// std/net/socket_ffi.yoop used to extern socket/bind/listen/accept/connect/
-// send/recv/close straight out of libc. That works on POSIX, where a socket
-// IS a file descriptor and failures land in errno, and breaks on Windows in
-// three separate ways:
+// std/net/socket_ffi.yoop deliberately does not extern socket/bind/listen/
+// accept/connect/send/recv/close straight out of libc. That works on POSIX,
+// where a socket IS a file descriptor and failures land in errno, and breaks
+// on Windows in three separate ways:
 //
 //   * socket() returns a SOCKET (a 64-bit unsigned handle), not an int, and
 //     signals failure with INVALID_SOCKET rather than -1;
 //   * a SOCKET is not a CRT file descriptor, so close() is the wrong call -
 //     it must be closesocket(), and CRT close() on a socket handle fails;
 //   * failures are reported via WSAGetLastError, so errno is left stale and
-//     every `errno.message(errno.get())` in std/net printed nonsense.
+//     every `errno.message(errno.get())` in std/net would print nonsense.
 //
 // Rather than teach the yoop layer about any of that, these shims present the
 // POSIX shape - int descriptors, -1 on failure, errno set - on both

@@ -1,15 +1,13 @@
 import { typeKinds, VoidType } from "./types.js";
 
-// Phase 9.H: a fallible *variant* is any variant decl with exactly two cases
+// A fallible *variant* is any variant decl with exactly two cases
 // named `Ok` and `Err`. The shape is structural - no marker trait - so any
 // user-defined variant that matches the naming convention plays in `?`
 // propagation. Each case may have zero or one payload field; the Ok payload
 // becomes the stripped value, and the Err payload is the propagated error type.
 //
-// Phase 10.X: the older Phase 2 "struct ending in `err: string`" convention
-// has been retired in favor of `Result<T, E>`-shaped variants. The fallible
-// machinery now recognizes exactly one shape: this one.
-// Phase 12: renamed from `isFallibleEnum`; the source-level keyword is `variant`.
+// The fallible machinery recognizes exactly one shape: this one, a
+// `Result<T, E>`-shaped variant. The source-level keyword is `variant`.
 export function isFallibleVariant(variantType) {
   if (!variantType || variantType.kind !== typeKinds.variant) return false;
   const variants = variantType.variants;

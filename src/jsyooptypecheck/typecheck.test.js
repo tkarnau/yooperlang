@@ -238,9 +238,9 @@ describe("typecheckProgram: generic trait dispatch through a bounded type param"
 
 describe("typecheckProgram: binary operator on mismatched types", () => {
   // Regression: unifyArith returns null for mismatched operands (e.g. a signed
-  // int compared against usize); resolveBinary used to propagate that null,
-  // which crashed the for-loop checker (null.kind). It now reports a clean
-  // diagnostic and returns an error type.
+  // int compared against usize). resolveBinary must not propagate that null -
+  // the for-loop checker would crash on null.kind. It reports a clean
+  // diagnostic and returns an error type instead.
   it("reports a clean error (no crash) for int32 < usize", () => {
     const { errors } = typecheckSource(
       "function main(): int32 {\n" +
@@ -388,7 +388,7 @@ describe("typecheckProgram: impl block validation - pass C.3", () => {
     );
   });
 
-  // Phase 7.4: cross-trait same-name methods are now allowed when signatures
+  // Cross-trait same-name methods are now allowed when signatures
   // agree, because every call site qualifies through the trait.
   it("two traits requiring the same method name with matching signatures is allowed", () => {
     const { errors } = typecheckProgram(
@@ -420,7 +420,7 @@ describe("typecheckProgram: impl block validation - pass C.3", () => {
     );
   });
 
-  // Phase 7.4: a trait method name may now coincide with a module-level
+  // A trait method name may now coincide with a module-level
   // free function name - the trait-qualified call site disambiguates.
   it("trait method name coinciding with a module-level free function is allowed", () => {
     const { errors } = typecheckProgram(
@@ -465,7 +465,7 @@ describe("typecheckProgram: self in method body scope", () => {
   });
 });
 
-describe("Phase 7.5: variant declarations and case constructors", () => {
+describe("variant declarations and case constructors", () => {
   it("declares a simple variant and constructs each case", () => {
     const { errors } = typecheckProgram(
       singleModule(`
@@ -540,7 +540,7 @@ describe("Phase 7.5: variant declarations and case constructors", () => {
   });
 });
 
-describe("Phase 7.5: union declarations and literals", () => {
+describe("union declarations and literals", () => {
   it("declares a union and accepts a single-field literal", () => {
     const { errors } = typecheckProgram(
       singleModule(`
@@ -571,7 +571,7 @@ describe("Phase 7.5: union declarations and literals", () => {
   });
 });
 
-describe("Phase 7.5: switch statement", () => {
+describe("switch statement", () => {
   it("typechecks an exhaustive variant switch with no default", () => {
     const { errors } = typecheckProgram(
       singleModule(`
@@ -643,7 +643,7 @@ describe("Phase 7.5: switch statement", () => {
 
 
 // ---------------------------------------------------------------------------
-// Async coloring (plans/async-coroutines.md)
+// Async coloring
 //
 // The two rules are mutually reinforcing: `await` only inside an async
 // body, and an async callee only reachable through `await`. Together they

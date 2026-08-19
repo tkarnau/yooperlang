@@ -1,28 +1,28 @@
 // Twin-stick shooter demo - now with a sprite-sheet player loaded
 // through SDL_image, and a comptime-built sprite-rect table.
 //
-// This is the running showcase for what the language can do today:
+// This is the running showcase for what the language can do:
 //
-//   - `@precompile` (Phase 11) evaluates the 16-entry source-rect
+//   - `@precompile` evaluates the 16-entry source-rect
 //     lookup table at *build time*. The interpreter walks the block,
 //     and codegen emits the resulting array as a baked-in LLVM
 //     `@global` - no runtime `module_init` ever touches the table.
 //
 //   - `enum Direction { South, North, West, East }` + `switch` over
-//     the enum (Phase 7.5) pick which row of the sheet to sample.
+//     the enum pick which row of the sheet to sample.
 //
-//   - `disposable` kind (Phase 6.1) gives Window, Renderer, and
+//   - the `disposable` kind gives Window, Renderer, and
 //     Texture deterministic RAII teardown - `dispose` is called at
 //     scope exit in declaration LIFO order with no manual cleanup
 //     anywhere in `main`.
 //
-//   - `c_layout` (Phase 8.B) + `unsafe_ptr` field reach (Phase 8.A)
+//   - `c_layout` + `unsafe_ptr` field reach
 //     project the SDL_Surface C struct's `format` field into yoop,
 //     so we can call SDL_MapRGB + SDL_SetColorKey to make the
 //     sheet's magenta background transparent before turning it into
 //     a texture.
 //
-//   - `task announce_kill` + `pooled` handle (Phase 8.F) prints kill
+//   - `task announce_kill` + a `pooled` handle print kill
 //     counts off the main thread without blocking the render loop.
 
 import.unsafe;
@@ -182,7 +182,7 @@ kind disposable {
 
 // ── Direction ────────────────────────────────────────────────────────────────
 
-// Phase 7.5 enum - picks the row out of the 4×4 sprite sheet.
+// The enum picks the row out of the 4x4 sprite sheet.
 variant Direction {
     South,
     North,
@@ -485,7 +485,7 @@ function main(): int32 {
             let score: int32 = 0;
 
             // Local fat-pointer copies of the comptime-baked sprite
-            // tables. Codegen today can't lower an INDEX_EXPRESSION
+            // tables. Codegen cannot lower an INDEX_EXPRESSION
             // whose base is a module-level global (the lvalue path
             // only knows about local symbols), so we read the
             // whole array slot once at function entry and index the

@@ -13,9 +13,9 @@ import * as intr from "std/core/intrinsics.yoop";
 import { owned } from "std/core/kinds.yoop";
 
 // PASSTHROUGH. Nothing is minted here - the value arrives carrying `owned`
-// and leaves carrying it, so no transition authority is required. Before the
-// passthrough rule this was rejected outright, which made it impossible to
-// wrap any owned-returning API.
+// and leaves carrying it, so no transition authority is required. Without
+// the passthrough rule this is rejected outright, which makes it impossible
+// to wrap any owned-returning API.
 function forward(s: owned string): owned string {
     return s;
 }
@@ -48,9 +48,9 @@ function main(): int32 {
 
     release(built);
 
-    // padStart / padEnd now allocate on every path, including when the input
-    // is already wide enough. They used to hand back the input itself in that
-    // case, which made the result freeable only some of the time.
+    // padStart / padEnd allocate on every path, including when the input is
+    // already wide enough. Handing back the input itself in that case would
+    // make the result freeable only some of the time.
     const padded: owned string = str.padStart("7", 4, "0");
     const wide: owned string = str.padStart("longer", 3, "0");
     printf("pad [%s] [%s]\n", padded, wide);

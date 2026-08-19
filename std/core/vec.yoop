@@ -1,4 +1,4 @@
-// std/core/vec.yoop - Phase 8.H growable vector type.
+// std/core/vec.yoop - growable vector type.
 //
 // `Vec<T>` is the blessed growable-array primitive that std modules and
 // user code build collections out of. Owns a heap-allocated backing buffer
@@ -151,7 +151,7 @@ export function vecFromArray<T>(src: T[]): Vec<T> propagates<disposable> {
 
 // `VecIter<T>` walks the populated prefix (indices 0 .. len-1) in order, so
 // `for x in vecIter(ref v)` replaces the index-plumbing while-loop that
-// reading a Vec used to require.
+// reading a Vec otherwise requires.
 //
 // Like `MapIter`, the iterator holds a BORROWING view of the backing buffer:
 // the `T[]` fat pointer is a copy, the heap data is shared. Any mutation that
@@ -174,7 +174,7 @@ export type VecIter<T> implements Iterable<T> {
 }
 
 // Build a `VecIter<T>` over the populated prefix of `v`, for `for ... in`.
-// The iterator yields `T` values via the `Iterable<T>` trait (Phase 10.B).
+// The iterator yields `T` values via the `Iterable<T>` trait.
 export function vecIter<T>(v: ref Vec<T>): VecIter<T> {
     return { data: v.data, len: v.len, i: 0 };
 }

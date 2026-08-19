@@ -8,11 +8,10 @@
 // them is untouched. Invalid coroutine IR fails the build here rather than in a
 // unit test that only reads text.
 //
-// It also asserts that every coroutine below RUNS and returns the right answer,
-// which it could not when it was first written: `main` cannot be async and a
-// pausable function is reachable only through `await`, so until `task` + `wait`
-// landed (item 3.5) there was no way to reach one from ordinary code at all.
-// The `run` and `check` tasks at the bottom are that bridge. Composition, a
+// It also asserts that every coroutine below RUNS and returns the right answer.
+// `main` cannot be async and a pausable function is reachable only through
+// `await`, so `task` + `wait` is the only way to reach one from ordinary code:
+// the `run` and `check` tasks at the bottom are that bridge. Composition, a
 // loop around an await, an early return and the void ABI are each checked by
 // their result rather than by the IR alone.
 //

@@ -1,9 +1,9 @@
 // Regression: a value enum or union declared in a directory-module file that
-// sorts AFTER a sibling using it used to reach consumers as its pass-A shell -
-// a null `underlying` for the enum (so `switch` refused it) and empty `fields`
-// for the union (so field access refused it). Pass C now fills both shells in
-// place instead of replacing the table entry, the way structs and vtables
-// already did.
+// sorts AFTER a sibling using it must not reach consumers as its pass-A shell -
+// a null `underlying` for the enum (so `switch` refuses it) and empty `fields`
+// for the union (so field access refuses it). Pass C fills both shells in
+// place instead of replacing the table entry, the same as structs and
+// vtables.
 
 import * as shapes from "./shapes";
 import { Color, Bits } from "./shapes";

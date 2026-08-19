@@ -70,9 +70,8 @@ export type Cx {
   //
   // `define void @main()` is ABI-illegal and the bug it hides is silent: with
   // no `ret` value nothing writes the return register, so the process exit
-  // status is whatever the last call left in it. Both compilers used to emit
-  // it, and the reference's incidental 0 was `yoop_runtime_shutdown` returning
-  // nothing interesting rather than anything deliberate.
+  // status is whatever the last call left in it. Both compilers emit the `i32`
+  // form.
   //
   // Read by the fall-out-the-bottom in codegen.yoop and by a bare `return;` in
   // stmt.yoop, which are the only two ways a void function terminates.

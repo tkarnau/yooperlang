@@ -1,10 +1,9 @@
 // Layer 1 parity: the bootstrap lexer must produce the same token stream as
 // this one.
 //
-// This is the first of the cross-checks plans/bootstrap-pipeline-contracts.md
-// calls for - "for the same input source, assert yoop_layer_dump ==
-// js_layer_dump" - and the pattern the parse and typecheck boundaries will copy
-// once their dumps exist.
+// The cross-check is "for the same input source, assert yoop_layer_dump ==
+// js_layer_dump", and it is the pattern the parse and typecheck boundaries
+// copy for their own dumps.
 //
 // The corpus is bootstrap/tests/parity/. Those files only have to LEX, so they
 // can hold constructs neither parser accepts yet. src/dumpTokens.js documents
@@ -48,9 +47,9 @@ describe("parity: layer 1 (lex) - bootstrap token stream matches the JS lexer", 
 
   // The dumper is the bootstrap's own lexer, which is under active development,
   // and a lexer that fails to advance is an infinite loop that pins a core.
-  // execFileSync had no deadline, so one bad file used to mean a spinning
-  // process for as long as the machine was up. This is the deadline that turns
-  // that into a test failure.
+  // Without a deadline one bad file means a spinning process for as long as
+  // the machine is up. This is the deadline that turns that into a test
+  // failure.
   const DUMP_TIMEOUT_MS = Number(process.env.YOOP_PARITY_DUMP_TIMEOUT_MS) || 30000;
 
   async function dump(file) {

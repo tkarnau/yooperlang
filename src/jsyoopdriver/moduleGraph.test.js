@@ -1,9 +1,9 @@
-// modules-folder: the program-owned `modules/` import root.
+// The program-owned `modules/` import root.
 //
 // These build real directory trees in a temp dir rather than stubbing fs,
 // because the whole feature IS filesystem behavior - an upward walk, a
 // first-hit rule, and two checks that only mean anything against real
-// directories. See plans/modules-folder.md.
+// directories.
 
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";

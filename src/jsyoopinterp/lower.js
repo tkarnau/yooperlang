@@ -1,13 +1,12 @@
-// Phase 11.B.0: typed bytecode lowering for the minimum slice -
-// integer/float literals and arithmetic binary operators, wrapped in a
+// Typed bytecode lowering. A single expression is wrapped in a
 // synthesized `return <expr>` function so the interpreter has a real
-// function to evaluate.
+// function to evaluate; a whole function decl lowers through
+// `lowerFunction`.
 //
-// Later sub-phases extend the per-node dispatcher with control flow,
-// memory ops, calls, structs/arrays/refs, enums, tasks, and kind-flow
-// cleanups. The dispatcher's shape is intentionally similar to
-// `emitExpr` in codegen.js so future maintenance can read both in
-// parallel.
+// The per-node dispatcher covers control flow, memory ops, calls,
+// structs/arrays/refs, enums, tasks, and kind-flow cleanups. Its shape
+// is intentionally similar to `emitExpr` in codegen.js so the two can
+// be read in parallel.
 
 import { ASTNodeKind } from "../contracts.js";
 import { typeKinds, isFloatPrim } from "../jsyooptypecheck/types.js";
@@ -64,25 +63,25 @@ class LowerCtx {
     this.registerTypes = [];
     this.moduleConsts = moduleConsts ?? new Map();
     this.fnResolver = fnResolver ?? null;
-    // Phase 11.D.18: set of module-level mangled syms (`<modid>__<name>`)
+    // Set of module-level mangled syms (`<modid>__<name>`)
     // that the block lowerer treats as live module state. IDENT
     // reads against these names lower to MODULE_LOAD; ASSIGNMENT
     // targets lower to MODULE_STORE. Null/undefined disables the
     // module-state path (the default for module-init folds and
     // user-function lowering).
     this.moduleStateNames = moduleStateNames ?? null;
-    // Phase 11.D.11: the enclosing function's return type. Used by
+    // The enclosing function's return type. Used by
     // TRY_OP lowering to build the correct Err variant for early
     // returns. Set by lowerFunction / lowerExpressionAsFunction
     // before walking the body; consulted in the TRY_OP case.
     this.currentReturnType = null;
-    // Phase 11.D.5: looks up a trait method's BytecodeFunction given
+    // Looks up a trait method's BytecodeFunction given
     // the receiver struct type + trait name + method name. Returns
     // null when the method can't be lowered at comptime (unsupported
     // body shape, generic-unresolved, etc.).
     this.traitMethodResolver = traitMethodResolver ?? null;
-    // Phase 11.D.7: looks up a generic-fn instance's BytecodeFunction
-    // given the Phase-7.1 registry instance object. Used when
+    // Looks up a generic-fn instance's BytecodeFunction
+    // given the generics registry instance object. Used when
     // CALL_EXPRESSION's `genericInstantiation` slot is populated.
     this.genericInstanceResolver = genericInstanceResolver ?? null;
     this.labelCounter = 0;
@@ -95,7 +94,7 @@ class LowerCtx {
     this.instructions.push(inst);
   }
   // Mint a unique label name within this function. Used by IF /
-  // WHILE / future control-flow lowering. Per-function counter so
+  // WHILE control-flow lowering. Per-function counter so
   // labels stay stable across cached function bytecode.
   freshLabel(hint) {
     return `${hint}_${this.labelCounter++}`;
@@ -105,8 +104,7 @@ class LowerCtx {
 // Lexical scope chain for IDENT resolution inside function bodies.
 // Bindings hold a register index that the IDENT case looks up. Param
 // regs live in the function's outermost scope; locals (LET_DECL,
-// CONST_DECL) extend a child scope opened per BLOCK in later
-// sub-phases. Today the chain only has the param scope.
+// CONST_DECL) extend a child scope opened per BLOCK.
 class Scope {
   constructor(parent = null) {
     this.parent = parent;
@@ -123,8 +121,7 @@ class Scope {
 
 // Lower a single typecheck-validated expression into a BytecodeFunction
 // whose body is `return <expr>`. Returns the function, or throws
-// ComptimeError if the expression contains an unsupported node kind
-// for this sub-phase.
+// ComptimeError if the expression contains an unsupported node kind.
 export function lowerExpressionAsFunction(exprAst, returnType, opts = {}) {
   const ctx = new LowerCtx(
     opts.fnName ?? "<comptime-fold>",
@@ -158,8 +155,7 @@ export function lowerExpressionAsFunction(exprAst, returnType, opts = {}) {
 // Lower a user-defined function decl into a BytecodeFunction. The
 // param list seeds the function's first N registers and the outer
 // scope binds param names to those registers. The body walks via the
-// statement-level lowerer (today: just BLOCK + RETURN_STATEMENT;
-// later sub-phases add LET_DECL, IF_STATEMENT, WHILE_STATEMENT, etc.).
+// statement-level lowerer.
 export function lowerFunction(funcDecl, opts = {}) {
   const ctx = new LowerCtx(
     funcDecl.name,
@@ -201,13 +197,13 @@ export function lowerFunction(funcDecl, opts = {}) {
   });
 }
 
-// Phase 11.D.18: lower an `@precompile { ... }` block as a void
-// no-param function. The block's BLOCK statement is walked exactly
-// like a normal function body, but `moduleStateNames` is non-null so
-// any IDENT read or ASSIGNMENT target that the typechecker tagged
-// `isModuleGlobal` lowers through MODULE_LOAD / MODULE_STORE rather
-// than through a local scope slot. Locals declared inside the block
-// (`let x: ... = ...`) still go through the regular scope path.
+// Lower an `@precompile { ... }` block as a void no-param function.
+// The block's BLOCK statement is walked exactly like a normal
+// function body, but `moduleStateNames` is non-null so any IDENT read
+// or ASSIGNMENT target that the typechecker tagged `isModuleGlobal`
+// lowers through MODULE_LOAD / MODULE_STORE rather than through a
+// local scope slot. Locals declared inside the block (`let x: ... =
+// ...`) still go through the regular scope path.
 //
 // Returns the synthesized BytecodeFunction. The comptime pass
 // evaluates it once with the shared `moduleState` map, then reads
@@ -239,7 +235,7 @@ export function lowerBlockAsFunction(blockAst, opts = {}) {
   });
 }
 
-// Lower one statement. Coverage today: BLOCK, RETURN_STATEMENT,
+// Lower one statement. Coverage: BLOCK, RETURN_STATEMENT,
 // LET_DECL, CONST_DECL, ASSIGNMENT, EXPRESSION_STATEMENT,
 // IF_STATEMENT, WHILE_STATEMENT. Statement kinds not on this list
 // throw ComptimeError and surface as the silent module-init fallback.
@@ -280,7 +276,7 @@ function lowerStatement(node, ctx, scope) {
         );
       }
       let valReg = lowerExpr(node.assignment, ctx, scope);
-      // Phase 11.D.9: `immediateTaskCall` is the typechecker's flag
+      // `immediateTaskCall` is the typechecker's flag
       // for `const x: T = compute(...);` where compute returns
       // Task<T>. The CALL_EXPRESSION produced a Task<T> register;
       // unwrap it to T before the MOVE so the slot holds the inner
@@ -325,16 +321,15 @@ function lowerStatement(node, ctx, scope) {
     }
 
     case ASTNodeKind.CLEANUP_CALL: {
-      // Phase 11.D.17: real cleanup_call dispatch. The kindCheck
-      // pass synthesizes these statements at scope-exit for
-      // disposable-kind bindings - e.g. `dispose(ref binding)` for
-      // a `disposable foo: Foo = ...`. Resolve the trait method's
-      // bytecode via traitMethodResolver and emit a CALL_DIRECT
-      // with `ref binding` as `self`. If the dispose body hits a
-      // non-whitelisted extern (e.g. SDL_DestroyWindow), the fold
-      // fails with a clear traceback - matches the @precompile
-      // contract that explicit comptime evaluation must execute
-      // *all* observable effects.
+      // Real cleanup_call dispatch. The kindCheck pass synthesizes
+      // these statements at scope-exit for disposable-kind bindings -
+      // e.g. `dispose(ref binding)` for a `disposable foo: Foo =
+      // ...`. Resolve the trait method's bytecode via
+      // traitMethodResolver and emit a CALL_DIRECT with `ref binding`
+      // as `self`. If the dispose body hits a non-whitelisted extern
+      // (e.g. SDL_DestroyWindow), the fold fails with a clear
+      // traceback - matches the @precompile contract that explicit
+      // comptime evaluation must execute *all* observable effects.
       if (!ctx.traitMethodResolver) {
         throw new ComptimeError(
           `comptime: CLEANUP_CALL requires a traitMethodResolver`,
@@ -455,11 +450,11 @@ function lowerStatement(node, ctx, scope) {
       return;
     }
     case ASTNodeKind.FOR_IN_LOOP: {
-      // Trait-driven iteration (Phase 10.B `Iterable<T>`) needs more
-      // plumbing - defer to the silent-fallback path until 11.D.
+      // Trait-driven iteration over a user-defined `Iterable<T>` is not
+      // supported at comptime - take the silent-fallback path.
       if (node.iterableImpl) {
         throw new ComptimeError(
-          `comptime: for-in over user-defined Iterable<T> is not supported yet (Phase 11.D)`,
+          `comptime: for-in over user-defined Iterable<T> is not supported`,
           node.sourceLoc,
         );
       }
@@ -895,7 +890,7 @@ function lowerExpr(node, ctx, scope) {
     }
 
     case ASTNodeKind.TEMPLATE_LITERAL: {
-      // Phase 11.E.3: lower each EXPR_PART into a register; build a
+      // Lower each EXPR_PART into a register; build a
       // parts descriptor that interleaves the original STRING_PARTs
       // (literal text) with `{ kind: "expr" }` markers consuming the
       // EXPR_PART registers in source order. TEMPLATE_FORMAT walks
@@ -953,7 +948,7 @@ function lowerExpr(node, ctx, scope) {
       const opPair = BIN_OP_MAP[opName];
       if (!opPair) {
         throw new ComptimeError(
-          `comptime: binary operator '${opName}' is not supported yet (lands in a later 11.B sub-phase)`,
+          `comptime: binary operator '${opName}' is not supported`,
           node.sourceLoc,
         );
       }
@@ -1054,7 +1049,7 @@ function lowerExpr(node, ctx, scope) {
         }
         return scopeReg;
       }
-      // Phase 11.D.18: read a module-level binding via MODULE_LOAD
+      // Read a module-level binding via MODULE_LOAD
       // when the block lowerer has opted-in. The typechecker
       // already tagged the IDENT with `isModuleGlobal +
       // moduleGlobalSym` in checkExpr; we re-use those marks.
@@ -1156,11 +1151,11 @@ function lowerExpr(node, ctx, scope) {
 
     case ASTNodeKind.ASSIGNMENT: {
       // Three target shapes today: bare identifier, struct field, and
-      // array index. Function-param ref deref + nested chains land in
-      // later sub-phases.
+      // array index. Function-param ref deref and nested chains are not
+      // supported.
       const tgt = node.target;
       if (tgt?.kind === ASTNodeKind.IDENT) {
-        // Phase 11.D.18: assignment to a module-level binding from
+        // Assignment to a module-level binding from
         // inside an `@precompile { ... }` block. The typechecker
         // already stamped `isModuleGlobal + moduleGlobalSym` on
         // the assignment target; emit MODULE_STORE rather than a
@@ -1263,11 +1258,11 @@ function lowerExpr(node, ctx, scope) {
         );
         return dst;
       }
-      // Phase 11.D.13: VTable.from(ref x) - typechecker stamped
-      // `vtableBuilder = { vtableType, implType }`. Pre-resolve each
-      // method's bytecode (via the trait method resolver against
-      // implType) so the runtime VTABLE_CONSTRUCT just bakes the
-      // array into the wrapped value.
+      // VTable.from(ref x) - typechecker stamped `vtableBuilder = {
+      // vtableType, implType }`. Pre-resolve each method's bytecode
+      // (via the trait method resolver against implType) so the
+      // runtime VTABLE_CONSTRUCT just bakes the array into the
+      // wrapped value.
       if (node.vtableBuilder) {
         if (!ctx.traitMethodResolver) {
           throw new ComptimeError(
@@ -1305,12 +1300,12 @@ function lowerExpr(node, ctx, scope) {
         );
         return dst;
       }
-      // Phase 11.D.13: trait method dispatch through a vtable. The
-      // typechecker stamped `vtableCall = { vtableType, methodName,
-      // fieldIndex }`. The first arg is the vtable receiver (`ref vt`);
-      // the rest are user args. Use VTABLE_CALL to look up
-      // methodFns[fieldIndex] at runtime and push a frame with ctx
-      // as the method's `ref self` param.
+      // Trait method dispatch through a vtable. The typechecker
+      // stamped `vtableCall = { vtableType, methodName, fieldIndex
+      // }`. The first arg is the vtable receiver (`ref vt`); the rest
+      // are user args. Use VTABLE_CALL to look up
+      // methodFns[fieldIndex] at runtime and push a frame with ctx as
+      // the method's `ref self` param.
       if (node.vtableCall) {
         const { fieldIndex } = node.vtableCall;
         // First arg is `ref vt`; we want the vtable value itself,
@@ -1333,17 +1328,16 @@ function lowerExpr(node, ctx, scope) {
         );
         return dst;
       }
-      // Phase 11.D.5: trait method call. The typechecker stamps
-      // `calleeMethodOf` (receiver struct type) + `calleeTrait`
-      // (trait type) + `calleeMethodName` on these. We dispatch to a
-      // dedicated trait-method resolver which finds the method's
-      // AST decl in the receiver's TYPE_DECL and lowers its body.
-      // Phase 11.D.7: generic function call. The typechecker stamps
-      // `genericInstantiation` pointing at the Phase-7.1 registry
-      // instance. We use that instance to look up (or build) the
-      // monomorphized bytecode body for these args.
-      // Falls through to the regular function resolver only for
-      // plain CALL_EXPRESSION nodes.
+      // Trait method call. The typechecker stamps `calleeMethodOf`
+      // (receiver struct type) + `calleeTrait` (trait type) +
+      // `calleeMethodName` on these. We dispatch to a dedicated
+      // trait-method resolver which finds the method's AST decl in
+      // the receiver's TYPE_DECL and lowers its body. Generic
+      // function call. The typechecker stamps `genericInstantiation`
+      // pointing at the generics registry instance. We use that
+      // instance to look up (or build) the monomorphized bytecode
+      // body for these args. Falls through to the regular function
+      // resolver only for plain CALL_EXPRESSION nodes.
       let resolved;
       if (node.genericInstantiation) {
         if (!ctx.genericInstanceResolver) {
@@ -1437,7 +1431,7 @@ function lowerExpr(node, ctx, scope) {
         );
         return dst;
       }
-      // Phase 11.D.9: a call to a task fn has resolvedType Task<T>
+      // A call to a task fn has resolvedType Task<T>
       // but the function body returns the inner T. Run the body
       // synchronously inline (CALL_DIRECT) into a fresh T register,
       // then TASK_WRAP that into Task<T> so the dst slot's type
@@ -1477,9 +1471,8 @@ function lowerExpr(node, ctx, scope) {
     }
 
     case ASTNodeKind.TRY_OP: {
-      // Phase 11.D.11: enum-shaped `?` propagation. Same-shape only
-      // for now - cross-shape needs `Into.into` trait dispatch which
-      // lands later. Lower as:
+      // Enum-shaped `?` propagation. Same-shape only - cross-shape needs
+      // `Into.into` trait dispatch, which is not supported here. Lower as:
       //   operandReg = <operand>
       //   tag = VARIANT_TAG operandReg
       //   match = tag == Err.ordinal
@@ -1567,7 +1560,7 @@ function lowerExpr(node, ctx, scope) {
       const fieldRegs = [];
       const fieldNames = [];
       if (node.tryContext || node.tryContextConcat) {
-        // Phase 10.E.2: `expr? "context"`. Lowered in the err branch, so
+        // `expr? "context"`. Lowered in the err branch, so
         // an interpolated context is only formatted when the error fires.
         const opErrField = errPayloadFields[0];
         const retErrField = retPayloadFields[0];
@@ -1655,7 +1648,7 @@ function lowerExpr(node, ctx, scope) {
         fieldRegs.push(decoratedReg);
         fieldNames.push(retErrField.name);
       } else if (node.tryConvert) {
-        // Phase 10.E cross-shape: operandErr.error → returnErr.error
+        // Cross-shape: operandErr.error → returnErr.error
         // through `Into<TargetType>.into(ref self)` on the operand
         // payload's struct type. Resolve the Into.into bytecode at
         // lower time via the trait method resolver, then emit a
@@ -1767,7 +1760,7 @@ function lowerExpr(node, ctx, scope) {
       }
       // Single-field Ok (the common Result-shaped case): unwrap to
       // the field's value. Multi-field Ok payloads would need a
-      // wrapper struct here; punt to a later sub-phase.
+      // wrapper struct here; not supported.
       if (okFields.length > 1) {
         throw new ComptimeError(
           `comptime: multi-field Ok payload in '?' is not supported yet`,
@@ -1951,7 +1944,7 @@ function lowerExpr(node, ctx, scope) {
   }
 }
 
-// Phase 11.E.3: decode the C-style escape sequences the parser left
+// Decode the C-style escape sequences the parser left
 // untouched in STRING_PART payloads. Codegen relies on printf to do
 // this at runtime; the comptime interpreter resolves them here so
 // the formatted output matches what the runtime version would emit.

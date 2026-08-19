@@ -1,4 +1,4 @@
-// Yoopstore-papercut #3: assigning a bare `unsafe_ptr` to an
+// Assigning a bare `unsafe_ptr` to an
 // `unsafe_ptr<T>` requires an explicit `unsafe_ptr.cast<T>(p)` -
 // otherwise the user would be silently claiming a pointee type
 // the source pointer doesn't carry.

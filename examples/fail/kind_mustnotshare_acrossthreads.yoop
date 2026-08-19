@@ -1,6 +1,5 @@
-// Phase 9.J: a binding carrying a kind with `mustNotShare acrossThreads`
-// cannot flow into a task spawn — the language statically rejects the cross-
-// thread share.
+// A binding carrying a kind with `mustNotShare acrossThreads` cannot flow
+// into a task spawn - the language statically rejects the cross-thread share.
 
 type LocalHandle {
     fd: int32,

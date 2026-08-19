@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>The tour | Yooperlang</title>
+<meta name="description" content="Five short Yooperlang programs: install the compiler, run hello, then functions, strings and logging, a trait, and a kind. Every program runs and every error shown is one the compiler really printed.">
+<link rel="stylesheet" href="assets/site.css">
+<script>
+  try {
+    var t = localStorage.getItem("yoop-theme");
+    if (t) document.documentElement.setAttribute("data-theme", t);
+  } catch (e) {}
+</script>
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+
+<header class="site-header">
+  <div class="container header-inner">
+    <a class="brand" href="index.html">
+      <span class="brand-mark">yoop</span><span class="brand-tail">erlang</span>
+    </a>
+    <nav class="site-nav" aria-label="Main">
+      <a href="index.html">Home</a>
+      <a href="tour.html" aria-current="page">Tour</a>
+      <a href="pipeline.html">Pipeline</a>
+      <a href="reference.html">Reference</a>
+      <a href="std.html">Std</a>
+      <a href="https://github.com/tkarnau/yooperlang" target="_blank" rel="noopener">GitHub</a>
+      <button class="icon-btn search-trigger" type="button" aria-label="Search">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><line x1="16.5" y1="16.5" x2="21" y2="21"></line></svg>
+        <span class="kbd">/</span>
+      </button>
+      <button class="icon-btn theme-toggle" type="button" aria-label="Toggle light and dark theme">
+        <svg class="icon-moon" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"></path></svg>
+        <svg class="icon-sun" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4.2"></circle><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M19.1 4.9l-1.4 1.4M6.3 17.7l-1.4 1.4"></path></svg>
+      </button>
+    </nav>
+  </div>
+</header>
+
+<main id="main">
+<div class="container">
+  <div class="tour-intro">
+    <span class="kicker">The tour</span>
+    <h1>Five programs</h1>
+    <p class="lede">
+      Install the compiler, run hello, then four more files that each add one idea. Every
+      program here is a real file in the repository, every output pane is what it printed
+      on a real run, and every red pane is a diagnostic the compiler really produced.
+    </p>
+  </div>
+
+  <div class="doc">
+    <aside class="side">
+      <nav aria-label="Steps">
+        <h2>Tour</h2>
+        <ul>
+          <li><a href="#install">Get the compiler</a></li>
+          <li><a href="#hello">1. Hello</a></li>
+          <li><a href="#functions">2. Functions</a></li>
+          <li><a href="#strings">3. Strings and logging</a></li>
+          <li><a href="#traits">4. Traits</a></li>
+          <li><a href="#kinds">5. Kinds</a></li>
+          <li><a href="#next">Where to next</a></li>
+        </ul>
+      </nav>
+    </aside>
+
+    <div class="doc-main">
+      <noscript>
+        <div class="noscript">
+          <strong>This page builds its code panes from generated data, so it needs JavaScript.</strong>
+          The programs themselves live in
+          <a href="https://github.com/tkarnau/yooperlang/tree/main/examples/tour">examples/tour/</a>
+          and read fine as plain files.
+        </div>
+      </noscript>
+
+      <!-- ------------------------------------------------------- install -->
+      <section>
+        <h2 id="install">Get the compiler</h2>
+        <p>
+          Grab the release, unpack it, and check that you have <code>clang</code>. The compiler
+          emits LLVM IR and shells out to clang to link, so clang is not optional and is not
+          in the box.
+        </p>
+<pre data-file="terminal"><code class="shell">curl -LO https://github.com/tkarnau/yooperlang/releases/download/v0.1.0/yoopiler-boot-0.1.0-linux-x64.tar.gz
+tar xzf yoopiler-boot-0.1.0-linux-x64.tar.gz
+cd yoopiler-boot-0.1.0-linux-x64
+
+clang --version                # you need this
+./bin/yoopiler_boot            # prints its usage</code></pre>
+        <p class="muted small">
+          Linux x64 only. If you have a checkout instead,
+          <code>node ./src/yoopiler.js file.yoop</code> does the same job.
+        </p>
+        <div class="callout">
+          <div class="callout-title">what you just downloaded</div>
+          <p>
+            The compiler for Yooperlang, written in Yooperlang, compiled by itself. The binary
+            was built by a compiler built by a compiler built from the same source, and the
+            last two came out byte-identical. It handles the subset the compiler itself is
+            written in, which is most of the language but not all of it.
+          </p>
+        </div>
+      </section>
+
+      <!-- ---------------------------------------------------------- 1 -->
+      <section>
+        <h2 id="hello">1. Hello</h2>
+        <p>
+          Put this in <code>hello.yoop</code>, build it, run it. The binary lands wherever
+          <code>-o</code> says and needs nothing installed to run.
+        </p>
+<pre data-file="terminal"><code class="shell">./bin/yoopiler_boot hello.yoop -o hello
+./hello
+echo $?</code></pre>
+        <p>
+          Every program starts at <code>main</code>, and the <code>int32</code> it returns is
+          the process exit code. Nothing wraps it, which is why <code>echo $?</code> prints
+          <code>0</code>. <code>printf</code> is the one function always in scope.
+        </p>
+        <div data-episode="hello"></div>
+      </section>
+
+      <!-- ---------------------------------------------------------- 2 -->
+      <section>
+        <h2 id="functions">2. Functions</h2>
+        <p>
+          Parameters and return types are always annotated. Inside a body, types are inferred
+          when the initializer makes them obvious.
+        </p>
+        <p>
+          Two things to notice. There are no implicit numeric conversions in either direction,
+          so a widening is written out as <code>float32(n)</code>. And <code>ref</code> appears
+          at the declaration <em>and</em> at the call site, so a function that mutates its
+          argument cannot do it quietly.
+        </p>
+        <div data-episode="functions"></div>
+      </section>
+
+      <!-- ---------------------------------------------------------- 3 -->
+      <section>
+        <h2 id="strings">3. Strings and logging</h2>
+        <p>
+          There are two string types and the split is ownership. A <code>string</code> is a
+          borrowed view: literals are strings, nothing frees them, and they are what you pass
+          to anything that only reads. A <code>Text</code> owns a growable buffer and is what
+          you build with.
+        </p>
+        <p>
+          That matters more than it looks. Every template literal and every concatenation is a
+          fresh allocation that nothing frees, so anything accumulating text in a loop should
+          be a <code>Text</code>. Logging is three functions in
+          <code>std/log.yoop</code> and goes to stderr, which is why it lands in a separate
+          pane below.
+        </p>
+        <div class="callout">
+          <div class="callout-title">two import rules</div>
+          <p>
+            Values from <code>std/</code> must be namespaced
+            (<code>import * as text from "std/core/text.yoop";</code>), because a bare
+            <code>info</code> or <code>push</code> would shadow your own names everywhere.
+            Types, traits and kinds are exempt and come in by name.
+          </p>
+        </div>
+        <div data-episode="strings"></div>
+      </section>
+
+      <!-- ---------------------------------------------------------- 4 -->
+      <section>
+        <h2 id="traits">4. Traits</h2>
+        <p>
+          A trait is a capability: the operations a type promises to provide. It is the only
+          polymorphism in the language. No classes, no inheritance. A <code>type</code> on its
+          own is just a struct - fields and nothing else - and <code>implements</code> is how it
+          takes on behavior.
+        </p>
+        <p>
+          Calls are trait-qualified, <code>Greeter.greet(ref g)</code> rather than
+          <code>g.greet()</code>. That looks verbose for about five minutes, and then you
+          notice that two traits on one type can both have a <code>greet</code> with no
+          ambiguity and no resolution order to learn. Generics monomorphize against the bound,
+          so <code>announce</code> becomes one machine function per type you actually call it
+          with.
+        </p>
+        <div data-episode="traits"></div>
+      </section>
+
+      <!-- ---------------------------------------------------------- 5 -->
+      <section>
+        <h2 id="kinds">5. Kinds</h2>
+        <p>
+          This is the part that is not like the other languages. A <strong>type</strong> says
+          what a value is, a <strong>trait</strong> says what it can do, and a
+          <strong>kind</strong> says how the binding must be used. A kind attaches to the
+          binding, not the type, so the same type in two bindings can carry different
+          obligations.
+        </p>
+        <p>
+          Compare <code>plain</code> and <code>kinded</code> in the output below: same type,
+          same literal, one word of difference, and one of them cleans up. Then look at
+          <code>bail</code>, where <code>close 3</code> still prints on the early return. You
+          declare the obligation once instead of remembering it on every branch.
+        </p>
+        <p>
+          <code>disposable</code> is not a compiler builtin. It is four clauses in
+          <code>std/core/kinds.yoop</code>, and a kind you declare yourself gets the same
+          treatment.
+        </p>
+        <div data-episode="kinds"></div>
+        <p class="muted small">
+          The flip side, stated plainly: <code>plain</code> leaks and the compiler says
+          nothing. Ownership is advisory until you ask for it with the keyword. An earlier
+          version made unhandled resources a hard error and it was miserable to use.
+        </p>
+      </section>
+
+      <section>
+        <h2 id="next">Where to next</h2>
+        <div class="grid grid-2">
+          <a class="card" href="pipeline.html?sample=kinds&amp;stage=codegen">
+            <span class="card-mark">next</span>
+            <h3>Watch step 5 compile</h3>
+            <p>The same program taken apart: tokens, tree, and the LLVM IR with the injected dispose call sitting in it.</p>
+          </a>
+          <a class="card" href="reference.html">
+            <span class="card-mark">reference</span>
+            <h3>The rest of the language</h3>
+            <p>Variants and exhaustive switch, errors as values and <code>?</code>, tasks, regions, marker kinds, C interop.</p>
+          </a>
+        </div>
+      </section>
+    </div>
+  </div>
+</div>
+</main>
+
+<footer class="site-footer">
+  <div class="container footer-inner">
+    <p>All five programs live in <a href="https://github.com/tkarnau/yooperlang/tree/main/examples/tour">examples/tour/</a>.</p>
+    <p><a href="std.html">Browse the standard library</a></p>
+  </div>
+</footer>
+
+<script src="data/tour.data.js"></script>
+<script src="data/search.data.js"></script>
+<script src="assets/highlight.js"></script>
+<script src="assets/site.js"></script>
+<script src="assets/tour.js"></script>
+</body>
+</html>

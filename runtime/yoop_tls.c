@@ -40,8 +40,6 @@
 // Draining BEFORE reacting to WANT_READ matters: mid-handshake OpenSSL often
 // owes the peer a flight AND wants a reply, and a loop that waits for the
 // reply first deadlocks.
-//
-// See plans/tls.md for the full design discussion.
 
 #include <stdint.h>
 #include <stddef.h>
@@ -127,8 +125,8 @@ void yoop_tls_ctx_free(void* ctx) {
 
 // Trust roots. A NULL/empty `ca_file` means "use OpenSSL's compiled-in default
 // paths", which is right on Linux and right on macOS when OpenSSL was
-// installed the normal way. It finds nothing on Windows - see plans/tls.md D5,
-// where the system-store bridge is phase 3. Failing to find roots surfaces
+// installed the normal way. It finds nothing on Windows, where there is no
+// bridge to the system certificate store. Failing to find roots surfaces
 // later as a verification failure, which is the correct direction to fail.
 int32_t yoop_tls_ctx_load_verify(void* ctxv, const char* ca_file) {
     tls_clear_error();

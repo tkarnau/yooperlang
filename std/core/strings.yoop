@@ -1,4 +1,4 @@
-// std/core/strings.yoop - Phase 8.H string primitives and bridges.
+// std/core/strings.yoop - string primitives and bridges.
 //
 // Built on the `stringAsBytes` / `stringFromBytesUnchecked` builtins
 // and on top of std/core/bytes.yoop. `stringFromBytes` validates UTF-8
@@ -151,8 +151,8 @@ export function stringConcat(a: string, b: string): owned string {
 }
 
 // Concat N strings into one fresh heap-allocated string. One allocation
-// total (sum the lengths, then alloc + copy). Takes an ordinary string[];
-// real `...string` variadic parameters are a future ergonomic upgrade.
+// total (sum the lengths, then alloc + copy). Takes an ordinary string[],
+// since there are no `...string` variadic parameters.
 export function stringConcatAll(parts: string[]): owned string {
     let total: usize = 0;
     let i: usize = 0;
@@ -194,13 +194,13 @@ function padReps(have: usize, width: usize, fillLen: usize): usize {
 // than a hang.
 //
 // The result is ALWAYS fresh storage, including when `s` is already wide
-// enough. That is a change: this used to return `s` itself in that case, so
-// the result was borrowed on one path and owned on the other, and a caller
-// that freed it was right half the time. `owned` is what makes that shape
-// impossible to write by accident.
+// enough. Returning `s` itself in that case would make the result borrowed on
+// one path and owned on the other, so a caller that freed it would be right
+// half the time. `owned` is what makes that shape impossible to write by
+// accident.
 //
-// It also used to concat in a loop, allocating and abandoning one string per
-// repetition. Now it sizes the result up front and allocates once.
+// It sizes the result up front and allocates once, rather than concatenating
+// in a loop and abandoning one string per repetition.
 //
 // Prefer `text.padStart` in std/core/text.yoop, which returns a `Text` that
 // cleans itself up.
@@ -243,9 +243,9 @@ export function padEnd(s: string, width: usize, fill: string): owned string {
 }
 
 // Sub-string from `start` to the end, in BYTE offsets. Freshly allocated on
-// BOTH paths - the failure path used to hand back the literal "", so whether
-// the result could be freed depended on the data, and a caller that freed it
-// aborted whenever the slice happened to fail.
+// BOTH paths. Handing back the literal "" on the failure path would make
+// freeability depend on the data, and a caller that freed it would abort
+// whenever the slice happened to fail.
 //
 // Both paths reach `owned` by passthrough: the Ok arm's `v` inherits it from
 // `Result<owned string, string>`'s first type argument, and the Err arm

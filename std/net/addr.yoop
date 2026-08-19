@@ -2,15 +2,14 @@ module net;
 
 // std/net/addr.yoop - IPv4 SocketAddr.
 //
-// IPv4-only in the MVP per library-design.md §6.1. host is a dotted-quad
-// string ("127.0.0.1") or a hostname; resolution is not yet implemented
-// so non-numeric hosts will fail at bind/connect time via inet_addr().
+// IPv4-only. host is a dotted-quad string ("127.0.0.1") or a hostname;
+// name resolution is not implemented, so non-numeric hosts fail at
+// bind/connect time via inet_addr().
 
 import { Display } from "../core/traits.yoop";
 
-// Phase 9.F: Display impl renders the host. A `host:port` form waits
-// for an int-to-string helper in std/core; for now the trait lets
-// `${addr}` in a template render the dotted-quad without the caller
+// The Display impl renders the host alone, not a `host:port` form, so
+// `${addr}` in a template renders the dotted-quad without the caller
 // pre-stringifying.
 export type SocketAddr implements Display {
     host: string,

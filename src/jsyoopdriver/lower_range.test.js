@@ -44,7 +44,7 @@ describe("lowerRangeExprs", () => {
 
   it("keeps the import first when the module already has imports", () => {
     // The graph walk stops reading imports at the first non-import decl, so a
-    // synthesized import that landed after one would never be resolved.
+    // synthesized import placed after one would never be resolved.
     const { ast } = loweredBody(
       'import * as m from "./m.yoop";\nfunction f(): int32 { for i in 0..3 { } return 0; }',
     );

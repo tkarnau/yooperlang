@@ -1,6 +1,6 @@
-// Phase 6.1 - flow-analysis pass for `mustCall fn beforeScopeEnd` obligations.
-// Phase 6.2 - escape-analysis extension: tracks `mustNotEscape scope` sentinels
-//             and rejects escape via return, field store, or ref-pass to non-scoped param.
+// Flow-analysis pass for `mustCall fn beforeScopeEnd` obligations, plus an
+// escape-analysis extension: tracks `mustNotEscape scope` sentinels and
+// rejects escape via return, field store, or ref-pass to a non-scoped param.
 //
 // Runs after Pass D has populated `resolvedType` and `resolvedKindType` on
 // every binding node. Walks each function body, maintaining a stack of
@@ -16,7 +16,7 @@
 // `ownsBlock` form have a dedicated inner frame; implicit-block bindings
 // share their enclosing scope's frame.
 //
-// Phase 6.2 sentinel tracking:
+// Sentinel tracking:
 // Each frame also carries `escapeSentinels` - the names of scoped bindings/
 // parameters whose escape must be detected. The walker checks three escape paths:
 //   1. RETURN: expression names a sentinel whose resolved type is non-primitive
@@ -32,7 +32,7 @@ export function runKindCheck(fnOrMethodDecl, errors, funcDeclTable = null, regis
   const body = fnOrMethodDecl.body;
   if (!body || body.kind !== ASTNodeKind.BLOCK) return;
 
-  // Phase 7.x: when the struct on a binding is an open generic instantiation
+  // When the struct on a binding is an open generic instantiation
   // (a `Box<T>` referenced inside a generic body, where T is still a
   // TypeParamType), its `implementsTraits` snapshot was taken in pass C.1
   // BEFORE pass C.3's `validateImplBlock` populated the genericDecl. Reach
@@ -55,7 +55,7 @@ export function runKindCheck(fnOrMethodDecl, errors, funcDeclTable = null, regis
   // sentinel: { bindingName, kindName, declScope }
   const stack = [];
 
-  // Phase 6.4 strict propagates: path-coverage satisfaction tracking. The
+  // Strict propagates: path-coverage satisfaction tracking. The
   // walker treats `o.satisfied` as a per-path mutable flag and uses
   // snapshot/restore around if/else branches to compute "satisfied on every
   // reaching path". After both arms of an if/else, the post-merge sat state
@@ -88,7 +88,7 @@ export function runKindCheck(fnOrMethodDecl, errors, funcDeclTable = null, regis
   }
 
   function makeCleanupCall(o) {
-    // Phase 6.3: obligation `type` selects the synthetic AST node kind.
+    // Obligation `type` selects the synthetic AST node kind.
     if (o.type === "autoWait") {
       const node = new ASTNode(ASTNodeKind.TASK_AUTO_WAIT, o.sourceLoc);
       node.bindingName = o.bindingName;
@@ -114,7 +114,7 @@ export function runKindCheck(fnOrMethodDecl, errors, funcDeclTable = null, regis
   }
 
   // Returns the array of obligations registered for this binding/param.
-  // Phase 6.4 strict propagates: obligations are emitted for any binding of a
+  // Strict propagates: obligations are emitted for any binding of a
   // type that propagates a `mustCall`/`refcounted` kind, regardless of whether
   // the binding declares the kind keyword. The keyword is an opt-IN to
   // auto-cleanup-at-scope-exit; bindings without it must satisfy the
@@ -135,10 +135,10 @@ export function runKindCheck(fnOrMethodDecl, errors, funcDeclTable = null, regis
   //   - `transferred`     - the binding was handed to the caller (it appears
   //                         in a `return` expression), so its cleanup is not
   //                         this function's problem. Set by
-  //                         `markReturnedObligations`. It stopped being
-  //                         vestigial when the unhandled-disposable WARNING
-  //                         landed - that warning needs to know the
-  //                         return-it-onward case is fine.
+  //                         `markTransferredByValue`. The
+  //                         unhandled-disposable warning reads it: that
+  //                         warning needs to know the return-it-onward
+  //                         case is fine.
   //   - `reported`        - dedupes the unhandled-disposable warning. One
   //                         binding can reach projectCleanups several times
   //                         (a return, then the enclosing block exit) and
@@ -148,7 +148,7 @@ export function runKindCheck(fnOrMethodDecl, errors, funcDeclTable = null, regis
     const kt = stmt.resolvedKindType;
     const rt = stmt.resolvedType;
 
-    // Phase 6.3: builtin kinds bound directly to Task<T> - joined / pooled.
+    // Builtin kinds bound directly to Task<T> - joined / pooled.
     // These are always opt-in via keyword, so `autoCleanup` is true.
     if ((kt?.refcounted || kt?.mustCall?.length) && rt?.kind === "task") {
       if (kt.autoJoin) {
@@ -172,7 +172,7 @@ export function runKindCheck(fnOrMethodDecl, errors, funcDeclTable = null, regis
       return out;
     }
 
-    // Phase 13.B: variants can declare `propagates<K>` and carry the
+    // Variants can declare `propagates<K>` and carry the
     // same obligations as structs. The shape of `propagatedKinds`,
     // `implementsTraits`, and `methods` is identical, so the rest of
     // this function just works on either receiver. Variants don't
@@ -240,7 +240,7 @@ export function runKindCheck(fnOrMethodDecl, errors, funcDeclTable = null, regis
           type: "mustCall",
           bindingName: stmt.name,
           methodName: mc.methodName,
-          // Phase 7.4: cleanup-call mangling is trait-qualified.
+          // Cleanup-call mangling is trait-qualified.
           traitName: mc.traitType?.name,
           structType: rt,
           moduleId: rt.moduleId,
@@ -337,18 +337,14 @@ export function runKindCheck(fnOrMethodDecl, errors, funcDeclTable = null, regis
     return branchDiverged;
   }
 
-  // Ownership redesign (2026-06-17): the return-site obligation-transfer
-  // machinery (`markIdentObligationsTransferred` /
-  // `markLiteralFieldObligationsTransferred`) was removed. `propagates<K>` no
-  // longer transfers an enforced obligation across a return, so there is
-  // nothing to mark. The `transferred` flag on obligations is now vestigial
-  // (never set); projectCleanups still tolerates it.
+  // `propagates<K>` does not transfer an enforced obligation across a
+  // return, so there is no return-site obligation-transfer machinery. The
+  // `transferred` flag is set only by `markTransferredByValue`.
 
   // Convert a list of obligations into auto-cleanup nodes for codegen,
   // skipping any that are satisfied, transferred, or not autoCleanup.
   //
-  // Ownership redesign (2026-06-17, see plans/ownership-and-typestate-redesign.md):
-  // obligations are ADVISORY, not enforced. A non-autoCleanup obligation that
+  // Obligations are ADVISORY, not enforced. A non-autoCleanup obligation that
   // reaches scope exit unhandled is NOT an error - the default is silent. Only a
   // binding that opted in via its kind keyword (`disposable`/`pooled`/`joined`/
   // Task -> autoCleanup) gets a cleanup call injected here. What to do with an
@@ -358,10 +354,10 @@ export function runKindCheck(fnOrMethodDecl, errors, funcDeclTable = null, regis
     const out = [];
     for (const o of obligations) {
       if (o.satisfied) continue;
-      // autoCleanup is decided BEFORE `transferred`. A keyword binding has
-      // always had its cleanup injected here, and `transferred` is new
-      // information that exists only to silence the advisory warning below -
-      // letting it skip the injection would change codegen and leak.
+      // autoCleanup is decided BEFORE `transferred`. A keyword binding's
+      // cleanup is injected here regardless; `transferred` exists only to
+      // silence the advisory warning below, and letting it skip the
+      // injection would change codegen and leak.
       if (o.autoCleanup) {
         out.push(makeCleanupCall(o));
         continue;
@@ -370,8 +366,8 @@ export function runKindCheck(fnOrMethodDecl, errors, funcDeclTable = null, regis
       // A binding that advertises a cleanup obligation, did not opt into
       // auto-cleanup, was not disposed by hand, and is not handed to the
       // caller. Still not an ERROR - the ownership model is advisory and the
-      // user may be managing it deliberately - but silence turned out to hide
-      // real leaks, so it is a warning. Suppress it by taking the kind keyword
+      // user may be managing it deliberately - but silence hides real leaks,
+      // so it is a warning. Suppress it by taking the kind keyword
       // (`disposable x = ...`), disposing by hand, or returning the value.
       if (!o.reported && !fnOrMethodDecl.isDeriveGenerated) {
         o.reported = true;
@@ -501,7 +497,7 @@ export function runKindCheck(fnOrMethodDecl, errors, funcDeclTable = null, regis
         // still need pending-cleanup annotation under the current frame.
         if (stmt.assignment) walkExpr(stmt.assignment);
         const obligations = obligationsFor(stmt);
-        // Phase 6.2: register an escape sentinel if this binding has mustNotEscape.
+        // Register an escape sentinel if this binding has mustNotEscape.
         if (stmt.resolvedKindType?.mustNotEscape) {
           const sentinel = {
             bindingName: stmt.name,
@@ -531,7 +527,7 @@ export function runKindCheck(fnOrMethodDecl, errors, funcDeclTable = null, regis
       }
       case ASTNodeKind.RETURN_STATEMENT: {
         if (stmt.value) {
-          // Phase 6.2: check if the return value escapes a sentinel.
+          // Check if the return value escapes a sentinel.
           const sentinels = allActiveSentinels();
           if (sentinels.length > 0) {
             const escaped = findEscapedSentinel(stmt.value, sentinels);
@@ -544,10 +540,10 @@ export function runKindCheck(fnOrMethodDecl, errors, funcDeclTable = null, regis
           // Anything named in the returned expression is the caller's now, so
           // it must not trip the unhandled-disposable warning below.
           markTransferredByValue(stmt.value);
-          // Ownership redesign (2026-06-17): returning a value that carries a
-          // propagating kind is fine and needs no annotation. `propagates<K>`
-          // is now an advisory producer-side signal (surfaced by tooling/IDE),
-          // not a transfer contract - there is nothing to enforce or mark here.
+          // Returning a value that carries a propagating kind is fine and
+          // needs no annotation. `propagates<K>` is an advisory producer-side
+          // signal (surfaced by tooling/IDE), not a transfer contract, so
+          // there is nothing to enforce or mark here.
           // The `mustNotEscape` escape check above still applies (that is the
           // separate `scoped` kind, which stays enforced).
         }
@@ -569,7 +565,7 @@ export function runKindCheck(fnOrMethodDecl, errors, funcDeclTable = null, regis
         return;
       case ASTNodeKind.IF_STATEMENT: {
         walkExpr(stmt.expression);
-        // Phase 6.4 strict propagates: walk each arm independently from a
+        // Strict propagates: walk each arm independently from a
         // shared starting sat state, then merge at the join point. A manual
         // dispose call satisfies an outer-scope obligation only if it
         // appears on every path that reaches the merge.
@@ -633,14 +629,14 @@ export function runKindCheck(fnOrMethodDecl, errors, funcDeclTable = null, regis
         return;
       }
       case ASTNodeKind.SWITCH_STATEMENT: {
-        // Ownership redesign (2026-06-17): walk each arm body as its own block
-        // so a `disposable`-keyword binding declared inside an arm gets its
-        // auto-cleanup injected (walkBlock populates arm.body.implicitCleanups,
-        // which codegen's emitBlockStmt emits). Before this, SWITCH fell through
-        // to `default` and arm bodies were never walked, so keyword cleanups in
-        // a `case` silently failed to fire. We also do an IF-style path-coverage
-        // merge across the arms so a manual dispose that appears on every
-        // reaching arm can satisfy an outer obligation.
+        // Walk each arm body as its own block so a `disposable`-keyword
+        // binding declared inside an arm gets its auto-cleanup injected
+        // (walkBlock populates arm.body.implicitCleanups, which codegen's
+        // emitBlockStmt emits). Letting SWITCH fall through to the default
+        // case would leave arm bodies unwalked, and keyword cleanups in a
+        // `case` would silently fail to fire. We also do an IF-style
+        // path-coverage merge across the arms so a manual dispose that
+        // appears on every reaching arm can satisfy an outer obligation.
         walkExpr(stmt.scrutinee);
         const base = snapshotSat();
         const bodies = (stmt.arms ?? []).map((a) => a.body);
@@ -693,7 +689,7 @@ export function runKindCheck(fnOrMethodDecl, errors, funcDeclTable = null, regis
     if (e.kind === ASTNodeKind.TRY_OP) {
       e.pendingCleanups = projectCleanups(flattenStackReverse());
       walkExpr(e.operand);
-      // Phase 10.E.2: the optional context string runs on the failure
+      // The optional context string runs on the failure
       // branch, so anything it interpolates is still a use of that binding.
       if (e.context) walkExpr(e.context);
       return;
@@ -704,15 +700,15 @@ export function runKindCheck(fnOrMethodDecl, errors, funcDeclTable = null, regis
       for (const f of e.fields ?? []) markTransferredByValue(f.value);
     }
 
-    // Phase 6.2: check ASSIGNMENT for field-store escapes.
+    // Check ASSIGNMENT for field-store escapes.
     if (e.kind === ASTNodeKind.ASSIGNMENT) {
       checkAssignmentEscape(e);
       walkExpr(e.value);
       return;
     }
 
-    // Phase 6.2: check CALL_EXPRESSION for ref-pass escapes.
-    // Phase 6.4: also mark pooled-typed arguments to pooled params for retain.
+    // Check CALL_EXPRESSION for ref-pass escapes.
+    // Also mark pooled-typed arguments to pooled params for retain.
     if (e.kind === ASTNodeKind.CALL_EXPRESSION) {
       checkCallEscape(e);
       markPooledArgRetains(e);
@@ -733,7 +729,7 @@ export function runKindCheck(fnOrMethodDecl, errors, funcDeclTable = null, regis
     }
   }
 
-  // Phase 6.2: check `outer.field = expr` for escapes.
+  // Check `outer.field = expr` for escapes.
   function checkAssignmentEscape(assignNode) {
     const sentinels = allActiveSentinels();
     if (sentinels.length === 0) return;
@@ -756,7 +752,7 @@ export function runKindCheck(fnOrMethodDecl, errors, funcDeclTable = null, regis
     }
   }
 
-  // Phase 6.2: check `f(ref a)` where `a` is a sentinel but `f`'s param is not scoped.
+  // Check `f(ref a)` where `a` is a sentinel but `f`'s param is not scoped.
   function checkCallEscape(callNode) {
     const sentinels = allActiveSentinels();
     if (sentinels.length === 0) return;
@@ -785,11 +781,11 @@ export function runKindCheck(fnOrMethodDecl, errors, funcDeclTable = null, regis
         }
       }
       // If we can't look up the callee (external, namespace call, etc.), conservatively allow.
-      // Indirect/imported calls are not tracked in phase 6.2.
+      // Indirect/imported calls are not tracked.
     }
   }
 
-  // Phase 6.4 strict propagates: a direct trait-qualified call like
+  // Strict propagates: a direct trait-qualified call like
   // `Disposable.dispose(ref arr)` flips the active mustCall obligation's
   // `satisfied` flag. The walker uses path coverage (snapshot/restore around
   // branches in walkStatement) to ensure a dispose inside one arm of an
@@ -817,7 +813,7 @@ export function runKindCheck(fnOrMethodDecl, errors, funcDeclTable = null, regis
     }
   }
 
-  // Phase 6.4: for any call to a function whose params include `pooled`,
+  // For any call to a function whose params include `pooled`,
   // mark each matching argument so codegen emits a TASK_RETAIN at the call site.
   function markPooledArgRetains(callNode) {
     const callee = callNode.callee;
@@ -833,7 +829,7 @@ export function runKindCheck(fnOrMethodDecl, errors, funcDeclTable = null, regis
       // for a `Task<T>` - its retain/release bodies are compiler-provided
       // (coreKinds.js), and a Task is a raw pointer. A refcounted kind on a
       // NON-task receiver (a user struct implementing the required trait)
-      // would previously be marked here too, and codegen would then hand a
+      // would otherwise be marked here too, and codegen would then hand a
       // struct VALUE to yoop_task_retain - IR that does not even verify.
       //
       // Only mark what codegen can actually emit. A refcounted kind on a
@@ -850,8 +846,8 @@ export function runKindCheck(fnOrMethodDecl, errors, funcDeclTable = null, regis
     }
   }
 
-  // Phase 6.2: populate outer frame with escape sentinels from scoped parameters.
-  // Phase 6.4: also register a release obligation for any pooled parameter.
+  // Populate outer frame with escape sentinels from scoped parameters.
+  // Also register a release obligation for any pooled parameter.
   const outerFrame = { obligations: [], escapeSentinels: [] };
   for (const p of fnOrMethodDecl.params ?? []) {
     const kt = p.resolvedKindType;
@@ -877,7 +873,7 @@ export function runKindCheck(fnOrMethodDecl, errors, funcDeclTable = null, regis
   walkBlock(body);
   stack.pop();
 
-  // Phase 6.4: param-level obligations (e.g. pooled param release) live in the
+  // Param-level obligations (e.g. pooled param release) live in the
   // outer frame, not the body's block frame. They didn't get folded into
   // body.implicitCleanups by walkBlock, so append them here in LIFO order so
   // fall-through cleanup fires them after body-local obligations.

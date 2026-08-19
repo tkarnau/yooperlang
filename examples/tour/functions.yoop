@@ -1,0 +1,33 @@
+// Functions are declared at module scope. Parameters and the return type are
+// always annotated: nothing crosses a call boundary untyped.
+
+function add(a: int32, b: int32): int32 {
+  return a + b;
+}
+
+// There are no implicit numeric conversions, in either direction, so the
+// widening is written out.
+function half(n: int32): float32 {
+  return float32(n) / 2.0;
+}
+
+// `ref` is written at the declaration AND at the call, so a function that
+// mutates its argument cannot do it quietly.
+function bump(ref n: int32): void {
+  n = n + 1;
+}
+
+function main(): int32 {
+  let total: int32 = add(2, 3);
+  bump(ref total);
+
+  const label = "total";      // const cannot be rebound; the type is inferred
+  printf(`${label}=${total}\n`);
+
+  const share: float32 = half(total);
+  if (share > 2.0) {
+    printf("over two\n");
+  }
+
+  return 0;
+}

@@ -1,19 +1,11 @@
 // The concurrency core kinds, as declared in std/core/kinds.yoop.
 //
-// This file used to be builtinKinds.js, and it CONSTRUCTED the kinds:
-// three hardcoded objects carrying "synthetic clauses that aren't
-// expressible in source" (its own words). `refcounted: true` was a bare
-// boolean naming nothing, and codegen simply knew it meant
-// yoop_task_retain / yoop_task_release.
-//
-// Now it is a registry. `std/core/kinds.yoop` declares `task`, `async`,
+// This is a registry. `std/core/kinds.yoop` declares `task`, `async`,
 // `joined`, `pooled` and `Task` as ordinary `kind { ... }` decls, the
 // typechecker captures them during pass A, and this holds the resolved
 // KindTypes so the rest of the compiler can reach them by name. The
 // behavior comes from their clauses; the compiler only asserts they exist
 // with the shape it depends on (REQUIRED_CORE_KINDS in typecheck.js).
-//
-// See plans/kinds-in-std.md.
 
 // Reset at the start of every typecheckProgram run - a single process
 // compiles many programs during the test suite, and each gets its own
@@ -32,9 +24,8 @@ export function lookupCoreKind(name) {
   return coreKinds.get(name) ?? null;
 }
 
-// True when `kt` is a kind whose values are reference counted. Replaces the
-// old `kindType.builtin && kindType.refcounted` test - "builtin" is no
-// longer a meaningful distinction now that these are declared like anything
+// True when `kt` is a kind whose values are reference counted. There is no
+// "builtin" distinction to make: the core kinds are declared like anything
 // else, and any user kind carrying `refcounted` gets the same treatment.
 export function isRefcountedKind(kt) {
   return !!kt && kt.refcounted !== null && kt.refcounted !== undefined;

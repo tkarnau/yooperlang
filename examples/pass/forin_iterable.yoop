@@ -1,4 +1,4 @@
-// Phase 10.B: `for x in EXPR` works over any type that implements
+// `for x in EXPR` works over any type that implements
 // Iterable<T>. The loop desugars to a while/switch over IterStep<T>:
 //   while (true) {
 //       switch (Iterable.next(ref iter)) {

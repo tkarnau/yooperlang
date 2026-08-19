@@ -44,7 +44,7 @@ import {
 } from "./types.js";
 import { pushError, formatType } from "./errors.js";
 import { lookupInScope, pushScope, declareInScope, popScope } from "./scope.js";
-// Phase 10.E.3: the handler form of `?` puts STATEMENTS inside an
+// The handler form of `?` puts STATEMENTS inside an
 // expression, so this file needs the statement checker. The resulting cycle
 // (checkStatement already imports this module) is the same shape as the
 // existing checkExpr <-> typecheck.js one and is safe for the same reason:
@@ -162,7 +162,7 @@ function resolveIdent(node, scope, ctx) {
   const binding = lookupInScope(scope, node.name);
   if (binding) {
     if (binding.type.kind === typeKinds.namespace) node.kind = ASTNodeKind.NAMESPACE_IDENT;
-    // Phase 6.2: record the binding's lexical depth for escape analysis.
+    // Record the binding's lexical depth for escape analysis.
     node.bindingScopeDepth = binding.scopeDepth ?? 0;
     // LSP: back-pointer to the declaring AST node so go-to-definition and
     // hover can navigate from a reference to its declaration without
@@ -189,7 +189,7 @@ function resolveIdent(node, scope, ctx) {
   const modType = ctx.typeContext.moduleSymbols?.get(node.name);
   if (modType) {
     if (modType.kind === typeKinds.namespace) node.kind = ASTNodeKind.NAMESPACE_IDENT;
-    // Phase 8.E: mark IDENT references that resolve to a module-level
+    // Mark IDENT references that resolve to a module-level
     // let/const binding so codegen emits a load from @<modid>__<name>
     // rather than %<name>. Functions and namespaces stay on their own
     // resolution paths.
@@ -209,7 +209,7 @@ function resolveIdent(node, scope, ctx) {
         node.moduleGlobalImported = false;
       }
     }
-    // Phase 10.X.2 follow-up: tag imported-function IDENTs in expression
+    // Tag imported-function IDENTs in expression
     // position with their source module so codegen can emit the right
     // mangled symbol when the reference is used as a function-pointer
     // *value* (e.g. `{ hash: imported_hash }` in a KeyOps<K> literal).
@@ -294,9 +294,8 @@ function resolveBinary(node, scope, ctx) {
     // instruction's type from the left operand and so survives a bare literal
     // here, but it still RECURSES into the untyped operand to emit it - and a
     // compound expression like `-24 + 176` has its own untypedInt resolvedType
-    // waiting there. That is the crash yooperdoom hit (takeaways 1.2), and the
-    // reason the old comment's "unaffected, codegen takes the type from that
-    // side" was true of the instruction but not of the operand.
+    // waiting there. That is the crash: "codegen takes the type from that
+    // side" is true of the instruction but not of the operand.
     //
     // Pinning to the typed side rather than to the int32 default is also what
     // reaches the range check: `b == 300` where b is uint8 is a diagnostic
@@ -375,7 +374,7 @@ function calleeDisplayName(callee) {
 // which is internally consistent and useless: there is no way to spell a
 // directive inside a template, so a trailing value arg can never be the thing
 // the author meant. Both correct spellings are one edit away, and the error
-// names them. See plans/yooperdoom-takeaways.md 2.3.
+// names them.
 function checkPrintfTemplateFormat(node, ctx) {
   const fmt = node.args?.[0];
   if (fmt?.kind !== ASTNodeKind.TEMPLATE_LITERAL) return;
@@ -428,7 +427,7 @@ function resolveCall(node, scope, ctx) {
     }
   }
 
-  // Phase 7.4: trait-qualified call - `Steppable.step(ref b1, ...)`. Intercept
+  // Trait-qualified call - `Steppable.step(ref b1, ...)`. Intercept
   // before the namespace-call branch below: a FIELD_ACCESS whose object IDENT
   // resolves to a TraitType dispatches through the trait's method table.
   if (
@@ -438,7 +437,7 @@ function resolveCall(node, scope, ctx) {
     (callee.object?.kind === ASTNodeKind.IDENT ||
       callee.object?.kind === ASTNodeKind.NAMESPACE_IDENT)
   ) {
-    // Phase 9.G: `VTableName.from(ref x)` - builtin vtable constructor.
+    // `VTableName.from(ref x)` - builtin vtable constructor.
     // The only legal method name is `from`; anything else is a typecheck
     // error with a clear hint. Resolution checks that the argument is a
     // `ref T` where T implements the vtable's trait.
@@ -542,7 +541,7 @@ function resolveCall(node, scope, ctx) {
   if (callee && typeof callee === "object") {
     const calleeType = resolveExprType(callee, scope, ctx);
     if (calleeType.kind === typeKinds.error) return setType(node, ErrorType());
-    // Phase 10.X.2: a FIELD_ACCESS resolving to a FunctionPointerType means
+    // A FIELD_ACCESS resolving to a FunctionPointerType means
     // the user is calling a function-pointer-typed struct field -
     // `ops.hash(k)` with `hash: (k: K) => uint64`. Lower as an indirect
     // call through the stored slot.
@@ -593,7 +592,7 @@ function resolveCall(node, scope, ctx) {
     }
   }
 
-  // Phase 7.1: generic function call - look up in the genericFuncTable
+  // Generic function call - look up in the genericFuncTable
   // (local or imported) and run call-site inference.
   if (typeof callee === "string") {
     const generic = lookupGenericFunc(callee, ctx);
@@ -602,7 +601,7 @@ function resolveCall(node, scope, ctx) {
     }
   }
 
-  // Phase 10.K: a bare identifier callee that resolves to an in-scope binding
+  // A bare identifier callee that resolves to an in-scope binding
   // of FunctionPointerType is an indirect call through that binding - a
   // function-pointer parameter or local (`pred(ch)` where `pred:
   // (ch: uint8) => bool`). This is the bare-identifier sibling of the
@@ -618,7 +617,7 @@ function resolveCall(node, scope, ctx) {
 
   const sig = ctx.typeContext.moduleSymbols.get(callee) ?? KNOWN_EXTERNS[callee];
   if (!sig) {
-    // Phase 7.4: bare-form `m(ref x)` is no longer a trait dispatch path.
+    // Bare-form `m(ref x)` is not a trait dispatch path.
     // If any in-scope trait has a method by this name, hint at the qualified
     // form (`Trait.m(ref x)`); otherwise emit a plain "unknown function".
     const hint = traitMethodHint(callee, ctx);
@@ -699,7 +698,7 @@ function resolveCallWithSig(node, sig, scope, ctx) {
   return resolveCallType(node, sig, scope, ctx);
 }
 
-// Phase 10.X.2: a CALL_EXPRESSION whose callee resolves to a
+// A CALL_EXPRESSION whose callee resolves to a
 // FunctionPointerType (typically `ops.hash(k)` where `hash` is a
 // fn-ptr struct field) lowers to an indirect call through the field.
 // Arity and arg-type checks run as usual; the codegen reads
@@ -726,7 +725,7 @@ function resolveFunctionPointerCall(node, fptType, scope, ctx) {
     );
   }
   node.fnPointerCall = true;
-  // Phase 10.K: stash the FPT so codegen has it for the bare-identifier
+  // Stash the FPT so codegen has it for the bare-identifier
   // callee case (where node.callee is a string with no .resolvedType, unlike
   // the FIELD_ACCESS field case which carries its own resolved type).
   node.fnPointerType = fptType;
@@ -770,7 +769,7 @@ function resolveWaitExpression(node, scope, ctx) {
 // live here and in resolveCall (which rejects an un-awaited async call):
 // together they guarantee there is no path to an async function except
 // from an async caller, so a suspend always has a frame to propagate
-// into. See plans/async-coroutines.md.
+// into. See docs/writing_yoop.md on async coloring.
 function resolveAwaitExpression(node, scope, ctx) {
   if (!ctx.inAsyncBody) {
     pushError(
@@ -836,8 +835,8 @@ function resolveUnary(node, scope, ctx) {
     return setType(node, ErrorType());
   }
 
-  // Phase 9: bitwise NOT - integer types only, returns the same type.
-  // Phase 12: also accepted on integer-backed value enums - returns the
+  // Bitwise NOT - integer types only, returns the same type.
+  // Also accepted on integer-backed value enums - returns the
   // same enum type. String-backed enums reject.
   if (node.op === "bitnot") {
     if (
@@ -891,7 +890,7 @@ function resolveUnary(node, scope, ctx) {
 // trait. Mirrors the technique in `lookupIntoImpl` and
 // `resolveTraitQualifiedCall`.
 //
-// Phase 13.D: variants share the implementsTraits surface with structs, so
+// Variants share the implementsTraits surface with structs, so
 // the same re-fetch applies - only the backing table differs.
 function canonicalNominalType(nominalType, ctx) {
   if (!nominalType) return nominalType;
@@ -912,7 +911,7 @@ function canonicalNominalType(nominalType, ctx) {
   return nominalType;
 }
 
-// Phase 13.D: name the field behind a failed interpolation inside a
+// Name the field behind a failed interpolation inside a
 // @derive(display)-generated body. Struct bodies interpolate `self.<field>`
 // directly; variant arms interpolate a pattern-bound local, whose field
 // label the expansion records in the template node's `deriveLabels`.
@@ -962,11 +961,11 @@ function resolveTemplateLiteral(node, scope, ctx) {
         (exprType.implementsTraits ?? []).every(t => t.name !== "Display")) {
         continue;
       }
-      // Phase 9.F: try Display. Look for a `Display` trait on the
+      // Try Display. Look for a `Display` trait on the
       // (deref'd) type's implementsTraits; synthesize a trait call.
       // Re-fetch the canonical type first - an imported type's shell
       // can have an empty implementsTraits (see canonicalNominalType).
-      // Phase 13.D: variants dispatch here too (same implementsTraits
+      // Variants dispatch here too (same implementsTraits
       // surface, same mangling), so a derived or hand-written variant
       // Display impl is interpolatable.
       const derefed = exprType.kind === typeKinds.ref ? exprType.inner : exprType;
@@ -980,7 +979,7 @@ function resolveTemplateLiteral(node, scope, ctx) {
         part.expr = synthesizeDisplayCall(part.expr, innerType, exprType);
         continue;
       }
-      // Phase 13.D: inside a @derive(display)-generated body the user never
+      // Inside a @derive(display)-generated body the user never
       // wrote this template, so the generic wording ("template literal
       // interpolation must be...") names nothing they can act on. Point at
       // the offending field and the two ways to make it printable.
@@ -1011,14 +1010,14 @@ function resolveTemplateLiteral(node, scope, ctx) {
   return setType(node, PrimType(primAnnotations.string));
 }
 
-// Phase 9.F: build the post-typecheck shape of `Display.toString(ref expr)`
+// Build the post-typecheck shape of `Display.toString(ref expr)`
 // directly. We bypass the parser by stamping `calleeMethodOf` +
 // `calleeMangledName` + a synthetic REF_EXPRESSION arg, mirroring what
 // resolveTraitQualifiedCall does for source-written trait calls.
 //
 // `exprType` is the type of `originalExpr` (used to materialize the ref
-// arg if needed); `structType` is the (deref'd) struct OR variant (Phase
-// 13.D - both carry implementsTraits and mangle identically) that holds the
+// arg if needed); `structType` is the (deref'd) struct OR variant (both
+// carry implementsTraits and mangle identically) that holds the
 // Display impl - its mangled symbol is what the call dispatches to.
 function synthesizeDisplayCall(originalExpr, structType, exprType) {
   // Arg = `ref originalExpr` when expr isn't already a ref; pass
@@ -1051,7 +1050,7 @@ function synthesizeDisplayCall(originalExpr, structType, exprType) {
 
 function isPrintableInTemplate(t) {
   if (!t) return false;
-  // Phase 12: a value enum is a nominal alias over a primitive underlying
+  // A value enum is a nominal alias over a primitive underlying
   // type, so it prints exactly like that primitive (the string value for
   // `enum<string>`, the int for an int-backed enum). Codegen sees through
   // the alias to the underlying. Tagged variants (payload-carrying sum
@@ -1085,7 +1084,7 @@ function resolveAssignment(node, scope, ctx) {
   return setType(node, ErrorType());
 }
 
-// Phase 9: `x op= rhs`. Treated as the merge of an assignment (target must be
+// `x op= rhs`. Treated as the merge of an assignment (target must be
 // a mutable lvalue) and a binary op (target's current type must accept `op`
 // with the RHS). Codegen evaluates the lvalue exactly once.
 function resolveCompoundAssignment(node, scope, ctx) {
@@ -1138,7 +1137,7 @@ function resolveCompoundAssignment(node, scope, ctx) {
   return setType(node, targetType);
 }
 
-// Phase 8.A: `*p = v` - assignment through an unsafe_ptr<T>. Resolves the
+// `*p = v` - assignment through an unsafe_ptr<T>. Resolves the
 // pointer, checks the RHS against the pointee type.
 function resolveAssignmentToDeref(node, scope, ctx) {
   const ptrType = resolveExprType(node.target.operand, scope, ctx);
@@ -1178,7 +1177,7 @@ function resolveAssignmentToIdent(node, scope, ctx) {
   const targetName = node.target.name;
   const binding = lookupInScope(scope, targetName);
   if (!binding) {
-    // Phase 8.E: not in lexical scope - fall back to module-level globals.
+    // Not in lexical scope - fall back to module-level globals.
     const moduleAssign = resolveAssignmentToModuleGlobal(node, scope, ctx);
     if (moduleAssign) return moduleAssign;
     pushError(ctx.errors, node, `undefined variable "${targetName}"`);
@@ -1217,11 +1216,11 @@ function resolveAssignmentToIdent(node, scope, ctx) {
   return setType(node, binding.type);
 }
 
-// Phase 8.E: handle assignment to a module-level let. Returns the assignment's
+// Handle assignment to a module-level let. Returns the assignment's
 // resolved type if the target was a module global; null if the target wasn't
 // found at module scope (caller falls through to "undefined variable").
 //
-// Phase 11.D.18: `scope` is now threaded through so that a `@precompile
+// `scope` is now threaded through so that a `@precompile
 // { ... }` block can assign to a module-level binding from a RHS that
 // references local block bindings (`SUM = acc;` where `acc` is a local
 // `let` declared earlier in the block). Module-init decls still call
@@ -1276,7 +1275,7 @@ function resolveAssignmentToModuleGlobal(node, scope, ctx) {
   return setType(node, modType);
 }
 
-// Phase 8.E: best-effort lookup of the AST decl for a module-level binding.
+// Best-effort lookup of the AST decl for a module-level binding.
 // Uses mod.moduleInitDecls (set in typecheck pass C.4) reachable via the
 // moduleEnv. Returns null if the binding isn't a module-level let/const.
 function findModuleInitDecl(tc, name) {
@@ -1345,7 +1344,7 @@ function resolveAssignmentToIndex(node, scope, ctx) {
 
 // `obj.field` - receiver must be a struct, namespace, string (for .len), or array (for .len).
 function resolveFieldAccess(node, scope, ctx) {
-  // Phase 7.5: bare `EnumName.Variant` (no payload). Detect before
+  // Bare `EnumName.Variant` (no payload). Detect before
   // resolveExprType on the IDENT object would error with "undefined variable".
   if (node.object.kind === ASTNodeKind.IDENT) {
     const maybeEnum = lookupVariantTypeByName(node.object.name, ctx);
@@ -1380,7 +1379,7 @@ function resolveFieldAccess(node, scope, ctx) {
       delete node.field;
       return setType(node, maybeEnum);
     }
-    // Phase 10.A: bare `GenericEnum.Variant` (no payload). Promote in place
+    // Bare `GenericEnum.Variant` (no payload). Promote in place
     // to an unpinned VARIANT_CONSTRUCTOR; checkInitializer will pin it to a
     // concrete instantiation against the target type. Without a target type
     // (statement-position use), resolveVariantConstructor reports an error.
@@ -1414,7 +1413,7 @@ function resolveFieldAccess(node, scope, ctx) {
       delete node.field;
       return resolveVariantConstructor(node, scope, ctx);
     }
-    // Phase 12: bare `EnumName.Case` for a value enum. Promote to a
+    // Bare `EnumName.Case` for a value enum. Promote to a
     // VARIANT_CONSTRUCTOR carrying `resolvedValueEnumType` + the case record;
     // codegen will emit the underlying constant value.
     const maybeValueEnum = lookupValueEnumByName(node.object.name, ctx);
@@ -1470,7 +1469,7 @@ function resolveFieldAccess(node, scope, ctx) {
       pushError(ctx.errors, node, `internal: namespace module ${objType.moduleId} not found`);
       return setType(node, ErrorType());
     }
-    // Phase 12: a namespace can export variant / value-enum / union /
+    // A namespace can export variant / value-enum / union /
     // vtable types in addition to values + structs. Look through every
     // table so `ns.VariantOrEnum.Case` resolves correctly through the
     // promotion that runs at the IDENT-field branch above.
@@ -1503,9 +1502,9 @@ function resolveFieldAccess(node, scope, ctx) {
     node.isArrayLen = true;
     return setType(node, PrimType(primAnnotations.usize));
   }
-  // Phase 8.C: array.ptr intrinsic - borrow the data pointer.
+  // Array.ptr intrinsic - borrow the data pointer.
   // Gated by `import.unsafe;` because the produced unsafe_ptr<T> is itself
-  // an unsafe pointer; mirrors the Phase 8.A blanket rule.
+  // an unsafe pointer, like every other unsafe-pointer producer.
   if (objType.kind === typeKinds.array && node.field === "ptr") {
     if (!ctx.typeContext.allowsUnsafe) {
       pushError(
@@ -1523,7 +1522,7 @@ function resolveFieldAccess(node, scope, ctx) {
     return setType(node, ErrorType());
   }
 
-  // Phase 12: `<expr>.Case` against a value-enum-typed receiver - happens
+  // `<expr>.Case` against a value-enum-typed receiver - happens
   // when the receiver isn't a bare IDENT (e.g. `ns.MyEnum.Case` where
   // `ns.MyEnum` already resolved to a ValueEnumType via the namespace
   // branch above). Same promotion as the bare-IDENT path.
@@ -1548,7 +1547,7 @@ function resolveFieldAccess(node, scope, ctx) {
     return setType(node, objType);
   }
 
-  // Phase 7.5: field access on a union type - same path as struct, just a
+  // Field access on a union type - same path as struct, just a
   // type-punning read into the union's chosen field type. Codegen lowers via
   // a bitcast.
   if (objType.kind === typeKinds.union) {
@@ -1603,7 +1602,7 @@ function resolveRefExpression(node, scope, ctx) {
   return setType(node, RefType(operandType));
 }
 
-// Phase 8.A: `&lvalue` - address-of. Returns unsafe_ptr<T> where T is the
+// `&lvalue` - address-of. Returns unsafe_ptr<T> where T is the
 // lvalue's type. Only lvalues are accepted (IDENT, FIELD_ACCESS,
 // INDEX_EXPRESSION, DEREF_EXPRESSION).
 function resolveAddressOf(node, scope, ctx) {
@@ -1625,7 +1624,7 @@ function resolveAddressOf(node, scope, ctx) {
   return setType(node, UnsafePtrType(operandType));
 }
 
-// Phase 8.A: `*p` - dereference an unsafe_ptr<T>. Returns T.
+// `*p` - dereference an unsafe_ptr<T>. Returns T.
 function resolveDeref(node, scope, ctx) {
   const operandType = resolveExprType(node.operand, scope, ctx);
   if (operandType.kind === typeKinds.error) return setType(node, ErrorType());
@@ -1650,7 +1649,7 @@ function resolveDeref(node, scope, ctx) {
   return setType(node, operandType.pointee);
 }
 
-// Phase 8.A: unsafe_ptr.cast<U>(p), unsafe_ptr.toInt(p), unsafe_ptr.fromInt<T>(n)
+// unsafe_ptr.cast<U>(p), unsafe_ptr.toInt(p), unsafe_ptr.fromInt<T>(n)
 function resolveUnsafePtrCast(node, scope, ctx) {
   const operandType = resolveExprType(node.operand, scope, ctx);
   if (operandType.kind === typeKinds.error) return setType(node, ErrorType());
@@ -1704,7 +1703,7 @@ function resolveUnsafePtrCast(node, scope, ctx) {
     return setType(node, UnsafePtrType(targetPointee));
   }
 
-  // Phase 8.C: unsafe_ptr.toArray<T>(p, n) - borrow a (ptr, len) pair as T[].
+  // unsafe_ptr.toArray<T>(p, n) - borrow a (ptr, len) pair as T[].
   if (node.castKind === "toArray") {
     const targetElem = resolveTypeAnnotInCtx(node.typeArg, ctx);
     if (!targetElem) {
@@ -1755,7 +1754,7 @@ function resolveUnsafePtrCast(node, scope, ctx) {
   return setType(node, ErrorType());
 }
 
-// Phase 8.D: errno.get() / errno.set(v) / errno.message(c).
+// errno.get() / errno.set(v) / errno.message(c).
 // `get` is nullary and returns c_int. `set` takes an int and returns void.
 // `message` takes an int and returns string. Untyped int args pin to int32.
 function resolveErrnoIntrinsic(node, scope, ctx) {
@@ -1861,7 +1860,7 @@ function resolveIndexExpression(node, scope, ctx) {
   const isIntIdx =
     (idxType.kind === typeKinds.prim && isIntPrim(idxType.name)) ||
     idxType.kind === typeKinds.untypedInt ||
-    // Phase 12: integer-backed value enums decay to their underlying
+    // Integer-backed value enums decay to their underlying
     // primitive for indexing (matches the implicit coercion used in
     // assignment / call positions).
     (idxType.kind === typeKinds.valueEnum &&
@@ -1875,7 +1874,7 @@ function resolveIndexExpression(node, scope, ctx) {
   return setType(node, objType.elem);
 }
 
-// Phase 9.E: `xs[i..j]` / `xs[i..]` / `xs[..j]` / `xs[..]` - zero-copy
+// `xs[i..j]` / `xs[i..]` / `xs[..j]` / `xs[..]` - zero-copy
 // fat-pointer subview. Result type is the same array type as `xs`.
 function resolveSliceExpression(node, scope, ctx) {
   const objType = resolveExprType(node.object, scope, ctx);
@@ -1907,17 +1906,17 @@ function resolveSliceExpression(node, scope, ctx) {
   return setType(node, objType);
 }
 
-// `expr?` - postfix propagator over a fallible enum (Phase 9.H + 10.E).
+// `expr?` - postfix propagator over a fallible enum.
 // A fallible operand is an enum with two variants named `Ok` and `Err`,
 // each with zero or one payload field. The enclosing function must also
 // return a fallible enum. When the two Err payload types differ, the
 // typechecker looks for an `Into<ReturnErr>` impl on the operand's err
-// type (Phase 10.E) and stamps the conversion onto the node so codegen
+// type and stamps the conversion onto the node so codegen
 // can wrap the propagated value before constructing the outer `Err`
 // variant.
 function resolveTryOp(node, scope, ctx) {
   const operandType = resolveExprType(node.operand, scope, ctx);
-  // Phase 10.E.2: type the optional context string up front, so a bad
+  // Type the optional context string up front, so a bad
   // interpolation inside it gets its own diagnostic even when the rest of
   // the `?` fails to check. The parser only ever puts a string or template
   // literal here, so the result is always `string`.
@@ -1935,7 +1934,7 @@ function resolveTryOp(node, scope, ctx) {
     return setType(node, ErrorType());
   }
 
-  // Phase 10.E.3: `expr? e { ... }` handles the failure right here, so none
+  // `expr? e { ... }` handles the failure right here, so none
   // of the propagation machinery below applies - no Err-payload compatibility
   // to establish, and in particular NO requirement that the enclosing
   // function return a fallible variant. That last part is the point: the
@@ -1958,18 +1957,18 @@ function resolveTryOp(node, scope, ctx) {
   const operandErr = variantErrPayloadType(operandType);
   const returnErr = variantErrPayloadType(retType);
   if (node.context) {
-    // Phase 10.E.2: a context string subsumes the plain Into<T> conversion -
+    // A context string subsumes the plain Into<T> conversion -
     // `WithContext<ReturnErr>` produces the outer Err payload directly, so
     // the same clause covers the same-shape and cross-shape cases.
     if (!resolveTryContext(node, operandErr, returnErr, ctx)) {
       return setType(node, ErrorType());
     }
   } else if (!typesEqual(operandErr, returnErr)) {
-    // Phase 10.E: same-type fast path failed - try the cross-shape path
+    // Same-type fast path failed - try the cross-shape path
     // via `Into<ReturnErr>` on the operand's Err payload type. Only
     // struct payloads can carry an `implementsTraits` list today, so
     // anything else (void, prim, enum, array, ...) lands in the same
-    // diagnostic the original phase 9.H gate emitted.
+    // diagnostic as an operand with no conversion at all.
     const conversion = lookupIntoImpl(operandErr, returnErr, ctx);
     if (!conversion) {
       pushError(
@@ -1986,7 +1985,7 @@ function resolveTryOp(node, scope, ctx) {
   return setType(node, strippedVariantOkType(operandType));
 }
 
-// Phase 10.E.3 - `expr? e { ... }`, the handling counterpart to propagation.
+// `expr? e { ... }`, the handling counterpart to propagation.
 //
 // The block runs on the Err path INSTEAD of the expression producing a value,
 // so it has to leave: fall out the bottom and the binding the `?` feeds would
@@ -2039,7 +2038,7 @@ function resolveTryHandler(node, operandType, scope, ctx) {
   return setType(node, strippedVariantOkType(operandType));
 }
 
-// Phase 10.E.2 - `expr? "context"`. Decides HOW the context string reaches
+// `expr? "context"`. Decides HOW the context string reaches
 // the propagated error and stamps the choice onto the node for codegen.
 // Two shapes, in order:
 //
@@ -2110,7 +2109,7 @@ function sourceTypeName(type) {
   return formatType(type);
 }
 
-// Phase 10.F: `waitUntil(h, deadline_ns): WaitResult<T>` - bounded-wait
+// `waitUntil(h, deadline_ns): WaitResult<T>` - bounded-wait
 // counterpart to the `wait` keyword. Recognized by callee name in
 // resolveCall; user-defined `waitUntil` functions are shadowed.
 //
@@ -2188,7 +2187,7 @@ function resolveWaitUntilCall(node, scope, ctx) {
   return setType(node, waitResultType);
 }
 
-// Phase 10.F.2: `cancel(h): void` - external cancellation primitive.
+// `cancel(h): void` - external cancellation primitive.
 // Recognized by callee name in resolveCall; user-defined `cancel`
 // functions are shadowed. The single arg must be a `Task<T>`; the call
 // itself returns void. Codegen lowers to `@yoop_task_cancel(handle_ptr)`.
@@ -2297,7 +2296,7 @@ function resolveSuspendNowCall(node, scope, ctx) {
   return setType(node, VoidType());
 }
 
-// Phase 10.E: look for a `trait Into<T> { function into(ref self): T; }`
+// Look for a `trait Into<T> { function into(ref self): T; }`
 // impl that converts `sourceType` into `targetType`. Returns
 // `{ mangledName, targetType }` (so codegen knows the symbol to call and
 // what to store) or null when no impl matches.
@@ -2311,8 +2310,8 @@ function lookupIntoImpl(sourceType, targetType, ctx) {
   return lookupTraitImplByArg(sourceType, "Into", "into", targetType, ctx);
 }
 
-// Shared by the two `?` conversion lookups (Phase 10.E `Into<T>` and Phase
-// 10.E.2 `WithContext<T>`): find a one-type-arg generic trait impl on
+// Shared by the two `?` conversion lookups (`Into<T>` and
+// `WithContext<T>`): find a one-type-arg generic trait impl on
 // `sourceType` whose single type arg is `targetType`, and return the mangled
 // symbol for `methodName` on it. Returns null on a miss.
 function lookupTraitImplByArg(sourceType, traitName, methodName, targetType, ctx) {
@@ -2392,7 +2391,7 @@ function rootIdentOf(node) {
     : null;
 }
 
-// Phase 7.5: look up an enum type by name. Checks the local variantTable then
+// Look up an enum type by name. Checks the local variantTable then
 // imported names. Returns null when the name isn't an enum.
 export function lookupVariantTypeByName(name, ctx) {
   const tc = ctx.typeContext;
@@ -2408,7 +2407,7 @@ export function lookupVariantTypeByName(name, ctx) {
   return null;
 }
 
-// Phase 10.A: look up a generic enum decl by name. Mirrors lookupVariantTypeByName.
+// Look up a generic enum decl by name. Mirrors lookupVariantTypeByName.
 // Returns the generic decl record (not a Type), or null.
 export function lookupGenericVariantDecl(name, ctx) {
   const tc = ctx.typeContext;
@@ -2424,7 +2423,7 @@ export function lookupGenericVariantDecl(name, ctx) {
   return null;
 }
 
-// Phase 12: look up a value-enum type by name. Mirrors lookupVariantTypeByName.
+// Look up a value-enum type by name. Mirrors lookupVariantTypeByName.
 export function lookupValueEnumByName(name, ctx) {
   const tc = ctx.typeContext;
   if (!tc) return null;
@@ -2439,7 +2438,7 @@ export function lookupValueEnumByName(name, ctx) {
   return null;
 }
 
-// Phase 7.5: look up a union type by name. Mirrors lookupVariantTypeByName.
+// Look up a union type by name. Mirrors lookupVariantTypeByName.
 export function lookupUnionByName(name, ctx) {
   const tc = ctx.typeContext;
   if (!tc) return null;
@@ -2454,14 +2453,14 @@ export function lookupUnionByName(name, ctx) {
   return null;
 }
 
-// Phase 7.5: `Shape.Circle { radius: 5.0 }` - typecheck a variant constructor
+// `Shape.Circle { radius: 5.0 }` - typecheck a variant constructor
 // with a payload. The parser also emits this node for the bare no-payload form
 // `Shape.Empty`, but only after promotion inside resolveFieldAccess.
-// Phase 10.A: if `enumName` resolves to a generic enum decl rather than a
+// If `enumName` resolves to a generic enum decl rather than a
 // concrete VariantType, we can't pick an instantiation without a target type.
 // In statement position we surface "cannot determine type arguments"; the
 // pin path runs through checkInitializer instead.
-// Phase 12: if a value-enum case was already stamped during a prior visit
+// If a value-enum case was already stamped during a prior visit
 // (resolveFieldAccess promotion path), short-circuit so a second resolution
 // pass doesn't re-look-up the name in the variant table and report "unknown
 // enum". A pre-stamped node carries `resolvedValueEnumType`.
@@ -2575,7 +2574,7 @@ function resolveVariantConstructor(node, scope, ctx) {
   return setType(node, enumType);
 }
 
-// Phase 10.A: pin a generic-enum variant constructor to a concrete
+// Pin a generic-enum variant constructor to a concrete
 // instantiation supplied by the target type. Stamps `resolvedVariantType` and
 // `resolvedVariant` from the instantiated (already-substituted) enum so
 // codegen sees concrete field types. Diagnostics mirror the concrete path.
@@ -2671,7 +2670,7 @@ export function checkInitializer(
     pinStructLiteral(valueNode, expectedType, scope, ctx);
     return expectedType;
   }
-  // Phase 10.A: pin a variant constructor whose enum name belongs to a
+  // Pin a variant constructor whose enum name belongs to a
   // generic enum decl and whose target type is a matching instantiation.
   // Bare no-payload variants (fields === null with no stamped enum yet)
   // and payload variants both flow through here.
@@ -2686,7 +2685,7 @@ export function checkInitializer(
       return pinVariantConstructor(valueNode, expectedType, scope, ctx);
     }
   }
-  // Phase 10.A: pre-promote a FIELD_ACCESS of shape `GenericEnum.Variant`
+  // Pre-promote a FIELD_ACCESS of shape `GenericEnum.Variant`
   // (bare no-payload form) before resolveExprType has a chance to error
   // about unpinned generic enums. The promotion stamps a VARIANT_CONSTRUCTOR
   // with `resolvedVariantType` unset; pinVariantConstructor then attaches the
@@ -2916,7 +2915,7 @@ export function resolveCallType(node, sig, scope, ctx) {
     }
   }
 
-  // Phase 9.J: `mustNotShare acrossThreads` enforcement at task-spawn sites.
+  // `mustNotShare acrossThreads` enforcement at task-spawn sites.
   // A call whose return type is a TaskType is the entry point for handing
   // work off to a worker thread; any argument that resolves to a binding
   // carrying a kind with `mustNotShare acrossThreads` cannot flow across the
@@ -2928,7 +2927,7 @@ export function resolveCallType(node, sig, scope, ctx) {
   return setType(node, sig.returnType);
 }
 
-// Phase 9.J: walk a call's args at a task-spawn site and reject any that
+// Walk a call's args at a task-spawn site and reject any that
 // resolve to an IDENT (or `ref IDENT`) whose binding carries a kindType with
 // `mustNotShare acrossThreads`. Diagnostics point at the offending arg so the
 // user sees which value is the problem.
@@ -2955,7 +2954,7 @@ function enforceMustNotShareAcrossThreads(node, scope, _ctx) {
   }
 }
 
-// Phase 7.4: trait-qualified call resolution - `Steppable.step(ref b1, ...)`.
+// Trait-qualified call resolution - `Steppable.step(ref b1, ...)`.
 // The trait is looked up by name; the method's first param must be `ref self`
 // and receives a struct (or, inside a generic body, a TypeParamType whose
 // bound matches `trait`). Tags the node with `calleeMangledName` for codegen.
@@ -2978,19 +2977,19 @@ function resolveTraitQualifiedCall(node, trait, methodName, scope, ctx) {
     const canonical = ctx.typeContext.structTable.get(recvType.name);
     if (canonical) recvType = canonical;
   }
-  // Phase 13.B: variants are nominal types that can implement traits.
+  // Variants are nominal types that can implement traits.
   // The variant shell is the canonical mutable object (since 13.A), so
   // no re-fetch is needed - it's the same object every reader sees.
 
-  // Phase 7.4 + 7.1: if the trait reference is generic (e.g. `Container.get`
+  // If the trait reference is generic (e.g. `Container.get`
   // where Container is `trait Container<T>`), resolve it against the
   // receiver's concrete instantiation by name. The receiver's
   // implementsTraits already contains the substituted TraitType with the
   // concrete method sigs.
-  // Phase 9.J: TypeParamType bounds is a list; multi-bound dispatch picks the
+  // TypeParamType bounds is a list; multi-bound dispatch picks the
   // bound matching `trait.name`. Empty bounds = unbounded type-param can't
   // dispatch a trait method.
-  // Phase 13.B: variants share the same implementsTraits surface as
+  // Variants share the same implementsTraits surface as
   // structs; pull from the same slot.
   let resolvedTrait = trait;
   if (trait.isGenericTraitRef) {
@@ -3012,7 +3011,7 @@ function resolveTraitQualifiedCall(node, trait, methodName, scope, ctx) {
     }
   }
 
-  // Phase 9.J: the qualifying trait may inherit `methodName` from an ancestor
+  // The qualifying trait may inherit `methodName` from an ancestor
   // - `BatchIterable.next(...)` where `BatchIterable extends Iterable` and
   // `next` is declared on `Iterable`. Walk the extends chain to find the
   // declaring trait; mangling uses that ancestor's name so dispatch lines up
@@ -3036,11 +3035,11 @@ function resolveTraitQualifiedCall(node, trait, methodName, scope, ctx) {
   }
 
   // Case 1: receiver is a struct or variant implementing the trait.
-  // Phase 9.J: extends chain - a type that implements a sub-trait `Child`
+  // Extends chain - a type that implements a sub-trait `Child`
   // implicitly implements every ancestor; `validateImplBlock` flattens
   // ancestors into `implementsTraits`, so this check still trips when a type
   // implements `Child` and the user qualifies via `Parent.method(...)`.
-  // Phase 13.B: variants share the dispatch surface; same lookup, same
+  // Variants share the dispatch surface; same lookup, same
   // mangling scheme (the variant's moduleId + name + trait + method).
   if (recvType.kind === typeKinds.struct || recvType.kind === typeKinds.variant) {
     const implementsIt = (recvType.implementsTraits ?? []).some(
@@ -3059,13 +3058,13 @@ function resolveTraitQualifiedCall(node, trait, methodName, scope, ctx) {
     node.calleeMethodOf = recvType;
     node.calleeTrait = declaringTrait;
     node.calleeMethodName = methodName;
-    // Phase 9.J: mangle by the declaring trait, not the qualifying trait, so
+    // Mangle by the declaring trait, not the qualifying trait, so
     // `BatchIterable.next(...)` lines up with the `Iterable.next` define.
     node.calleeMangledName = mangleTraitMethod(recvType, declaringTrait.name, methodName);
     return resolveCallWithSig(node, subbedSig, scope, ctx);
   }
 
-  // Phase 9.G - Case 3: receiver is a VTableType for this trait. The call
+  // Case 3: receiver is a VTableType for this trait. The call
   // lowers to an indirect call through the stored function pointer at the
   // method's field slot, with the vtable's ctx passed as the first arg.
   // The trait method's "ref self" lands as the ctx pointer; the function
@@ -3102,8 +3101,8 @@ function resolveTraitQualifiedCall(node, trait, methodName, scope, ctx) {
     return resolveCallWithSig(node, subbedSig, scope, ctx);
   }
 
-  // Case 2 (Phase 7.2): receiver is a TypeParamType whose bound list contains
-  // this trait - or extends it (Phase 9.J).
+  // Case 2: receiver is a TypeParamType whose bound list contains
+  // this trait - or extends it.
   if (recvType.kind === typeKinds.typeParam) {
     const bounds = recvType.bounds ?? [];
     const boundMatchesAncestor = (b) => {
@@ -3127,7 +3126,7 @@ function resolveTraitQualifiedCall(node, trait, methodName, scope, ctx) {
       return setType(node, ErrorType());
     }
     const subbedSig = substituteSelfPlaceholder(methodSig, recvType);
-    // Phase 9.J: tag with the declaring trait so codegen's post-substitution
+    // Tag with the declaring trait so codegen's post-substitution
     // rewrite picks the right mangled symbol when `Child.method(...)` lands on
     // a method declared on `Parent`.
     node.boundMethod = {
@@ -3167,7 +3166,7 @@ function substituteSelfPlaceholder(methodSig, concreteType) {
 // For generic traits (declared as `trait Foo<T>`), returns a placeholder
 // `{ isGeneric: true, name }` - `resolveTraitQualifiedCall` matches it
 // against the receiver's instantiated trait by name.
-// Phase 9.G: VTableName lookup. Mirrors lookupVariantTypeByName / lookupUnionByName
+// VTableName lookup. Mirrors lookupVariantTypeByName / lookupUnionByName
 // - checks the local vtableTable, then imports of nominal types.
 export function lookupVTableByName(name, ctx) {
   const tc = ctx.typeContext;
@@ -3183,14 +3182,14 @@ export function lookupVTableByName(name, ctx) {
   return null;
 }
 
-// Phase 9.G: `VTableName.method(...)` dispatch. Two cases:
+// `VTableName.method(...)` dispatch. Two cases:
 //   - `from(ref x)`: builtin constructor, returns a vtable value.
 //   - `<method>(ref v, ...)`: forwarding form for trait dispatch through
 //     the vtable. Equivalent to `Trait.method(ref v, ...)` where v is a
 //     vtable value, but lets callers use the vtable type as the dispatch
 //     namespace (matches the library-design surface in §8 q1).
 function resolveVTableBuiltinCall(node, vtableType, methodName, scope, ctx) {
-  // Phase 10.K: `VTableName.fromFn(f1, f2, ...)` - build a vtable value
+  // `VTableName.fromFn(f1, f2, ...)` - build a vtable value
   // directly from named functions (one per trait method, in declaration
   // order), skipping the struct + impl boilerplate. The ctx slot is null
   // (the functions are stateless); codegen wraps each in a ctx-dropping
@@ -3270,7 +3269,7 @@ function resolveVTableBuiltinCall(node, vtableType, methodName, scope, ctx) {
   return setType(node, vtableType);
 }
 
-// Phase 10.K: `VTableName.fromFn(f1, f2, ...)`. One named function per trait
+// `VTableName.fromFn(f1, f2, ...)`. One named function per trait
 // method, in declaration order. Each function's FuncType must be assignable
 // to the matching method's function-pointer slot (params + return). Args must
 // be *named functions* (FuncType) - not runtime function-pointer values - so
@@ -3323,7 +3322,7 @@ function lookupTraitByName(name, ctx) {
     const remote = srcEnv?.traitTable.get(imp.exportName);
     if (remote) return remote;
   }
-  // Phase 7.4 + Phase 7.1: generic trait reference at a call site. We can't
+  // Generic trait reference at a call site. We can't
   // resolve the methodSig from the generic shell directly (it carries
   // TypeParamType placeholders), so return a name-only marker. The receiver
   // will carry the concrete instantiated TraitType we'll resolve through.
@@ -3343,7 +3342,7 @@ function lookupTraitByName(name, ctx) {
   return null;
 }
 
-// Phase 7.4: when free-function lookup misses, hint at the trait-qualified
+// When free-function lookup misses, hint at the trait-qualified
 // form if any in-scope trait has a method by that name. Returns a hint string
 // like '`Steppable.step(...)`' or null.
 function traitMethodHint(methodName, ctx) {
@@ -3367,7 +3366,7 @@ function traitMethodHint(methodName, ctx) {
   return `one of: ${candidates.map((t) => `\`${t}.${methodName}(...)\``).join(", ")}`;
 }
 
-// Phase 7.1: look up a generic function decl by name in the local + imported
+// Look up a generic function decl by name in the local + imported
 // generic func tables.
 export function lookupGenericFunc(name, ctx) {
   const tc = ctx.typeContext;
@@ -3382,7 +3381,7 @@ export function lookupGenericFunc(name, ctx) {
   return null;
 }
 
-// Phase 7.1: unify a generic param type against a concrete arg type, filling
+// Unify a generic param type against a concrete arg type, filling
 // the `subst` map (paramName -> Type). Returns true on success, false on
 // conflict. Untyped literals do NOT pin a type param - only concrete types do.
 function unifyAgainstTypeParam(paramType, argType, declId, subst) {
@@ -3452,7 +3451,7 @@ function unifyAgainstTypeParam(paramType, argType, declId, subst) {
     }
     return true;
   }
-  // Phase 10.X.2: walk function-pointer params + return so a type
+  // Walk function-pointer params + return so a type
   // parameter buried inside an FPT-typed field can drive inference
   // (e.g. `KeyOps<K> { hash: (k: K) => uint64 }` constrains K when
   // the user passes a `KeyOps<int32>` to a generic `lookup<K>`).
@@ -3483,7 +3482,7 @@ function unifyAgainstTypeParam(paramType, argType, declId, subst) {
   return true;
 }
 
-// Phase 7.1: handle a call to a generic function. Walks param types against
+// Handle a call to a generic function. Walks param types against
 // arg types to infer the type-arg map, then instantiates the function.
 //
 // `expectedReturnType` (optional): if supplied (typically by `checkInitializer`
@@ -3513,8 +3512,7 @@ function resolveGenericCall(node, generic, scope, ctx, expectedReturnType = null
   // standalone type (resolveOrphanStructLiteral would emit "struct literal
   // has no target type"), but the param's substituted type after
   // unification IS the target. Stash these indices and check them in
-  // the second pass once we know T. See plans/archive/yoopbinder-papercuts.md
-  // Issue 2.
+  // the second pass once we know T.
   const argTypes = [];
   const deferredStructLits = new Set();
   for (let i = 0; i < node.args.length; i++) {
@@ -3570,7 +3568,7 @@ function resolveGenericCall(node, generic, scope, ctx, expectedReturnType = null
     concreteArgs.push(canonicalNominalType(bound, ctx));
   }
 
-  // Phase 7.2 / 9.J: call-site bound check. Runs before instantiation so the
+  // Call-site bound check. Runs before instantiation so the
   // diagnostic points at the call site, not the registry side-channel. With
   // multi-bound type params, every bound must be satisfied - fire one check
   // per bound.
@@ -3677,7 +3675,7 @@ function resolveGenericCall(node, generic, scope, ctx, expectedReturnType = null
 // struct's declared field type, reports duplicates and missing fields,
 // and stamps the literal node with its resolved type.
 export function pinStructLiteral(litNode, targetType, scope, ctx) {
-  // Phase 7.5: a union literal looks identical to a struct literal in source
+  // A union literal looks identical to a struct literal in source
   // (`Color { rgba: 0x...}`), but only one field may be named.
   if (targetType.kind === typeKinds.union) {
     if (litNode.fields.length === 0) {

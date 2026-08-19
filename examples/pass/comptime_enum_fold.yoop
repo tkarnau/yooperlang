@@ -1,9 +1,9 @@
-// Phase 11.B.13: enum variant construct + switch lowering for the
+// Enum variant construct + switch lowering for the
 // comptime interpreter. The interpreter builds a wrapped enum value
 // for `Shape.Circle { radius: 4 }` and dispatches `switch` arms via a
 // tag-equality chain, binding payload fields as locals in each arm.
 //
-// Note on coverage today: the *consumer* folds (functions that read
+// Note on coverage: the *consumer* folds (functions that read
 // previously-folded enum constants via the moduleConsts table) fold
 // to literal LLVM globals. The *producer* enum constants themselves
 // stay as `zeroinitializer` because encoding an enum's variant
@@ -36,8 +36,8 @@ function area_doubled(s: Shape): int32 {
 }
 
 // Module-level enum constants - emitted as zeroinitializer + runtime
-// module_init for now (the interpreter fold succeeds but the LLVM
-// constant encoding for enum payloads isn't wired yet).
+// module_init (the interpreter fold succeeds, but there is no LLVM
+// constant encoding for enum payloads).
 const C: Shape = Shape.Circle { radius: 4 };
 const S: Shape = Shape.Square { side: 5 };
 const T: Shape = Shape.Triangle;

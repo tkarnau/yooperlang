@@ -1,14 +1,14 @@
 // The same allocator-context bug, with no async code anywhere in sight.
 //
 // `yoop_task_wait` drains the run queue re-entrantly on the CALLING thread,
-// so that a nested wait chain cannot deadlock the pool (Phase 9.I). The
+// so that a nested wait chain cannot deadlock the pool. The
 // consequence is that a plain synchronous function holding an arena will run
 // whatever task it happens to pop INSIDE its own region - and everything that
 // task allocated is reclaimed the moment the arena scope ends.
 //
-// So arenas and tasks were already incompatible in straight-line code, before
-// anybody wrote `async`. The fix is the same one: run_task_step installs the
-// task's own allocator context around the step and restores the caller's
+// So arenas and tasks collide in straight-line code too, with no `async`
+// anywhere in the program. The remedy is the same one: run_task_step installs
+// the task's own allocator context around the step and restores the caller's
 // afterwards, whichever thread the step runs on.
 //
 // Pinned to ONE worker with that worker parked inside a blocking sleep, so
