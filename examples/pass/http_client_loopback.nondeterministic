@@ -1,0 +1,13 @@
+The server task and the client task both print, and nothing orders them against
+each other. `serveDefault(..., 2)` returns once it has ACCEPTED two connections
+and prints `server done served=2` from the server task, while the client task is
+still awaiting the second response - so that line may land either between the two
+`status=` lines or after both.
+
+Measured rather than assumed: 60 unloaded runs all produced one order, and 60
+runs with eight busy cores alongside produced the other order 5 times. An
+expectation pinning either one is a test that fails a few percent of the time on
+a loaded CI machine.
+
+The socket-free halves of the same behaviour are asserted by http_no_socket,
+http_parse_smoke and http_url_smoke, which have no second thread to race.

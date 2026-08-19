@@ -1,0 +1,6 @@
+mid.len=3 mid[0]=20 mid[1]=30 mid[2]=40
+tail.len=3 tail[0]=40 tail[2]=60
+head.len=3 head[0]=10 head[2]=30
+all.len=6
+xs[1]=99
+exit=0

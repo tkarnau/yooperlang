@@ -119,9 +119,18 @@ check on a change, and say so when you do.
 
 ## Run / test
 
-- `npm test` - all tests (unit + e2e). Currently 1267 tests, ~50s.
+- `npm test` - all tests (unit + e2e). Currently 1627 tests, ~55s.
 - `npm run test:unit` - fast, no clang.
 - `npm run test:e2e` - full pipeline, requires `clang` on PATH.
+- `npm run test:pass` - the PROGRAM corpus: every example under
+  `examples/pass/` and `examples/tour/` built and run with the bootstrap and
+  checked against a hand-written `.expected` beside it (stdout, then `exit=N`).
+  This is the absolute twin of `scripts/probe_programs.sh`, which only ever said
+  the two compilers AGREE. **Never capture a `.expected` from compiler output** -
+  write it from what the program should do. A program whose output is not
+  determined by the program gets a `<name>.nondeterministic` marker saying why,
+  and "it looked stable over a few runs" is not a reason: two of the six
+  exclusions there passed until they were stress-tested under load.
 - **If the machine feels slow after a day of suite runs, look for ORPHANS before
   rebooting:**
 

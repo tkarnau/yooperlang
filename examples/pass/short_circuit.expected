@@ -1,0 +1,12 @@
+false && _ ran 1 side(s)
+true || _ taken
+true || _ ran 1 side(s)
+true && true taken
+true && _ ran 2 side(s)
+null guard ok
+bounds guard ok
+underflow guard ok
+or guard ok
+nested=true
+loop guard ok, steps=1
+exit=0

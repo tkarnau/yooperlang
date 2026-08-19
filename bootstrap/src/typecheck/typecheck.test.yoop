@@ -5702,6 +5702,93 @@ suite function aTrailingBlockNeedsAKindThatOwnsOne(): void {
   }
 }
 
+// The same propagation rule reached through the field's TYPE rather than
+// through a kind written in front of it. This is the far more common shape:
+// nobody writes `disposable` on a `Vec` field, and the vector still has to be
+// freed by somebody.
+//
+// The refcounted kind is DECLARED here rather than imported, because
+// checkSource builds a single-module graph with no std - so `Program.refcountedKind`
+// is empty unless the source under test fills it, and a test that assumed std
+// would be asserting on a check that had silently switched itself off.
+suite function aFieldsTypeCarriesItsKindIntoTheHolder(): void {
+  const MAIN: string = "\nfunction main(): int32 { return 0; }";
+  const KIND: string =
+    "trait Shared { function retain(ref self): void; }\nkind pooled { appliesTo binding parameter field; requires Shared; refcounted retain release; }\n";
+  const HELD: string =
+    "trait Disposable { function dispose(ref self): void; }\nkind held { appliesTo binding field; requires Disposable; mustCall dispose beforeScopeEnd; }\ntype R implements Disposable propagates<held> { fd: int32, function dispose(ref self): void { } }\n";
+
+  // A task handle is the base case: a compiler type with no declaration to hang
+  // a `propagates<>` on, so it carries the refcounted kind by being the storage
+  // discipline that kind asked for.
+  let taskUnheld = checkSource(`${KIND}type Job { work: Task<int32>, }${MAIN}`);
+  let test theory: Case = t.asserts("a Task field in a type that propagates nothing is refused") {
+    theory.isSuccessful = diagnosticsMention(ref taskUnheld, "carrying kind \"pooled\"");
+    theory.detail = `wanted a pooled propagation refusal, got: ${firstDiagnostic(ref taskUnheld)}`;
+  }
+
+  let taskHeld = checkSource(`${KIND}type Job propagates<pooled> { work: Task<int32>, }${MAIN}`);
+  let test theory: Case = t.asserts("a Task field in a type that propagates pooled checks clean") {
+    theory.isSuccessful = taskHeld.diagnostics.len == 0;
+    theory.detail = `a propagated Task field reported: ${firstDiagnostic(ref taskHeld)}`;
+  }
+
+  // Without a refcounted kind anywhere in the graph there is no name to report,
+  // so the check stands down rather than inventing one. This is what makes the
+  // std-less unit graph safe to run the rest of these in.
+  let noKind = checkSource(`type Job { work: Task<int32>, }${MAIN}`);
+  let test theory: Case = t.asserts("a Task field is accepted when the graph declares no refcounted kind") {
+    theory.isSuccessful = noKind.diagnostics.len == 0;
+    theory.detail = `wanted silence with no refcounted kind, got: ${firstDiagnostic(ref noKind)}`;
+  }
+
+  // The ordinary case, and the one the compiler's own source is full of: the
+  // field's type propagates, so its holder has to.
+  let ownedUnheld = checkSource(`${HELD}type W { r: R, }${MAIN}`);
+  let test theory: Case = t.asserts("a field whose type propagates a kind the holder does not is refused") {
+    theory.isSuccessful = diagnosticsMention(ref ownedUnheld, "which \"W\" does not propagate");
+    theory.detail = `wanted a propagation refusal, got: ${firstDiagnostic(ref ownedUnheld)}`;
+  }
+
+  let ownedHeld = checkSource(`${HELD}type W propagates<held> { r: R, }${MAIN}`);
+  let test theory: Case = t.asserts("a field whose type propagates a kind the holder also propagates checks clean") {
+    theory.isSuccessful = ownedHeld.diagnostics.len == 0;
+    theory.detail = `a propagated field type reported: ${firstDiagnostic(ref ownedHeld)}`;
+  }
+
+  // The chain is established one declaration at a time rather than by a walk,
+  // so the holder of a holder has to say so too.
+  let chain = checkSource(`${HELD}type W propagates<held> { r: R, }\ntype Outer { w: W, }${MAIN}`);
+  let test theory: Case = t.asserts("propagation is transitive - the holder of a holder has to propagate too") {
+    theory.isSuccessful = diagnosticsMention(ref chain, "which \"Outer\" does not propagate");
+    theory.detail = `wanted a transitive refusal, got: ${firstDiagnostic(ref chain)}`;
+  }
+
+  // Pass A stamps the `propagates<>` word on the shell, so the field type does
+  // not have to be declared first.
+  let forward = checkSource(`${HELD}type Outer { r: R, }${MAIN}`);
+  let test theory: Case = t.asserts("a field type declared after its holder is still read") {
+    theory.isSuccessful = diagnosticsMention(ref forward, "which \"Outer\" does not propagate");
+    theory.detail = `wanted a forward-reference refusal, got: ${firstDiagnostic(ref forward)}`;
+  }
+
+  // Both halves fire on one field otherwise, and one mistake is one
+  // diagnostic.
+  let written = checkSource(`${HELD}type W { held r: R, }${MAIN}`);
+  let test theory: Case = t.asserts("a field that WRITES the kind its type carries is reported once") {
+    theory.isSuccessful = written.diagnostics.len == 1;
+    theory.detail = `wanted exactly one diagnostic, got ${written.diagnostics.len}: ${firstDiagnostic(ref written)}`;
+  }
+
+  // A variant CASE payload is deliberately outside the rule - the reference
+  // accepts it and the corpus is written against that.
+  let variantCase = checkSource(`${HELD}variant Slot { Held { r: R }, Empty }${MAIN}`);
+  let test theory: Case = t.asserts("a variant case payload carrying a kind is accepted") {
+    theory.isSuccessful = variantCase.diagnostics.len == 0;
+    theory.detail = `a variant payload reported: ${firstDiagnostic(ref variantCase)}`;
+  }
+}
+
 suite function aFieldsKindHasToBePropagatedByItsType(): void {
   const MAIN: string = "\nfunction main(): int32 { return 0; }";
   const KIND: string =

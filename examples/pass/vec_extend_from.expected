@@ -1,0 +1,4 @@
+from_array len=3 cap=3 sum=60
+extend len=5 cap=5 last=50
+empty len=3 cap=3 first=10
+exit=0

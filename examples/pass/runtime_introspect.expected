@@ -1,0 +1,8 @@
+cpus>0: true
+setWorkerCount(2): true workers=2
+counter=5000
+afterSet+Sub=60
+cas first=true second=false observed=61
+rss>0: true
+monotonic: true
+exit=0

@@ -1,0 +1,9 @@
+method=GET path=/hello version=HTTP/1.1 cl=0 host=localhost
+query name=yoop
+bad-method : 501 unsupported method "BREW"
+bad-version: 505 unsupported HTTP version "HTTP/9.9"
+bad-length : 400 Content-Length is not a number
+chunked    : accepted chunked=true
+both-framings: 400 message has both Transfer-Encoding and Content-Length
+encoded-sep: 400 decoding request path "/a%2Fb": encoded path separator is not allowed
+exit=0

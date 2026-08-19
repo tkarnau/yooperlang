@@ -417,9 +417,11 @@ function fillStructFields(
     }
     const carried = carriedKindNameOf(ref ast, fieldNode.childA);
     checkFieldKindUse(ref prog, ref ast, declNode, fieldNode, carried);
+    const fieldType = resolveTypeAnnotation(ref prog, ref tm, ref ast, fieldNode.childA);
+    checkFieldTypeKindUse(ref prog, ref ast, declNode, fieldNode, fieldType, carried);
     vec.vecPush(ref fields, {
       name: fieldNode.name,
-      typeId: resolveTypeAnnotation(ref prog, ref tm, ref ast, fieldNode.childA),
+      typeId: fieldType,
       carriedKind: carried,
     });
     f += 1;

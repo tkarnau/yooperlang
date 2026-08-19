@@ -1,0 +1,14 @@
+The program races four clients against a server whose accept cap is two, and
+which of the two over-cap connections gets a 503 rather than a TCP reset is the
+kernel's choice, not the program's. When the listen backlog drops the connection
+first, the client prints `client N err 500 reading the response head: Connection
+reset by peer` and `refusedSeen` comes back false instead of true.
+
+Measured rather than assumed: 25 runs with eight busy cores alongside produced
+the reset form twice, once for one client and once for two. It is also why
+`npm test` failed intermittently before this marker existed - the suite runs in
+parallel with src/e2e.test.js, which is load enough.
+
+The cap accounting itself is stable (`peak=2`, `rejected=2`,
+`accepted+rejected=4`, `drained=true` in every run); it is only the REASON the
+over-cap client failed that moves.

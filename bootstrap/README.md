@@ -55,7 +55,8 @@ a shared header file.
                        kinds.yoop is what a `kind` DECLARATION is allowed to
                        say - sites, effect categories, composition, and the
                        two clauses that name a trait, kind_use.yoop where one
-                       may be WRITTEN, clearance.yoop who may move a value
+                       may be WRITTEN and where a field's TYPE carries one into
+                       its holder, clearance.yoop who may move a value
                        across a marker, and markers.yoop what a value CARRIES
                        at every place it moves;
                        vtable*.yoop is type ERASURE - what a vtable's slots are

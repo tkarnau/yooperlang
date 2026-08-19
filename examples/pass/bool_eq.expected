@@ -1,0 +1,8 @@
+t!=f
+t==t
+f==f
+t==true
+!(t==f)
+agree(f,f)
+same=true diff=false
+exit=0

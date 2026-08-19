@@ -212,6 +212,80 @@ export function checkFieldKindUse(
   }
 }
 
+// ----- a kind arriving through a field's TYPE --------------------------------
+
+// `work: Task<int32>` inside `type Job { ... }` - the same propagation rule as
+// above, reached from the other direction.
+//
+// checkFieldKindUse reads a kind the field WRITES. This reads one the field's
+// TYPE already carries, which is the far more common way an obligation gets
+// into a struct: nobody writes `disposable` in front of a `Vec<int32>` field,
+// and the vector still has to be freed by somebody.
+//
+// The rule is the reference's and it is transitive by construction, because the
+// carried kind is read off the field type's own `propagates<>`: a `Vec` field
+// makes its holder propagate `disposable`, and a field of THAT holder makes its
+// holder propagate it too. Nothing walks - each link is one comparison, and the
+// chain is established one declaration at a time.
+//
+// A `Task<T>` is the base case and the reason `Program.refcountedKind` exists.
+// It is a compiler type with no declaration to hang a `propagates<>` clause on,
+// so it carries its kind by being the storage discipline the kind asked for
+// rather than by naming it.
+//
+// TWO DELIBERATE LIMITS, both matching the reference:
+//
+//   Only a STRUCT field. A variant CASE payload holding a `Vec` is accepted, by
+//   the reference and so by this. The hazard is the same one and the carve-out
+//   is not principled; it is what the corpus is written against, and widening a
+//   refusal is not a thing to do from inference.
+//
+//   A field whose type is not yet POPULATED reads as carrying nothing. Pass A
+//   stamps the `propagates<>` word on the shell, so a forward reference within
+//   the graph is answered correctly; what is left unanswered is a type whose
+//   shell pass A never reached, and that file has a bigger problem than this.
+export function checkFieldTypeKindUse(
+  ref prog: Program,
+  ref ast: AST,
+  declNode: ASTNode,
+  fieldNode: ASTNode,
+  fieldTypeId: TypeId,
+  carried: string
+): void {
+  const held = heldKindOfType(ref prog, fieldTypeId);
+  if (held.len == 0) {
+    return;
+  }
+  // The field WROTE the kind, so checkFieldKindUse already had this out with
+  // it. Reporting again would name the same field twice for one mistake.
+  if (str.stringEq(held, carried)) {
+    return;
+  }
+  if (str.stringEq(propagatedKindNameOf(ref ast, declNode), held)) {
+    return;
+  }
+  reportError(
+    ref prog,
+    `field "${fieldNode.name}" holds a value carrying kind "${held}", which "${declNode.name}" does not propagate - write "propagates<${held}>" on the type, or the obligation has no holder`,
+    fieldNode.sourceLoc
+  );
+}
+
+// The kind a VALUE of this type carries, or "".
+//
+// A task handle answers with the refcounted kind's name; everything else
+// answers with its own `propagates<>` clause. Deliberately NOT recursive: see
+// the transitivity note above.
+function heldKindOfType(ref prog: Program, typeId: TypeId): string {
+  if (typeId == TYPE_ERROR_ID) {
+    return "";
+  }
+  if (isTaskType(ref prog, typeId)) {
+    return prog.refcountedKind;
+  }
+  return propagatedKindOf(ref prog, typeId);
+}
+
 // `type S propagates<bogus>` - the clause has to name a kind that exists.
 //
 // Read here rather than where `propagatesKind` is stamped, because the stamp is

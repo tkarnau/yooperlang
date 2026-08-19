@@ -1,0 +1,6 @@
+The output is the environment's, not the program's: every line prints the value
+of YOOP_E2E_SET / YOOP_E2E_EMPTY / YOOP_E2E_UNSET_VAR as the process actually
+received them. The fixture only demonstrates what it is for - set vs explicitly
+empty vs never set - when the first two are exported, which src/e2e.test.js does
+and this suite does not, and any expectation written for the all-unset case
+would still be falsified by a shell that happens to export either name.

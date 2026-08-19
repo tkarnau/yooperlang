@@ -315,22 +315,64 @@ Three smaller findings, all worth fixing on their own:
   * INTERNAL MODULE IDS LEAK into user-facing messages: `module m_3 has no
     export "nope"`. The `_3` is a graph id, not anything the user wrote.
 
-### A7. A kind-propagation check the bootstrap does not make (found while doing A2)
+### A7. A kind-propagation check the bootstrap does not make - DONE
 
 The reference refuses
 
     type Job { work: Task<int32> }
 
 with `field 'work' carries kind 'pooled' but enclosing struct 'Job' does not
-propagate it`. The bootstrap ACCEPTS it, and emits no retain for the field
-store - so the handle in the struct has no count of its own and the spawning
-scope's release is the last one.
+propagate it`. The bootstrap ACCEPTED it, and emitted no retain for the field
+store - so the handle in the struct had no count of its own and the spawning
+scope's release was the last one. This was the bootstrap accepting MORE than the
+reference, the unsafe direction and the opposite of every other divergence in
+this document.
 
-This is the bootstrap accepting MORE than the reference, which is the unsafe
-direction and the opposite of every other divergence in this document. It is
-NOT what A2 named and it does not block anything - no corpus program writes it,
-which is why the probes never saw it. The fix is a check rather than a
-lowering: refuse it the way the reference does.
+Measured while fixing it, the gap was WIDER than the one line above. The rule is
+not about `Task<T>`; it is about any field whose TYPE carries a kind, and the
+bootstrap made none of it:
+
+    type Outer { j: Job }        // Job propagates<pooled>
+    type Outer { r: Res }        // Res propagates<disposable>
+    type Holder { xs: Vec<int32> }   // Vec propagates<disposable>
+
+All three are refused by the reference and were accepted by the bootstrap. The
+third is the shape that actually occurs: nobody writes `disposable` in front of
+a `Vec` field, and the vector still has to be freed by somebody. The compiler's
+own `Program` propagates `disposable` for exactly this reason.
+
+The check is `checkFieldTypeKindUse` in `typecheck/kind_use.yoop`, called from
+pass C's field walk where the field's resolved TypeId is already in hand. It is
+the type-side twin of `checkFieldKindUse`, which reads a kind the field WRITES,
+and the two are kept from reporting the same field twice.
+
+TRANSITIVITY IS BY CONSTRUCTION, not by a walk. The carried kind is read off the
+field type's own `propagates<>` clause, so a `Vec` field makes its holder
+propagate `disposable`, and a field of THAT holder has to propagate it too -
+each link is one comparison, established one declaration at a time. A forward
+reference is answered correctly because pass A stamps the `propagates<>` word on
+the shell.
+
+`Task<T>` is the base case and the reason `Program.refcountedKind` now exists:
+it is a compiler type with no declaration to hang a clause on, so it carries its
+kind by BEING the storage discipline the kind asked for. The name is recorded at
+`registerKind`, first registration wins, the same rule the kind registry itself
+follows. A graph declaring no refcounted kind has no name to report, so the
+check stands down rather than inventing one - which is what keeps the std-less
+unit-test graph honest.
+
+TWO DELIBERATE LIMITS, both matching the reference. A variant CASE payload
+holding a kind-carrying type is accepted; the hazard is the same one and the
+carve-out is not principled, but it is what the corpus is written against and
+widening a refusal from inference is not a thing to do. And the field's type has
+to be populated, which pass A guarantees for anything in the graph.
+
+ONE DIVERGENCE, and the bootstrap is right: the reference points the diagnostic
+at the TYPE declaration, the bootstrap at the FIELD. A type may have several
+offending fields and the field is the token to fix.
+
+Covered by 9 unit tests in `typecheck/typecheck.test.yoop` and by
+`examples/fail/field_task_not_propagated`.
 
 ### A3. Keyword member names (1 file) - DONE
 
@@ -612,7 +654,11 @@ undo step - deleting `src/` - comes last and comes with everything it needs.
   6. THE REMAINING DRIVER FLAGS (C): `--track-heap`, `--warn-disposable`,
      `--warn-std`, `--dump-ast-json`, `--list-attributes`.
   7. THE `.expected` CORPUS (E, decision 4), and the diagnostic fixture harness
-     for `examples/fail/`.
+     for `examples/fail/`. THE CORPUS IS DONE - `src/pass.test.js`
+     (`npm run test:pass`), 242 hand-written expectations over the 248 programs
+     in `examples/pass/` and `examples/tour/`, 6 excluded with a stated reason.
+     See the section below. The `examples/fail/` harness exists
+     (`src/fail.test.js`) and is at 69 of 140.
   8. PORT THE REMAINING JS UNIT-TEST COVERAGE to Yoop unit tests, subsystem by
      subsystem, deleting each JS file only once its counterpart exists.
   9. REPOINT THE TOOLING (F): `gen_web.mjs`, `gen_std_index.mjs`, the CI job.
@@ -622,6 +668,73 @@ undo step - deleting `src/` - comes last and comes with everything it needs.
 
 Steps 5 and 6 do not depend on step 4 and can move if it is convenient. Step 11
 is deliberately after the deletion, per decision 3.
+
+## The `.expected` corpus (step 7)
+
+DONE. `src/pass.test.js`, run by `npm run test:pass`, compiles every program
+under `examples/pass/` and `examples/tour/` with the BOOTSTRAP, runs it, and
+asserts its stdout and exit code against a hand-written `.expected` beside it.
+242 of 248 ported, 6 excluded, 0 left.
+
+This is what replaces `scripts/probe_programs.sh`, and the difference is the
+point: the probe builds each program with BOTH compilers and diffs the two runs
+against each other, which passes happily when both are wrong the same way. The
+expectations here were derived by READING each program, so they say what the
+program should do rather than what some compiler did.
+
+WHAT IT FOUND. No miscompiles - 242 independently derived expectations and the
+bootstrap matched every one. That is a real result and it is only a result
+because the expectations were not captured; a captured corpus reports zero
+miscompiles by construction.
+
+What it did find is that `examples/pass/` was partly documenting the WRONG
+compiler. Several programs carry a trailing `// expected output:` comment and a
+number of those record the JS reference's behaviour: `float_literal.yoop` claims
+`x=3.140000`, but `${float}` renders through `%g` (`runtime/yoop_format.c`,
+deliberately - see `bootstrap/src/codegen/template.yoop`), so the answer is
+`x=3.14`. Same class in `casts`, `heap_alloc_struct`, `module_init_folded`,
+`at_precompile_externs`, `traits_multi_impl`, `runtime_introspect`. Those
+comments are a hint to check, never a source to copy.
+
+THE SIX EXCLUSIONS each carry a `<name>.nondeterministic` marker whose contents
+state why; the suite asserts that a marker is never empty and that nothing has
+both a marker and an expectation.
+
+  `env_vars`              the output is the environment's, not the program's
+  `async_yield_smoke`     two tasks woken on two fds; the order is the
+                          scheduler's, and the program's own comment says so
+  `hello_server`,         neither terminates - each binds a port and blocks in
+  `http_router`           accept for a client the suite never supplies
+  `http_client_loopback`  the server task's `server done served=2` and the
+                          client task's second `status=` line are not ordered
+                          against each other
+  `http_concurrent`       whether an over-cap connection gets a 503 or a TCP
+                          reset is the kernel's choice
+
+The last two were NOT identified by reading; they were written as expectations,
+passed, and were caught by stress-testing. `http_client_loopback` held one order
+in 60 unloaded runs and flipped in 5 of 60 with eight busy cores alongside;
+`http_concurrent` flipped in 2 of 25 the same way, and was failing `npm test`
+intermittently because that suite runs in parallel with `src/e2e.test.js`, which
+is load enough. A "verified stable over repeated runs" expectation is an
+empirical claim about a machine, not a property of the program, and the corpus
+is where that distinction has to be made.
+
+TWO HARNESS RULES the corpus needed:
+
+  stderr is NOT compared. These programs write results to stdout; stderr carries
+  the runtime's own diagnostics, which is not what the program asserts.
+
+  every program runs in its OWN directory, with any non-source file beside it
+  staged in. Without it a program writing a relative path writes into the REPO
+  (`fs_metadata` left a `yoop_fs_meta_test.bin` in the working tree), and worse,
+  `src/e2e.test.js` runs some of the same programs from the same cwd in a test
+  file node runs in PARALLEL - two runs of `fs_metadata` then create, stat and
+  delete one file and whichever loses reports a size for a file the other
+  removed. Staging is also what `language_showcase` needs to be portable at all.
+
+`npm test` picks the suite up through its `src/**/*.test.js` glob. `test:unit`
+excludes it by name, because that target is documented as fast and clang-free.
 
 ## Verification
 

@@ -236,6 +236,15 @@ export type Program propagates<disposable> {
   // declared in std/core/kinds.yoop with nothing linking the two files. The JS
   // reference has the same registry for the same reason.
   kinds: Map<string, KindInfo>,
+  // The name of the kind whose declaration carries `refcounted`, or "".
+  //
+  // Recorded at registration because a `Task<T>` is the one type that carries a
+  // kind WITHOUT naming it: it is a compiler type with no declaration to hang a
+  // `propagates<>` on, so the only way to say which kind a task handle holds is
+  // to name the kind that asked for the storage discipline it has. First
+  // registration wins, the same rule `kinds` itself follows; std declares
+  // exactly one (`pooled`).
+  refcountedKind: string,
   // Type names carrying `@derive(display)`, anywhere in the graph. The
   // attribute parses and is unwrapped, but generating its `toString` is not
   // built yet, so this exists purely so the refusal can say WHY a type that
@@ -445,6 +454,7 @@ export function initProgram(): Program propagates<disposable> {
     callWasAwaited: false,
     currentFn: "",
     kinds: kinds,
+    refcountedKind: "",
     taskSymbols: taskSymbols,
     derivedDisplay: derivedDisplay,
     intrinsics: intrinsics,
@@ -709,6 +719,9 @@ export function registerKind(ref prog: Program, info: KindInfo): void {
   }
   let stamped = info;
   stamped.markerBit = assignMarkerBit(ref prog, info);
+  if (stamped.refcounted && prog.refcountedKind.len == 0) {
+    prog.refcountedKind = stamped.name;
+  }
   map.mapInsert(ref prog.kinds, stamped.name, stamped);
 }
 

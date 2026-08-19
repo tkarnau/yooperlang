@@ -1,0 +1,8 @@
+plain     scheme=http host=example.com port=80 target=/
+with-port scheme=http host=example.com port=8080 target=/foo
+https     scheme=https host=api.example.com port=443 target=/v1?x=1
+ipv6      scheme=http host=::1 port=18080 target=/
+no-host   err=parseUri: empty authority
+no-scheme err=parseUri: missing "://"
+bad-port  err=parseUri: trailing garbage in port
+exit=0

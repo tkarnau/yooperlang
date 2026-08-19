@@ -1,0 +1,19 @@
+build [hello, world] len=12
+grow len=1000 viewLen=1000
+utf8 bytes=10 chars=4
+chars 65 233 8364 128512
+charAt1=233 offsetOfChar3=6
+replaceChar bytes=8 chars=4
+subChars bytes=5 chars=2
+subBytes rejected
+query 1 1 1 1 4
+replaceAll [a==b==c==d]
+upper [MIXED CASE]
+trim [padded]
+join [one, two, three]
+padStart [0007]
+reuse [reused] len=6
+display [reused]
+parseInt -1234
+parseInt rejected
+exit=0

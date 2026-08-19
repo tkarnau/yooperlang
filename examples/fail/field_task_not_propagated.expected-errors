@@ -1,0 +1,7 @@
+# Illegal: a `Task<T>` field is a refcounted handle and `Job` propagates
+# nothing, so the count the field holds is nobody's to release.
+#
+# The bootstrap points at the FIELD; the reference points at the type
+# declaration. The field is the offending token and there may be several in one
+# type, so the bootstrap's location is the better of the two.
+8:5: holds a value carrying kind "pooled"

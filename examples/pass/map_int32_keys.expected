@@ -1,0 +1,6 @@
+len=3
+get 2 -> beta
+get 99 -> <none>
+removed 2 -> 1 len=2
+contains 3 -> 1
+exit=0

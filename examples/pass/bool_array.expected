@@ -1,0 +1,8 @@
+flags.len=4 flags[0]=true flags[1]=false
+flags[1]=true
+zero is true
+three is false
+count=3
+heap=true,false,true
+vec=true,false,true vlen=3
+exit=0

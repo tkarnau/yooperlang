@@ -1,0 +1,4 @@
+p.type=7 p.kind=3
+t==Tag.kind
+type variant, kind=42
+exit=0
