@@ -175,7 +175,7 @@ $(node scripts/seed.mjs) examples/intro/hello.yoop -o /tmp/hello && /tmp/hello
 
 ```bash
 npm install       # test runner deps only
-npm test          # every Node-driven suite: 467 tests, needs clang
+npm test          # every Node-driven suite: 468 tests, needs clang
 npm run test:unit # fast, needs no seed
 npm run test:e2e  # the suites that build and run programs, needs clang
 ```

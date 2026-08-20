@@ -144,7 +144,7 @@ check on a change, and say so when you do.
 
 ## Run / test
 
-- `npm test` - every Node-driven suite. 467 tests, about two minutes. Needs
+- `npm test` - every Node-driven suite. 468 tests, about two minutes. Needs
   `clang` and a seed.
 - `npm run test:unit` - fast, needs no seed: the C runtime's own tests, the std
   index check, and the stage comparison the fixpoint is decided by. The last of

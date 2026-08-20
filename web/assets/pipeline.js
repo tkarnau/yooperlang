@@ -143,7 +143,7 @@
   function stageLex(sample) {
     const src = makeSourceView(sample.source, {
       name: sample.file,
-      hint: "hover either side",
+      hint: "hover or tap either side",
     });
 
     const list = el("div", { class: "token-list" });
@@ -160,10 +160,14 @@
         }),
         el("span", { class: "token-pos", text: `@${tok.pos}+${tok.len}` }),
       ]);
-      row.addEventListener("mouseenter", () => {
+      // Click as well as hover: a phone has no pointer, and the panes are
+      // stacked there rather than side by side.
+      const show = () => {
         src.highlight(tok.pos, tok.len, true);
         markRow(row);
-      });
+      };
+      row.addEventListener("mouseenter", show);
+      row.addEventListener("click", show);
       rows.push({ row, tok });
       list.appendChild(row);
     });
@@ -195,10 +199,7 @@
     const right = el("div", { class: "pane-col" }, [
       el("div", { class: "pane-head" }, [
         el("strong", { text: `${sample.tokens.length} tokens` }),
-        el("span", {
-          class: "muted small",
-          text: "tag, text, byte offset and length - exactly what --dump-tokens prints",
-        }),
+        el("span", { class: "muted small", text: "hover or tap to line one up with the source" }),
       ]),
       list,
     ]);
@@ -233,7 +234,7 @@
   function stageParse(sample) {
     const src = makeSourceView(sample.source, {
       name: sample.file,
-      hint: "hover a node",
+      hint: "hover or tap a node",
     });
 
     const tree = el("div", { class: "ast-tree" });
@@ -261,9 +262,9 @@
       if (node.loc) {
         summary.dataset.pos = String(node.loc.pos);
         summary.dataset.len = String(node.loc.length || 0);
-        summary.addEventListener("mouseenter", () => {
-          src.highlight(node.loc.pos, node.loc.length || 1, true);
-        });
+        const show = () => src.highlight(node.loc.pos, node.loc.length || 1, true);
+        summary.addEventListener("mouseenter", show);
+        summary.addEventListener("click", show);
       }
 
       details.appendChild(summary);
@@ -284,10 +285,7 @@
     const right = el("div", { class: "pane-col" }, [
       el("div", { class: "pane-head" }, [
         el("strong", { text: `${count} nodes` }),
-        el("span", {
-          class: "muted small",
-          text: "the tree --dump-ast-json writes; braces and semicolons became structure",
-        }),
+        el("span", { class: "muted small", text: "hover or tap to line one up with the source" }),
       ]),
       tree,
     ]);
@@ -299,15 +297,6 @@
 
   function stageCodegen(sample) {
     const wrap = el("div");
-    wrap.appendChild(
-      el("p", {
-        class: "lede",
-        text:
-          "LLVM IR as text, straight from --keep-ir. Only this module's own definitions are " +
-          "shown: a hello world links the whole standard-library prelude, and the rest of " +
-          "that file is code nobody in this program wrote.",
-      }),
-    );
     wrap.appendChild(
       codeBlock(sample.ir.text, {
         name: "yooper_out.ll (this module's definitions)",
@@ -326,13 +315,12 @@
       ]),
     );
     wrap.appendChild(
-      el("p", { class: "muted small" }, [
-        "Debug metadata references were stripped for readability. Everything else is verbatim, " +
-          "including the mangled names: a symbol carries its module id so two modules can both " +
-          "declare a ",
-        el("code", { text: "main" }),
-        "-adjacent helper without colliding at link time.",
-      ]),
+      el("p", {
+        class: "muted small",
+        text:
+          "This module's own definitions only, with the debug metadata stripped. The rest of " +
+          "the .ll is the standard-library prelude.",
+      }),
     );
     return wrap;
   }
@@ -350,15 +338,6 @@
     );
     wrap.appendChild(
       termBlock(sample.output, { label: `./${base}`, exitCode: sample.exitCode }),
-    );
-    wrap.appendChild(
-      el("p", { class: "muted small" }, [
-        "The executable lands next to the source with the extension stripped, and it is an " +
-          "ordinary native binary: no runtime to install, no VM, nothing to ship alongside it " +
-          "except the C libraries your ",
-        el("code", { text: "extern" }),
-        " blocks asked for.",
-      ]),
     );
     return wrap;
   }

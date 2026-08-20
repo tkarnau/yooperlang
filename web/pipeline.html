@@ -28,6 +28,8 @@
       <a href="reference.html">Reference</a>
       <a href="std.html">Std</a>
       <a href="https://github.com/tkarnau/yooperlang" target="_blank" rel="noopener">GitHub</a>
+    </nav>
+    <div class="header-tools">
       <button class="icon-btn search-trigger" type="button" aria-label="Search">
         <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><line x1="16.5" y1="16.5" x2="21" y2="21"></line></svg>
         <span class="kbd">/</span>
@@ -36,7 +38,7 @@
         <svg class="icon-moon" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"></path></svg>
         <svg class="icon-sun" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4.2"></circle><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M19.1 4.9l-1.4 1.4M6.3 17.7l-1.4 1.4"></path></svg>
       </button>
-    </nav>
+    </div>
   </div>
 </header>
 
@@ -46,11 +48,8 @@
     <span class="kicker">The pipeline</span>
     <h1>Watch a program become a binary</h1>
     <p class="lede">
-      Source goes in, five stages happen, an executable comes out. Everything on this page is
-      a real dump from a real build: the token stream is what the <code>dump_tokens</code> tool
-      printed, the tree is what <code>--dump-ast-json</code> wrote, the LLVM is the
-      <code>.ll</code> the compiler writes beside every executable, and the output is what the
-      binary printed when it ran.
+      Pick a program, then step through what the compiler made of it. Every pane is a real
+      dump from a real build, not an illustration.
     </p>
   </div>
 
@@ -73,65 +72,12 @@
   </div>
 
   <section class="section" id="about">
-    <div class="section-head">
-      <span class="kicker">What each stage is</span>
-      <h2>Five stages, one direction</h2>
-    </div>
-    <div class="grid grid-3">
-      <div class="card">
-        <span class="card-mark">1. lex</span>
-        <h3>Text becomes tokens</h3>
-        <p>
-          A flat stream of tagged spans. Every token records its byte offset and length, which
-          is what lets a diagnostic later point a caret at the exact column.
-        </p>
-      </div>
-      <div class="card">
-        <span class="card-mark">2. parse</span>
-        <h3>Tokens become a tree</h3>
-        <p>
-          A hand-written recursive descent parser. Note the tokens that vanish here: braces,
-          semicolons and commas are structure, so they end up as the shape of the tree rather
-          than as nodes in it.
-        </p>
-      </div>
-      <div class="card">
-        <span class="card-mark">3. typecheck</span>
-        <h3>The tree gets an opinion</h3>
-        <p>
-          Types are resolved, generics monomorphized, trait impls matched to bounds, kind
-          clauses enforced, and every path checked for a return. This stage produces the
-          diagnostics you see everywhere else on this site, so a clean build shows nothing.
-        </p>
-      </div>
-      <div class="card">
-        <span class="card-mark">4. codegen</span>
-        <h3>The tree becomes LLVM IR</h3>
-        <p>
-          Text, not bitcode. A struct becomes an LLVM aggregate, <code>ref</code> becomes a
-          pointer, a kind's <code>mustCall</code> becomes an actual call placed on every exit
-          path.
-        </p>
-      </div>
-      <div class="card">
-        <span class="card-mark">5. link</span>
-        <h3>clang does the rest</h3>
-        <p>
-          The compiler shells out to <code>clang</code> with the emitted <code>.ll</code>, the
-          small C runtime, and any <code>-l</code> flags your <code>extern</code> blocks asked
-          for. What lands where <code>-o</code> says is an ordinary native executable.
-        </p>
-      </div>
-      <div class="card">
-        <span class="card-mark">bonus</span>
-        <h3>It is all inspectable</h3>
-        <p>
-          The <code>dump_tokens</code> tool, <code>--dump-ast-json</code>, the
-          <code>.ll</code> written beside every executable (<code>--emit-ir</code> stops there),
-          and <code>--track-heap</code>. None of it is a debug build.
-        </p>
-      </div>
-    </div>
+    <p class="muted small">
+      Every pane here comes out of the tree itself: <code>dump_tokens</code>,
+      <code>--dump-ast-json</code>, the <code>.ll</code> the compiler writes beside every
+      executable, and the binary's own stdout. <code>npm run gen:web</code> rebuilds all of it.
+      Left and right arrows walk the stages.
+    </p>
   </section>
 </div>
 </main>
