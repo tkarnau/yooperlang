@@ -11,6 +11,8 @@ A systems language attempt with a TypeScript syntax feel - for myself and folks 
   it. The language's own `disposable` / `async` / `task` are written this way, in
   std, not baked into the compiler. See [A taste](#a-taste).
 
+Heavily leaned on LLMs to clean original work and do a significant portion of codegen. The goal is to learn and have fun and rewrite by hand as we grapple with unfamiliar concepts that the LLMs showed at least a seemingly working happy path for. The legacy version of this language is available if folks want to check that out which was mostly hung up around very basic typechecking before needing to use lots of help.
+
 ("Yooper" is what you call someone from Michigan's Upper Peninsula. The name is a bit of a joke, and so is this language.)
 
 ## Personal Objective
