@@ -1,6 +1,6 @@
 {
   "name": "yooperlang",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "A systems language with a TypeScript feel - no garbage collector, structs plus free functions, traits and kinds. Compiles to LLVM IR.",
   "type": "module",
   "license": "MIT",

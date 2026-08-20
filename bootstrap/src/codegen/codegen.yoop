@@ -462,15 +462,20 @@ function emitFunction(
 
   // Every LLVM block needs a terminator, and a void function may just run off
   // the end in yoop.
+  //
+  // A NON-void one that falls off the end is refused by pass D - see
+  // `checkAllPathsReturn` in typecheck/pass_d.yoop - so the two arms below are
+  // assertions that the check ran and agreed with this walk about what
+  // terminates, not diagnostics a user program can reach.
   if (isCoro) {
     // Falling out of a coroutine's body reaches the final suspend rather than a
-    // `ret`. A non-void one that falls off the end was proven unreachable by
-    // pass D, exactly as in the ordinary case below.
+    // `ret`. A non-void one that falls off the end was refused by pass D,
+    // exactly as in the ordinary case below.
     if (!bodyTerminated) {
       if (text.equals(retTy, "void")) {
         emitCoroReturn(ref cx, retTy, Operand.None, false);
       } else {
-        return internalError("no return on some path out of", declNode.name);
+        return internalError("pass D admitted a body with no return on some path out of", declNode.name);
       }
     }
     emitCoroTrailer(ref cx);
@@ -495,7 +500,7 @@ function emitFunction(
         emitRetVoid(ref cx);
       }
     } else {
-      return internalError("no return on some path out of", declNode.name);
+      return internalError("pass D admitted a body with no return on some path out of", declNode.name);
     }
   }
   emitFunctionClose(ref cx);

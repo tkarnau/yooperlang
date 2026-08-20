@@ -62,7 +62,9 @@ a shared header file.
                        vtable*.yoop is type ERASURE - what a vtable's slots are
                        and what the three ways of using one mean;
                        diverge.yoop answers "does control flow always leave
-                       this statement", for the handler form of `?`
+                       this statement", for the handler form of `?`, for the
+                       unreachable-code warning, and for the rule that a
+                       function declaring a return type returns on every path
       codegen/         layer 5: typed AST -> LLVM IR text (see the rules below)
       link/            layer 6: IR -> executable, by shelling out to clang;
                        also where the runtime's C sources are found, which glue

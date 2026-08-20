@@ -46,7 +46,7 @@
 // rendering 1 rather than true, among others - see bootstrap/README.md). A
 // parity assertion would fail on those, and asserting the reference against a
 // file that documents the reference's own bugs is not a test worth having.
-import { describe, it, before } from "node:test";
+import { describe, it, before, after } from "node:test";
 import assert from "node:assert";
 import fs from "fs";
 import path from "path";
@@ -125,6 +125,16 @@ describe("the corpus: the bootstrap compiler builds and runs examples/ correctly
       { cwd: REPO, timeout: COMPILE_TIMEOUT_MS },
     );
   });
+
+  // Every run of this suite used to leave its temp dir behind - `mkdtempSync`
+  // makes a new one each time and nothing removed it. One session of iterating
+  // left 9,882 of them and filled a 16G tmpfs, which surfaces as a LINK failure
+  // in whatever runs next ("No space left on device") rather than as anything
+  // pointing here.
+  after(() => {
+    if (work) fs.rmSync(work, { recursive: true, force: true });
+  });
+
 
   it("finds programs", () => {
     assert.ok(programs.length > 0, `no programs under ${PASS} or ${TOUR}`);

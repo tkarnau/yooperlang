@@ -1400,6 +1400,17 @@ suite function diagnosticsNameTheFileTheyCameFrom(): void {
   }
 }
 
+// The LINE of the first diagnostic, or 0 when there is none. A refusal that
+// carries no location is exactly what this batch of checks moved away from, so
+// the location is part of the assertion rather than a detail of it.
+function firstDiagnosticLine(ref prog: Program): usize {
+  if (prog.diagnostics.len == 0) {
+    return 0;
+  }
+  const first = vec.vecGet(ref prog.diagnostics, 0);
+  return first.sourceLoc.line;
+}
+
 function firstDiagnosticFile(ref prog: Program): string {
   if (prog.diagnostics.len == 0) {
     return "";
@@ -3838,6 +3849,188 @@ suite function deadCodeAfterADivergingStatementIsWarnedAbout(): void {
   }
 }
 
+// A function that declares a return type has to return one on every path.
+//
+// The check is one line on top of `alwaysDiverges` (see typecheck/diverge.yoop
+// and the dead-tail suite above), so what is worth asserting is not the walk -
+// it is the two directions the walk can be wrong in. Refusing a real fall-off
+// is the cheap half; NOT refusing the legal neighbours is the half that would
+// break working programs, so every accepting shape gets its own case.
+// A `break` leaves the STATEMENT, not the FUNCTION.
+//
+// The distinction `alwaysReturns` exists for, and it is worth its own suite
+// because conflating it with `alwaysDiverges` is the natural mistake: for the
+// `?` handler rule a break really is enough (the block is left and the binding
+// is never read), and for "did every path return" it is not (the break lands
+// at the join, still inside a function that owes a value).
+//
+// Before the split, the first of these reached CODEGEN as an internal error.
+// The reference accepts it and emits a function that falls off the end, so
+// neither compiler was right and a refusal is the answer.
+suite function aBreakLeavesTheStatementButNotTheFunction(): void {
+  let breakArms = checkSource(
+    "function f(n: int32): int32 { switch (n) { case 1: { break; } default: { break; } } }\nfunction main(): int32 { return f(1); }");
+  let test theory: Case = t.asserts("a switch whose every arm BREAKS does not return a value") {
+    theory.isSuccessful = diagnosticsMention(ref breakArms, "without returning one");
+    theory.detail = `wanted a missing-return refusal, got: ${firstDiagnostic(ref breakArms)}`;
+  }
+
+  // The same switch with returns is the legal neighbour, and the one the
+  // over-eager reading would have been trying to allow.
+  let returnArms = checkSource(
+    "function f(n: int32): int32 { switch (n) { case 1: { return 1; } default: { return 0; } } }\nfunction main(): int32 { return f(1); }");
+  let test theory: Case = t.asserts("a switch whose every arm RETURNS does return a value") {
+    theory.isSuccessful = returnArms.diagnostics.len == 0;
+    theory.detail = `an all-return switch reported: ${firstDiagnostic(ref returnArms)}`;
+  }
+
+  let breakThenReturn = checkSource(
+    "function f(n: int32): int32 { while (n > 0) { break; } return 0; }\nfunction main(): int32 { return f(1); }");
+  let test theory: Case = t.asserts("a break inside a loop followed by a return is fine") {
+    theory.isSuccessful = breakThenReturn.diagnostics.len == 0;
+    theory.detail = `a break-then-return reported: ${firstDiagnostic(ref breakThenReturn)}`;
+  }
+
+  // The handler rule reads the OTHER predicate, and a break still satisfies it.
+  // If the two ever collapsed back into one, this is the assertion that says so.
+  // `Result` is declared here rather than imported: checkSource builds a
+  // single-module graph with no std.
+  let handlerBreak = checkSource(
+    "variant Result<T, E> { Ok { value: T }, Err { error: E } }\nfunction readAt(i: int32): Result<int32, string> { return Result.Ok { value: i }; }\nfunction main(): int32 { let n: int32 = 3; while (n > 0) { let v: int32 = readAt(1)? e { break; }; n = n - 1; } return 0; }");
+  let test theory: Case = t.asserts("a break still satisfies the handler-block rule") {
+    theory.isSuccessful = handlerBreak.diagnostics.len == 0;
+    theory.detail = `a break handler reported: ${firstDiagnostic(ref handlerBreak)}`;
+  }
+}
+
+suite function everyPathOutOfAFunctionMustReturnAValue(): void {
+  const CALLER: string = "\nfunction main(): int32 { return f(1); }";
+  const WANTED: string = "control can reach the end of its body";
+
+  // 1. An `if` with no `else`: the false path reaches the closing brace.
+  let noElse = checkSource(`function f(x: int32): int32 { if (x > 0) { return 1; } }${CALLER}`);
+  let test theory: Case = t.asserts("an if with no else is refused") {
+    theory.isSuccessful = diagnosticsMention(ref noElse, WANTED);
+    theory.detail = `wanted a missing-return refusal, got: ${firstDiagnostic(ref noElse)}`;
+  }
+  let test theory: Case = t.asserts("and it is an ERROR, not a warning") {
+    theory.isSuccessful = errorCount(ref noElse) == 1;
+    theory.detail = `wanted one error, got ${errorCount(ref noElse)}`;
+  }
+  // The whole reason this moved out of codegen: the refusal names a place, and
+  // the place is the function's own name. Stored 0-based - the driver adds one
+  // on the way out - so the first line of the source reads as 0 here and prints
+  // as 1.
+  let test theory: Case = t.asserts("the refusal points at the declaration") {
+    theory.isSuccessful = firstDiagnosticLine(ref noElse) == 0;
+    theory.detail = `wanted line 0, got ${firstDiagnosticLine(ref noElse)}`;
+  }
+  let test theory: Case = t.asserts("and it names the offending function") {
+    theory.isSuccessful = diagnosticsMention(ref noElse, "\"f\" returns int32");
+    theory.detail = `wanted the function named, got: ${firstDiagnostic(ref noElse)}`;
+  }
+
+  // 2. Only one arm of the `if` returns.
+  let oneArm = checkSource(
+    `function f(x: int32): int32 { if (x > 0) { return 1; } else { let y: int32 = 2; } }${CALLER}`);
+  let test theory: Case = t.asserts("an if whose else does not return is refused") {
+    theory.isSuccessful = diagnosticsMention(ref oneArm, WANTED);
+    theory.detail = `wanted a missing-return refusal, got: ${firstDiagnostic(ref oneArm)}`;
+  }
+
+  // 3. A CONDITIONAL loop may not run at all, so a return inside it covers
+  // nothing. This is the shape the infinite-loop case below has to be told
+  // apart from, and getting the two confused is the whole hazard.
+  let loopOnly = checkSource(
+    `function f(n: int32): int32 { let i: int32 = 0; while (i < n) { return i; } }${CALLER}`);
+  let test theory: Case = t.asserts("a return inside a conditional loop is refused") {
+    theory.isSuccessful = diagnosticsMention(ref loopOnly, WANTED);
+    theory.detail = `wanted a missing-return refusal, got: ${firstDiagnostic(ref loopOnly)}`;
+  }
+
+  // EVERY offender, not the first. Three bad functions is three diagnostics -
+  // fixing one and recompiling to find the next is what codegen used to make
+  // the reader do.
+  let three = checkSource(
+    "function a(x: int32): int32 { if (x > 0) { return 1; } }\nfunction b(x: int32): int32 { if (x > 0) { return 1; } else { let y: int32 = 2; } }\nfunction c(n: int32): int32 { while (n > 0) { return n; } }\nfunction main(): int32 { return a(1) + b(1) + c(1); }");
+  let test theory: Case = t.asserts("three offending functions produce three refusals") {
+    theory.isSuccessful = errorCount(ref three) == 3;
+    theory.detail = `wanted 3 errors, got ${errorCount(ref three)}: ${firstDiagnostic(ref three)}`;
+  }
+
+  // ----- the legal neighbours, none of which may be refused -----------------
+
+  let endsInReturn = checkSource(`function f(x: int32): int32 { return x; }${CALLER}`);
+  let test theory: Case = t.asserts("a function ending in a return is accepted") {
+    theory.isSuccessful = endsInReturn.diagnostics.len == 0;
+    theory.detail = `a clean function reported: ${firstDiagnostic(ref endsInReturn)}`;
+  }
+
+  let bothArms = checkSource(
+    `function f(x: int32): int32 { if (x > 0) { return 1; } else { return 2; } }${CALLER}`);
+  let test theory: Case = t.asserts("an if whose both arms return is accepted") {
+    theory.isSuccessful = bothArms.diagnostics.len == 0;
+    theory.detail = `an if/else that returns reported: ${firstDiagnostic(ref bothArms)}`;
+  }
+
+  // Exhaustive over a bool, so there is no default arm to carry the answer -
+  // the arms themselves have to.
+  let allArms = checkSource(
+    "function f(b: bool): int32 { switch (b) { case true: { return 1; } case false: { return 0; } } }\nfunction main(): int32 { return f(true); }");
+  let test theory: Case = t.asserts("a switch whose every arm returns is accepted") {
+    theory.isSuccessful = allArms.diagnostics.len == 0;
+    theory.detail = `an all-returning switch reported: ${firstDiagnostic(ref allArms)}`;
+  }
+
+  // Falling off the end IS a void function's return, so there is nothing to
+  // check and nothing to say.
+  let voidFn = checkSource(
+    "function f(x: int32): void { let y: int32 = x; }\nfunction main(): int32 { f(1); return 0; }");
+  let test theory: Case = t.asserts("a void function needs no return at all") {
+    theory.isSuccessful = voidFn.diagnostics.len == 0;
+    theory.detail = `a void function reported: ${firstDiagnostic(ref voidFn)}`;
+  }
+
+  // THE HAZARD. `while (true)` with nothing breaking out of it never reaches
+  // the statement after itself, so a function that ends in one is complete -
+  // and a naive "the body does not end in a return" check would refuse every
+  // event loop ever written.
+  let forever = checkSource(
+    "function f(x: int32): int32 { while (true) { if (x > 0) { return x; } } }\nfunction main(): int32 { return f(1); }");
+  let test theory: Case = t.asserts("a function ending in while (true) is accepted") {
+    theory.isSuccessful = forever.diagnostics.len == 0;
+    theory.detail = `an infinite loop reported: ${firstDiagnostic(ref forever)}`;
+  }
+
+  // And the other side of that: a `break` makes the loop's exit reachable, so
+  // this one really does fall off the end. Without this, the case above would
+  // be an accepting rule with no edge.
+  let breaksOut = checkSource(
+    "function f(x: int32): int32 { while (true) { if (x > 0) { break; } } }\nfunction main(): int32 { return f(1); }");
+  let test theory: Case = t.asserts("a while (true) with an escaping break is refused") {
+    theory.isSuccessful = diagnosticsMention(ref breaksOut, WANTED);
+    theory.detail = `wanted a missing-return refusal, got: ${firstDiagnostic(ref breaksOut)}`;
+  }
+
+  // A `break` belonging to something INSIDE the loop does not leave it. The
+  // switch's arm break lands on the switch's join, so the loop still runs
+  // forever and the function is still complete.
+  let innerBreak = checkSource(
+    "function f(x: int32): int32 { while (true) { switch (x) { case 1: { break; } default: { return x; } } } }\nfunction main(): int32 { return f(1); }");
+  let test theory: Case = t.asserts("a break captured by an inner switch does not escape the loop") {
+    theory.isSuccessful = innerBreak.diagnostics.len == 0;
+    theory.detail = `a captured break reported: ${firstDiagnostic(ref innerBreak)}`;
+  }
+
+  // A METHOD gets the same check, under its own name.
+  let method = checkSource(
+    "trait Sized { function size(ref self): int32; }\ntype Box implements Sized { n: int32, function size(ref self): int32 { if (self.n > 0) { return self.n; } } }\nfunction main(): int32 { let b: Box = { n: 1 }; return Sized.size(ref b); }");
+  let test theory: Case = t.asserts("a method with a fall-off path is refused too") {
+    theory.isSuccessful = diagnosticsMention(ref method, "\"size\" returns int32");
+    theory.detail = `wanted the method refused by name, got: ${firstDiagnostic(ref method)}`;
+  }
+}
+
 suite function aHandlerBlockSeesThroughCompoundDivergence(): void {
   const DECLS: string = "variant R { Ok { value: int32 }, Err { error: string }, }\nfunction inner(n: int32): R { return R.Ok { value: n }; }\n";
   const HANDLE: string = "function outer(n: int32): int32 { let x: int32 = inner(n)? e { ";
@@ -4982,7 +5175,11 @@ function main(): int32 { return 0; }`);
 suite function aBindingThatOwnsABlockIsScopedToIt(): void {
   const RES: string = "trait Closer { function close(ref self): void; }\nkind tracked { appliesTo binding; requires Closer; mustCall close beforeScopeEnd; ownsBlock; }\ntype Res implements Closer { id: int32, function close(ref self): void { } }\nfunction open(): Res { return { id: 1 }; }\n";
 
-  let inside = checkSource(`${RES}function f(): int32 { tracked r: Res = open() { return r.id; } return 0; }\nfunction main(): int32 { return 0; }`);
+  // No `return` after the block, and that is not an oversight: the block IS
+  // the rest of the function, so a `return 0;` behind it would be dead code and
+  // the unreachable-code warning would say so. The block's own `return` is what
+  // finishes the function - see the LET_DECL case in typecheck/diverge.yoop.
+  let inside = checkSource(`${RES}function f(): int32 { tracked r: Res = open() { return r.id; } }\nfunction main(): int32 { return 0; }`);
   let test theory: Case = t.asserts("the binding is visible inside its block") {
     theory.isSuccessful = inside.diagnostics.len == 0;
     theory.detail = `reading the binding inside its block reported: ${firstDiagnostic(ref inside)}`;
@@ -6222,7 +6419,7 @@ suite function aTrailingBlockNeedsAKindThatOwnsOne(): void {
     "trait Disposable { function dispose(ref self): void; }\ntype H implements Disposable { fd: int32, function dispose(ref self): void { } }\n";
 
   let owns = checkSource(
-    `${OWNER}kind owning { appliesTo binding; requires Disposable; ownsBlock; mustCall dispose beforeScopeEnd; }\nfunction main(): int32 { owning h: H = { fd: 1 } { return 0; } return 0; }`
+    `${OWNER}kind owning { appliesTo binding; requires Disposable; ownsBlock; mustCall dispose beforeScopeEnd; }\nfunction main(): int32 { owning h: H = { fd: 1 } { return 0; } }`
   );
   let test theory: Case = t.asserts("a kind declaring ownsBlock may take a trailing block") {
     theory.isSuccessful = owns.diagnostics.len == 0;

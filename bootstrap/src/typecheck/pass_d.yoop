@@ -338,7 +338,45 @@ function checkBodyAgainst(
     // legal when every return hands back a value already carrying it. See the
     // passthrough section of typecheck/markers.yoop.
     checkConferredPassthrough(ref prog, ref ast, declNode);
+    checkAllPathsReturn(ref prog, ref ast, declNode, retType);
   }
+}
+
+// A function that declares a return type has to hand one back on EVERY path.
+//
+// The question is answered by `alwaysReturns` in typecheck/diverge.yoop, which
+// is the near twin of the `alwaysDiverges` the `?` handler rule and the
+// unreachable-code warning read - and it has to be the twin rather than the
+// same function, because a `break` LEAVES THE STATEMENT while staying inside a
+// function that still owes a value. See that module's header.
+//
+// This belongs here rather than in codegen, which is where it used to be
+// noticed: codegen has no value to return either, so it reported an INTERNAL
+// error, without a location, and stopped at the first offender. Refusing it
+// here gives the function's own location and reports every one of them, and
+// leaves the codegen check standing as what it now is - an assertion that pass
+// D ran.
+//
+// Two exemptions. A `void` function falling off the end IS its return, and a
+// return type that already failed to resolve has reported once and should not
+// report twice on top of it.
+function checkAllPathsReturn(
+  ref prog: Program,
+  ref ast: AST,
+  declNode: ASTNode,
+  retType: TypeId
+): void {
+  if (retType == TYPE_VOID_ID || retType == TYPE_ERROR_ID) {
+    return;
+  }
+  if (alwaysReturns(ref ast, declNode.childD)) {
+    return;
+  }
+  reportError(
+    ref prog,
+    `"${declNode.name}" returns ${formatType(ref prog, retType)}, and control can reach the end of its body without returning one - every path out has to return a value`,
+    declNode.sourceLoc
+  );
 }
 
 // Parameters are locals the caller filled in. Their types come from the Func

@@ -47,3 +47,6 @@ dist/
 
 # npm pack output.
 *.tgz
+
+# The bootstrap seed cache - a downloaded previous release. See scripts/seed.mjs.
+.seed/

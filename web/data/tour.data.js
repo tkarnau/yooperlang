@@ -57,7 +57,7 @@ window.YOOP_DATA.tour = {
    "note": "The rule is divergence, not \"the last statement is a return\". An `if` covers a path only when it has an `else` and both arms diverge, and a conditional loop covers nothing because it may never run.",
    "file": "examples/fail/missing_return.yoop",
    "source": "// A function with a value to return must return on every path. Without this\n// check all three of these compile and trap at runtime with a bare SIGTRAP\n// and no source location.\n\n// 1. An `if` with no `else` leaves a path with no return.\nfunction noElse(x: int32): int32 {\n    if (x > 0) {\n        return 1;\n    }\n}\n\n// 2. Only one arm of the `if` returns.\nfunction oneArm(x: int32): int32 {\n    if (x > 0) {\n        return 1;\n    } else {\n        printf(\"negative\\n\");\n    }\n}\n\n// 3. A conditional loop may not run at all, so a return inside it does not\n// cover the fallthrough path.\nfunction loopOnly(n: int32): int32 {\n    let i: int32 = 0;\n    while (i < n) {\n        return i;\n    }\n}\n\nfunction main(): int32 {\n    return noElse(1) + oneArm(1) + loopOnly(1);\n}\n",
-   "diagnostic": "typecheck failed (3 errors):\n\nexamples/fail/missing_return.yoop:6:16: function \"noElse\" returns int32 but not every path returns a value - add a return at the end, or make each branch return\n  |\n6 | function noElse(x: int32): int32 {\n  |                ^\n\nexamples/fail/missing_return.yoop:13:16: function \"oneArm\" returns int32 but not every path returns a value - add a return at the end, or make each branch return\n   |\n13 | function oneArm(x: int32): int32 {\n   |                ^\n\nexamples/fail/missing_return.yoop:23:18: function \"loopOnly\" returns int32 but not every path returns a value - add a return at the end, or make each branch return\n   |\n23 | function loopOnly(n: int32): int32 {\n   |                  ^"
+   "diagnostic": "[error] examples/fail/missing_return.yoop:6:10: \"noElse\" returns int32, and control can reach the end of its body without returning one - every path out has to return a value\n[error] examples/fail/missing_return.yoop:13:10: \"oneArm\" returns int32, and control can reach the end of its body without returning one - every path out has to return a value\n[error] examples/fail/missing_return.yoop:23:10: \"loopOnly\" returns int32, and control can reach the end of its body without returning one - every path out has to return a value"
   },
   {
    "id": "counter_int32_vs_usize",
@@ -66,7 +66,7 @@ window.YOOP_DATA.tour = {
    "note": "Lengths and indices are usize; an unannotated literal is int32. No implicit widening means the most ordinary loop in programming is where the rule bites first. In a `for` head the counter takes its type from the CONDITION instead.",
    "file": "examples/fail/counter_int32_vs_usize.yoop",
    "source": "function main(): int32 {\n    let xs: int32[] = [10, 20, 30];\n    let k: int32 = 0;\n    while (k < xs.len) {\n        k = k + 1;\n    }\n    return 0;\n}\n\n// Fails because `xs.len` is a usize and `k` is an int32, and there is no\n// implicit widening between named numeric types. The counted-loop head\n// (`for (let k = 0; k < xs.len; k += 1)`) is the one place a counter takes\n// its type from the loop CONDITION rather than the literal, which is why\n// that spelling compiles and this one does not.\n",
-   "diagnostic": "typecheck failed (2 errors):\n\nexamples/fail/counter_int32_vs_usize.yoop:4:23: operator \"<\" cannot be applied to int32 and usize\n  |\n4 |     while (k < xs.len) {\n  |                       ^\n\nexamples/fail/counter_int32_vs_usize.yoop:4:13: while-statement must be a bool type expression, found error\n  |\n4 |     while (k < xs.len) {\n  |             ^"
+   "diagnostic": "[error] examples/fail/counter_int32_vs_usize.yoop:4:22: operator \"<\" cannot be applied to int32 and usize"
   },
   {
    "id": "struct_literal_no_target",
@@ -75,7 +75,7 @@ window.YOOP_DATA.tour = {
    "note": "A struct literal has no name in it, so it has no type of its own. Inference flows initializer to binding, and it will not run backwards guessing which struct you meant.",
    "file": "examples/fail/struct_literal_no_target.yoop",
    "source": "type Point {\n    x: int32,\n    y: int32,\n}\n\nfunction main(): int32 {\n    const p = { x: 1, y: 2 };\n    return p.x;\n}\n\n// Fails because a struct literal carries no type of its own: inference flows\n// from the initializer to the binding, and a bare `{ ... }` has nothing to\n// flow. Give the literal a target - an annotation (`const p: Point = ...`),\n// a return type, or a parameter type - and it typechecks.\n",
-   "diagnostic": "typecheck failed (3 errors):\n\nexamples/fail/struct_literal_no_target.yoop:7:21: struct literal has no target type\n  |\n7 |     const p = { x: 1, y: 2 };\n  |                     ^\n\nexamples/fail/struct_literal_no_target.yoop:7:27: struct literal has no target type\n  |\n7 |     const p = { x: 1, y: 2 };\n  |                           ^\n\nexamples/fail/struct_literal_no_target.yoop:7:12: cannot infer a type for \"p\"; add an explicit type annotation\n  |\n7 |     const p = { x: 1, y: 2 };\n  |            ^"
+   "diagnostic": "[error] examples/fail/struct_literal_no_target.yoop:7:15: cannot tell which struct this literal is - annotate the binding or the parameter it goes to"
   },
   {
    "id": "method_call_sugar",
@@ -84,7 +84,7 @@ window.YOOP_DATA.tour = {
    "note": "The call is `Greeter.greet(ref g)`, always. Note the fix-it below is out of date: it points at the bare `greet(ref g)` form, which is itself rejected, with a better message that names the trait for you.",
    "file": "examples/fail/traits_method_call_sugar.yoop",
    "source": "extern \"C\" from \"stdio.h\" { function printf(fmt: string, ...): int32; }\n\ntrait Disposable {\n    function dispose(ref self): void;\n}\n\ntype FileHandle implements Disposable {\n    fd: int32,\n    function dispose(ref self): void {\n        printf(`disposing fd=${self.fd}\\n`);\n    }\n}\n\nfunction main(): int32 {\n    let h: FileHandle = { fd: 7 };\n    h.dispose();\n    return 0;\n}\n\n// Fails because `h.dispose()` uses method-call syntax, which is not supported.\n// Trait methods must be called in the free-function form: `dispose(ref h)`.\n// The typechecker detects that `dispose` is a method name (not a field) and\n// produces a specific error pointing to the correct call form.\n",
-   "diagnostic": "typecheck failed (1 error):\n\nexamples/fail/traits_method_call_sugar.yoop:16:7: method-call form '.dispose()' is not supported - use the free-function form 'dispose(ref value)'\n   |\n16 |     h.dispose();\n   |       ^^^^^^^"
+   "diagnostic": "[error] examples/fail/traits_method_call_sugar.yoop:16:6: \"h\" is a local of type FileHandle, not an imported namespace - calling a method on a value is not supported by the bootstrap typechecker yet"
   },
   {
    "id": "generic_bound_unsatisfied",
@@ -93,7 +93,7 @@ window.YOOP_DATA.tour = {
    "note": "Bounds are checked at the call, against the concrete type. Monomorphization means there is no runtime dispatch to fall back on.",
    "file": "examples/fail/generic_bound_unsatisfied.yoop",
    "source": "trait Display {\n    function show(ref self): string;\n}\n\ntype Bare {\n    n: int32,\n}\n\nfunction describe<T implements Display>(ref x: T): void {\n    let s: string = Display.show(ref x);\n}\n\nfunction main(): int32 {\n    let b: Bare = { n: 1 };\n    describe(ref b);\n    return 0;\n}\n",
-   "diagnostic": "typecheck failed (1 error):\n\nexamples/fail/generic_bound_unsatisfied.yoop:15:14: call to \"describe\": type argument \"T\" = struct Bare does not satisfy bound - type \"Bare\" does not implement trait \"Display\"\n   |\n15 |     describe(ref b);\n   |              ^"
+   "diagnostic": "[error] examples/fail/generic_bound_unsatisfied.yoop:15:13: call to \"describe\": \"Bare\" does not satisfy the bound \"Display\" on type parameter \"T\""
   },
   {
    "id": "kind_requires_trait",
@@ -102,7 +102,7 @@ window.YOOP_DATA.tour = {
    "note": "`requires Disposable` in the kind declaration is what makes a kind a contract rather than a naming convention.",
    "file": "examples/fail/binding_missing_trait.yoop",
    "source": "trait Disposable {\n    function dispose(ref self): void;\n}\n\ntype PlainStruct {\n    fd: int32,\n}\n\nkind disposable {\n    appliesTo binding;\n    requires Disposable;\n    mustCall dispose beforeScopeEnd;\n}\n\nfunction main(): int32 {\n    disposable a: PlainStruct = { fd: 1 };\n    return 0;\n}\n\n// Fails because PlainStruct does not implement Disposable, but the kind\n// `disposable` requires it. The kind-binding validation in checkLetOrConst\n// rejects any RHS whose struct type is missing a required trait.\n",
-   "diagnostic": "typecheck failed (1 error):\n\nexamples/fail/binding_missing_trait.yoop:16:17: binding \"a\" has kind \"disposable\" which requires \"Disposable\", but type struct PlainStruct does not implement \"Disposable\"\n   |\n16 |     disposable a: PlainStruct = { fd: 1 };\n   |                 ^"
+   "diagnostic": "[error] examples/fail/binding_missing_trait.yoop:16:5: \"a\" is disposable, which requires a \"dispose\" method, but PlainStruct has none"
   },
   {
    "id": "scoped_escape_return",
@@ -111,7 +111,7 @@ window.YOOP_DATA.tour = {
    "note": "`mustNotEscape scope` is a clause with real teeth: it is enforced, and it is also what lets the compiler keep the binding in a stack slot.",
    "file": "examples/fail/scoped_escape_return.yoop",
    "source": "extern \"C\" from \"stdio.h\" {\n    function printf(fmt: string, ...): int32;\n}\n\ntrait Disposable {\n    function dispose(ref self): void;\n}\n\ntype FileHandle implements Disposable {\n    fd: int32,\n    function dispose(ref self): void {\n        printf(`disposing fd=${self.fd}\\n`);\n    }\n}\n\nkind scoped {\n    appliesTo binding parameter;\n    requires Disposable;\n    ownsBlock;\n    mustCall dispose beforeScopeEnd;\n    mustNotEscape scope;\n}\n\nfunction bad(): FileHandle {\n    scoped a: FileHandle = { fd: 1 };\n    return a;\n}\n\nfunction main(): int32 {\n    return 0;\n}\n\n// Fails: binding 'a' has kind 'scoped' which forbids escape via return\n",
-   "diagnostic": "typecheck failed (1 error):\n\nexamples/fail/scoped_escape_return.yoop:26:13: binding 'a' has kind 'scoped' which forbids escape via return\n   |\n26 |     return a;\n   |             ^"
+   "diagnostic": "[error] examples/fail/scoped_escape_return.yoop:26:13: \"a\" is bounded by the scope that declares it (mustNotEscape scope), so it cannot be returned out of one"
   }
  ]
 };

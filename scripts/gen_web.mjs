@@ -21,11 +21,33 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { execFileSync } from "node:child_process";
+import { seedCompiler, seedEnv } from "./seed.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const webRoot = path.join(repoRoot, "web");
 const dataRoot = path.join(webRoot, "data");
-const yoopiler = path.join(repoRoot, "src/yoopiler.js");
+// The compiler this site documents is the one this tree BUILDS, not the seed
+// that bootstrapped it: the seed is a previous release and predates whatever
+// the current source does. So both tools are compiled from `bootstrap/` on the
+// way in, and everything below runs them directly rather than through node.
+//
+// `dumpTokens` is a separate PROGRAM rather than a driver flag - the token dump
+// is a tool, and the driver has no reason to carry it.
+const buildDir = fs.mkdtempSync(path.join(os.tmpdir(), "yoop_web_tools_"));
+const yoopiler = path.join(buildDir, "yoopiler_boot");
+const tokenDumper = path.join(buildDir, "dump_tokens");
+process.on("exit", () => fs.rmSync(buildDir, { recursive: true, force: true }));
+
+function buildTools() {
+  const seed = seedCompiler();
+  execFileSync(seed, [path.join(repoRoot, "bootstrap/src/main.yoop"), "-o", yoopiler], {
+    stdio: "inherit", cwd: repoRoot, env: seedEnv(),
+  });
+  execFileSync(yoopiler, [path.join(repoRoot, "bootstrap/tools/dump_tokens.yoop"), "-o", tokenDumper], {
+    stdio: "inherit", cwd: repoRoot, env: seedEnv(),
+  });
+}
 
 const COMPILE_TIMEOUT_MS = Number(process.env.YOOP_WEB_COMPILE_TIMEOUT_MS ?? 120000);
 const RUN_TIMEOUT_MS = Number(process.env.YOOP_WEB_RUN_TIMEOUT_MS ?? 20000);
@@ -156,6 +178,11 @@ function log(msg) {
 function run(cmd, args, opts = {}) {
   const result = spawnSync(cmd, args, {
     cwd: repoRoot,
+    // The compiler resolves std and the C runtime relative to its OWN binary,
+    // and these tools are built into a temp dir. So every spawn carries the
+    // roots for THIS tree - which is also what makes the generated pages
+    // describe this checkout rather than whatever the seed shipped with.
+    env: seedEnv(),
     encoding: "utf8",
     timeout: opts.timeout ?? COMPILE_TIMEOUT_MS,
     killSignal: "SIGKILL",
@@ -206,7 +233,7 @@ function relativizePaths(text) {
 // ---------------------------------------------------------------------------
 
 function dumpTokens(file) {
-  const { stdout } = run(process.execPath, [yoopiler, "--dump-tokens", file]);
+  const { stdout } = run(tokenDumper, [file]);
   const tokens = [];
   for (const line of stdout.split("\n")) {
     const trimmed = line.trim();
@@ -223,7 +250,7 @@ function dumpTokens(file) {
 
 function dumpAst(file, tmpDir) {
   const out = path.join(tmpDir, "ast.json");
-  const res = run(process.execPath, [yoopiler, "--dump-ast-json", out, file]);
+  const res = run(yoopiler, ["--dump-ast-json", out, file]);
   if (!fs.existsSync(out)) {
     throw new Error(`AST dump produced nothing for ${file}: ${res.stderr || res.stdout}`);
   }
@@ -282,24 +309,24 @@ function excerptIr(irText, moduleBase) {
 function compileAndRun(file, tmpDir, { wantIr = false } = {}) {
   const base = path.basename(file, ".yoop");
   const binPath = path.join(tmpDir, base);
-  const args = [yoopiler, file, "-o", binPath];
-  if (wantIr) args.splice(2, 0, "--keep-ir");
-
-  const compile = run(process.execPath, args);
+  // No flag for the IR: the bootstrap writes `<out>.ll` beside the executable
+  // on an ordinary linking run, so `wantIr` only changes whether it is READ.
+  const compile = run(yoopiler, [file, "-o", binPath]);
   const compileOutput = stripToolchainNoise(relativizePaths(compile.stdout + compile.stderr));
 
   if (compile.code !== 0 || !fs.existsSync(binPath)) {
     return { compiled: false, diagnostic: compileOutput, exitCode: compile.code };
   }
 
+  // The IR sits beside the executable, named for it. Read rather than parsed
+  // out of a log line: the path is something this function chose, so deriving
+  // it from `binPath` cannot go stale when the compiler rewords a message.
   let ir = null;
-  if (wantIr) {
-    const m = /llvm IR written to (\S+\.ll)/.exec(compile.stdout);
-    if (m && fs.existsSync(m[1])) {
-      ir = excerptIr(fs.readFileSync(m[1], "utf8"), base);
-      fs.rmSync(path.dirname(m[1]), { recursive: true, force: true });
-    }
+  const irPath = `${binPath}.ll`;
+  if (wantIr && fs.existsSync(irPath)) {
+    ir = excerptIr(fs.readFileSync(irPath, "utf8"), base);
   }
+  fs.rmSync(irPath, { force: true });
 
   const ran = run(binPath, [], { timeout: RUN_TIMEOUT_MS });
   fs.rmSync(binPath, { force: true });
@@ -630,6 +657,21 @@ function buildPipelineData(tmpDir) {
   return samples;
 }
 
+// How many PROGRAMS a fixture directory holds - a `.yoop` file or a directory
+// entered through its main.yoop, and nothing else.
+//
+// A plain entry count was wrong the moment the fixtures grew companion files:
+// `.expected`, `.expected-errors` and `.nondeterministic` all sit beside the
+// program they belong to, so counting directory entries reported the corpus as
+// twice its size.
+function countPrograms(rel) {
+  const dir = path.join(repoRoot, rel);
+  return fs.readdirSync(dir, { withFileTypes: true }).filter((e) => {
+    if (e.isDirectory()) return fs.existsSync(path.join(dir, e.name, "main.yoop"));
+    return e.name.endsWith(".yoop");
+  }).length;
+}
+
 function buildStatusData() {
   const pkg = JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json"), "utf8"));
 
@@ -666,8 +708,8 @@ function buildStatusData() {
     stdModules: null, // filled in by the caller from the std build
     bootstrapFiles: countFiles("bootstrap/src"),
     bootstrapLines: lineCount("bootstrap/src"),
-    exampleProgramsPass: fs.readdirSync(path.join(repoRoot, "examples/pass")).length,
-    exampleProgramsFail: fs.readdirSync(path.join(repoRoot, "examples/fail")).length,
+    exampleProgramsPass: countPrograms("examples/pass"),
+    exampleProgramsFail: countPrograms("examples/fail"),
     specLines: readIfPresent("SPEC.md")?.split("\n").length ?? 0,
   };
 }
@@ -812,6 +854,10 @@ function writeData(name, value) {
 
 function main() {
   if (!fs.existsSync(dataRoot)) fs.mkdirSync(dataRoot, { recursive: true });
+  // Before anything else: the site is generated by really compiling and really
+  // running these programs, so the compiler has to exist first.
+  log("building the compiler and the token dumper from bootstrap/");
+  buildTools();
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "yoop_genweb_"));
 
   try {

@@ -488,6 +488,130 @@ return, after an exhaustive switch, each beside the shape that must stay
 SILENT, plus "it is a warning and not an error", "a dead run is one
 diagnostic", and "a dead statement is still typechecked").
 
+### A11. Missing return, refused at typecheck - DONE
+
+The companion to A10, out of the same module and found the same way: regenerating
+the web site's break-it cards showed `examples/fail/missing_return.yoop`
+answering
+
+    [info] typecheck: ok
+    [error] codegen: internal error: no return on some path out of "noElse"
+
+Three things wrong with that. It is an INTERNAL error for an ordinary user
+mistake. It has no source location, because codegen has none to give at the
+point it notices. And it stops at the first offender, where the reference
+reports all three functions in the file at once.
+
+The check is one line on top of `typecheck/diverge.yoop`: a function body that
+does not diverge is exactly a function with a path that falls off the end. It
+lives in `checkAllPathsReturn` in `pass_d.yoop`, called from `checkBodyAgainst`
+right after the body walk, which is the one place both a function and a method
+go through - so a method gets it under its own name for free. `void` is exempt
+(falling off the end IS its return) and so is a return type that already failed
+to resolve, which has reported once and should not report twice.
+
+WHAT HAD TO GROW, and it is the whole difficulty. `alwaysDiverges` had cases for
+return/break/continue, blocks, `if` and `switch`, and NO CASE FOR LOOPS - so
+
+    function forever(): int32 { while (true) { doWork(); } }
+
+did not diverge by its reckoning and a naive check would have refused a correct
+program. Three cases were added, each one matching a `terminated` answer codegen
+already computes:
+
+  * `while (true)` with no `break` that escapes it, which is `emitWhile`'s own
+    rule - it leaves the exit label out entirely for exactly this shape, because
+    naming it in a `br i1 true` would keep a label alive that nothing defines.
+    A conditional loop still counts for nothing, which is what tells the legal
+    `while (true)` apart from the fixture's `loopOnly`: that condition may be
+    false on the very first test.
+  * a kind-prefixed binding that OWNS a block (`disposable r: T = e { ... }`),
+    whose block hangs off the DECL rather than standing as a BLOCK statement, so
+    it is reached through `childD`. `emitScopedBinding` hands its block's
+    terminator straight back, so the two agree.
+  * `ephemeral scope(n) { ... }`, the anonymous twin of that, block in `childB`.
+    Same reasoning, same agreement with `emitKindRegion`.
+
+The direction of the conservatism FLIPS between the callers, which is why every
+case had to be one codegen agrees with. For the `?` handler rule a false
+positive is a silent miscompile; for this check a false positive is silently
+accepting a missing return and a false NEGATIVE refuses a legal program. So the
+`while (true)` case leans the other way from the rest of the file: `break`
+detection over-reporting would refuse working code, so `hasEscapingBreak`
+descends only into forms whose block certainly runs inside the loop in question,
+and stops at anything that captures a `break` of its own (a nested loop, and a
+`switch`, whose arms point at the switch's join). ONE known gap and it is the
+harmless direction: a `break` inside the handler block of a `?` is not found,
+because the walk is over statements and does not descend into expressions. Such
+a `while (true)` reads as diverging when it does not, so a missing return under
+it still reaches codegen's assertion - which is what happened before this check
+existed, rather than a new refusal.
+
+Adding the two block-owning cases made the unreachable-code warning smarter for
+free, and it immediately found real dead code in two of A10's own test fixtures:
+`tracked r: Res = open() { return r.id; } return 0;` has a `return 0` nothing can
+reach. Both fixtures now end at the block, which is the shape they were trying to
+describe anyway.
+
+The codegen check STAYS, reworded. It is now an assertion that pass D ran and
+that the two walks agree about what terminates, and it says so:
+`pass D admitted a body with no return on some path out of "f"`.
+
+ONE corner still reaches it, and it predates this work: a `switch` whose every
+arm ends in `break`. `alwaysDiverges` counts a `break` as leaving (it has to -
+that is what makes a handler block usable to skip a loop iteration), while
+`emitSwitch` counts a `break` as making the join reachable and therefore does not
+terminate. The reference compiles that program; the bootstrap internal-errors on
+it, exactly as it did before. Not made worse, not fixed.
+
+Diagnostic, all three at once and each at its own declaration:
+
+    missing_return.yoop:6:10: "noElse" returns int32, and control can reach the
+      end of its body without returning one - every path out has to return a value
+
+Tests: `typecheck.test.yoop:everyPathOutOfAFunctionMustReturnAValue`
+(15 assertions - the three refusals, that all three are reported together, that
+the refusal is an error carrying a location and the function's name, a method
+refused under its own name, and the six legal neighbours that may never be
+refused: ends in a return, if/else both return, an exhaustive switch whose arms
+all return, a `void` function with no return at all, `while (true)`, and a
+`break` captured by a switch inside a `while (true)`).
+`examples/fail/missing_return.expected-errors` is now ported, which is what the
+`npm run test:fail` count moving 76 -> 77 is.
+
+VERIFIED: `--test bootstrap/src` 1386 passed / 0 failed (1371 before),
+`test:pass` 247/0, `test:fail` 77/0, `test:slice` 205/0, `test:selfhost` 6/0,
+`test:parity` 7/0. Both probes are BYTE-IDENTICAL to a build of the tree without
+this change - `probe_surface.sh` 507 files, 0 refused, 0 bad-ir, and
+`probe_programs.sh` line for line - which is the statement that matters here:
+not one legal program in `std/`, `examples/` or `bootstrap/src/` moved.
+
+#### The split that followed: `alwaysReturns`
+
+A `break` LEAVES THE STATEMENT BUT NOT THE FUNCTION, and reusing one predicate
+for both questions got that wrong. `alwaysDiverges` counts a break, correctly:
+for the `?` handler rule the block really is left and the binding is never read.
+For "did every path return a value" it must not, because the break lands at the
+loop or switch join, which is still inside a function that owes a value.
+
+So `diverge.yoop` grew `alwaysReturns`, the near twin that counts RETURN and not
+the two jumps, recurring with its own question through blocks, `if`, `switch`,
+the infinite loop and the two block-owning forms. Pass D reads that one; the
+handler rule and the unreachable-code warning still read the original.
+
+The shape it had been getting wrong reached codegen as an internal error:
+
+    function f(n: int32): int32 {
+      switch (n) { case 1: { break; } default: { break; } }
+    }
+
+The REFERENCE compiles that, emitting a function that falls off the end, so
+neither compiler was right and the refusal is the answer.
+
+Covered by `typecheck.test.yoop:aBreakLeavesTheStatementButNotTheFunction`,
+whose fourth assertion is the one that matters if the two are ever collapsed
+back together: a break still has to satisfy the handler-block rule.
+
 ### A7. A kind-propagation check the bootstrap does not make - DONE
 
 The reference refuses

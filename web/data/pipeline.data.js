@@ -100,164 +100,159 @@ window.YOOP_DATA.pipeline = {
    "ast": {
     "id": 1,
     "kind": "PROGRAM",
-    "fields": {
-     "allowsUnsafe": false,
-     "isTestModule": false
+    "loc": {
+     "pos": 145,
+     "length": 8,
+     "line": 4,
+     "column": 1
     },
     "children": [
      {
-      "id": 11,
-      "kind": "GROUP",
-      "label": "body",
+      "id": 2,
+      "kind": "FUNCTION_DECL",
+      "loc": {
+       "pos": 154,
+       "length": 4,
+       "line": 4,
+       "column": 10
+      },
+      "fields": {
+       "name": "main"
+      },
       "children": [
        {
-        "id": 2,
-        "kind": "FUNCTION_DECL",
+        "id": 3,
+        "kind": "NODE_LIST",
+        "label": "functionParamList",
+        "loc": {
+         "pos": 160,
+         "length": 1,
+         "line": 4,
+         "column": 16
+        }
+       },
+       {
+        "id": 4,
+        "kind": "TYPE_ANNOTATION_TYPE_NAME",
+        "label": "returnTypeAnnotation",
+        "loc": {
+         "pos": 162,
+         "length": 5,
+         "line": 4,
+         "column": 18
+        },
         "fields": {
-         "isTask": false,
-         "name": "main",
-         "returnTypeAnnotation": {
-          "kind": "typeName",
-          "name": "int32"
-         },
-         "isAsync": false
+         "name": "int32"
+        }
+       },
+       {
+        "id": 5,
+        "kind": "BLOCK",
+        "label": "functionBody",
+        "loc": {
+         "pos": 172,
+         "length": 6,
+         "line": 5,
+         "column": 3
         },
         "children": [
          {
-          "id": 3,
-          "kind": "BLOCK",
-          "fields": {
-           "endPos": 212
+          "id": 6,
+          "kind": "NODE_LIST",
+          "label": "statementsList",
+          "loc": {
+           "pos": 178,
+           "length": 1,
+           "line": 5,
+           "column": 9
           },
           "children": [
            {
-            "id": 10,
-            "kind": "GROUP",
-            "label": "body",
+            "id": 7,
+            "kind": "EXPRESSION_STATEMENT",
+            "loc": {
+             "pos": 172,
+             "length": 6,
+             "line": 5,
+             "column": 3
+            },
             "children": [
              {
-              "id": 4,
-              "kind": "EXPRESSION_STATEMENT",
-              "fields": {
-               "startLoc": {
-                "pos": 172,
-                "line": 5,
-                "column": 3
-               }
-              },
-              "children": [
-               {
-                "id": 5,
-                "kind": "CALL_EXPRESSION",
-                "fields": {
-                 "callee": "printf"
-                },
-                "children": [
-                 {
-                  "id": 7,
-                  "kind": "GROUP",
-                  "label": "args",
-                  "children": [
-                   {
-                    "id": 6,
-                    "kind": "STRING_LITERAL",
-                    "fields": {
-                     "value": "\"Hello, Yooper.\\n\""
-                    },
-                    "children": [],
-                    "loc": {
-                     "pos": 198,
-                     "length": 0,
-                     "line": 5,
-                     "column": 29
-                    }
-                   }
-                  ]
-                 }
-                ],
-                "label": "value",
-                "loc": {
-                 "pos": 179,
-                 "length": 0,
-                 "line": 5,
-                 "column": 10
-                }
-               }
-              ],
+              "id": 8,
+              "kind": "CALL_EXPRESSION",
+              "label": "expression",
               "loc": {
                "pos": 178,
-               "length": 0,
+               "length": 1,
                "line": 5,
                "column": 9
-              }
-             },
-             {
-              "id": 8,
-              "kind": "RETURN_STATEMENT",
+              },
               "fields": {
-               "startLoc": {
-                "pos": 202,
-                "line": 6,
-                "column": 3
-               }
+               "name": "printf"
               },
               "children": [
                {
                 "id": 9,
-                "kind": "INT_LITERAL",
-                "fields": {
-                 "value": 0
-                },
-                "children": [],
-                "label": "value",
+                "kind": "NODE_LIST",
+                "label": "undefined",
                 "loc": {
-                 "pos": 210,
-                 "length": 0,
-                 "line": 6,
-                 "column": 11
-                }
+                 "pos": 179,
+                 "length": 1,
+                 "line": 5,
+                 "column": 10
+                },
+                "children": [
+                 {
+                  "id": 10,
+                  "kind": "STRING_LITERAL",
+                  "loc": {
+                   "pos": 179,
+                   "length": 18,
+                   "line": 5,
+                   "column": 10
+                  }
+                 }
+                ]
                }
-              ],
+              ]
+             }
+            ]
+           },
+           {
+            "id": 11,
+            "kind": "RETURN_STATEMENT",
+            "loc": {
+             "pos": 209,
+             "length": 1,
+             "line": 6,
+             "column": 10
+            },
+            "children": [
+             {
+              "id": 12,
+              "kind": "INT_LITERAL",
+              "label": "returnExpression",
               "loc": {
-               "pos": 210,
-               "length": 0,
+               "pos": 209,
+               "length": 1,
                "line": 6,
-               "column": 11
+               "column": 10
               }
              }
             ]
            }
-          ],
-          "label": "body",
-          "loc": {
-           "pos": 178,
-           "length": 0,
-           "line": 5,
-           "column": 9
-          }
+          ]
          }
-        ],
-        "loc": {
-         "pos": 158,
-         "length": 0,
-         "line": 4,
-         "column": 14
-        }
+        ]
        }
       ]
      }
-    ],
-    "loc": {
-     "pos": 153,
-     "length": 0,
-     "line": 4,
-     "column": 9
-    }
+    ]
    },
    "ir": {
-    "text": "@.str_hello_ff931f55_0 = private unnamed_addr constant [16 x i8] c\"Hello, Yooper.\\0A\\00\", align 1\n\ndefine i32 @main() {\nentry:\n  call void @yoop_runtime_init()\n  call void @yoop_runtime_set_coro_ops(ptr @yoop_coro_resume, ptr @yoop_coro_destroy, ptr @yoop_coro_done)\n  %t0 = getelementptr inbounds [16 x i8], ptr @.str_hello_ff931f55_0, i32 0, i32 0\n  %t1 = call i32 (ptr, ...) @printf(ptr %t0)\n  call void @yoop_runtime_shutdown()\n  ret i32 0\n}",
-    "totalLines": 4347,
-    "shownLines": 11
+    "text": "define i32 @main() {\nentry:\n  %t1 = call i32 (ptr, ...) @printf(ptr @.str.0)\n  ret i32 0\n}",
+    "totalLines": 37,
+    "shownLines": 5
    },
    "output": "Hello, Yooper.",
    "exitCode": 0
@@ -624,733 +619,716 @@ window.YOOP_DATA.pipeline = {
    "ast": {
     "id": 1,
     "kind": "PROGRAM",
-    "fields": {
-     "allowsUnsafe": false,
-     "isTestModule": false
+    "loc": {
+     "pos": 327,
+     "length": 8,
+     "line": 8,
+     "column": 1
     },
     "children": [
      {
-      "id": 49,
-      "kind": "GROUP",
-      "label": "body",
+      "id": 2,
+      "kind": "FUNCTION_DECL",
+      "loc": {
+       "pos": 336,
+       "length": 4,
+       "line": 8,
+       "column": 10
+      },
+      "fields": {
+       "name": "main"
+      },
       "children": [
        {
-        "id": 2,
-        "kind": "FUNCTION_DECL",
+        "id": 3,
+        "kind": "NODE_LIST",
+        "label": "functionParamList",
+        "loc": {
+         "pos": 342,
+         "length": 1,
+         "line": 8,
+         "column": 16
+        }
+       },
+       {
+        "id": 4,
+        "kind": "TYPE_ANNOTATION_TYPE_NAME",
+        "label": "returnTypeAnnotation",
+        "loc": {
+         "pos": 344,
+         "length": 5,
+         "line": 8,
+         "column": 18
+        },
         "fields": {
-         "isTask": false,
-         "name": "main",
-         "returnTypeAnnotation": {
-          "kind": "typeName",
-          "name": "int32"
-         },
-         "isAsync": false
+         "name": "int32"
+        }
+       },
+       {
+        "id": 5,
+        "kind": "BLOCK",
+        "label": "functionBody",
+        "loc": {
+         "pos": 356,
+         "length": 3,
+         "line": 9,
+         "column": 5
         },
         "children": [
          {
-          "id": 3,
-          "kind": "BLOCK",
-          "fields": {
-           "endPos": 630
+          "id": 6,
+          "kind": "NODE_LIST",
+          "label": "statementsList",
+          "loc": {
+           "pos": 359,
+           "length": 1,
+           "line": 9,
+           "column": 8
           },
           "children": [
            {
-            "id": 48,
-            "kind": "GROUP",
-            "label": "body",
+            "id": 7,
+            "kind": "LET_DECL",
+            "loc": {
+             "pos": 360,
+             "length": 1,
+             "line": 9,
+             "column": 9
+            },
+            "fields": {
+             "name": "a"
+            },
             "children": [
              {
-              "id": 4,
-              "kind": "LET_DECL",
-              "fields": {
-               "name": "a",
-               "typeAnnotation": {
-                "kind": "typeName",
-                "name": "int32"
-               },
-               "startLoc": {
-                "pos": 356,
-                "line": 9,
-                "column": 5
-               }
-              },
-              "children": [
-               {
-                "id": 5,
-                "kind": "INT_LITERAL",
-                "fields": {
-                 "value": 0
-                },
-                "children": [],
-                "label": "assignment",
-                "loc": {
-                 "pos": 372,
-                 "length": 0,
-                 "line": 9,
-                 "column": 21
-                }
-               }
-              ],
-              "loc": {
-               "pos": 361,
-               "length": 0,
-               "line": 9,
-               "column": 10
-              }
-             },
-             {
-              "id": 6,
-              "kind": "LET_DECL",
-              "fields": {
-               "name": "b",
-               "typeAnnotation": {
-                "kind": "typeName",
-                "name": "int32"
-               },
-               "startLoc": {
-                "pos": 378,
-                "line": 10,
-                "column": 5
-               }
-              },
-              "children": [
-               {
-                "id": 7,
-                "kind": "INT_LITERAL",
-                "fields": {
-                 "value": 1
-                },
-                "children": [],
-                "label": "assignment",
-                "loc": {
-                 "pos": 394,
-                 "length": 0,
-                 "line": 10,
-                 "column": 21
-                }
-               }
-              ],
-              "loc": {
-               "pos": 383,
-               "length": 0,
-               "line": 10,
-               "column": 10
-              }
-             },
-             {
               "id": 8,
-              "kind": "LET_DECL",
-              "fields": {
-               "name": "i",
-               "typeAnnotation": {
-                "kind": "typeName",
-                "name": "int32"
-               },
-               "startLoc": {
-                "pos": 400,
-                "line": 11,
-                "column": 5
-               }
-              },
-              "children": [
-               {
-                "id": 9,
-                "kind": "INT_LITERAL",
-                "fields": {
-                 "value": 0
-                },
-                "children": [],
-                "label": "assignment",
-                "loc": {
-                 "pos": 416,
-                 "length": 0,
-                 "line": 11,
-                 "column": 21
-                }
-               }
-              ],
+              "kind": "TYPE_ANNOTATION_TYPE_NAME",
+              "label": "typeAnnotation",
               "loc": {
-               "pos": 405,
-               "length": 0,
-               "line": 11,
-               "column": 10
+               "pos": 363,
+               "length": 5,
+               "line": 9,
+               "column": 12
+              },
+              "fields": {
+               "name": "int32"
               }
              },
              {
-              "id": 10,
-              "kind": "WHILE_STATEMENT",
+              "id": 9,
+              "kind": "INT_LITERAL",
+              "label": "assignmentExpression",
+              "loc": {
+               "pos": 371,
+               "length": 1,
+               "line": 9,
+               "column": 20
+              }
+             }
+            ]
+           },
+           {
+            "id": 10,
+            "kind": "LET_DECL",
+            "loc": {
+             "pos": 382,
+             "length": 1,
+             "line": 10,
+             "column": 9
+            },
+            "fields": {
+             "name": "b"
+            },
+            "children": [
+             {
+              "id": 11,
+              "kind": "TYPE_ANNOTATION_TYPE_NAME",
+              "label": "typeAnnotation",
+              "loc": {
+               "pos": 385,
+               "length": 5,
+               "line": 10,
+               "column": 12
+              },
               "fields": {
-               "startLoc": {
-                "pos": 469,
-                "line": 14,
-                "column": 5
-               }
+               "name": "int32"
+              }
+             },
+             {
+              "id": 12,
+              "kind": "INT_LITERAL",
+              "label": "assignmentExpression",
+              "loc": {
+               "pos": 393,
+               "length": 1,
+               "line": 10,
+               "column": 20
+              },
+              "fields": {
+               "intVal": "1"
+              }
+             }
+            ]
+           },
+           {
+            "id": 13,
+            "kind": "LET_DECL",
+            "loc": {
+             "pos": 404,
+             "length": 1,
+             "line": 11,
+             "column": 9
+            },
+            "fields": {
+             "name": "i"
+            },
+            "children": [
+             {
+              "id": 14,
+              "kind": "TYPE_ANNOTATION_TYPE_NAME",
+              "label": "typeAnnotation",
+              "loc": {
+               "pos": 407,
+               "length": 5,
+               "line": 11,
+               "column": 12
+              },
+              "fields": {
+               "name": "int32"
+              }
+             },
+             {
+              "id": 15,
+              "kind": "INT_LITERAL",
+              "label": "assignmentExpression",
+              "loc": {
+               "pos": 415,
+               "length": 1,
+               "line": 11,
+               "column": 20
+              }
+             }
+            ]
+           },
+           {
+            "id": 16,
+            "kind": "WHILE_STATEMENT",
+            "loc": {
+             "pos": 475,
+             "length": 1,
+             "line": 14,
+             "column": 11
+            },
+            "children": [
+             {
+              "id": 17,
+              "kind": "BINARY_EXPRESSION",
+              "label": "condition",
+              "loc": {
+               "pos": 482,
+               "length": 1,
+               "line": 14,
+               "column": 18
+              },
+              "fields": {
+               "operator": "LT"
               },
               "children": [
                {
-                "id": 11,
-                "kind": "BINARY_EXPRESSION",
-                "fields": {
-                 "op": "lt"
-                },
-                "children": [
-                 {
-                  "id": 12,
-                  "kind": "IDENT",
-                  "fields": {
-                   "name": "i"
-                  },
-                  "children": [],
-                  "label": "left",
-                  "loc": {
-                   "pos": 479,
-                   "length": 0,
-                   "line": 14,
-                   "column": 15
-                  }
-                 },
-                 {
-                  "id": 13,
-                  "kind": "INT_LITERAL",
-                  "fields": {
-                   "value": 10
-                  },
-                  "children": [],
-                  "label": "right",
-                  "loc": {
-                   "pos": 482,
-                   "length": 0,
-                   "line": 14,
-                   "column": 18
-                  }
-                 }
-                ],
-                "label": "expression",
+                "id": 18,
+                "kind": "IDENT",
+                "label": "leftNode",
                 "loc": {
-                 "pos": 483,
-                 "length": 0,
+                 "pos": 478,
+                 "length": 1,
                  "line": 14,
-                 "column": 19
+                 "column": 14
+                },
+                "fields": {
+                 "name": "i"
                 }
                },
                {
-                "id": 14,
-                "kind": "BLOCK",
+                "id": 19,
+                "kind": "INT_LITERAL",
+                "label": "rightNode",
+                "loc": {
+                 "pos": 480,
+                 "length": 2,
+                 "line": 14,
+                 "column": 16
+                },
                 "fields": {
-                 "endPos": 613
+                 "intVal": "10"
+                }
+               }
+              ]
+             },
+             {
+              "id": 20,
+              "kind": "BLOCK",
+              "label": "bodyBlock",
+              "loc": {
+               "pos": 494,
+               "length": 6,
+               "line": 15,
+               "column": 9
+              },
+              "children": [
+               {
+                "id": 21,
+                "kind": "NODE_LIST",
+                "label": "statementsList",
+                "loc": {
+                 "pos": 500,
+                 "length": 1,
+                 "line": 15,
+                 "column": 15
                 },
                 "children": [
                  {
-                  "id": 45,
-                  "kind": "GROUP",
-                  "label": "body",
+                  "id": 22,
+                  "kind": "EXPRESSION_STATEMENT",
+                  "loc": {
+                   "pos": 494,
+                   "length": 6,
+                   "line": 15,
+                   "column": 9
+                  },
                   "children": [
                    {
-                    "id": 15,
-                    "kind": "EXPRESSION_STATEMENT",
+                    "id": 23,
+                    "kind": "CALL_EXPRESSION",
+                    "label": "expression",
+                    "loc": {
+                     "pos": 500,
+                     "length": 1,
+                     "line": 15,
+                     "column": 15
+                    },
                     "fields": {
-                     "startLoc": {
-                      "pos": 494,
-                      "line": 15,
-                      "column": 9
-                     }
+                     "name": "printf"
                     },
                     "children": [
                      {
-                      "id": 16,
-                      "kind": "CALL_EXPRESSION",
-                      "fields": {
-                       "callee": "printf"
+                      "id": 24,
+                      "kind": "NODE_LIST",
+                      "label": "undefined",
+                      "loc": {
+                       "pos": 501,
+                       "length": 1,
+                       "line": 15,
+                       "column": 16
                       },
                       "children": [
                        {
-                        "id": 26,
-                        "kind": "GROUP",
-                        "label": "args",
+                        "id": 25,
+                        "kind": "TEMPLATE_LITERAL",
+                        "loc": {
+                         "pos": 501,
+                         "length": 20,
+                         "line": 15,
+                         "column": 16
+                        },
                         "children": [
                          {
-                          "id": 17,
-                          "kind": "TEMPLATE_LITERAL",
-                          "fields": {},
+                          "id": 26,
+                          "kind": "STRING_PART",
+                          "loc": {
+                           "pos": 502,
+                           "length": 4,
+                           "line": 15,
+                           "column": 17
+                          }
+                         },
+                         {
+                          "id": 27,
+                          "kind": "EXPR_PART",
+                          "loc": {
+                           "pos": 508,
+                           "length": 1,
+                           "line": 15,
+                           "column": 23
+                          },
                           "children": [
                            {
-                            "id": 25,
-                            "kind": "GROUP",
-                            "label": "parts",
-                            "children": [
-                             {
-                              "id": 18,
-                              "kind": "STRING_PART",
-                              "fields": {
-                               "value": "fib("
-                              },
-                              "children": []
-                             },
-                             {
-                              "id": 19,
-                              "kind": "EXPR_PART",
-                              "fields": {},
-                              "children": [
-                               {
-                                "id": 20,
-                                "kind": "IDENT",
-                                "fields": {
-                                 "name": "i"
-                                },
-                                "children": [],
-                                "label": "expr",
-                                "loc": {
-                                 "pos": 510,
-                                 "length": 0,
-                                 "line": 15,
-                                 "column": 25
-                                }
-                               }
-                              ]
-                             },
-                             {
-                              "id": 21,
-                              "kind": "STRING_PART",
-                              "fields": {
-                               "value": ") = "
-                              },
-                              "children": []
-                             },
-                             {
-                              "id": 22,
-                              "kind": "EXPR_PART",
-                              "fields": {},
-                              "children": [
-                               {
-                                "id": 23,
-                                "kind": "IDENT",
-                                "fields": {
-                                 "name": "a"
-                                },
-                                "children": [],
-                                "label": "expr",
-                                "loc": {
-                                 "pos": 518,
-                                 "length": 0,
-                                 "line": 15,
-                                 "column": 33
-                                }
-                               }
-                              ]
-                             },
-                             {
-                              "id": 24,
-                              "kind": "STRING_PART",
-                              "fields": {
-                               "value": "\\n"
-                              },
-                              "children": []
-                             }
-                            ]
+                            "id": 28,
+                            "kind": "IDENT",
+                            "label": "undefined",
+                            "loc": {
+                             "pos": 509,
+                             "length": 1,
+                             "line": 15,
+                             "column": 24
+                            },
+                            "fields": {
+                             "name": "i"
+                            }
                            }
-                          ],
+                          ]
+                         },
+                         {
+                          "id": 29,
+                          "kind": "STRING_PART",
                           "loc": {
-                           "pos": 522,
-                           "length": 0,
+                           "pos": 510,
+                           "length": 4,
                            "line": 15,
-                           "column": 37
+                           "column": 25
+                          },
+                          "fields": {
+                           "text": ") = "
+                          }
+                         },
+                         {
+                          "id": 30,
+                          "kind": "EXPR_PART",
+                          "loc": {
+                           "pos": 516,
+                           "length": 1,
+                           "line": 15,
+                           "column": 31
+                          },
+                          "children": [
+                           {
+                            "id": 31,
+                            "kind": "IDENT",
+                            "label": "undefined",
+                            "loc": {
+                             "pos": 517,
+                             "length": 1,
+                             "line": 15,
+                             "column": 32
+                            },
+                            "fields": {
+                             "name": "a"
+                            }
+                           }
+                          ]
+                         },
+                         {
+                          "id": 32,
+                          "kind": "STRING_PART",
+                          "loc": {
+                           "pos": 518,
+                           "length": 2,
+                           "line": 15,
+                           "column": 33
+                          },
+                          "fields": {
+                           "text": "\n"
                           }
                          }
                         ]
                        }
-                      ],
-                      "label": "value",
-                      "loc": {
-                       "pos": 501,
-                       "length": 0,
-                       "line": 15,
-                       "column": 16
-                      }
+                      ]
                      }
-                    ],
-                    "loc": {
-                     "pos": 500,
-                     "length": 0,
-                     "line": 15,
-                     "column": 15
-                    }
-                   },
+                    ]
+                   }
+                  ]
+                 },
+                 {
+                  "id": 33,
+                  "kind": "LET_DECL",
+                  "loc": {
+                   "pos": 536,
+                   "length": 4,
+                   "line": 16,
+                   "column": 13
+                  },
+                  "fields": {
+                   "name": "next"
+                  },
+                  "children": [
                    {
-                    "id": 27,
-                    "kind": "LET_DECL",
-                    "fields": {
-                     "name": "next",
-                     "typeAnnotation": {
-                      "kind": "typeName",
-                      "name": "int32"
-                     },
-                     "startLoc": {
-                      "pos": 532,
-                      "line": 16,
-                      "column": 9
-                     }
-                    },
-                    "children": [
-                     {
-                      "id": 28,
-                      "kind": "BINARY_EXPRESSION",
-                      "fields": {
-                       "op": "plus"
-                      },
-                      "children": [
-                       {
-                        "id": 29,
-                        "kind": "IDENT",
-                        "fields": {
-                         "name": "a"
-                        },
-                        "children": [],
-                        "label": "left",
-                        "loc": {
-                         "pos": 553,
-                         "length": 0,
-                         "line": 16,
-                         "column": 30
-                        }
-                       },
-                       {
-                        "id": 30,
-                        "kind": "IDENT",
-                        "fields": {
-                         "name": "b"
-                        },
-                        "children": [],
-                        "label": "right",
-                        "loc": {
-                         "pos": 556,
-                         "length": 0,
-                         "line": 16,
-                         "column": 33
-                        }
-                       }
-                      ],
-                      "label": "assignment",
-                      "loc": {
-                       "pos": 556,
-                       "length": 0,
-                       "line": 16,
-                       "column": 33
-                      }
-                     }
-                    ],
+                    "id": 34,
+                    "kind": "TYPE_ANNOTATION_TYPE_NAME",
+                    "label": "typeAnnotation",
                     "loc": {
-                     "pos": 540,
-                     "length": 0,
+                     "pos": 542,
+                     "length": 5,
                      "line": 16,
-                     "column": 17
-                    }
-                   },
-                   {
-                    "id": 31,
-                    "kind": "EXPRESSION_STATEMENT",
-                    "fields": {
-                     "startLoc": {
-                      "pos": 565,
-                      "line": 17,
-                      "column": 9
-                     }
+                     "column": 19
                     },
-                    "children": [
-                     {
-                      "id": 32,
-                      "kind": "ASSIGNMENT",
-                      "fields": {},
-                      "children": [
-                       {
-                        "id": 33,
-                        "kind": "IDENT",
-                        "fields": {
-                         "name": "a"
-                        },
-                        "children": [],
-                        "label": "target",
-                        "loc": {
-                         "pos": 568,
-                         "length": 0,
-                         "line": 17,
-                         "column": 12
-                        }
-                       },
-                       {
-                        "id": 34,
-                        "kind": "IDENT",
-                        "fields": {
-                         "name": "b"
-                        },
-                        "children": [],
-                        "label": "value",
-                        "loc": {
-                         "pos": 571,
-                         "length": 0,
-                         "line": 17,
-                         "column": 15
-                        }
-                       }
-                      ],
-                      "label": "value",
-                      "loc": {
-                       "pos": 570,
-                       "length": 0,
-                       "line": 17,
-                       "column": 14
-                      }
-                     }
-                    ],
-                    "loc": {
-                     "pos": 566,
-                     "length": 0,
-                     "line": 17,
-                     "column": 10
+                    "fields": {
+                     "name": "int32"
                     }
                    },
                    {
                     "id": 35,
-                    "kind": "EXPRESSION_STATEMENT",
+                    "kind": "BINARY_EXPRESSION",
+                    "label": "assignmentExpression",
+                    "loc": {
+                     "pos": 555,
+                     "length": 1,
+                     "line": 16,
+                     "column": 32
+                    },
                     "fields": {
-                     "startLoc": {
-                      "pos": 580,
-                      "line": 18,
-                      "column": 9
-                     }
+                     "operator": "PLUS"
                     },
                     "children": [
                      {
                       "id": 36,
-                      "kind": "ASSIGNMENT",
-                      "fields": {},
-                      "children": [
-                       {
-                        "id": 37,
-                        "kind": "IDENT",
-                        "fields": {
-                         "name": "b"
-                        },
-                        "children": [],
-                        "label": "target",
-                        "loc": {
-                         "pos": 583,
-                         "length": 0,
-                         "line": 18,
-                         "column": 12
-                        }
-                       },
-                       {
-                        "id": 38,
-                        "kind": "IDENT",
-                        "fields": {
-                         "name": "next"
-                        },
-                        "children": [],
-                        "label": "value",
-                        "loc": {
-                         "pos": 589,
-                         "length": 0,
-                         "line": 18,
-                         "column": 18
-                        }
-                       }
-                      ],
-                      "label": "value",
+                      "kind": "IDENT",
+                      "label": "leftNode",
                       "loc": {
-                       "pos": 588,
-                       "length": 0,
-                       "line": 18,
-                       "column": 17
+                       "pos": 552,
+                       "length": 1,
+                       "line": 16,
+                       "column": 29
+                      },
+                      "fields": {
+                       "name": "a"
+                      }
+                     },
+                     {
+                      "id": 37,
+                      "kind": "IDENT",
+                      "label": "rightNode",
+                      "loc": {
+                       "pos": 555,
+                       "length": 1,
+                       "line": 16,
+                       "column": 32
+                      },
+                      "fields": {
+                       "name": "b"
                       }
                      }
-                    ],
-                    "loc": {
-                     "pos": 581,
-                     "length": 0,
-                     "line": 18,
-                     "column": 10
-                    }
-                   },
+                    ]
+                   }
+                  ]
+                 },
+                 {
+                  "id": 38,
+                  "kind": "EXPRESSION_STATEMENT",
+                  "loc": {
+                   "pos": 565,
+                   "length": 1,
+                   "line": 17,
+                   "column": 9
+                  },
+                  "children": [
                    {
                     "id": 39,
-                    "kind": "EXPRESSION_STATEMENT",
-                    "fields": {
-                     "startLoc": {
-                      "pos": 598,
-                      "line": 19,
-                      "column": 9
-                     }
+                    "kind": "ASSIGNMENT",
+                    "label": "expression",
+                    "loc": {
+                     "pos": 569,
+                     "length": 1,
+                     "line": 17,
+                     "column": 13
                     },
                     "children": [
                      {
                       "id": 40,
-                      "kind": "ASSIGNMENT",
-                      "fields": {},
+                      "kind": "IDENT",
+                      "label": "target",
+                      "loc": {
+                       "pos": 567,
+                       "length": 1,
+                       "line": 17,
+                       "column": 11
+                      },
+                      "fields": {
+                       "name": "a"
+                      }
+                     },
+                     {
+                      "id": 41,
+                      "kind": "IDENT",
+                      "label": "value",
+                      "loc": {
+                       "pos": 570,
+                       "length": 1,
+                       "line": 17,
+                       "column": 14
+                      },
+                      "fields": {
+                       "name": "b"
+                      }
+                     }
+                    ]
+                   }
+                  ]
+                 },
+                 {
+                  "id": 42,
+                  "kind": "EXPRESSION_STATEMENT",
+                  "loc": {
+                   "pos": 580,
+                   "length": 1,
+                   "line": 18,
+                   "column": 9
+                  },
+                  "children": [
+                   {
+                    "id": 43,
+                    "kind": "ASSIGNMENT",
+                    "label": "expression",
+                    "loc": {
+                     "pos": 584,
+                     "length": 4,
+                     "line": 18,
+                     "column": 13
+                    },
+                    "children": [
+                     {
+                      "id": 44,
+                      "kind": "IDENT",
+                      "label": "target",
+                      "loc": {
+                       "pos": 582,
+                       "length": 1,
+                       "line": 18,
+                       "column": 11
+                      },
+                      "fields": {
+                       "name": "b"
+                      }
+                     },
+                     {
+                      "id": 45,
+                      "kind": "IDENT",
+                      "label": "value",
+                      "loc": {
+                       "pos": 588,
+                       "length": 1,
+                       "line": 18,
+                       "column": 17
+                      },
+                      "fields": {
+                       "name": "next"
+                      }
+                     }
+                    ]
+                   }
+                  ]
+                 },
+                 {
+                  "id": 46,
+                  "kind": "EXPRESSION_STATEMENT",
+                  "loc": {
+                   "pos": 598,
+                   "length": 1,
+                   "line": 19,
+                   "column": 9
+                  },
+                  "children": [
+                   {
+                    "id": 47,
+                    "kind": "ASSIGNMENT",
+                    "label": "expression",
+                    "loc": {
+                     "pos": 602,
+                     "length": 1,
+                     "line": 19,
+                     "column": 13
+                    },
+                    "children": [
+                     {
+                      "id": 48,
+                      "kind": "IDENT",
+                      "label": "target",
+                      "loc": {
+                       "pos": 600,
+                       "length": 1,
+                       "line": 19,
+                       "column": 11
+                      },
+                      "fields": {
+                       "name": "i"
+                      }
+                     },
+                     {
+                      "id": 49,
+                      "kind": "BINARY_EXPRESSION",
+                      "label": "value",
+                      "loc": {
+                       "pos": 607,
+                       "length": 1,
+                       "line": 19,
+                       "column": 18
+                      },
+                      "fields": {
+                       "operator": "PLUS"
+                      },
                       "children": [
                        {
-                        "id": 41,
+                        "id": 50,
                         "kind": "IDENT",
+                        "label": "leftNode",
+                        "loc": {
+                         "pos": 604,
+                         "length": 1,
+                         "line": 19,
+                         "column": 15
+                        },
                         "fields": {
                          "name": "i"
-                        },
-                        "children": [],
-                        "label": "target",
-                        "loc": {
-                         "pos": 601,
-                         "length": 0,
-                         "line": 19,
-                         "column": 12
                         }
                        },
                        {
-                        "id": 42,
-                        "kind": "BINARY_EXPRESSION",
-                        "fields": {
-                         "op": "plus"
-                        },
-                        "children": [
-                         {
-                          "id": 43,
-                          "kind": "IDENT",
-                          "fields": {
-                           "name": "i"
-                          },
-                          "children": [],
-                          "label": "left",
-                          "loc": {
-                           "pos": 605,
-                           "length": 0,
-                           "line": 19,
-                           "column": 16
-                          }
-                         },
-                         {
-                          "id": 44,
-                          "kind": "INT_LITERAL",
-                          "fields": {
-                           "value": 1
-                          },
-                          "children": [],
-                          "label": "right",
-                          "loc": {
-                           "pos": 607,
-                           "length": 0,
-                           "line": 19,
-                           "column": 18
-                          }
-                         }
-                        ],
-                        "label": "value",
+                        "id": 51,
+                        "kind": "INT_LITERAL",
+                        "label": "rightNode",
                         "loc": {
-                         "pos": 608,
-                         "length": 0,
+                         "pos": 606,
+                         "length": 1,
                          "line": 19,
-                         "column": 19
+                         "column": 17
+                        },
+                        "fields": {
+                         "intVal": "1"
                         }
                        }
-                      ],
-                      "label": "value",
-                      "loc": {
-                       "pos": 603,
-                       "length": 0,
-                       "line": 19,
-                       "column": 14
-                      }
+                      ]
                      }
-                    ],
-                    "loc": {
-                     "pos": 599,
-                     "length": 0,
-                     "line": 19,
-                     "column": 10
-                    }
+                    ]
                    }
                   ]
                  }
-                ],
-                "label": "body",
-                "loc": {
-                 "pos": 500,
-                 "length": 0,
-                 "line": 15,
-                 "column": 15
-                }
+                ]
                }
-              ],
-              "loc": {
-               "pos": 477,
-               "length": 0,
-               "line": 14,
-               "column": 13
-              }
-             },
+              ]
+             }
+            ]
+           },
+           {
+            "id": 52,
+            "kind": "RETURN_STATEMENT",
+            "loc": {
+             "pos": 627,
+             "length": 1,
+             "line": 22,
+             "column": 12
+            },
+            "children": [
              {
-              "id": 46,
-              "kind": "RETURN_STATEMENT",
-              "fields": {
-               "startLoc": {
-                "pos": 620,
-                "line": 22,
-                "column": 5
-               }
-              },
-              "children": [
-               {
-                "id": 47,
-                "kind": "INT_LITERAL",
-                "fields": {
-                 "value": 0
-                },
-                "children": [],
-                "label": "value",
-                "loc": {
-                 "pos": 628,
-                 "length": 0,
-                 "line": 22,
-                 "column": 13
-                }
-               }
-              ],
+              "id": 53,
+              "kind": "INT_LITERAL",
+              "label": "returnExpression",
               "loc": {
-               "pos": 628,
-               "length": 0,
+               "pos": 627,
+               "length": 1,
                "line": 22,
-               "column": 13
+               "column": 12
               }
              }
             ]
            }
-          ],
-          "label": "body",
-          "loc": {
-           "pos": 359,
-           "length": 0,
-           "line": 9,
-           "column": 8
-          }
+          ]
          }
-        ],
-        "loc": {
-         "pos": 340,
-         "length": 0,
-         "line": 8,
-         "column": 14
-        }
+        ]
        }
       ]
      }
-    ],
-    "loc": {
-     "pos": 335,
-     "length": 0,
-     "line": 8,
-     "column": 9
-    }
+    ]
    },
    "ir": {
-    "text": "@.str_fibonacci_e727b1c3_0 = private unnamed_addr constant [14 x i8] c\"fib(%d) = %d\\0A\\00\", align 1\n\ndefine i32 @main() {\nentry:\n  call void @yoop_runtime_init()\n  call void @yoop_runtime_set_coro_ops(ptr @yoop_coro_resume, ptr @yoop_coro_destroy, ptr @yoop_coro_done)\n  %a = alloca i32, align 4\n  store i32 0, ptr %a\n  %b = alloca i32, align 4\n  store i32 1, ptr %b\n  %i = alloca i32, align 4\n  store i32 0, ptr %i\n  %next = alloca i32, align 4\n  br label %while_cond_0\nwhile_cond_0:\n  %t0 = load i32, ptr %i\n  %t1 = icmp slt i32 %t0, 10\n  br i1 %t1, label %while_body_1, label %while_after_2\nwhile_body_1:\n  %t2 = load i32, ptr %i\n  %t3 = load i32, ptr %a\n  %t4 = getelementptr inbounds [14 x i8], ptr @.str_fibonacci_e727b1c3_0, i32 0, i32 0\n  %t5 = call i32 (ptr, ...) @printf(ptr %t4, i32 %t2, i32 %t3)\n  %t6 = load i32, ptr %a\n  %t7 = load i32, ptr %b\n  %t8 = add i32 %t6, %t7\n  store i32 %t8, ptr %next\n  %t9 = load i32, ptr %b\n  store i32 %t9, ptr %a\n  %t10 = load i32, ptr %next\n  store i32 %t10, ptr %b\n  %t11 = load i32, ptr %i\n  %t12 = add i32 %t11, 1\n  store i32 %t12, ptr %i\n  br label %while_cond_0\nwhile_after_2:\n  call void @yoop_runtime_shutdown()\n  ret i32 0\n}",
-    "totalLines": 4391,
-    "shownLines": 39
+    "text": "define i32 @main() {\nentry:\n  %a.1.addr = alloca i32\n  %b.2.addr = alloca i32\n  %i.3.addr = alloca i32\n  %next.4.addr = alloca i32\n  store i32 0, ptr %a.1.addr\n  store i32 1, ptr %b.2.addr\n  store i32 0, ptr %i.3.addr\n  br label %L1\nL1:\n  %t1 = load i32, ptr %i.3.addr\n  %t2 = icmp slt i32 %t1, 10\n  br i1 %t2, label %L2, label %L3\nL2:\n  %t3 = load i32, ptr %i.3.addr\n  %t4 = sext i32 %t3 to i64\n  %t5 = call ptr @malloc(i64 24)\n  call i32 (ptr, ptr, ...) @sprintf(ptr %t5, ptr @.str.1, i64 %t4)\n  %t6 = load i32, ptr %a.1.addr\n  %t7 = sext i32 %t6 to i64\n  %t8 = call ptr @malloc(i64 24)\n  call i32 (ptr, ptr, ...) @sprintf(ptr %t8, ptr @.str.3, i64 %t7)\n  %t9 = call i64 @strlen(ptr @.str.0)\n  %t10 = call i64 @strlen(ptr %t5)\n  %t11 = call i64 @strlen(ptr @.str.2)\n  %t12 = call i64 @strlen(ptr %t8)\n  %t13 = call i64 @strlen(ptr @.str.4)\n  %t14 = add i64 0, %t9\n  %t15 = add i64 %t14, %t10\n  %t16 = add i64 %t15, %t11\n  %t17 = add i64 %t16, %t12\n  %t18 = add i64 %t17, %t13\n  %t19 = add i64 %t18, 1\n  %t20 = call ptr @malloc(i64 %t19)\n  %t21 = getelementptr i8, ptr %t20, i64 0\n  call ptr @memcpy(ptr %t21, ptr @.str.0, i64 %t9)\n  %t22 = getelementptr i8, ptr %t20, i64 %t14\n  call ptr @memcpy(ptr %t22, ptr %t5, i64 %t10)\n  %t23 = getelementptr i8, ptr %t20, i64 %t15\n  call ptr @memcpy(ptr %t23, ptr @.str.2, i64 %t11)\n  %t24 = getelementptr i8, ptr %t20, i64 %t16\n  call ptr @memcpy(ptr %t24, ptr %t8, i64 %t12)\n  %t25 = getelementptr i8, ptr %t20, i64 %t17\n  call ptr @memcpy(ptr %t25, ptr @.str.4, i64 %t13)\n  %t26 = getelementptr i8, ptr %t20, i64 %t18\n  store i8 0, ptr %t26\n  %t27 = call i32 (ptr, ...) @printf(ptr @.str.5, ptr %t20)\n  %t28 = load i32, ptr %a.1.addr\n  %t29 = load i32, ptr %b.2.addr\n  %t30 = add i32 %t28, %t29\n  store i32 %t30, ptr %next.4.addr\n  %t31 = load i32, ptr %b.2.addr\n  store i32 %t31, ptr %a.1.addr\n  %t32 = load i32, ptr %next.4.addr\n  store i32 %t32, ptr %b.2.addr\n  %t33 = load i32, ptr %i.3.addr\n  %t34 = add i32 %t33, 1\n  store i32 %t34, ptr %i.3.addr\n  br label %L1\nL3:\n  ret i32 0\n}",
+    "totalLines": 122,
+    "shownLines": 63
    },
    "output": "fib(0) = 0\nfib(1) = 1\nfib(2) = 1\nfib(3) = 2\nfib(4) = 3\nfib(5) = 5\nfib(6) = 8\nfib(7) = 13\nfib(8) = 21\nfib(9) = 34",
    "exitCode": 0
@@ -2088,1314 +2066,1447 @@ window.YOOP_DATA.pipeline = {
    "ast": {
     "id": 1,
     "kind": "PROGRAM",
-    "fields": {
-     "allowsUnsafe": false,
-     "isTestModule": false
+    "loc": {
+     "pos": 141,
+     "length": 5,
+     "line": 4,
+     "column": 1
     },
     "children": [
      {
-      "id": 93,
-      "kind": "GROUP",
-      "label": "body",
+      "id": 2,
+      "kind": "TRAIT_DECL",
+      "loc": {
+       "pos": 147,
+       "length": 7,
+       "line": 4,
+       "column": 7
+      },
+      "fields": {
+       "name": "Greeter"
+      },
       "children": [
        {
-        "id": 2,
-        "kind": "TRAIT_DECL",
+        "id": 3,
+        "kind": "METHOD_SIG",
+        "loc": {
+         "pos": 168,
+         "length": 5,
+         "line": 5,
+         "column": 12
+        },
         "fields": {
-         "name": "Greeter"
+         "name": "greet"
         },
         "children": [
          {
-          "id": 6,
-          "kind": "GROUP",
-          "label": "methods",
+          "id": 4,
+          "kind": "NODE_LIST",
+          "label": "undefined",
+          "loc": {
+           "pos": 177,
+           "length": 1,
+           "line": 5,
+           "column": 21
+          },
           "children": [
            {
-            "id": 3,
-            "kind": "METHOD_SIG",
+            "id": 5,
+            "kind": "PARAM",
+            "loc": {
+             "pos": 174,
+             "length": 3,
+             "line": 5,
+             "column": 18
+            },
             "fields": {
-             "isTask": false,
-             "isAsync": false,
-             "name": "greet",
-             "returnTypeAnnotation": {
-              "kind": "typeName",
-              "name": "string"
-             }
+             "name": "self",
+             "flagA": "true"
             },
             "children": [
              {
-              "id": 5,
-              "kind": "GROUP",
-              "label": "params",
-              "children": [
-               {
-                "id": 4,
-                "kind": "PARAM",
-                "fields": {
-                 "isRef": true,
-                 "name": "self",
-                 "typeAnnotation": {
-                  "kind": "selfType"
-                 }
-                },
-                "children": [],
-                "loc": {
-                 "pos": 183,
-                 "length": 0,
-                 "line": 5,
-                 "column": 27
-                }
-               }
-              ]
+              "id": 6,
+              "kind": "TYPE_ANNOTATION_TYPE_NAME",
+              "label": "typeAnnotation",
+              "loc": {
+               "pos": 182,
+               "length": 1,
+               "line": 5,
+               "column": 26
+              },
+              "fields": {
+               "name": "Greeter"
+              }
              }
-            ],
-            "loc": {
-             "pos": 167,
-             "length": 0,
-             "line": 5,
-             "column": 11
-            }
+            ]
            }
           ]
-         }
-        ],
-        "loc": {
-         "pos": 146,
-         "length": 0,
-         "line": 4,
-         "column": 6
-        }
-       },
-       {
-        "id": 7,
-        "kind": "TYPE_DECL",
-        "fields": {
-         "name": "Town",
-         "implements": [
-          {
-           "name": "Greeter",
-           "typeArgs": null,
-           "sourceLoc": {
-            "pos": 319,
-            "line": 10,
-            "column": 22
-           }
+         },
+         {
+          "id": 7,
+          "kind": "TYPE_ANNOTATION_TYPE_NAME",
+          "label": "undefined",
+          "loc": {
+           "pos": 185,
+           "length": 6,
+           "line": 5,
+           "column": 29
+          },
+          "fields": {
+           "name": "string"
           }
-         ]
+         }
+        ]
+       }
+      ]
+     },
+     {
+      "id": 8,
+      "kind": "TYPE_DECL",
+      "loc": {
+       "pos": 303,
+       "length": 4,
+       "line": 10,
+       "column": 6
+      },
+      "fields": {
+       "name": "Town"
+      },
+      "children": [
+       {
+        "id": 9,
+        "kind": "NODE_LIST",
+        "label": "implementsList",
+        "loc": {
+         "pos": 318,
+         "length": 1,
+         "line": 10,
+         "column": 21
         },
         "children": [
          {
           "id": 10,
-          "kind": "GROUP",
-          "label": "fields",
+          "kind": "TYPE_ANNOTATION_TYPE_NAME",
+          "loc": {
+           "pos": 319,
+           "length": 7,
+           "line": 10,
+           "column": 22
+          },
+          "fields": {
+           "name": "Greeter"
+          }
+         }
+        ]
+       },
+       {
+        "id": 11,
+        "kind": "FIELD_DECL",
+        "loc": {
+         "pos": 331,
+         "length": 4,
+         "line": 11,
+         "column": 3
+        },
+        "fields": {
+         "name": "name"
+        },
+        "children": [
+         {
+          "id": 12,
+          "kind": "TYPE_ANNOTATION_TYPE_NAME",
+          "label": "typeAnnotation",
+          "loc": {
+           "pos": 337,
+           "length": 6,
+           "line": 11,
+           "column": 9
+          },
+          "fields": {
+           "name": "string"
+          }
+         }
+        ]
+       },
+       {
+        "id": 13,
+        "kind": "FIELD_DECL",
+        "loc": {
+         "pos": 347,
+         "length": 10,
+         "line": 12,
+         "column": 3
+        },
+        "fields": {
+         "name": "population"
+        },
+        "children": [
+         {
+          "id": 14,
+          "kind": "TYPE_ANNOTATION_TYPE_NAME",
+          "label": "typeAnnotation",
+          "loc": {
+           "pos": 359,
+           "length": 5,
+           "line": 12,
+           "column": 15
+          },
+          "fields": {
+           "name": "int32"
+          }
+         }
+        ]
+       },
+       {
+        "id": 15,
+        "kind": "METHOD_DECL",
+        "loc": {
+         "pos": 377,
+         "length": 5,
+         "line": 13,
+         "column": 12
+        },
+        "fields": {
+         "name": "greet"
+        },
+        "children": [
+         {
+          "id": 16,
+          "kind": "NODE_LIST",
+          "label": "undefined",
+          "loc": {
+           "pos": 386,
+           "length": 1,
+           "line": 13,
+           "column": 21
+          },
           "children": [
            {
-            "id": 8,
-            "kind": "FIELD_DECL",
-            "fields": {
-             "name": "name",
-             "typeAnnotation": {
-              "kind": "typeName",
-              "name": "string"
-             }
-            },
-            "children": [],
+            "id": 17,
+            "kind": "PARAM",
             "loc": {
-             "pos": 335,
-             "length": 0,
-             "line": 11,
-             "column": 7
-            }
-           },
-           {
-            "id": 9,
-            "kind": "FIELD_DECL",
-            "fields": {
-             "name": "population",
-             "typeAnnotation": {
-              "kind": "typeName",
-              "name": "int32"
-             }
+             "pos": 383,
+             "length": 3,
+             "line": 13,
+             "column": 18
             },
-            "children": [],
-            "loc": {
-             "pos": 357,
-             "length": 0,
-             "line": 12,
-             "column": 13
-            }
+            "fields": {
+             "name": "self",
+             "flagA": "true"
+            },
+            "children": [
+             {
+              "id": 18,
+              "kind": "TYPE_ANNOTATION_TYPE_NAME",
+              "label": "typeAnnotation",
+              "loc": {
+               "pos": 391,
+               "length": 1,
+               "line": 13,
+               "column": 26
+              },
+              "fields": {
+               "name": "Town"
+              }
+             }
+            ]
            }
           ]
          },
          {
           "id": 19,
-          "kind": "GROUP",
-          "label": "methods",
-          "children": [
-           {
-            "id": 11,
-            "kind": "METHOD_DECL",
-            "fields": {
-             "isTask": false,
-             "isAsync": false,
-             "name": "greet",
-             "returnTypeAnnotation": {
-              "kind": "typeName",
-              "name": "string"
-             }
-            },
-            "children": [
-             {
-              "id": 13,
-              "kind": "GROUP",
-              "label": "params",
-              "children": [
-               {
-                "id": 12,
-                "kind": "PARAM",
-                "fields": {
-                 "isRef": true,
-                 "name": "self",
-                 "typeAnnotation": {
-                  "kind": "selfType"
-                 }
-                },
-                "children": [],
-                "loc": {
-                 "pos": 392,
-                 "length": 0,
-                 "line": 13,
-                 "column": 27
-                }
-               }
-              ]
-             },
-             {
-              "id": 14,
-              "kind": "BLOCK",
-              "fields": {
-               "endPos": 427
-              },
-              "children": [
-               {
-                "id": 18,
-                "kind": "GROUP",
-                "label": "body",
-                "children": [
-                 {
-                  "id": 15,
-                  "kind": "RETURN_STATEMENT",
-                  "fields": {
-                   "startLoc": {
-                    "pos": 407,
-                    "line": 14,
-                    "column": 5
-                   }
-                  },
-                  "children": [
-                   {
-                    "id": 16,
-                    "kind": "FIELD_ACCESS",
-                    "fields": {
-                     "field": "name",
-                     "fieldSourceLoc": {
-                      "pos": 419,
-                      "line": 14,
-                      "column": 17,
-                      "length": 4
-                     }
-                    },
-                    "children": [
-                     {
-                      "id": 17,
-                      "kind": "IDENT",
-                      "fields": {
-                       "name": "self"
-                      },
-                      "children": [],
-                      "label": "object",
-                      "loc": {
-                       "pos": 419,
-                       "length": 0,
-                       "line": 14,
-                       "column": 17
-                      }
-                     }
-                    ],
-                    "label": "value",
-                    "loc": {
-                     "pos": 419,
-                     "length": 0,
-                     "line": 14,
-                     "column": 17
-                    }
-                   }
-                  ],
-                  "loc": {
-                   "pos": 418,
-                   "length": 0,
-                   "line": 14,
-                   "column": 16
-                  }
-                 }
-                ]
-               }
-              ],
-              "label": "body",
-              "loc": {
-               "pos": 413,
-               "length": 0,
-               "line": 14,
-               "column": 11
-              }
-             }
-            ],
-            "loc": {
-             "pos": 376,
-             "length": 0,
-             "line": 13,
-             "column": 11
-            }
-           }
-          ]
-         }
-        ],
-        "loc": {
-         "pos": 307,
-         "length": 0,
-         "line": 10,
-         "column": 10
-        }
-       },
-       {
-        "id": 20,
-        "kind": "TYPE_DECL",
-        "fields": {
-         "name": "Lake",
-         "implements": [
-          {
-           "name": "Greeter",
-           "typeArgs": null,
-           "sourceLoc": {
-            "pos": 453,
-            "line": 18,
-            "column": 22
-           }
+          "kind": "TYPE_ANNOTATION_TYPE_NAME",
+          "label": "undefined",
+          "loc": {
+           "pos": 394,
+           "length": 6,
+           "line": 13,
+           "column": 29
+          },
+          "fields": {
+           "name": "string"
           }
-         ]
-        },
-        "children": [
+         },
          {
-          "id": 22,
-          "kind": "GROUP",
-          "label": "fields",
+          "id": 20,
+          "kind": "BLOCK",
+          "label": "functionBody",
+          "loc": {
+           "pos": 407,
+           "length": 6,
+           "line": 14,
+           "column": 5
+          },
           "children": [
            {
             "id": 21,
-            "kind": "FIELD_DECL",
-            "fields": {
-             "name": "name",
-             "typeAnnotation": {
-              "kind": "typeName",
-              "name": "string"
-             }
-            },
-            "children": [],
+            "kind": "NODE_LIST",
+            "label": "statementsList",
             "loc": {
-             "pos": 469,
-             "length": 0,
-             "line": 19,
-             "column": 7
-            }
-           }
-          ]
-         },
-         {
-          "id": 31,
-          "kind": "GROUP",
-          "label": "methods",
-          "children": [
-           {
-            "id": 23,
-            "kind": "METHOD_DECL",
-            "fields": {
-             "isTask": false,
-             "isAsync": false,
-             "name": "greet",
-             "returnTypeAnnotation": {
-              "kind": "typeName",
-              "name": "string"
-             }
+             "pos": 413,
+             "length": 1,
+             "line": 14,
+             "column": 11
             },
             "children": [
              {
-              "id": 25,
-              "kind": "GROUP",
-              "label": "params",
-              "children": [
-               {
-                "id": 24,
-                "kind": "PARAM",
-                "fields": {
-                 "isRef": true,
-                 "name": "self",
-                 "typeAnnotation": {
-                  "kind": "selfType"
-                 }
-                },
-                "children": [],
-                "loc": {
-                 "pos": 505,
-                 "length": 0,
-                 "line": 20,
-                 "column": 27
-                }
-               }
-              ]
-             },
-             {
-              "id": 26,
-              "kind": "BLOCK",
-              "fields": {
-               "endPos": 540
+              "id": 22,
+              "kind": "RETURN_STATEMENT",
+              "loc": {
+               "pos": 414,
+               "length": 4,
+               "line": 14,
+               "column": 12
               },
               "children": [
                {
-                "id": 30,
-                "kind": "GROUP",
-                "label": "body",
+                "id": 23,
+                "kind": "FIELD_ACCESS",
+                "label": "returnExpression",
+                "loc": {
+                 "pos": 423,
+                 "length": 1,
+                 "line": 14,
+                 "column": 21
+                },
+                "fields": {
+                 "name": "name"
+                },
                 "children": [
                  {
-                  "id": 27,
-                  "kind": "RETURN_STATEMENT",
-                  "fields": {
-                   "startLoc": {
-                    "pos": 520,
-                    "line": 21,
-                    "column": 5
-                   }
-                  },
-                  "children": [
-                   {
-                    "id": 28,
-                    "kind": "FIELD_ACCESS",
-                    "fields": {
-                     "field": "name",
-                     "fieldSourceLoc": {
-                      "pos": 532,
-                      "line": 21,
-                      "column": 17,
-                      "length": 4
-                     }
-                    },
-                    "children": [
-                     {
-                      "id": 29,
-                      "kind": "IDENT",
-                      "fields": {
-                       "name": "self"
-                      },
-                      "children": [],
-                      "label": "object",
-                      "loc": {
-                       "pos": 532,
-                       "length": 0,
-                       "line": 21,
-                       "column": 17
-                      }
-                     }
-                    ],
-                    "label": "value",
-                    "loc": {
-                     "pos": 532,
-                     "length": 0,
-                     "line": 21,
-                     "column": 17
-                    }
-                   }
-                  ],
+                  "id": 24,
+                  "kind": "IDENT",
+                  "label": "base",
                   "loc": {
-                   "pos": 531,
-                   "length": 0,
-                   "line": 21,
-                   "column": 16
+                   "pos": 414,
+                   "length": 4,
+                   "line": 14,
+                   "column": 12
+                  },
+                  "fields": {
+                   "name": "self"
                   }
                  }
                 ]
                }
-              ],
-              "label": "body",
-              "loc": {
-               "pos": 526,
-               "length": 0,
-               "line": 21,
-               "column": 11
-              }
+              ]
              }
-            ],
-            "loc": {
-             "pos": 489,
-             "length": 0,
-             "line": 20,
-             "column": 11
-            }
+            ]
            }
           ]
          }
-        ],
-        "loc": {
-         "pos": 441,
-         "length": 0,
-         "line": 18,
-         "column": 10
-        }
-       },
+        ]
+       }
+      ]
+     },
+     {
+      "id": 25,
+      "kind": "TYPE_DECL",
+      "loc": {
+       "pos": 437,
+       "length": 4,
+       "line": 18,
+       "column": 6
+      },
+      "fields": {
+       "name": "Lake"
+      },
+      "children": [
        {
-        "id": 32,
-        "kind": "FUNCTION_DECL",
-        "fields": {
-         "isTask": false,
-         "name": "announce",
-         "returnTypeAnnotation": {
-          "kind": "typeName",
-          "name": "void"
-         },
-         "isAsync": false
+        "id": 26,
+        "kind": "NODE_LIST",
+        "label": "implementsList",
+        "loc": {
+         "pos": 452,
+         "length": 1,
+         "line": 18,
+         "column": 21
         },
         "children": [
          {
-          "id": 34,
-          "kind": "GROUP",
-          "label": "typeParams",
-          "children": [
-           {
-            "id": 33,
-            "kind": "TYPE_PARAM",
-            "fields": {
-             "name": "T",
-             "bounds": [
-              {
-               "kind": "typeName",
-               "name": "Greeter"
-              }
-             ]
-            },
-            "children": [],
-            "loc": {
-             "pos": 887,
-             "length": 0,
-             "line": 31,
-             "column": 19
-            }
-           }
-          ]
-         },
-         {
-          "id": 36,
-          "kind": "GROUP",
-          "label": "params",
-          "children": [
-           {
-            "id": 35,
-            "kind": "PARAM",
-            "fields": {
-             "isRef": true,
-             "name": "g",
-             "typeAnnotation": {
-              "kind": "typeName",
-              "name": "T"
-             }
-            },
-            "children": [],
-            "loc": {
-             "pos": 912,
-             "length": 0,
-             "line": 31,
-             "column": 44
-            }
-           }
-          ]
-         },
-         {
-          "id": 37,
-          "kind": "BLOCK",
+          "id": 27,
+          "kind": "TYPE_ANNOTATION_TYPE_NAME",
+          "loc": {
+           "pos": 453,
+           "length": 7,
+           "line": 18,
+           "column": 22
+          },
           "fields": {
-           "endPos": 977
+           "name": "Greeter"
+          }
+         }
+        ]
+       },
+       {
+        "id": 28,
+        "kind": "FIELD_DECL",
+        "loc": {
+         "pos": 465,
+         "length": 4,
+         "line": 19,
+         "column": 3
+        },
+        "fields": {
+         "name": "name"
+        },
+        "children": [
+         {
+          "id": 29,
+          "kind": "TYPE_ANNOTATION_TYPE_NAME",
+          "label": "typeAnnotation",
+          "loc": {
+           "pos": 471,
+           "length": 6,
+           "line": 19,
+           "column": 9
+          },
+          "fields": {
+           "name": "string"
+          }
+         }
+        ]
+       },
+       {
+        "id": 30,
+        "kind": "METHOD_DECL",
+        "loc": {
+         "pos": 490,
+         "length": 5,
+         "line": 20,
+         "column": 12
+        },
+        "fields": {
+         "name": "greet"
+        },
+        "children": [
+         {
+          "id": 31,
+          "kind": "NODE_LIST",
+          "label": "undefined",
+          "loc": {
+           "pos": 499,
+           "length": 1,
+           "line": 20,
+           "column": 21
           },
           "children": [
            {
-            "id": 52,
-            "kind": "GROUP",
-            "label": "body",
+            "id": 32,
+            "kind": "PARAM",
+            "loc": {
+             "pos": 496,
+             "length": 3,
+             "line": 20,
+             "column": 18
+            },
+            "fields": {
+             "name": "self",
+             "flagA": "true"
+            },
             "children": [
              {
-              "id": 38,
-              "kind": "EXPRESSION_STATEMENT",
-              "fields": {
-               "startLoc": {
-                "pos": 929,
-                "line": 32,
-                "column": 3
-               }
-              },
-              "children": [
-               {
-                "id": 39,
-                "kind": "CALL_EXPRESSION",
-                "fields": {
-                 "callee": "printf"
-                },
-                "children": [
-                 {
-                  "id": 51,
-                  "kind": "GROUP",
-                  "label": "args",
-                  "children": [
-                   {
-                    "id": 40,
-                    "kind": "TEMPLATE_LITERAL",
-                    "fields": {},
-                    "children": [
-                     {
-                      "id": 50,
-                      "kind": "GROUP",
-                      "label": "parts",
-                      "children": [
-                       {
-                        "id": 41,
-                        "kind": "STRING_PART",
-                        "fields": {
-                         "value": "hello from "
-                        },
-                        "children": []
-                       },
-                       {
-                        "id": 42,
-                        "kind": "EXPR_PART",
-                        "fields": {},
-                        "children": [
-                         {
-                          "id": 43,
-                          "kind": "CALL_EXPRESSION",
-                          "fields": {},
-                          "children": [
-                           {
-                            "id": 44,
-                            "kind": "FIELD_ACCESS",
-                            "fields": {
-                             "field": "greet",
-                             "fieldSourceLoc": {
-                              "pos": 39,
-                              "line": 1,
-                              "column": 40,
-                              "length": 5
-                             }
-                            },
-                            "children": [
-                             {
-                              "id": 45,
-                              "kind": "IDENT",
-                              "fields": {
-                               "name": "Greeter"
-                              },
-                              "children": [],
-                              "label": "object",
-                              "loc": {
-                               "pos": 958,
-                               "length": 0,
-                               "line": 32,
-                               "column": 32
-                              }
-                             }
-                            ],
-                            "label": "callee",
-                            "loc": {
-                             "pos": 958,
-                             "length": 0,
-                             "line": 32,
-                             "column": 32
-                            }
-                           },
-                           {
-                            "id": 48,
-                            "kind": "GROUP",
-                            "label": "args",
-                            "children": [
-                             {
-                              "id": 46,
-                              "kind": "REF_EXPRESSION",
-                              "fields": {},
-                              "children": [
-                               {
-                                "id": 47,
-                                "kind": "IDENT",
-                                "fields": {
-                                 "name": "g"
-                                },
-                                "children": [],
-                                "label": "operand",
-                                "loc": {
-                                 "pos": 970,
-                                 "length": 0,
-                                 "line": 32,
-                                 "column": 44
-                                }
-                               }
-                              ],
-                              "loc": {
-                               "pos": 969,
-                               "length": 0,
-                               "line": 32,
-                               "column": 43
-                              }
-                             }
-                            ]
-                           }
-                          ],
-                          "label": "expr",
-                          "loc": {
-                           "pos": 964,
-                           "length": 0,
-                           "line": 32,
-                           "column": 38
-                          }
-                         }
-                        ]
-                       },
-                       {
-                        "id": 49,
-                        "kind": "STRING_PART",
-                        "fields": {
-                         "value": "\\n"
-                        },
-                        "children": []
-                       }
-                      ]
-                     }
-                    ],
-                    "loc": {
-                     "pos": 975,
-                     "length": 0,
-                     "line": 32,
-                     "column": 49
-                    }
-                   }
-                  ]
-                 }
-                ],
-                "label": "value",
-                "loc": {
-                 "pos": 936,
-                 "length": 0,
-                 "line": 32,
-                 "column": 10
-                }
-               }
-              ],
+              "id": 33,
+              "kind": "TYPE_ANNOTATION_TYPE_NAME",
+              "label": "typeAnnotation",
               "loc": {
-               "pos": 935,
-               "length": 0,
-               "line": 32,
-               "column": 9
+               "pos": 504,
+               "length": 1,
+               "line": 20,
+               "column": 26
+              },
+              "fields": {
+               "name": "Lake"
               }
              }
             ]
            }
-          ],
-          "label": "body",
-          "loc": {
-           "pos": 935,
-           "length": 0,
-           "line": 32,
-           "column": 9
-          }
-         }
-        ],
-        "loc": {
-         "pos": 886,
-         "length": 0,
-         "line": 31,
-         "column": 18
-        }
-       },
-       {
-        "id": 53,
-        "kind": "FUNCTION_DECL",
-        "fields": {
-         "isTask": false,
-         "name": "main",
-         "returnTypeAnnotation": {
-          "kind": "typeName",
-          "name": "int32"
+          ]
          },
-         "isAsync": false
-        },
-        "children": [
          {
-          "id": 54,
-          "kind": "BLOCK",
+          "id": 34,
+          "kind": "TYPE_ANNOTATION_TYPE_NAME",
+          "label": "undefined",
+          "loc": {
+           "pos": 507,
+           "length": 6,
+           "line": 20,
+           "column": 29
+          },
           "fields": {
-           "endPos": 1232
+           "name": "string"
+          }
+         },
+         {
+          "id": 35,
+          "kind": "BLOCK",
+          "label": "functionBody",
+          "loc": {
+           "pos": 520,
+           "length": 6,
+           "line": 21,
+           "column": 5
           },
           "children": [
            {
-            "id": 92,
-            "kind": "GROUP",
-            "label": "body",
+            "id": 36,
+            "kind": "NODE_LIST",
+            "label": "statementsList",
+            "loc": {
+             "pos": 526,
+             "length": 1,
+             "line": 21,
+             "column": 11
+            },
             "children": [
              {
-              "id": 55,
-              "kind": "LET_DECL",
-              "fields": {
-               "name": "mqt",
-               "typeAnnotation": {
-                "kind": "typeName",
-                "name": "Town"
-               },
-               "startLoc": {
-                "pos": 1007,
-                "line": 36,
-                "column": 3
-               }
+              "id": 37,
+              "kind": "RETURN_STATEMENT",
+              "loc": {
+               "pos": 527,
+               "length": 4,
+               "line": 21,
+               "column": 12
               },
               "children": [
                {
-                "id": 56,
-                "kind": "STRUCT_LITERAL",
-                "fields": {},
+                "id": 38,
+                "kind": "FIELD_ACCESS",
+                "label": "returnExpression",
+                "loc": {
+                 "pos": 536,
+                 "length": 1,
+                 "line": 21,
+                 "column": 21
+                },
+                "fields": {
+                 "name": "name"
+                },
                 "children": [
                  {
-                  "id": 61,
-                  "kind": "GROUP",
-                  "label": "fields",
+                  "id": 39,
+                  "kind": "IDENT",
+                  "label": "base",
+                  "loc": {
+                   "pos": 527,
+                   "length": 4,
+                   "line": 21,
+                   "column": 12
+                  },
+                  "fields": {
+                   "name": "self"
+                  }
+                 }
+                ]
+               }
+              ]
+             }
+            ]
+           }
+          ]
+         }
+        ]
+       }
+      ]
+     },
+     {
+      "id": 40,
+      "kind": "FUNCTION_DECL",
+      "loc": {
+       "pos": 878,
+       "length": 8,
+       "line": 31,
+       "column": 10
+      },
+      "fields": {
+       "name": "announce"
+      },
+      "children": [
+       {
+        "id": 41,
+        "kind": "NODE_LIST",
+        "label": "typeParams",
+        "loc": {
+         "pos": 887,
+         "length": 1,
+         "line": 31,
+         "column": 19
+        },
+        "children": [
+         {
+          "id": 42,
+          "kind": "TYPE_PARAM",
+          "loc": {
+           "pos": 887,
+           "length": 1,
+           "line": 31,
+           "column": 19
+          },
+          "fields": {
+           "name": "T"
+          },
+          "children": [
+           {
+            "id": 43,
+            "kind": "NODE_LIST",
+            "label": "bounds",
+            "loc": {
+             "pos": 899,
+             "length": 1,
+             "line": 31,
+             "column": 31
+            },
+            "children": [
+             {
+              "id": 44,
+              "kind": "TYPE_ANNOTATION_TYPE_NAME",
+              "loc": {
+               "pos": 900,
+               "length": 7,
+               "line": 31,
+               "column": 32
+              },
+              "fields": {
+               "name": "Greeter"
+              }
+             }
+            ]
+           }
+          ]
+         }
+        ]
+       },
+       {
+        "id": 45,
+        "kind": "NODE_LIST",
+        "label": "functionParamList",
+        "loc": {
+         "pos": 912,
+         "length": 1,
+         "line": 31,
+         "column": 44
+        },
+        "children": [
+         {
+          "id": 46,
+          "kind": "PARAM",
+          "loc": {
+           "pos": 909,
+           "length": 3,
+           "line": 31,
+           "column": 41
+          },
+          "fields": {
+           "name": "g",
+           "flagA": "true"
+          },
+          "children": [
+           {
+            "id": 47,
+            "kind": "TYPE_ANNOTATION_TYPE_NAME",
+            "label": "typeAnnotation",
+            "loc": {
+             "pos": 916,
+             "length": 1,
+             "line": 31,
+             "column": 48
+            },
+            "fields": {
+             "name": "T"
+            }
+           }
+          ]
+         }
+        ]
+       },
+       {
+        "id": 48,
+        "kind": "TYPE_ANNOTATION_TYPE_NAME",
+        "label": "returnTypeAnnotation",
+        "loc": {
+         "pos": 920,
+         "length": 4,
+         "line": 31,
+         "column": 52
+        },
+        "fields": {
+         "name": "void"
+        }
+       },
+       {
+        "id": 49,
+        "kind": "BLOCK",
+        "label": "functionBody",
+        "loc": {
+         "pos": 929,
+         "length": 6,
+         "line": 32,
+         "column": 3
+        },
+        "children": [
+         {
+          "id": 50,
+          "kind": "NODE_LIST",
+          "label": "statementsList",
+          "loc": {
+           "pos": 935,
+           "length": 1,
+           "line": 32,
+           "column": 9
+          },
+          "children": [
+           {
+            "id": 51,
+            "kind": "EXPRESSION_STATEMENT",
+            "loc": {
+             "pos": 929,
+             "length": 6,
+             "line": 32,
+             "column": 3
+            },
+            "children": [
+             {
+              "id": 52,
+              "kind": "CALL_EXPRESSION",
+              "label": "expression",
+              "loc": {
+               "pos": 935,
+               "length": 1,
+               "line": 32,
+               "column": 9
+              },
+              "fields": {
+               "name": "printf"
+              },
+              "children": [
+               {
+                "id": 53,
+                "kind": "NODE_LIST",
+                "label": "undefined",
+                "loc": {
+                 "pos": 936,
+                 "length": 1,
+                 "line": 32,
+                 "column": 10
+                },
+                "children": [
+                 {
+                  "id": 54,
+                  "kind": "TEMPLATE_LITERAL",
+                  "loc": {
+                   "pos": 936,
+                   "length": 38,
+                   "line": 32,
+                   "column": 10
+                  },
                   "children": [
                    {
-                    "id": 57,
-                    "kind": "STRUCT_LITERAL_FIELD",
-                    "fields": {
-                     "name": "name"
-                    },
-                    "children": [
-                     {
-                      "id": 58,
-                      "kind": "STRING_LITERAL",
-                      "fields": {
-                       "value": "\"Marquette\""
-                      },
-                      "children": [],
-                      "label": "value",
-                      "loc": {
-                       "pos": 1043,
-                       "length": 0,
-                       "line": 36,
-                       "column": 39
-                      }
-                     }
-                    ],
+                    "id": 55,
+                    "kind": "STRING_PART",
                     "loc": {
-                     "pos": 1029,
-                     "length": 0,
-                     "line": 36,
-                     "column": 25
+                     "pos": 937,
+                     "length": 11,
+                     "line": 32,
+                     "column": 11
                     }
                    },
                    {
-                    "id": 59,
-                    "kind": "STRUCT_LITERAL_FIELD",
-                    "fields": {
-                     "name": "population"
-                    },
-                    "children": [
-                     {
-                      "id": 60,
-                      "kind": "INT_LITERAL",
-                      "fields": {
-                       "value": 20629
-                      },
-                      "children": [],
-                      "label": "value",
-                      "loc": {
-                       "pos": 1061,
-                       "length": 0,
-                       "line": 36,
-                       "column": 57
-                      }
-                     }
-                    ],
+                    "id": 56,
+                    "kind": "EXPR_PART",
                     "loc": {
-                     "pos": 1054,
-                     "length": 0,
-                     "line": 36,
-                     "column": 50
-                    }
-                   }
-                  ]
-                 }
-                ],
-                "label": "assignment",
-                "loc": {
-                 "pos": 1029,
-                 "length": 0,
-                 "line": 36,
-                 "column": 25
-                }
-               }
-              ],
-              "loc": {
-               "pos": 1014,
-               "length": 0,
-               "line": 36,
-               "column": 10
-              }
-             },
-             {
-              "id": 62,
-              "kind": "LET_DECL",
-              "fields": {
-               "name": "superior",
-               "typeAnnotation": {
-                "kind": "typeName",
-                "name": "Lake"
-               },
-               "startLoc": {
-                "pos": 1067,
-                "line": 37,
-                "column": 3
-               }
-              },
-              "children": [
-               {
-                "id": 63,
-                "kind": "STRUCT_LITERAL",
-                "fields": {},
-                "children": [
-                 {
-                  "id": 66,
-                  "kind": "GROUP",
-                  "label": "fields",
-                  "children": [
-                   {
-                    "id": 64,
-                    "kind": "STRUCT_LITERAL_FIELD",
-                    "fields": {
-                     "name": "name"
-                    },
-                    "children": [
-                     {
-                      "id": 65,
-                      "kind": "STRING_LITERAL",
-                      "fields": {
-                       "value": "\"Lake Superior\""
-                      },
-                      "children": [],
-                      "label": "value",
-                      "loc": {
-                       "pos": 1113,
-                       "length": 0,
-                       "line": 37,
-                       "column": 49
-                      }
-                     }
-                    ],
-                    "loc": {
-                     "pos": 1094,
-                     "length": 0,
-                     "line": 37,
-                     "column": 30
-                    }
-                   }
-                  ]
-                 }
-                ],
-                "label": "assignment",
-                "loc": {
-                 "pos": 1094,
-                 "length": 0,
-                 "line": 37,
-                 "column": 30
-                }
-               }
-              ],
-              "loc": {
-               "pos": 1079,
-               "length": 0,
-               "line": 37,
-               "column": 15
-              }
-             },
-             {
-              "id": 67,
-              "kind": "EXPRESSION_STATEMENT",
-              "fields": {
-               "startLoc": {
-                "pos": 1118,
-                "line": 39,
-                "column": 3
-               }
-              },
-              "children": [
-               {
-                "id": 68,
-                "kind": "CALL_EXPRESSION",
-                "fields": {
-                 "callee": "announce"
-                },
-                "children": [
-                 {
-                  "id": 71,
-                  "kind": "GROUP",
-                  "label": "args",
-                  "children": [
-                   {
-                    "id": 69,
-                    "kind": "REF_EXPRESSION",
-                    "fields": {},
-                    "children": [
-                     {
-                      "id": 70,
-                      "kind": "IDENT",
-                      "fields": {
-                       "name": "mqt"
-                      },
-                      "children": [],
-                      "label": "operand",
-                      "loc": {
-                       "pos": 1135,
-                       "length": 0,
-                       "line": 39,
-                       "column": 20
-                      }
-                     }
-                    ],
-                    "loc": {
-                     "pos": 1134,
-                     "length": 0,
-                     "line": 39,
-                     "column": 19
-                    }
-                   }
-                  ]
-                 }
-                ],
-                "label": "value",
-                "loc": {
-                 "pos": 1127,
-                 "length": 0,
-                 "line": 39,
-                 "column": 12
-                }
-               }
-              ],
-              "loc": {
-               "pos": 1126,
-               "length": 0,
-               "line": 39,
-               "column": 11
-              }
-             },
-             {
-              "id": 72,
-              "kind": "EXPRESSION_STATEMENT",
-              "fields": {
-               "startLoc": {
-                "pos": 1139,
-                "line": 40,
-                "column": 3
-               }
-              },
-              "children": [
-               {
-                "id": 73,
-                "kind": "CALL_EXPRESSION",
-                "fields": {
-                 "callee": "announce"
-                },
-                "children": [
-                 {
-                  "id": 76,
-                  "kind": "GROUP",
-                  "label": "args",
-                  "children": [
-                   {
-                    "id": 74,
-                    "kind": "REF_EXPRESSION",
-                    "fields": {},
-                    "children": [
-                     {
-                      "id": 75,
-                      "kind": "IDENT",
-                      "fields": {
-                       "name": "superior"
-                      },
-                      "children": [],
-                      "label": "operand",
-                      "loc": {
-                       "pos": 1161,
-                       "length": 0,
-                       "line": 40,
-                       "column": 25
-                      }
-                     }
-                    ],
-                    "loc": {
-                     "pos": 1160,
-                     "length": 0,
-                     "line": 40,
+                     "pos": 950,
+                     "length": 1,
+                     "line": 32,
                      "column": 24
-                    }
-                   }
-                  ]
-                 }
-                ],
-                "label": "value",
-                "loc": {
-                 "pos": 1148,
-                 "length": 0,
-                 "line": 40,
-                 "column": 12
-                }
-               }
-              ],
-              "loc": {
-               "pos": 1147,
-               "length": 0,
-               "line": 40,
-               "column": 11
-              }
-             },
-             {
-              "id": 77,
-              "kind": "EXPRESSION_STATEMENT",
-              "fields": {
-               "startLoc": {
-                "pos": 1166,
-                "line": 42,
-                "column": 3
-               }
-              },
-              "children": [
-               {
-                "id": 78,
-                "kind": "CALL_EXPRESSION",
-                "fields": {
-                 "callee": "printf"
-                },
-                "children": [
-                 {
-                  "id": 89,
-                  "kind": "GROUP",
-                  "label": "args",
-                  "children": [
-                   {
-                    "id": 79,
-                    "kind": "TEMPLATE_LITERAL",
-                    "fields": {},
+                    },
                     "children": [
                      {
-                      "id": 88,
-                      "kind": "GROUP",
-                      "label": "parts",
+                      "id": 57,
+                      "kind": "CALL_EXPRESSION",
+                      "label": "undefined",
+                      "loc": {
+                       "pos": 963,
+                       "length": 1,
+                       "line": 32,
+                       "column": 37
+                      },
+                      "fields": {
+                       "name": "greet"
+                      },
                       "children": [
                        {
-                        "id": 80,
-                        "kind": "EXPR_PART",
-                        "fields": {},
+                        "id": 58,
+                        "kind": "NODE_LIST",
+                        "label": "undefined",
+                        "loc": {
+                         "pos": 964,
+                         "length": 1,
+                         "line": 32,
+                         "column": 38
+                        },
                         "children": [
                          {
-                          "id": 81,
-                          "kind": "FIELD_ACCESS",
-                          "fields": {
-                           "field": "name",
-                           "fieldSourceLoc": {
-                            "pos": 35,
-                            "line": 1,
-                            "column": 36,
-                            "length": 4
-                           }
+                          "id": 59,
+                          "kind": "REF_EXPRESSION",
+                          "loc": {
+                           "pos": 964,
+                           "length": 3,
+                           "line": 32,
+                           "column": 38
                           },
                           "children": [
                            {
-                            "id": 82,
+                            "id": 60,
                             "kind": "IDENT",
-                            "fields": {
-                             "name": "mqt"
-                            },
-                            "children": [],
-                            "label": "object",
+                            "label": "operand",
                             "loc": {
-                             "pos": 1180,
-                             "length": 0,
-                             "line": 42,
-                             "column": 17
+                             "pos": 969,
+                             "length": 1,
+                             "line": 32,
+                             "column": 43
+                            },
+                            "fields": {
+                             "name": "g"
                             }
                            }
-                          ],
-                          "label": "expr",
-                          "loc": {
-                           "pos": 1180,
-                           "length": 0,
-                           "line": 42,
-                           "column": 17
-                          }
+                          ]
                          }
                         ]
                        },
                        {
-                        "id": 83,
-                        "kind": "STRING_PART",
-                        "fields": {
-                         "value": " has "
+                        "id": 61,
+                        "kind": "IDENT",
+                        "label": "qualifyingBase",
+                        "loc": {
+                         "pos": 957,
+                         "length": 1,
+                         "line": 32,
+                         "column": 31
                         },
-                        "children": []
-                       },
-                       {
-                        "id": 84,
-                        "kind": "EXPR_PART",
-                        "fields": {},
-                        "children": [
-                         {
-                          "id": 85,
-                          "kind": "FIELD_ACCESS",
-                          "fields": {
-                           "field": "population",
-                           "fieldSourceLoc": {
-                            "pos": 35,
-                            "line": 1,
-                            "column": 36,
-                            "length": 10
-                           }
-                          },
-                          "children": [
-                           {
-                            "id": 86,
-                            "kind": "IDENT",
-                            "fields": {
-                             "name": "mqt"
-                            },
-                            "children": [],
-                            "label": "object",
-                            "loc": {
-                             "pos": 1196,
-                             "length": 0,
-                             "line": 42,
-                             "column": 33
-                            }
-                           }
-                          ],
-                          "label": "expr",
-                          "loc": {
-                           "pos": 1196,
-                           "length": 0,
-                           "line": 42,
-                           "column": 33
-                          }
-                         }
-                        ]
-                       },
-                       {
-                        "id": 87,
-                        "kind": "STRING_PART",
                         "fields": {
-                         "value": " people\\n"
-                        },
-                        "children": []
+                         "name": "Greeter"
+                        }
                        }
                       ]
                      }
-                    ],
+                    ]
+                   },
+                   {
+                    "id": 62,
+                    "kind": "STRING_PART",
                     "loc": {
-                     "pos": 1218,
-                     "length": 0,
-                     "line": 42,
-                     "column": 55
+                     "pos": 971,
+                     "length": 2,
+                     "line": 32,
+                     "column": 45
+                    },
+                    "fields": {
+                     "text": "\n"
                     }
                    }
                   ]
                  }
-                ],
-                "label": "value",
-                "loc": {
-                 "pos": 1173,
-                 "length": 0,
-                 "line": 42,
-                 "column": 10
-                }
+                ]
                }
-              ],
+              ]
+             }
+            ]
+           }
+          ]
+         }
+        ]
+       }
+      ]
+     },
+     {
+      "id": 63,
+      "kind": "FUNCTION_DECL",
+      "loc": {
+       "pos": 989,
+       "length": 4,
+       "line": 35,
+       "column": 10
+      },
+      "fields": {
+       "name": "main"
+      },
+      "children": [
+       {
+        "id": 64,
+        "kind": "NODE_LIST",
+        "label": "functionParamList",
+        "loc": {
+         "pos": 995,
+         "length": 1,
+         "line": 35,
+         "column": 16
+        }
+       },
+       {
+        "id": 65,
+        "kind": "TYPE_ANNOTATION_TYPE_NAME",
+        "label": "returnTypeAnnotation",
+        "loc": {
+         "pos": 997,
+         "length": 5,
+         "line": 35,
+         "column": 18
+        },
+        "fields": {
+         "name": "int32"
+        }
+       },
+       {
+        "id": 66,
+        "kind": "BLOCK",
+        "label": "functionBody",
+        "loc": {
+         "pos": 1007,
+         "length": 3,
+         "line": 36,
+         "column": 3
+        },
+        "children": [
+         {
+          "id": 67,
+          "kind": "NODE_LIST",
+          "label": "statementsList",
+          "loc": {
+           "pos": 1010,
+           "length": 1,
+           "line": 36,
+           "column": 6
+          },
+          "children": [
+           {
+            "id": 68,
+            "kind": "LET_DECL",
+            "loc": {
+             "pos": 1011,
+             "length": 3,
+             "line": 36,
+             "column": 7
+            },
+            "fields": {
+             "name": "mqt"
+            },
+            "children": [
+             {
+              "id": 69,
+              "kind": "TYPE_ANNOTATION_TYPE_NAME",
+              "label": "typeAnnotation",
               "loc": {
-               "pos": 1172,
-               "length": 0,
-               "line": 42,
-               "column": 9
+               "pos": 1016,
+               "length": 4,
+               "line": 36,
+               "column": 12
+              },
+              "fields": {
+               "name": "Town"
               }
              },
              {
-              "id": 90,
-              "kind": "RETURN_STATEMENT",
-              "fields": {
-               "startLoc": {
-                "pos": 1222,
-                "line": 43,
-                "column": 3
-               }
+              "id": 70,
+              "kind": "STRUCT_LITERAL",
+              "label": "assignmentExpression",
+              "loc": {
+               "pos": 1023,
+               "length": 1,
+               "line": 36,
+               "column": 19
               },
               "children": [
                {
-                "id": 91,
-                "kind": "INT_LITERAL",
-                "fields": {
-                 "value": 0
-                },
-                "children": [],
-                "label": "value",
+                "id": 71,
+                "kind": "NODE_LIST",
+                "label": "undefined",
                 "loc": {
-                 "pos": 1230,
-                 "length": 0,
-                 "line": 43,
-                 "column": 11
-                }
+                 "pos": 1024,
+                 "length": 1,
+                 "line": 36,
+                 "column": 20
+                },
+                "children": [
+                 {
+                  "id": 72,
+                  "kind": "STRUCT_LITERAL_FIELD",
+                  "loc": {
+                   "pos": 1025,
+                   "length": 4,
+                   "line": 36,
+                   "column": 21
+                  },
+                  "fields": {
+                   "name": "name"
+                  },
+                  "children": [
+                   {
+                    "id": 73,
+                    "kind": "STRING_LITERAL",
+                    "label": "undefined",
+                    "loc": {
+                     "pos": 1031,
+                     "length": 11,
+                     "line": 36,
+                     "column": 27
+                    },
+                    "fields": {
+                     "text": "Marquette"
+                    }
+                   }
+                  ]
+                 },
+                 {
+                  "id": 74,
+                  "kind": "STRUCT_LITERAL_FIELD",
+                  "loc": {
+                   "pos": 1044,
+                   "length": 10,
+                   "line": 36,
+                   "column": 40
+                  },
+                  "fields": {
+                   "name": "population"
+                  },
+                  "children": [
+                   {
+                    "id": 75,
+                    "kind": "INT_LITERAL",
+                    "label": "undefined",
+                    "loc": {
+                     "pos": 1056,
+                     "length": 5,
+                     "line": 36,
+                     "column": 52
+                    },
+                    "fields": {
+                     "intVal": "20629"
+                    }
+                   }
+                  ]
+                 }
+                ]
                }
-              ],
+              ]
+             }
+            ]
+           },
+           {
+            "id": 76,
+            "kind": "LET_DECL",
+            "loc": {
+             "pos": 1071,
+             "length": 8,
+             "line": 37,
+             "column": 7
+            },
+            "fields": {
+             "name": "superior"
+            },
+            "children": [
+             {
+              "id": 77,
+              "kind": "TYPE_ANNOTATION_TYPE_NAME",
+              "label": "typeAnnotation",
               "loc": {
-               "pos": 1230,
-               "length": 0,
-               "line": 43,
+               "pos": 1081,
+               "length": 4,
+               "line": 37,
+               "column": 17
+              },
+              "fields": {
+               "name": "Lake"
+              }
+             },
+             {
+              "id": 78,
+              "kind": "STRUCT_LITERAL",
+              "label": "assignmentExpression",
+              "loc": {
+               "pos": 1088,
+               "length": 1,
+               "line": 37,
+               "column": 24
+              },
+              "children": [
+               {
+                "id": 79,
+                "kind": "NODE_LIST",
+                "label": "undefined",
+                "loc": {
+                 "pos": 1089,
+                 "length": 1,
+                 "line": 37,
+                 "column": 25
+                },
+                "children": [
+                 {
+                  "id": 80,
+                  "kind": "STRUCT_LITERAL_FIELD",
+                  "loc": {
+                   "pos": 1090,
+                   "length": 4,
+                   "line": 37,
+                   "column": 26
+                  },
+                  "fields": {
+                   "name": "name"
+                  },
+                  "children": [
+                   {
+                    "id": 81,
+                    "kind": "STRING_LITERAL",
+                    "label": "undefined",
+                    "loc": {
+                     "pos": 1096,
+                     "length": 15,
+                     "line": 37,
+                     "column": 32
+                    },
+                    "fields": {
+                     "text": "Lake Superior"
+                    }
+                   }
+                  ]
+                 }
+                ]
+               }
+              ]
+             }
+            ]
+           },
+           {
+            "id": 82,
+            "kind": "EXPRESSION_STATEMENT",
+            "loc": {
+             "pos": 1118,
+             "length": 8,
+             "line": 39,
+             "column": 3
+            },
+            "children": [
+             {
+              "id": 83,
+              "kind": "CALL_EXPRESSION",
+              "label": "expression",
+              "loc": {
+               "pos": 1126,
+               "length": 1,
+               "line": 39,
                "column": 11
+              },
+              "fields": {
+               "name": "announce"
+              },
+              "children": [
+               {
+                "id": 84,
+                "kind": "NODE_LIST",
+                "label": "undefined",
+                "loc": {
+                 "pos": 1127,
+                 "length": 1,
+                 "line": 39,
+                 "column": 12
+                },
+                "children": [
+                 {
+                  "id": 85,
+                  "kind": "REF_EXPRESSION",
+                  "loc": {
+                   "pos": 1127,
+                   "length": 3,
+                   "line": 39,
+                   "column": 12
+                  },
+                  "children": [
+                   {
+                    "id": 86,
+                    "kind": "IDENT",
+                    "label": "operand",
+                    "loc": {
+                     "pos": 1134,
+                     "length": 1,
+                     "line": 39,
+                     "column": 19
+                    },
+                    "fields": {
+                     "name": "mqt"
+                    }
+                   }
+                  ]
+                 }
+                ]
+               }
+              ]
+             }
+            ]
+           },
+           {
+            "id": 87,
+            "kind": "EXPRESSION_STATEMENT",
+            "loc": {
+             "pos": 1139,
+             "length": 8,
+             "line": 40,
+             "column": 3
+            },
+            "children": [
+             {
+              "id": 88,
+              "kind": "CALL_EXPRESSION",
+              "label": "expression",
+              "loc": {
+               "pos": 1147,
+               "length": 1,
+               "line": 40,
+               "column": 11
+              },
+              "fields": {
+               "name": "announce"
+              },
+              "children": [
+               {
+                "id": 89,
+                "kind": "NODE_LIST",
+                "label": "undefined",
+                "loc": {
+                 "pos": 1148,
+                 "length": 1,
+                 "line": 40,
+                 "column": 12
+                },
+                "children": [
+                 {
+                  "id": 90,
+                  "kind": "REF_EXPRESSION",
+                  "loc": {
+                   "pos": 1148,
+                   "length": 3,
+                   "line": 40,
+                   "column": 12
+                  },
+                  "children": [
+                   {
+                    "id": 91,
+                    "kind": "IDENT",
+                    "label": "operand",
+                    "loc": {
+                     "pos": 1160,
+                     "length": 1,
+                     "line": 40,
+                     "column": 24
+                    },
+                    "fields": {
+                     "name": "superior"
+                    }
+                   }
+                  ]
+                 }
+                ]
+               }
+              ]
+             }
+            ]
+           },
+           {
+            "id": 92,
+            "kind": "EXPRESSION_STATEMENT",
+            "loc": {
+             "pos": 1166,
+             "length": 6,
+             "line": 42,
+             "column": 3
+            },
+            "children": [
+             {
+              "id": 93,
+              "kind": "CALL_EXPRESSION",
+              "label": "expression",
+              "loc": {
+               "pos": 1172,
+               "length": 1,
+               "line": 42,
+               "column": 9
+              },
+              "fields": {
+               "name": "printf"
+              },
+              "children": [
+               {
+                "id": 94,
+                "kind": "NODE_LIST",
+                "label": "undefined",
+                "loc": {
+                 "pos": 1173,
+                 "length": 1,
+                 "line": 42,
+                 "column": 10
+                },
+                "children": [
+                 {
+                  "id": 95,
+                  "kind": "TEMPLATE_LITERAL",
+                  "loc": {
+                   "pos": 1173,
+                   "length": 44,
+                   "line": 42,
+                   "column": 10
+                  },
+                  "children": [
+                   {
+                    "id": 96,
+                    "kind": "EXPR_PART",
+                    "loc": {
+                     "pos": 1176,
+                     "length": 1,
+                     "line": 42,
+                     "column": 13
+                    },
+                    "children": [
+                     {
+                      "id": 97,
+                      "kind": "FIELD_ACCESS",
+                      "label": "undefined",
+                      "loc": {
+                       "pos": 1184,
+                       "length": 1,
+                       "line": 42,
+                       "column": 21
+                      },
+                      "fields": {
+                       "name": "name"
+                      },
+                      "children": [
+                       {
+                        "id": 98,
+                        "kind": "IDENT",
+                        "label": "base",
+                        "loc": {
+                         "pos": 1179,
+                         "length": 1,
+                         "line": 42,
+                         "column": 16
+                        },
+                        "fields": {
+                         "name": "mqt"
+                        }
+                       }
+                      ]
+                     }
+                    ]
+                   },
+                   {
+                    "id": 99,
+                    "kind": "STRING_PART",
+                    "loc": {
+                     "pos": 1185,
+                     "length": 5,
+                     "line": 42,
+                     "column": 22
+                    },
+                    "fields": {
+                     "text": " has "
+                    }
+                   },
+                   {
+                    "id": 100,
+                    "kind": "EXPR_PART",
+                    "loc": {
+                     "pos": 1192,
+                     "length": 1,
+                     "line": 42,
+                     "column": 29
+                    },
+                    "children": [
+                     {
+                      "id": 101,
+                      "kind": "FIELD_ACCESS",
+                      "label": "undefined",
+                      "loc": {
+                       "pos": 1206,
+                       "length": 1,
+                       "line": 42,
+                       "column": 43
+                      },
+                      "fields": {
+                       "name": "population"
+                      },
+                      "children": [
+                       {
+                        "id": 102,
+                        "kind": "IDENT",
+                        "label": "base",
+                        "loc": {
+                         "pos": 1195,
+                         "length": 1,
+                         "line": 42,
+                         "column": 32
+                        },
+                        "fields": {
+                         "name": "mqt"
+                        }
+                       }
+                      ]
+                     }
+                    ]
+                   },
+                   {
+                    "id": 103,
+                    "kind": "STRING_PART",
+                    "loc": {
+                     "pos": 1207,
+                     "length": 9,
+                     "line": 42,
+                     "column": 44
+                    },
+                    "fields": {
+                     "text": " people\n"
+                    }
+                   }
+                  ]
+                 }
+                ]
+               }
+              ]
+             }
+            ]
+           },
+           {
+            "id": 104,
+            "kind": "RETURN_STATEMENT",
+            "loc": {
+             "pos": 1229,
+             "length": 1,
+             "line": 43,
+             "column": 10
+            },
+            "children": [
+             {
+              "id": 105,
+              "kind": "INT_LITERAL",
+              "label": "returnExpression",
+              "loc": {
+               "pos": 1229,
+               "length": 1,
+               "line": 43,
+               "column": 10
               }
              }
             ]
            }
-          ],
-          "label": "body",
-          "loc": {
-           "pos": 1010,
-           "length": 0,
-           "line": 36,
-           "column": 6
-          }
+          ]
          }
-        ],
-        "loc": {
-         "pos": 993,
-         "length": 0,
-         "line": 35,
-         "column": 14
-        }
+        ]
        }
       ]
      }
-    ],
-    "loc": {
-     "pos": 146,
-     "length": 0,
-     "line": 4,
-     "column": 6
-    }
+    ]
    },
    "ir": {
-    "text": "@.str_traits_2f968632_0 = private unnamed_addr constant [10 x i8] c\"Marquette\\00\", align 1\n@.str_traits_2f968632_1 = private unnamed_addr constant [14 x i8] c\"Lake Superior\\00\", align 1\n@.str_traits_2f968632_2 = private unnamed_addr constant [18 x i8] c\"%s has %d people\\0A\\00\", align 1\n@.str_traits_2f968632_3 = private unnamed_addr constant [15 x i8] c\"hello from %s\\0A\\00\", align 1\n\ndefine ptr @traits_2f968632__Town__Greeter__greet(ptr %self.arg) {\nentry:\n  %self = alloca ptr, align 8\n  store ptr %self.arg, ptr %self\n  %t0 = load ptr, ptr %self\n  %t1 = getelementptr inbounds %struct.traits_2f968632__Town, ptr %t0, i32 0, i32 0\n  %t2 = load ptr, ptr %t1\n  ret ptr %t2\n}\n\ndefine ptr @traits_2f968632__Lake__Greeter__greet(ptr %self.arg) {\nentry:\n  %self = alloca ptr, align 8\n  store ptr %self.arg, ptr %self\n  %t0 = load ptr, ptr %self\n  %t1 = getelementptr inbounds %struct.traits_2f968632__Lake, ptr %t0, i32 0, i32 0\n  %t2 = load ptr, ptr %t1\n  ret ptr %t2\n}\n\ndefine i32 @main() {\nentry:\n  call void @yoop_runtime_init()\n  call void @yoop_runtime_set_coro_ops(ptr @yoop_coro_resume, ptr @yoop_coro_destroy, ptr @yoop_coro_done)\n  %mqt = alloca %struct.traits_2f968632__Town, align 8\n  %t0 = getelementptr inbounds %struct.traits_2f968632__Town, ptr %mqt, i32 0, i32 0\n  %t1 = getelementptr inbounds [10 x i8], ptr @.str_traits_2f968632_0, i32 0, i32 0\n  store ptr %t1, ptr %t0\n  %t2 = getelementptr inbounds %struct.traits_2f968632__Town, ptr %mqt, i32 0, i32 1\n  store i32 20629, ptr %t2\n  %superior = alloca %struct.traits_2f968632__Lake, align 8\n  %t3 = getelementptr inbounds %struct.traits_2f968632__Lake, ptr %superior, i32 0, i32 0\n  %t4 = getelementptr inbounds [14 x i8], ptr @.str_traits_2f968632_1, i32 0, i32 0\n  store ptr %t4, ptr %t3\n  call void @traits_2f968632__announce__traits_2f968632__Town(ptr %mqt)\n  call void @traits_2f968632__announce__traits_2f968632__Lake(ptr %superior)\n  %t5 = getelementptr inbounds %struct.traits_2f968632__Town, ptr %mqt, i32 0, i32 0\n  %t6 = load ptr, ptr %t5\n  %t7 = getelementptr inbounds %struct.traits_2f968632__Town, ptr %mqt, i32 0, i32 1\n  %t8 = load i32, ptr %t7\n  %t9 = getelementptr inbounds [18 x i8], ptr @.str_traits_2f968632_2, i32 0, i32 0\n  %t10 = call i32 (ptr, ...) @printf(ptr %t9, ptr %t6, i32 %t8)\n  call void @yoop_runtime_shutdown()\n  ret i32 0\n}\n\ndefine void @traits_2f968632__announce__traits_2f968632__Town(ptr %g.arg) {\nentry:\n  %g = alloca ptr, align 8\n  store ptr %g.arg, ptr %g\n  %t0 = load ptr, ptr %g\n  %t1 = call ptr @traits_2f968632__Town__Greeter__greet(ptr %t0)\n  %t2 = getelementptr inbounds [15 x i8], ptr @.str_traits_2f968632_3, i32 0, i32 0\n  %t3 = call i32 (ptr, ...) @printf(ptr %t2, ptr %t1)\n  ret void\n}\n\ndefine void @traits_2f968632__announce__traits_2f968632__Lake(ptr %g.arg) {\nentry:\n  %g = alloca ptr, align 8\n  store ptr %g.arg, ptr %g\n  %t0 = load ptr, ptr %g\n  %t1 = call ptr @traits_2f968632__Lake__Greeter__greet(ptr %t0)\n  %t2 = getelementptr inbounds [15 x i8], ptr @.str_traits_2f968632_3, i32 0, i32 0\n  %t3 = call i32 (ptr, ...) @printf(ptr %t2, ptr %t1)\n  ret void\n}",
-    "totalLines": 4449,
-    "shownLines": 72
+    "text": "define ptr @traits_3__Town__greet(ptr %self.arg) {\nentry:\n  %t1 = load %struct.traits_3__Town, ptr %self.arg\n  %t2 = extractvalue %struct.traits_3__Town %t1, 0\n  ret ptr %t2\n}\n\ndefine ptr @traits_3__Lake__greet(ptr %self.arg) {\nentry:\n  %t1 = load %struct.traits_3__Lake, ptr %self.arg\n  %t2 = extractvalue %struct.traits_3__Lake %t1, 0\n  ret ptr %t2\n}\n\ndefine void @traits_3__announce_Town(ptr %g.arg) {\nentry:\n  %t1 = call ptr @traits_3__Town__greet(ptr %g.arg)\n  %t2 = call i64 @strlen(ptr @.str.0)\n  %t3 = call i64 @strlen(ptr %t1)\n  %t4 = call i64 @strlen(ptr @.str.1)\n  %t5 = add i64 0, %t2\n  %t6 = add i64 %t5, %t3\n  %t7 = add i64 %t6, %t4\n  %t8 = add i64 %t7, 1\n  %t9 = call ptr @malloc(i64 %t8)\n  %t10 = getelementptr i8, ptr %t9, i64 0\n  call ptr @memcpy(ptr %t10, ptr @.str.0, i64 %t2)\n  %t11 = getelementptr i8, ptr %t9, i64 %t5\n  call ptr @memcpy(ptr %t11, ptr %t1, i64 %t3)\n  %t12 = getelementptr i8, ptr %t9, i64 %t6\n  call ptr @memcpy(ptr %t12, ptr @.str.1, i64 %t4)\n  %t13 = getelementptr i8, ptr %t9, i64 %t7\n  store i8 0, ptr %t13\n  %t14 = call i32 (ptr, ...) @printf(ptr @.str.2, ptr %t9)\n  ret void\n}\n\ndefine void @traits_3__announce_Lake(ptr %g.arg) {\nentry:\n  %t1 = call ptr @traits_3__Lake__greet(ptr %g.arg)\n  %t2 = call i64 @strlen(ptr @.str.3)\n  %t3 = call i64 @strlen(ptr %t1)\n  %t4 = call i64 @strlen(ptr @.str.4)\n  %t5 = add i64 0, %t2\n  %t6 = add i64 %t5, %t3\n  %t7 = add i64 %t6, %t4\n  %t8 = add i64 %t7, 1\n  %t9 = call ptr @malloc(i64 %t8)\n  %t10 = getelementptr i8, ptr %t9, i64 0\n  call ptr @memcpy(ptr %t10, ptr @.str.3, i64 %t2)\n  %t11 = getelementptr i8, ptr %t9, i64 %t5\n  call ptr @memcpy(ptr %t11, ptr %t1, i64 %t3)\n  %t12 = getelementptr i8, ptr %t9, i64 %t6\n  call ptr @memcpy(ptr %t12, ptr @.str.4, i64 %t4)\n  %t13 = getelementptr i8, ptr %t9, i64 %t7\n  store i8 0, ptr %t13\n  %t14 = call i32 (ptr, ...) @printf(ptr @.str.5, ptr %t9)\n  ret void\n}\n\ndefine i32 @main() {\nentry:\n  %sc.1.addr = alloca %struct.traits_3__Town\n  %mqt.2.addr = alloca %struct.traits_3__Town\n  %sc.3.addr = alloca %struct.traits_3__Lake\n  %superior.4.addr = alloca %struct.traits_3__Lake\n  %t1 = getelementptr inbounds %struct.traits_3__Town, ptr %sc.1.addr, i32 0, i32 0\n  store ptr @.str.6, ptr %t1\n  %t2 = getelementptr inbounds %struct.traits_3__Town, ptr %sc.1.addr, i32 0, i32 1\n  store i32 20629, ptr %t2\n  %t3 = load %struct.traits_3__Town, ptr %sc.1.addr\n  store %struct.traits_3__Town %t3, ptr %mqt.2.addr\n  %t4 = getelementptr inbounds %struct.traits_3__Lake, ptr %sc.3.addr, i32 0, i32 0\n  store ptr @.str.7, ptr %t4\n  %t5 = load %struct.traits_3__Lake, ptr %sc.3.addr\n  store %struct.traits_3__Lake %t5, ptr %superior.4.addr\n  call void @traits_3__announce_Town(ptr %mqt.2.addr)\n  call void @traits_3__announce_Lake(ptr %superior.4.addr)\n  %t6 = load %struct.traits_3__Town, ptr %mqt.2.addr\n  %t7 = extractvalue %struct.traits_3__Town %t6, 0\n  %t8 = load %struct.traits_3__Town, ptr %mqt.2.addr\n  %t9 = extractvalue %struct.traits_3__Town %t8, 1\n  %t10 = sext i32 %t9 to i64\n  %t11 = call ptr @malloc(i64 24)\n  call i32 (ptr, ptr, ...) @sprintf(ptr %t11, ptr @.str.9, i64 %t10)\n  %t12 = call i64 @strlen(ptr %t7)\n  %t13 = call i64 @strlen(ptr @.str.8)\n  %t14 = call i64 @strlen(ptr %t11)\n  %t15 = call i64 @strlen(ptr @.str.10)\n  %t16 = add i64 0, %t12\n  %t17 = add i64 %t16, %t13\n  %t18 = add i64 %t17, %t14\n  %t19 = add i64 %t18, %t15\n  %t20 = add i64 %t19, 1\n  %t21 = call ptr @malloc(i64 %t20)\n  %t22 = getelementptr i8, ptr %t21, i64 0\n  call ptr @memcpy(ptr %t22, ptr %t7, i64 %t12)\n  %t23 = getelementptr i8, ptr %t21, i64 %t16\n  call ptr @memcpy(ptr %t23, ptr @.str.8, i64 %t13)\n  %t24 = getelementptr i8, ptr %t21, i64 %t17\n  call ptr @memcpy(ptr %t24, ptr %t11, i64 %t14)\n  %t25 = getelementptr i8, ptr %t21, i64 %t18\n  call ptr @memcpy(ptr %t25, ptr @.str.10, i64 %t15)\n  %t26 = getelementptr i8, ptr %t21, i64 %t19\n  store i8 0, ptr %t26\n  %t27 = call i32 (ptr, ...) @printf(ptr @.str.11, ptr %t21)\n  ret i32 0\n}",
+    "totalLines": 189,
+    "shownLines": 108
    },
    "output": "hello from Marquette\nhello from Lake Superior\nMarquette has 20629 people",
    "exitCode": 0
@@ -4200,1460 +4311,1624 @@ window.YOOP_DATA.pipeline = {
    "ast": {
     "id": 1,
     "kind": "PROGRAM",
-    "fields": {
-     "allowsUnsafe": false,
-     "isTestModule": false
+    "loc": {
+     "pos": 621,
+     "length": 6,
+     "line": 15,
+     "column": 1
     },
     "children": [
      {
-      "id": 102,
-      "kind": "GROUP",
-      "label": "body",
+      "id": 2,
+      "kind": "IMPORT_DECL",
+      "loc": {
+       "pos": 621,
+       "length": 6,
+       "line": 15,
+       "column": 1
+      },
+      "fields": {
+       "text": "std/core/kinds.yoop"
+      },
       "children": [
        {
-        "id": 2,
-        "kind": "IMPORT_DECL",
-        "fields": {
-         "importKind": "named",
-         "specifiers": [
-          {
-           "exportName": "Disposable",
-           "localName": "Disposable",
-           "sourceLoc": {
-            "pos": 630,
-            "line": 15,
-            "column": 10
-           }
-          },
-          {
-           "exportName": "disposable",
-           "localName": "disposable",
-           "sourceLoc": {
-            "pos": 642,
-            "line": 15,
-            "column": 22
-           }
-          }
-         ],
-         "sourcePath": "std/core/kinds.yoop"
-        },
-        "children": [],
+        "id": 3,
+        "kind": "IMPORT_SPECIFIER",
         "loc": {
-         "pos": 627,
-         "length": 0,
+         "pos": 630,
+         "length": 10,
          "line": 15,
-         "column": 7
+         "column": 10
+        },
+        "fields": {
+         "name": "Disposable"
         }
        },
        {
-        "id": 3,
-        "kind": "TYPE_DECL",
+        "id": 4,
+        "kind": "IMPORT_SPECIFIER",
+        "loc": {
+         "pos": 642,
+         "length": 10,
+         "line": 15,
+         "column": 22
+        },
         "fields": {
-         "name": "Conn",
-         "implements": [
-          {
-           "name": "Disposable",
-           "typeArgs": null,
-           "sourceLoc": {
-            "pos": 705,
-            "line": 17,
-            "column": 22
-           }
-          }
-         ]
+         "name": "disposable",
+         "text": "disposable"
+        }
+       }
+      ]
+     },
+     {
+      "id": 5,
+      "kind": "TYPE_DECL",
+      "loc": {
+       "pos": 689,
+       "length": 4,
+       "line": 17,
+       "column": 6
+      },
+      "fields": {
+       "name": "Conn"
+      },
+      "children": [
+       {
+        "id": 6,
+        "kind": "NODE_LIST",
+        "label": "implementsList",
+        "loc": {
+         "pos": 704,
+         "length": 1,
+         "line": 17,
+         "column": 21
         },
         "children": [
          {
-          "id": 5,
-          "kind": "GROUP",
-          "label": "fields",
+          "id": 7,
+          "kind": "TYPE_ANNOTATION_TYPE_NAME",
+          "loc": {
+           "pos": 705,
+           "length": 10,
+           "line": 17,
+           "column": 22
+          },
+          "fields": {
+           "name": "Disposable"
+          }
+         }
+        ]
+       },
+       {
+        "id": 8,
+        "kind": "FIELD_DECL",
+        "loc": {
+         "pos": 720,
+         "length": 2,
+         "line": 18,
+         "column": 3
+        },
+        "fields": {
+         "name": "id"
+        },
+        "children": [
+         {
+          "id": 9,
+          "kind": "TYPE_ANNOTATION_TYPE_NAME",
+          "label": "typeAnnotation",
+          "loc": {
+           "pos": 724,
+           "length": 5,
+           "line": 18,
+           "column": 7
+          },
+          "fields": {
+           "name": "int32"
+          }
+         }
+        ]
+       },
+       {
+        "id": 10,
+        "kind": "METHOD_DECL",
+        "loc": {
+         "pos": 742,
+         "length": 7,
+         "line": 19,
+         "column": 12
+        },
+        "fields": {
+         "name": "dispose"
+        },
+        "children": [
+         {
+          "id": 11,
+          "kind": "NODE_LIST",
+          "label": "undefined",
+          "loc": {
+           "pos": 753,
+           "length": 1,
+           "line": 19,
+           "column": 23
+          },
           "children": [
            {
-            "id": 4,
-            "kind": "FIELD_DECL",
-            "fields": {
-             "name": "id",
-             "typeAnnotation": {
-              "kind": "typeName",
-              "name": "int32"
-             }
-            },
-            "children": [],
+            "id": 12,
+            "kind": "PARAM",
             "loc": {
-             "pos": 722,
-             "length": 0,
-             "line": 18,
-             "column": 5
-            }
+             "pos": 750,
+             "length": 3,
+             "line": 19,
+             "column": 20
+            },
+            "fields": {
+             "name": "self",
+             "flagA": "true"
+            },
+            "children": [
+             {
+              "id": 13,
+              "kind": "TYPE_ANNOTATION_TYPE_NAME",
+              "label": "typeAnnotation",
+              "loc": {
+               "pos": 758,
+               "length": 1,
+               "line": 19,
+               "column": 28
+              },
+              "fields": {
+               "name": "Conn"
+              }
+             }
+            ]
            }
           ]
          },
          {
-          "id": 21,
-          "kind": "GROUP",
-          "label": "methods",
+          "id": 14,
+          "kind": "TYPE_ANNOTATION_TYPE_NAME",
+          "label": "undefined",
+          "loc": {
+           "pos": 761,
+           "length": 4,
+           "line": 19,
+           "column": 31
+          },
+          "fields": {
+           "name": "void"
+          }
+         },
+         {
+          "id": 15,
+          "kind": "BLOCK",
+          "label": "functionBody",
+          "loc": {
+           "pos": 772,
+           "length": 6,
+           "line": 20,
+           "column": 5
+          },
           "children": [
            {
-            "id": 6,
-            "kind": "METHOD_DECL",
-            "fields": {
-             "isTask": false,
-             "isAsync": false,
-             "name": "dispose",
-             "returnTypeAnnotation": {
-              "kind": "typeName",
-              "name": "void"
-             }
+            "id": 16,
+            "kind": "NODE_LIST",
+            "label": "statementsList",
+            "loc": {
+             "pos": 778,
+             "length": 1,
+             "line": 20,
+             "column": 11
             },
             "children": [
              {
-              "id": 8,
-              "kind": "GROUP",
-              "label": "params",
-              "children": [
-               {
-                "id": 7,
-                "kind": "PARAM",
-                "fields": {
-                 "isRef": true,
-                 "name": "self",
-                 "typeAnnotation": {
-                  "kind": "selfType"
-                 }
-                },
-                "children": [],
-                "loc": {
-                 "pos": 759,
-                 "length": 0,
-                 "line": 19,
-                 "column": 29
-                }
-               }
-              ]
-             },
-             {
-              "id": 9,
-              "kind": "BLOCK",
-              "fields": {
-               "endPos": 806
+              "id": 17,
+              "kind": "EXPRESSION_STATEMENT",
+              "loc": {
+               "pos": 772,
+               "length": 6,
+               "line": 20,
+               "column": 5
               },
               "children": [
                {
-                "id": 20,
-                "kind": "GROUP",
-                "label": "body",
+                "id": 18,
+                "kind": "CALL_EXPRESSION",
+                "label": "expression",
+                "loc": {
+                 "pos": 778,
+                 "length": 1,
+                 "line": 20,
+                 "column": 11
+                },
+                "fields": {
+                 "name": "printf"
+                },
                 "children": [
                  {
-                  "id": 10,
-                  "kind": "EXPRESSION_STATEMENT",
-                  "fields": {
-                   "startLoc": {
-                    "pos": 772,
-                    "line": 20,
-                    "column": 5
-                   }
+                  "id": 19,
+                  "kind": "NODE_LIST",
+                  "label": "undefined",
+                  "loc": {
+                   "pos": 779,
+                   "length": 1,
+                   "line": 20,
+                   "column": 12
                   },
                   "children": [
                    {
-                    "id": 11,
-                    "kind": "CALL_EXPRESSION",
-                    "fields": {
-                     "callee": "printf"
+                    "id": 20,
+                    "kind": "TEMPLATE_LITERAL",
+                    "loc": {
+                     "pos": 779,
+                     "length": 22,
+                     "line": 20,
+                     "column": 12
                     },
                     "children": [
                      {
-                      "id": 19,
-                      "kind": "GROUP",
-                      "label": "args",
+                      "id": 21,
+                      "kind": "STRING_PART",
+                      "loc": {
+                       "pos": 780,
+                       "length": 8,
+                       "line": 20,
+                       "column": 13
+                      },
+                      "fields": {
+                       "text": "  close "
+                      }
+                     },
+                     {
+                      "id": 22,
+                      "kind": "EXPR_PART",
+                      "loc": {
+                       "pos": 790,
+                       "length": 1,
+                       "line": 20,
+                       "column": 23
+                      },
                       "children": [
                        {
-                        "id": 12,
-                        "kind": "TEMPLATE_LITERAL",
-                        "fields": {},
+                        "id": 23,
+                        "kind": "FIELD_ACCESS",
+                        "label": "undefined",
+                        "loc": {
+                         "pos": 797,
+                         "length": 1,
+                         "line": 20,
+                         "column": 30
+                        },
+                        "fields": {
+                         "name": "id"
+                        },
                         "children": [
                          {
-                          "id": 18,
-                          "kind": "GROUP",
-                          "label": "parts",
-                          "children": [
-                           {
-                            "id": 13,
-                            "kind": "STRING_PART",
-                            "fields": {
-                             "value": "  close "
-                            },
-                            "children": []
-                           },
-                           {
-                            "id": 14,
-                            "kind": "EXPR_PART",
-                            "fields": {},
-                            "children": [
-                             {
-                              "id": 15,
-                              "kind": "FIELD_ACCESS",
-                              "fields": {
-                               "field": "id",
-                               "fieldSourceLoc": {
-                                "pos": 36,
-                                "line": 1,
-                                "column": 37,
-                                "length": 2
-                               }
-                              },
-                              "children": [
-                               {
-                                "id": 16,
-                                "kind": "IDENT",
-                                "fields": {
-                                 "name": "self"
-                                },
-                                "children": [],
-                                "label": "object",
-                                "loc": {
-                                 "pos": 795,
-                                 "length": 0,
-                                 "line": 20,
-                                 "column": 28
-                                }
-                               }
-                              ],
-                              "label": "expr",
-                              "loc": {
-                               "pos": 795,
-                               "length": 0,
-                               "line": 20,
-                               "column": 28
-                              }
-                             }
-                            ]
-                           },
-                           {
-                            "id": 17,
-                            "kind": "STRING_PART",
-                            "fields": {
-                             "value": "\\n"
-                            },
-                            "children": []
-                           }
-                          ]
+                          "id": 24,
+                          "kind": "IDENT",
+                          "label": "base",
+                          "loc": {
+                           "pos": 790,
+                           "length": 4,
+                           "line": 20,
+                           "column": 23
+                          },
+                          "fields": {
+                           "name": "self"
+                          }
                          }
-                        ],
+                        ]
+                       }
+                      ]
+                     },
+                     {
+                      "id": 25,
+                      "kind": "STRING_PART",
+                      "loc": {
+                       "pos": 798,
+                       "length": 2,
+                       "line": 20,
+                       "column": 31
+                      },
+                      "fields": {
+                       "text": "\n"
+                      }
+                     }
+                    ]
+                   }
+                  ]
+                 }
+                ]
+               }
+              ]
+             }
+            ]
+           }
+          ]
+         }
+        ]
+       }
+      ]
+     },
+     {
+      "id": 26,
+      "kind": "FUNCTION_DECL",
+      "loc": {
+       "pos": 957,
+       "length": 5,
+       "line": 26,
+       "column": 10
+      },
+      "fields": {
+       "name": "plain"
+      },
+      "children": [
+       {
+        "id": 27,
+        "kind": "NODE_LIST",
+        "label": "functionParamList",
+        "loc": {
+         "pos": 964,
+         "length": 1,
+         "line": 26,
+         "column": 17
+        }
+       },
+       {
+        "id": 28,
+        "kind": "TYPE_ANNOTATION_TYPE_NAME",
+        "label": "returnTypeAnnotation",
+        "loc": {
+         "pos": 966,
+         "length": 4,
+         "line": 26,
+         "column": 19
+        },
+        "fields": {
+         "name": "void"
+        }
+       },
+       {
+        "id": 29,
+        "kind": "BLOCK",
+        "label": "functionBody",
+        "loc": {
+         "pos": 975,
+         "length": 6,
+         "line": 27,
+         "column": 3
+        },
+        "children": [
+         {
+          "id": 30,
+          "kind": "NODE_LIST",
+          "label": "statementsList",
+          "loc": {
+           "pos": 981,
+           "length": 1,
+           "line": 27,
+           "column": 9
+          },
+          "children": [
+           {
+            "id": 31,
+            "kind": "EXPRESSION_STATEMENT",
+            "loc": {
+             "pos": 975,
+             "length": 6,
+             "line": 27,
+             "column": 3
+            },
+            "children": [
+             {
+              "id": 32,
+              "kind": "CALL_EXPRESSION",
+              "label": "expression",
+              "loc": {
+               "pos": 981,
+               "length": 1,
+               "line": 27,
+               "column": 9
+              },
+              "fields": {
+               "name": "printf"
+              },
+              "children": [
+               {
+                "id": 33,
+                "kind": "NODE_LIST",
+                "label": "undefined",
+                "loc": {
+                 "pos": 982,
+                 "length": 1,
+                 "line": 27,
+                 "column": 10
+                },
+                "children": [
+                 {
+                  "id": 34,
+                  "kind": "STRING_LITERAL",
+                  "loc": {
+                   "pos": 982,
+                   "length": 10,
+                   "line": 27,
+                   "column": 10
+                  },
+                  "fields": {
+                   "text": "plain:\n"
+                  }
+                 }
+                ]
+               }
+              ]
+             }
+            ]
+           },
+           {
+            "id": 35,
+            "kind": "LET_DECL",
+            "loc": {
+             "pos": 1001,
+             "length": 1,
+             "line": 28,
+             "column": 7
+            },
+            "fields": {
+             "name": "c"
+            },
+            "children": [
+             {
+              "id": 36,
+              "kind": "TYPE_ANNOTATION_TYPE_NAME",
+              "label": "typeAnnotation",
+              "loc": {
+               "pos": 1004,
+               "length": 4,
+               "line": 28,
+               "column": 10
+              },
+              "fields": {
+               "name": "Conn"
+              }
+             },
+             {
+              "id": 37,
+              "kind": "STRUCT_LITERAL",
+              "label": "assignmentExpression",
+              "loc": {
+               "pos": 1011,
+               "length": 1,
+               "line": 28,
+               "column": 17
+              },
+              "children": [
+               {
+                "id": 38,
+                "kind": "NODE_LIST",
+                "label": "undefined",
+                "loc": {
+                 "pos": 1012,
+                 "length": 1,
+                 "line": 28,
+                 "column": 18
+                },
+                "children": [
+                 {
+                  "id": 39,
+                  "kind": "STRUCT_LITERAL_FIELD",
+                  "loc": {
+                   "pos": 1013,
+                   "length": 2,
+                   "line": 28,
+                   "column": 19
+                  },
+                  "fields": {
+                   "name": "id"
+                  },
+                  "children": [
+                   {
+                    "id": 40,
+                    "kind": "INT_LITERAL",
+                    "label": "undefined",
+                    "loc": {
+                     "pos": 1017,
+                     "length": 1,
+                     "line": 28,
+                     "column": 23
+                    },
+                    "fields": {
+                     "intVal": "1"
+                    }
+                   }
+                  ]
+                 }
+                ]
+               }
+              ]
+             }
+            ]
+           },
+           {
+            "id": 41,
+            "kind": "EXPRESSION_STATEMENT",
+            "loc": {
+             "pos": 1024,
+             "length": 6,
+             "line": 29,
+             "column": 3
+            },
+            "children": [
+             {
+              "id": 42,
+              "kind": "CALL_EXPRESSION",
+              "label": "expression",
+              "loc": {
+               "pos": 1030,
+               "length": 1,
+               "line": 29,
+               "column": 9
+              },
+              "fields": {
+               "name": "printf"
+              },
+              "children": [
+               {
+                "id": 43,
+                "kind": "NODE_LIST",
+                "label": "undefined",
+                "loc": {
+                 "pos": 1031,
+                 "length": 1,
+                 "line": 29,
+                 "column": 10
+                },
+                "children": [
+                 {
+                  "id": 44,
+                  "kind": "TEMPLATE_LITERAL",
+                  "loc": {
+                   "pos": 1031,
+                   "length": 17,
+                   "line": 29,
+                   "column": 10
+                  },
+                  "children": [
+                   {
+                    "id": 45,
+                    "kind": "STRING_PART",
+                    "loc": {
+                     "pos": 1032,
+                     "length": 6,
+                     "line": 29,
+                     "column": 11
+                    },
+                    "fields": {
+                     "text": "  use "
+                    }
+                   },
+                   {
+                    "id": 46,
+                    "kind": "EXPR_PART",
+                    "loc": {
+                     "pos": 1040,
+                     "length": 1,
+                     "line": 29,
+                     "column": 19
+                    },
+                    "children": [
+                     {
+                      "id": 47,
+                      "kind": "FIELD_ACCESS",
+                      "label": "undefined",
+                      "loc": {
+                       "pos": 1044,
+                       "length": 1,
+                       "line": 29,
+                       "column": 23
+                      },
+                      "fields": {
+                       "name": "id"
+                      },
+                      "children": [
+                       {
+                        "id": 48,
+                        "kind": "IDENT",
+                        "label": "base",
                         "loc": {
-                         "pos": 802,
-                         "length": 0,
-                         "line": 20,
-                         "column": 35
+                         "pos": 1041,
+                         "length": 1,
+                         "line": 29,
+                         "column": 20
+                        },
+                        "fields": {
+                         "name": "c"
                         }
                        }
                       ]
                      }
-                    ],
-                    "label": "value",
+                    ]
+                   },
+                   {
+                    "id": 49,
+                    "kind": "STRING_PART",
                     "loc": {
-                     "pos": 779,
-                     "length": 0,
-                     "line": 20,
-                     "column": 12
+                     "pos": 1045,
+                     "length": 2,
+                     "line": 29,
+                     "column": 24
+                    },
+                    "fields": {
+                     "text": "\n"
                     }
                    }
-                  ],
+                  ]
+                 }
+                ]
+               }
+              ]
+             }
+            ]
+           }
+          ]
+         }
+        ]
+       }
+      ]
+     },
+     {
+      "id": 50,
+      "kind": "FUNCTION_DECL",
+      "loc": {
+       "pos": 1140,
+       "length": 6,
+       "line": 33,
+       "column": 10
+      },
+      "fields": {
+       "name": "kinded"
+      },
+      "children": [
+       {
+        "id": 51,
+        "kind": "NODE_LIST",
+        "label": "functionParamList",
+        "loc": {
+         "pos": 1148,
+         "length": 1,
+         "line": 33,
+         "column": 18
+        }
+       },
+       {
+        "id": 52,
+        "kind": "TYPE_ANNOTATION_TYPE_NAME",
+        "label": "returnTypeAnnotation",
+        "loc": {
+         "pos": 1150,
+         "length": 4,
+         "line": 33,
+         "column": 20
+        },
+        "fields": {
+         "name": "void"
+        }
+       },
+       {
+        "id": 53,
+        "kind": "BLOCK",
+        "label": "functionBody",
+        "loc": {
+         "pos": 1159,
+         "length": 6,
+         "line": 34,
+         "column": 3
+        },
+        "children": [
+         {
+          "id": 54,
+          "kind": "NODE_LIST",
+          "label": "statementsList",
+          "loc": {
+           "pos": 1165,
+           "length": 1,
+           "line": 34,
+           "column": 9
+          },
+          "children": [
+           {
+            "id": 55,
+            "kind": "EXPRESSION_STATEMENT",
+            "loc": {
+             "pos": 1159,
+             "length": 6,
+             "line": 34,
+             "column": 3
+            },
+            "children": [
+             {
+              "id": 56,
+              "kind": "CALL_EXPRESSION",
+              "label": "expression",
+              "loc": {
+               "pos": 1165,
+               "length": 1,
+               "line": 34,
+               "column": 9
+              },
+              "fields": {
+               "name": "printf"
+              },
+              "children": [
+               {
+                "id": 57,
+                "kind": "NODE_LIST",
+                "label": "undefined",
+                "loc": {
+                 "pos": 1166,
+                 "length": 1,
+                 "line": 34,
+                 "column": 10
+                },
+                "children": [
+                 {
+                  "id": 58,
+                  "kind": "STRING_LITERAL",
                   "loc": {
-                   "pos": 778,
-                   "length": 0,
-                   "line": 20,
+                   "pos": 1166,
+                   "length": 11,
+                   "line": 34,
+                   "column": 10
+                  },
+                  "fields": {
+                   "text": "kinded:\n"
+                  }
+                 }
+                ]
+               }
+              ]
+             }
+            ]
+           },
+           {
+            "id": 59,
+            "kind": "CONST_DECL",
+            "loc": {
+             "pos": 1182,
+             "length": 10,
+             "line": 35,
+             "column": 3
+            },
+            "fields": {
+             "name": "c"
+            },
+            "children": [
+             {
+              "id": 60,
+              "kind": "TYPE_ANNOTATION_TYPE_NAME",
+              "label": "typeAnnotation",
+              "loc": {
+               "pos": 1196,
+               "length": 4,
+               "line": 35,
+               "column": 17
+              },
+              "fields": {
+               "name": "Conn"
+              }
+             },
+             {
+              "id": 61,
+              "kind": "STRUCT_LITERAL",
+              "label": "assignmentExpression",
+              "loc": {
+               "pos": 1203,
+               "length": 1,
+               "line": 35,
+               "column": 24
+              },
+              "children": [
+               {
+                "id": 62,
+                "kind": "NODE_LIST",
+                "label": "undefined",
+                "loc": {
+                 "pos": 1204,
+                 "length": 1,
+                 "line": 35,
+                 "column": 25
+                },
+                "children": [
+                 {
+                  "id": 63,
+                  "kind": "STRUCT_LITERAL_FIELD",
+                  "loc": {
+                   "pos": 1205,
+                   "length": 2,
+                   "line": 35,
+                   "column": 26
+                  },
+                  "fields": {
+                   "name": "id"
+                  },
+                  "children": [
+                   {
+                    "id": 64,
+                    "kind": "INT_LITERAL",
+                    "label": "undefined",
+                    "loc": {
+                     "pos": 1209,
+                     "length": 1,
+                     "line": 35,
+                     "column": 30
+                    },
+                    "fields": {
+                     "intVal": "2"
+                    }
+                   }
+                  ]
+                 }
+                ]
+               }
+              ]
+             },
+             {
+              "id": 65,
+              "kind": "NODE_LIST",
+              "label": "undefined",
+              "loc": {
+               "pos": 1192,
+               "length": 1,
+               "line": 35,
+               "column": 13
+              },
+              "children": [
+               {
+                "id": 66,
+                "kind": "KIND_PREFIX",
+                "loc": {
+                 "pos": 1182,
+                 "length": 10,
+                 "line": 35,
+                 "column": 3
+                },
+                "fields": {
+                 "name": "disposable"
+                }
+               }
+              ]
+             }
+            ]
+           },
+           {
+            "id": 67,
+            "kind": "EXPRESSION_STATEMENT",
+            "loc": {
+             "pos": 1216,
+             "length": 6,
+             "line": 36,
+             "column": 3
+            },
+            "children": [
+             {
+              "id": 68,
+              "kind": "CALL_EXPRESSION",
+              "label": "expression",
+              "loc": {
+               "pos": 1222,
+               "length": 1,
+               "line": 36,
+               "column": 9
+              },
+              "fields": {
+               "name": "printf"
+              },
+              "children": [
+               {
+                "id": 69,
+                "kind": "NODE_LIST",
+                "label": "undefined",
+                "loc": {
+                 "pos": 1223,
+                 "length": 1,
+                 "line": 36,
+                 "column": 10
+                },
+                "children": [
+                 {
+                  "id": 70,
+                  "kind": "TEMPLATE_LITERAL",
+                  "loc": {
+                   "pos": 1223,
+                   "length": 17,
+                   "line": 36,
+                   "column": 10
+                  },
+                  "children": [
+                   {
+                    "id": 71,
+                    "kind": "STRING_PART",
+                    "loc": {
+                     "pos": 1224,
+                     "length": 6,
+                     "line": 36,
+                     "column": 11
+                    },
+                    "fields": {
+                     "text": "  use "
+                    }
+                   },
+                   {
+                    "id": 72,
+                    "kind": "EXPR_PART",
+                    "loc": {
+                     "pos": 1232,
+                     "length": 1,
+                     "line": 36,
+                     "column": 19
+                    },
+                    "children": [
+                     {
+                      "id": 73,
+                      "kind": "FIELD_ACCESS",
+                      "label": "undefined",
+                      "loc": {
+                       "pos": 1236,
+                       "length": 1,
+                       "line": 36,
+                       "column": 23
+                      },
+                      "fields": {
+                       "name": "id"
+                      },
+                      "children": [
+                       {
+                        "id": 74,
+                        "kind": "IDENT",
+                        "label": "base",
+                        "loc": {
+                         "pos": 1233,
+                         "length": 1,
+                         "line": 36,
+                         "column": 20
+                        },
+                        "fields": {
+                         "name": "c"
+                        }
+                       }
+                      ]
+                     }
+                    ]
+                   },
+                   {
+                    "id": 75,
+                    "kind": "STRING_PART",
+                    "loc": {
+                     "pos": 1237,
+                     "length": 2,
+                     "line": 36,
+                     "column": 24
+                    },
+                    "fields": {
+                     "text": "\n"
+                    }
+                   }
+                  ]
+                 }
+                ]
+               }
+              ]
+             }
+            ]
+           }
+          ]
+         }
+        ]
+       }
+      ]
+     },
+     {
+      "id": 76,
+      "kind": "FUNCTION_DECL",
+      "loc": {
+       "pos": 1367,
+       "length": 4,
+       "line": 41,
+       "column": 10
+      },
+      "fields": {
+       "name": "bail"
+      },
+      "children": [
+       {
+        "id": 77,
+        "kind": "NODE_LIST",
+        "label": "functionParamList",
+        "loc": {
+         "pos": 1377,
+         "length": 1,
+         "line": 41,
+         "column": 20
+        },
+        "children": [
+         {
+          "id": 78,
+          "kind": "PARAM",
+          "loc": {
+           "pos": 1372,
+           "length": 5,
+           "line": 41,
+           "column": 15
+          },
+          "fields": {
+           "name": "early"
+          },
+          "children": [
+           {
+            "id": 79,
+            "kind": "TYPE_ANNOTATION_TYPE_NAME",
+            "label": "typeAnnotation",
+            "loc": {
+             "pos": 1379,
+             "length": 4,
+             "line": 41,
+             "column": 22
+            },
+            "fields": {
+             "name": "bool"
+            }
+           }
+          ]
+         }
+        ]
+       },
+       {
+        "id": 80,
+        "kind": "TYPE_ANNOTATION_TYPE_NAME",
+        "label": "returnTypeAnnotation",
+        "loc": {
+         "pos": 1386,
+         "length": 4,
+         "line": 41,
+         "column": 29
+        },
+        "fields": {
+         "name": "void"
+        }
+       },
+       {
+        "id": 81,
+        "kind": "BLOCK",
+        "label": "functionBody",
+        "loc": {
+         "pos": 1395,
+         "length": 6,
+         "line": 42,
+         "column": 3
+        },
+        "children": [
+         {
+          "id": 82,
+          "kind": "NODE_LIST",
+          "label": "statementsList",
+          "loc": {
+           "pos": 1401,
+           "length": 1,
+           "line": 42,
+           "column": 9
+          },
+          "children": [
+           {
+            "id": 83,
+            "kind": "EXPRESSION_STATEMENT",
+            "loc": {
+             "pos": 1395,
+             "length": 6,
+             "line": 42,
+             "column": 3
+            },
+            "children": [
+             {
+              "id": 84,
+              "kind": "CALL_EXPRESSION",
+              "label": "expression",
+              "loc": {
+               "pos": 1401,
+               "length": 1,
+               "line": 42,
+               "column": 9
+              },
+              "fields": {
+               "name": "printf"
+              },
+              "children": [
+               {
+                "id": 85,
+                "kind": "NODE_LIST",
+                "label": "undefined",
+                "loc": {
+                 "pos": 1402,
+                 "length": 1,
+                 "line": 42,
+                 "column": 10
+                },
+                "children": [
+                 {
+                  "id": 86,
+                  "kind": "STRING_LITERAL",
+                  "loc": {
+                   "pos": 1402,
+                   "length": 9,
+                   "line": 42,
+                   "column": 10
+                  },
+                  "fields": {
+                   "text": "bail:\n"
+                  }
+                 }
+                ]
+               }
+              ]
+             }
+            ]
+           },
+           {
+            "id": 87,
+            "kind": "CONST_DECL",
+            "loc": {
+             "pos": 1416,
+             "length": 10,
+             "line": 43,
+             "column": 3
+            },
+            "fields": {
+             "name": "c"
+            },
+            "children": [
+             {
+              "id": 88,
+              "kind": "TYPE_ANNOTATION_TYPE_NAME",
+              "label": "typeAnnotation",
+              "loc": {
+               "pos": 1430,
+               "length": 4,
+               "line": 43,
+               "column": 17
+              },
+              "fields": {
+               "name": "Conn"
+              }
+             },
+             {
+              "id": 89,
+              "kind": "STRUCT_LITERAL",
+              "label": "assignmentExpression",
+              "loc": {
+               "pos": 1437,
+               "length": 1,
+               "line": 43,
+               "column": 24
+              },
+              "children": [
+               {
+                "id": 90,
+                "kind": "NODE_LIST",
+                "label": "undefined",
+                "loc": {
+                 "pos": 1438,
+                 "length": 1,
+                 "line": 43,
+                 "column": 25
+                },
+                "children": [
+                 {
+                  "id": 91,
+                  "kind": "STRUCT_LITERAL_FIELD",
+                  "loc": {
+                   "pos": 1439,
+                   "length": 2,
+                   "line": 43,
+                   "column": 26
+                  },
+                  "fields": {
+                   "name": "id"
+                  },
+                  "children": [
+                   {
+                    "id": 92,
+                    "kind": "INT_LITERAL",
+                    "label": "undefined",
+                    "loc": {
+                     "pos": 1443,
+                     "length": 1,
+                     "line": 43,
+                     "column": 30
+                    },
+                    "fields": {
+                     "intVal": "3"
+                    }
+                   }
+                  ]
+                 }
+                ]
+               }
+              ]
+             },
+             {
+              "id": 93,
+              "kind": "NODE_LIST",
+              "label": "undefined",
+              "loc": {
+               "pos": 1426,
+               "length": 1,
+               "line": 43,
+               "column": 13
+              },
+              "children": [
+               {
+                "id": 94,
+                "kind": "KIND_PREFIX",
+                "loc": {
+                 "pos": 1416,
+                 "length": 10,
+                 "line": 43,
+                 "column": 3
+                },
+                "fields": {
+                 "name": "disposable"
+                }
+               }
+              ]
+             }
+            ]
+           },
+           {
+            "id": 95,
+            "kind": "IF_STATEMENT",
+            "loc": {
+             "pos": 1453,
+             "length": 1,
+             "line": 44,
+             "column": 6
+            },
+            "children": [
+             {
+              "id": 96,
+              "kind": "IDENT",
+              "label": "condition",
+              "loc": {
+               "pos": 1459,
+               "length": 1,
+               "line": 44,
+               "column": 12
+              },
+              "fields": {
+               "name": "early"
+              }
+             },
+             {
+              "id": 97,
+              "kind": "BLOCK",
+              "label": "thenBlock",
+              "loc": {
+               "pos": 1467,
+               "length": 6,
+               "line": 45,
+               "column": 5
+              },
+              "children": [
+               {
+                "id": 98,
+                "kind": "NODE_LIST",
+                "label": "statementsList",
+                "loc": {
+                 "pos": 1473,
+                 "length": 1,
+                 "line": 45,
+                 "column": 11
+                },
+                "children": [
+                 {
+                  "id": 99,
+                  "kind": "RETURN_STATEMENT",
+                  "loc": {
+                   "pos": 1473,
+                   "length": 1,
+                   "line": 45,
                    "column": 11
                   }
                  }
                 ]
                }
-              ],
-              "label": "body",
-              "loc": {
-               "pos": 778,
-               "length": 0,
-               "line": 20,
-               "column": 11
-              }
+              ]
              }
-            ],
+            ]
+           },
+           {
+            "id": 100,
+            "kind": "EXPRESSION_STATEMENT",
             "loc": {
-             "pos": 741,
-             "length": 0,
-             "line": 19,
-             "column": 11
-            }
+             "pos": 1481,
+             "length": 6,
+             "line": 47,
+             "column": 3
+            },
+            "children": [
+             {
+              "id": 101,
+              "kind": "CALL_EXPRESSION",
+              "label": "expression",
+              "loc": {
+               "pos": 1487,
+               "length": 1,
+               "line": 47,
+               "column": 9
+              },
+              "fields": {
+               "name": "printf"
+              },
+              "children": [
+               {
+                "id": 102,
+                "kind": "NODE_LIST",
+                "label": "undefined",
+                "loc": {
+                 "pos": 1488,
+                 "length": 1,
+                 "line": 47,
+                 "column": 10
+                },
+                "children": [
+                 {
+                  "id": 103,
+                  "kind": "STRING_LITERAL",
+                  "loc": {
+                   "pos": 1488,
+                   "length": 17,
+                   "line": 47,
+                   "column": 10
+                  },
+                  "fields": {
+                   "text": "  not reached\n"
+                  }
+                 }
+                ]
+               }
+              ]
+             }
+            ]
            }
           ]
          }
-        ],
-        "loc": {
-         "pos": 693,
-         "length": 0,
-         "line": 17,
-         "column": 10
-        }
-       },
+        ]
+       }
+      ]
+     },
+     {
+      "id": 104,
+      "kind": "FUNCTION_DECL",
+      "loc": {
+       "pos": 1520,
+       "length": 4,
+       "line": 50,
+       "column": 10
+      },
+      "fields": {
+       "name": "main"
+      },
+      "children": [
        {
-        "id": 22,
-        "kind": "FUNCTION_DECL",
-        "fields": {
-         "isTask": false,
-         "name": "plain",
-         "returnTypeAnnotation": {
-          "kind": "typeName",
-          "name": "void"
-         },
-         "isAsync": false
-        },
-        "children": [
-         {
-          "id": 23,
-          "kind": "BLOCK",
-          "fields": {
-           "endPos": 1051
-          },
-          "children": [
-           {
-            "id": 43,
-            "kind": "GROUP",
-            "label": "body",
-            "children": [
-             {
-              "id": 24,
-              "kind": "EXPRESSION_STATEMENT",
-              "fields": {
-               "startLoc": {
-                "pos": 975,
-                "line": 27,
-                "column": 3
-               }
-              },
-              "children": [
-               {
-                "id": 25,
-                "kind": "CALL_EXPRESSION",
-                "fields": {
-                 "callee": "printf"
-                },
-                "children": [
-                 {
-                  "id": 27,
-                  "kind": "GROUP",
-                  "label": "args",
-                  "children": [
-                   {
-                    "id": 26,
-                    "kind": "STRING_LITERAL",
-                    "fields": {
-                     "value": "\"plain:\\n\""
-                    },
-                    "children": [],
-                    "loc": {
-                     "pos": 993,
-                     "length": 0,
-                     "line": 27,
-                     "column": 21
-                    }
-                   }
-                  ]
-                 }
-                ],
-                "label": "value",
-                "loc": {
-                 "pos": 982,
-                 "length": 0,
-                 "line": 27,
-                 "column": 10
-                }
-               }
-              ],
-              "loc": {
-               "pos": 981,
-               "length": 0,
-               "line": 27,
-               "column": 9
-              }
-             },
-             {
-              "id": 28,
-              "kind": "LET_DECL",
-              "fields": {
-               "name": "c",
-               "typeAnnotation": {
-                "kind": "typeName",
-                "name": "Conn"
-               },
-               "startLoc": {
-                "pos": 997,
-                "line": 28,
-                "column": 3
-               }
-              },
-              "children": [
-               {
-                "id": 29,
-                "kind": "STRUCT_LITERAL",
-                "fields": {},
-                "children": [
-                 {
-                  "id": 32,
-                  "kind": "GROUP",
-                  "label": "fields",
-                  "children": [
-                   {
-                    "id": 30,
-                    "kind": "STRUCT_LITERAL_FIELD",
-                    "fields": {
-                     "name": "id"
-                    },
-                    "children": [
-                     {
-                      "id": 31,
-                      "kind": "INT_LITERAL",
-                      "fields": {
-                       "value": 1
-                      },
-                      "children": [],
-                      "label": "value",
-                      "loc": {
-                       "pos": 1018,
-                       "length": 0,
-                       "line": 28,
-                       "column": 24
-                      }
-                     }
-                    ],
-                    "loc": {
-                     "pos": 1015,
-                     "length": 0,
-                     "line": 28,
-                     "column": 21
-                    }
-                   }
-                  ]
-                 }
-                ],
-                "label": "assignment",
-                "loc": {
-                 "pos": 1015,
-                 "length": 0,
-                 "line": 28,
-                 "column": 21
-                }
-               }
-              ],
-              "loc": {
-               "pos": 1002,
-               "length": 0,
-               "line": 28,
-               "column": 8
-              }
-             },
-             {
-              "id": 33,
-              "kind": "EXPRESSION_STATEMENT",
-              "fields": {
-               "startLoc": {
-                "pos": 1024,
-                "line": 29,
-                "column": 3
-               }
-              },
-              "children": [
-               {
-                "id": 34,
-                "kind": "CALL_EXPRESSION",
-                "fields": {
-                 "callee": "printf"
-                },
-                "children": [
-                 {
-                  "id": 42,
-                  "kind": "GROUP",
-                  "label": "args",
-                  "children": [
-                   {
-                    "id": 35,
-                    "kind": "TEMPLATE_LITERAL",
-                    "fields": {},
-                    "children": [
-                     {
-                      "id": 41,
-                      "kind": "GROUP",
-                      "label": "parts",
-                      "children": [
-                       {
-                        "id": 36,
-                        "kind": "STRING_PART",
-                        "fields": {
-                         "value": "  use "
-                        },
-                        "children": []
-                       },
-                       {
-                        "id": 37,
-                        "kind": "EXPR_PART",
-                        "fields": {},
-                        "children": [
-                         {
-                          "id": 38,
-                          "kind": "FIELD_ACCESS",
-                          "fields": {
-                           "field": "id",
-                           "fieldSourceLoc": {
-                            "pos": 33,
-                            "line": 1,
-                            "column": 34,
-                            "length": 2
-                           }
-                          },
-                          "children": [
-                           {
-                            "id": 39,
-                            "kind": "IDENT",
-                            "fields": {
-                             "name": "c"
-                            },
-                            "children": [],
-                            "label": "object",
-                            "loc": {
-                             "pos": 1042,
-                             "length": 0,
-                             "line": 29,
-                             "column": 21
-                            }
-                           }
-                          ],
-                          "label": "expr",
-                          "loc": {
-                           "pos": 1042,
-                           "length": 0,
-                           "line": 29,
-                           "column": 21
-                          }
-                         }
-                        ]
-                       },
-                       {
-                        "id": 40,
-                        "kind": "STRING_PART",
-                        "fields": {
-                         "value": "\\n"
-                        },
-                        "children": []
-                       }
-                      ]
-                     }
-                    ],
-                    "loc": {
-                     "pos": 1049,
-                     "length": 0,
-                     "line": 29,
-                     "column": 28
-                    }
-                   }
-                  ]
-                 }
-                ],
-                "label": "value",
-                "loc": {
-                 "pos": 1031,
-                 "length": 0,
-                 "line": 29,
-                 "column": 10
-                }
-               }
-              ],
-              "loc": {
-               "pos": 1030,
-               "length": 0,
-               "line": 29,
-               "column": 9
-              }
-             }
-            ]
-           }
-          ],
-          "label": "body",
-          "loc": {
-           "pos": 981,
-           "length": 0,
-           "line": 27,
-           "column": 9
-          }
-         }
-        ],
+        "id": 105,
+        "kind": "NODE_LIST",
+        "label": "functionParamList",
         "loc": {
-         "pos": 962,
-         "length": 0,
-         "line": 26,
-         "column": 15
-        }
-       },
-       {
-        "id": 44,
-        "kind": "FUNCTION_DECL",
-        "fields": {
-         "isTask": false,
-         "name": "kinded",
-         "returnTypeAnnotation": {
-          "kind": "typeName",
-          "name": "void"
-         },
-         "isAsync": false
-        },
-        "children": [
-         {
-          "id": 45,
-          "kind": "BLOCK",
-          "fields": {
-           "endPos": 1243
-          },
-          "children": [
-           {
-            "id": 65,
-            "kind": "GROUP",
-            "label": "body",
-            "children": [
-             {
-              "id": 46,
-              "kind": "EXPRESSION_STATEMENT",
-              "fields": {
-               "startLoc": {
-                "pos": 1159,
-                "line": 34,
-                "column": 3
-               }
-              },
-              "children": [
-               {
-                "id": 47,
-                "kind": "CALL_EXPRESSION",
-                "fields": {
-                 "callee": "printf"
-                },
-                "children": [
-                 {
-                  "id": 49,
-                  "kind": "GROUP",
-                  "label": "args",
-                  "children": [
-                   {
-                    "id": 48,
-                    "kind": "STRING_LITERAL",
-                    "fields": {
-                     "value": "\"kinded:\\n\""
-                    },
-                    "children": [],
-                    "loc": {
-                     "pos": 1178,
-                     "length": 0,
-                     "line": 34,
-                     "column": 22
-                    }
-                   }
-                  ]
-                 }
-                ],
-                "label": "value",
-                "loc": {
-                 "pos": 1166,
-                 "length": 0,
-                 "line": 34,
-                 "column": 10
-                }
-               }
-              ],
-              "loc": {
-               "pos": 1165,
-               "length": 0,
-               "line": 34,
-               "column": 9
-              }
-             },
-             {
-              "id": 50,
-              "kind": "CONST_DECL",
-              "fields": {
-               "kindPrefix": {
-                "name": "disposable",
-                "args": null,
-                "sourceLoc": {
-                 "pos": 1182,
-                 "line": 35,
-                 "column": 3
-                }
-               },
-               "name": "c",
-               "typeAnnotation": {
-                "kind": "typeName",
-                "name": "Conn"
-               },
-               "startLoc": {
-                "pos": 1182,
-                "line": 35,
-                "column": 3
-               }
-              },
-              "children": [
-               {
-                "id": 51,
-                "kind": "STRUCT_LITERAL",
-                "fields": {},
-                "children": [
-                 {
-                  "id": 54,
-                  "kind": "GROUP",
-                  "label": "fields",
-                  "children": [
-                   {
-                    "id": 52,
-                    "kind": "STRUCT_LITERAL_FIELD",
-                    "fields": {
-                     "name": "id"
-                    },
-                    "children": [
-                     {
-                      "id": 53,
-                      "kind": "INT_LITERAL",
-                      "fields": {
-                       "value": 2
-                      },
-                      "children": [],
-                      "label": "value",
-                      "loc": {
-                       "pos": 1210,
-                       "length": 0,
-                       "line": 35,
-                       "column": 31
-                      }
-                     }
-                    ],
-                    "loc": {
-                     "pos": 1207,
-                     "length": 0,
-                     "line": 35,
-                     "column": 28
-                    }
-                   }
-                  ]
-                 }
-                ],
-                "label": "assignment",
-                "loc": {
-                 "pos": 1207,
-                 "length": 0,
-                 "line": 35,
-                 "column": 28
-                }
-               }
-              ],
-              "loc": {
-               "pos": 1194,
-               "length": 0,
-               "line": 35,
-               "column": 15
-              }
-             },
-             {
-              "id": 55,
-              "kind": "EXPRESSION_STATEMENT",
-              "fields": {
-               "startLoc": {
-                "pos": 1216,
-                "line": 36,
-                "column": 3
-               }
-              },
-              "children": [
-               {
-                "id": 56,
-                "kind": "CALL_EXPRESSION",
-                "fields": {
-                 "callee": "printf"
-                },
-                "children": [
-                 {
-                  "id": 64,
-                  "kind": "GROUP",
-                  "label": "args",
-                  "children": [
-                   {
-                    "id": 57,
-                    "kind": "TEMPLATE_LITERAL",
-                    "fields": {},
-                    "children": [
-                     {
-                      "id": 63,
-                      "kind": "GROUP",
-                      "label": "parts",
-                      "children": [
-                       {
-                        "id": 58,
-                        "kind": "STRING_PART",
-                        "fields": {
-                         "value": "  use "
-                        },
-                        "children": []
-                       },
-                       {
-                        "id": 59,
-                        "kind": "EXPR_PART",
-                        "fields": {},
-                        "children": [
-                         {
-                          "id": 60,
-                          "kind": "FIELD_ACCESS",
-                          "fields": {
-                           "field": "id",
-                           "fieldSourceLoc": {
-                            "pos": 33,
-                            "line": 1,
-                            "column": 34,
-                            "length": 2
-                           }
-                          },
-                          "children": [
-                           {
-                            "id": 61,
-                            "kind": "IDENT",
-                            "fields": {
-                             "name": "c"
-                            },
-                            "children": [],
-                            "label": "object",
-                            "loc": {
-                             "pos": 1234,
-                             "length": 0,
-                             "line": 36,
-                             "column": 21
-                            }
-                           }
-                          ],
-                          "label": "expr",
-                          "loc": {
-                           "pos": 1234,
-                           "length": 0,
-                           "line": 36,
-                           "column": 21
-                          }
-                         }
-                        ]
-                       },
-                       {
-                        "id": 62,
-                        "kind": "STRING_PART",
-                        "fields": {
-                         "value": "\\n"
-                        },
-                        "children": []
-                       }
-                      ]
-                     }
-                    ],
-                    "loc": {
-                     "pos": 1241,
-                     "length": 0,
-                     "line": 36,
-                     "column": 28
-                    }
-                   }
-                  ]
-                 }
-                ],
-                "label": "value",
-                "loc": {
-                 "pos": 1223,
-                 "length": 0,
-                 "line": 36,
-                 "column": 10
-                }
-               }
-              ],
-              "loc": {
-               "pos": 1222,
-               "length": 0,
-               "line": 36,
-               "column": 9
-              }
-             }
-            ]
-           }
-          ],
-          "label": "body",
-          "loc": {
-           "pos": 1165,
-           "length": 0,
-           "line": 34,
-           "column": 9
-          }
-         }
-        ],
-        "loc": {
-         "pos": 1146,
-         "length": 0,
-         "line": 33,
+         "pos": 1526,
+         "length": 1,
+         "line": 50,
          "column": 16
         }
        },
        {
-        "id": 66,
-        "kind": "FUNCTION_DECL",
-        "fields": {
-         "isTask": false,
-         "name": "bail",
-         "returnTypeAnnotation": {
-          "kind": "typeName",
-          "name": "void"
-         },
-         "isAsync": false
-        },
-        "children": [
-         {
-          "id": 68,
-          "kind": "GROUP",
-          "label": "params",
-          "children": [
-           {
-            "id": 67,
-            "kind": "PARAM",
-            "fields": {
-             "isRef": false,
-             "name": "early",
-             "typeAnnotation": {
-              "kind": "typeName",
-              "name": "bool"
-             }
-            },
-            "children": [],
-            "loc": {
-             "pos": 1377,
-             "length": 0,
-             "line": 41,
-             "column": 20
-            }
-           }
-          ]
-         },
-         {
-          "id": 69,
-          "kind": "BLOCK",
-          "fields": {
-           "endPos": 1508
-          },
-          "children": [
-           {
-            "id": 88,
-            "kind": "GROUP",
-            "label": "body",
-            "children": [
-             {
-              "id": 70,
-              "kind": "EXPRESSION_STATEMENT",
-              "fields": {
-               "startLoc": {
-                "pos": 1395,
-                "line": 42,
-                "column": 3
-               }
-              },
-              "children": [
-               {
-                "id": 71,
-                "kind": "CALL_EXPRESSION",
-                "fields": {
-                 "callee": "printf"
-                },
-                "children": [
-                 {
-                  "id": 73,
-                  "kind": "GROUP",
-                  "label": "args",
-                  "children": [
-                   {
-                    "id": 72,
-                    "kind": "STRING_LITERAL",
-                    "fields": {
-                     "value": "\"bail:\\n\""
-                    },
-                    "children": [],
-                    "loc": {
-                     "pos": 1412,
-                     "length": 0,
-                     "line": 42,
-                     "column": 20
-                    }
-                   }
-                  ]
-                 }
-                ],
-                "label": "value",
-                "loc": {
-                 "pos": 1402,
-                 "length": 0,
-                 "line": 42,
-                 "column": 10
-                }
-               }
-              ],
-              "loc": {
-               "pos": 1401,
-               "length": 0,
-               "line": 42,
-               "column": 9
-              }
-             },
-             {
-              "id": 74,
-              "kind": "CONST_DECL",
-              "fields": {
-               "kindPrefix": {
-                "name": "disposable",
-                "args": null,
-                "sourceLoc": {
-                 "pos": 1416,
-                 "line": 43,
-                 "column": 3
-                }
-               },
-               "name": "c",
-               "typeAnnotation": {
-                "kind": "typeName",
-                "name": "Conn"
-               },
-               "startLoc": {
-                "pos": 1416,
-                "line": 43,
-                "column": 3
-               }
-              },
-              "children": [
-               {
-                "id": 75,
-                "kind": "STRUCT_LITERAL",
-                "fields": {},
-                "children": [
-                 {
-                  "id": 78,
-                  "kind": "GROUP",
-                  "label": "fields",
-                  "children": [
-                   {
-                    "id": 76,
-                    "kind": "STRUCT_LITERAL_FIELD",
-                    "fields": {
-                     "name": "id"
-                    },
-                    "children": [
-                     {
-                      "id": 77,
-                      "kind": "INT_LITERAL",
-                      "fields": {
-                       "value": 3
-                      },
-                      "children": [],
-                      "label": "value",
-                      "loc": {
-                       "pos": 1444,
-                       "length": 0,
-                       "line": 43,
-                       "column": 31
-                      }
-                     }
-                    ],
-                    "loc": {
-                     "pos": 1441,
-                     "length": 0,
-                     "line": 43,
-                     "column": 28
-                    }
-                   }
-                  ]
-                 }
-                ],
-                "label": "assignment",
-                "loc": {
-                 "pos": 1441,
-                 "length": 0,
-                 "line": 43,
-                 "column": 28
-                }
-               }
-              ],
-              "loc": {
-               "pos": 1428,
-               "length": 0,
-               "line": 43,
-               "column": 15
-              }
-             },
-             {
-              "id": 79,
-              "kind": "IF_STATEMENT",
-              "fields": {
-               "startLoc": {
-                "pos": 1450,
-                "line": 44,
-                "column": 3
-               }
-              },
-              "children": [
-               {
-                "id": 80,
-                "kind": "IDENT",
-                "fields": {
-                 "name": "early"
-                },
-                "children": [],
-                "label": "expression",
-                "loc": {
-                 "pos": 1460,
-                 "length": 0,
-                 "line": 44,
-                 "column": 13
-                }
-               },
-               {
-                "id": 81,
-                "kind": "BLOCK",
-                "fields": {
-                 "endPos": 1477
-                },
-                "children": [
-                 {
-                  "id": 83,
-                  "kind": "GROUP",
-                  "label": "body",
-                  "children": [
-                   {
-                    "id": 82,
-                    "kind": "RETURN_STATEMENT",
-                    "fields": {
-                     "startLoc": {
-                      "pos": 1467,
-                      "line": 45,
-                      "column": 5
-                     }
-                    },
-                    "children": [],
-                    "loc": {
-                     "pos": 1474,
-                     "length": 0,
-                     "line": 45,
-                     "column": 12
-                    }
-                   }
-                  ]
-                 }
-                ],
-                "label": "body",
-                "loc": {
-                 "pos": 1473,
-                 "length": 0,
-                 "line": 45,
-                 "column": 11
-                }
-               }
-              ],
-              "loc": {
-               "pos": 1459,
-               "length": 0,
-               "line": 44,
-               "column": 12
-              }
-             },
-             {
-              "id": 84,
-              "kind": "EXPRESSION_STATEMENT",
-              "fields": {
-               "startLoc": {
-                "pos": 1481,
-                "line": 47,
-                "column": 3
-               }
-              },
-              "children": [
-               {
-                "id": 85,
-                "kind": "CALL_EXPRESSION",
-                "fields": {
-                 "callee": "printf"
-                },
-                "children": [
-                 {
-                  "id": 87,
-                  "kind": "GROUP",
-                  "label": "args",
-                  "children": [
-                   {
-                    "id": 86,
-                    "kind": "STRING_LITERAL",
-                    "fields": {
-                     "value": "\"  not reached\\n\""
-                    },
-                    "children": [],
-                    "loc": {
-                     "pos": 1506,
-                     "length": 0,
-                     "line": 47,
-                     "column": 28
-                    }
-                   }
-                  ]
-                 }
-                ],
-                "label": "value",
-                "loc": {
-                 "pos": 1488,
-                 "length": 0,
-                 "line": 47,
-                 "column": 10
-                }
-               }
-              ],
-              "loc": {
-               "pos": 1487,
-               "length": 0,
-               "line": 47,
-               "column": 9
-              }
-             }
-            ]
-           }
-          ],
-          "label": "body",
-          "loc": {
-           "pos": 1401,
-           "length": 0,
-           "line": 42,
-           "column": 9
-          }
-         }
-        ],
+        "id": 106,
+        "kind": "TYPE_ANNOTATION_TYPE_NAME",
+        "label": "returnTypeAnnotation",
         "loc": {
-         "pos": 1371,
-         "length": 0,
-         "line": 41,
-         "column": 14
+         "pos": 1528,
+         "length": 5,
+         "line": 50,
+         "column": 18
+        },
+        "fields": {
+         "name": "int32"
         }
        },
        {
-        "id": 89,
-        "kind": "FUNCTION_DECL",
-        "fields": {
-         "isTask": false,
-         "name": "main",
-         "returnTypeAnnotation": {
-          "kind": "typeName",
-          "name": "int32"
-         },
-         "isAsync": false
+        "id": 107,
+        "kind": "BLOCK",
+        "label": "functionBody",
+        "loc": {
+         "pos": 1538,
+         "length": 5,
+         "line": 51,
+         "column": 3
         },
         "children": [
          {
-          "id": 90,
-          "kind": "BLOCK",
-          "fields": {
-           "endPos": 1585
+          "id": 108,
+          "kind": "NODE_LIST",
+          "label": "statementsList",
+          "loc": {
+           "pos": 1543,
+           "length": 1,
+           "line": 51,
+           "column": 8
           },
           "children": [
            {
-            "id": 101,
-            "kind": "GROUP",
-            "label": "body",
+            "id": 109,
+            "kind": "EXPRESSION_STATEMENT",
+            "loc": {
+             "pos": 1538,
+             "length": 5,
+             "line": 51,
+             "column": 3
+            },
             "children": [
              {
-              "id": 91,
-              "kind": "EXPRESSION_STATEMENT",
+              "id": 110,
+              "kind": "CALL_EXPRESSION",
+              "label": "expression",
+              "loc": {
+               "pos": 1543,
+               "length": 1,
+               "line": 51,
+               "column": 8
+              },
               "fields": {
-               "startLoc": {
-                "pos": 1538,
-                "line": 51,
-                "column": 3
-               }
+               "name": "plain"
               },
               "children": [
                {
-                "id": 92,
-                "kind": "CALL_EXPRESSION",
-                "fields": {
-                 "callee": "plain"
-                },
-                "children": [],
-                "label": "value",
+                "id": 111,
+                "kind": "NODE_LIST",
+                "label": "undefined",
                 "loc": {
                  "pos": 1544,
-                 "length": 0,
+                 "length": 1,
                  "line": 51,
                  "column": 9
                 }
                }
-              ],
-              "loc": {
-               "pos": 1543,
-               "length": 0,
-               "line": 51,
-               "column": 8
-              }
-             },
+              ]
+             }
+            ]
+           },
+           {
+            "id": 112,
+            "kind": "EXPRESSION_STATEMENT",
+            "loc": {
+             "pos": 1549,
+             "length": 6,
+             "line": 52,
+             "column": 3
+            },
+            "children": [
              {
-              "id": 93,
-              "kind": "EXPRESSION_STATEMENT",
+              "id": 113,
+              "kind": "CALL_EXPRESSION",
+              "label": "expression",
+              "loc": {
+               "pos": 1555,
+               "length": 1,
+               "line": 52,
+               "column": 9
+              },
               "fields": {
-               "startLoc": {
-                "pos": 1549,
-                "line": 52,
-                "column": 3
-               }
+               "name": "kinded"
               },
               "children": [
                {
-                "id": 94,
-                "kind": "CALL_EXPRESSION",
-                "fields": {
-                 "callee": "kinded"
-                },
-                "children": [],
-                "label": "value",
+                "id": 114,
+                "kind": "NODE_LIST",
+                "label": "undefined",
                 "loc": {
                  "pos": 1556,
-                 "length": 0,
+                 "length": 1,
                  "line": 52,
                  "column": 10
                 }
                }
-              ],
-              "loc": {
-               "pos": 1555,
-               "length": 0,
-               "line": 52,
-               "column": 9
-              }
-             },
+              ]
+             }
+            ]
+           },
+           {
+            "id": 115,
+            "kind": "EXPRESSION_STATEMENT",
+            "loc": {
+             "pos": 1561,
+             "length": 4,
+             "line": 53,
+             "column": 3
+            },
+            "children": [
              {
-              "id": 95,
-              "kind": "EXPRESSION_STATEMENT",
+              "id": 116,
+              "kind": "CALL_EXPRESSION",
+              "label": "expression",
+              "loc": {
+               "pos": 1565,
+               "length": 1,
+               "line": 53,
+               "column": 7
+              },
               "fields": {
-               "startLoc": {
-                "pos": 1561,
-                "line": 53,
-                "column": 3
-               }
+               "name": "bail"
               },
               "children": [
                {
-                "id": 96,
-                "kind": "CALL_EXPRESSION",
-                "fields": {
-                 "callee": "bail"
+                "id": 117,
+                "kind": "NODE_LIST",
+                "label": "undefined",
+                "loc": {
+                 "pos": 1566,
+                 "length": 1,
+                 "line": 53,
+                 "column": 8
                 },
                 "children": [
                  {
-                  "id": 98,
-                  "kind": "GROUP",
-                  "label": "args",
-                  "children": [
-                   {
-                    "id": 97,
-                    "kind": "BOOL_LITERAL",
-                    "fields": {
-                     "value": true
-                    },
-                    "children": [],
-                    "loc": {
-                     "pos": 1571,
-                     "length": 0,
-                     "line": 53,
-                     "column": 13
-                    }
-                   }
-                  ]
+                  "id": 118,
+                  "kind": "BOOL_LITERAL",
+                  "loc": {
+                   "pos": 1566,
+                   "length": 4,
+                   "line": 53,
+                   "column": 8
+                  },
+                  "fields": {
+                   "intVal": "1"
+                  }
                  }
-                ],
-                "label": "value",
-                "loc": {
-                 "pos": 1566,
-                 "length": 0,
-                 "line": 53,
-                 "column": 8
-                }
+                ]
                }
-              ],
-              "loc": {
-               "pos": 1565,
-               "length": 0,
-               "line": 53,
-               "column": 7
-              }
-             },
+              ]
+             }
+            ]
+           },
+           {
+            "id": 119,
+            "kind": "RETURN_STATEMENT",
+            "loc": {
+             "pos": 1582,
+             "length": 1,
+             "line": 54,
+             "column": 10
+            },
+            "children": [
              {
-              "id": 99,
-              "kind": "RETURN_STATEMENT",
-              "fields": {
-               "startLoc": {
-                "pos": 1575,
-                "line": 54,
-                "column": 3
-               }
-              },
-              "children": [
-               {
-                "id": 100,
-                "kind": "INT_LITERAL",
-                "fields": {
-                 "value": 0
-                },
-                "children": [],
-                "label": "value",
-                "loc": {
-                 "pos": 1583,
-                 "length": 0,
-                 "line": 54,
-                 "column": 11
-                }
-               }
-              ],
+              "id": 120,
+              "kind": "INT_LITERAL",
+              "label": "returnExpression",
               "loc": {
-               "pos": 1583,
-               "length": 0,
+               "pos": 1582,
+               "length": 1,
                "line": 54,
-               "column": 11
+               "column": 10
               }
              }
             ]
            }
-          ],
-          "label": "body",
-          "loc": {
-           "pos": 1543,
-           "length": 0,
-           "line": 51,
-           "column": 8
-          }
+          ]
          }
-        ],
-        "loc": {
-         "pos": 1524,
-         "length": 0,
-         "line": 50,
-         "column": 14
-        }
+        ]
        }
       ]
      }
-    ],
-    "loc": {
-     "pos": 627,
-     "length": 0,
-     "line": 15,
-     "column": 7
-    }
+    ]
    },
    "ir": {
-    "text": "@.str_kinds_b82c3a01_0 = private unnamed_addr constant [12 x i8] c\"  close %d\\0A\\00\", align 1\n@.str_kinds_b82c3a01_1 = private unnamed_addr constant [8 x i8] c\"plain:\\0A\\00\", align 1\n@.str_kinds_b82c3a01_2 = private unnamed_addr constant [10 x i8] c\"  use %d\\0A\\00\", align 1\n@.str_kinds_b82c3a01_3 = private unnamed_addr constant [9 x i8] c\"kinded:\\0A\\00\", align 1\n@.str_kinds_b82c3a01_4 = private unnamed_addr constant [7 x i8] c\"bail:\\0A\\00\", align 1\n@.str_kinds_b82c3a01_5 = private unnamed_addr constant [15 x i8] c\"  not reached\\0A\\00\", align 1\n\ndefine void @kinds_b82c3a01__Conn__Disposable__dispose(ptr %self.arg) {\nentry:\n  %self = alloca ptr, align 8\n  store ptr %self.arg, ptr %self\n  %t0 = load ptr, ptr %self\n  %t1 = getelementptr inbounds %struct.kinds_b82c3a01__Conn, ptr %t0, i32 0, i32 0\n  %t2 = load i32, ptr %t1\n  %t3 = getelementptr inbounds [12 x i8], ptr @.str_kinds_b82c3a01_0, i32 0, i32 0\n  %t4 = call i32 (ptr, ...) @printf(ptr %t3, i32 %t2)\n  ret void\n}\n\ndefine void @kinds_b82c3a01__plain() {\nentry:\n  %t0 = getelementptr inbounds [8 x i8], ptr @.str_kinds_b82c3a01_1, i32 0, i32 0\n  %t1 = call i32 (ptr, ...) @printf(ptr %t0)\n  %c = alloca %struct.kinds_b82c3a01__Conn, align 4\n  %t2 = getelementptr inbounds %struct.kinds_b82c3a01__Conn, ptr %c, i32 0, i32 0\n  store i32 1, ptr %t2\n  %t3 = getelementptr inbounds %struct.kinds_b82c3a01__Conn, ptr %c, i32 0, i32 0\n  %t4 = load i32, ptr %t3\n  %t5 = getelementptr inbounds [10 x i8], ptr @.str_kinds_b82c3a01_2, i32 0, i32 0\n  %t6 = call i32 (ptr, ...) @printf(ptr %t5, i32 %t4)\n  ret void\n}\n\ndefine void @kinds_b82c3a01__kinded() {\nentry:\n  %t0 = getelementptr inbounds [9 x i8], ptr @.str_kinds_b82c3a01_3, i32 0, i32 0\n  %t1 = call i32 (ptr, ...) @printf(ptr %t0)\n  %c = alloca %struct.kinds_b82c3a01__Conn, align 4\n  %t2 = getelementptr inbounds %struct.kinds_b82c3a01__Conn, ptr %c, i32 0, i32 0\n  store i32 2, ptr %t2\n  %t3 = getelementptr inbounds %struct.kinds_b82c3a01__Conn, ptr %c, i32 0, i32 0\n  %t4 = load i32, ptr %t3\n  %t5 = getelementptr inbounds [10 x i8], ptr @.str_kinds_b82c3a01_2, i32 0, i32 0\n  %t6 = call i32 (ptr, ...) @printf(ptr %t5, i32 %t4)\n  call void @kinds_b82c3a01__Conn__Disposable__dispose(ptr %c)\n  ret void\n}\n\ndefine void @kinds_b82c3a01__bail(i1 %early.arg) {\nentry:\n  %early = alloca i1, align 1\n  store i1 %early.arg, ptr %early\n  %t0 = getelementptr inbounds [7 x i8], ptr @.str_kinds_b82c3a01_4, i32 0, i32 0\n  %t1 = call i32 (ptr, ...) @printf(ptr %t0)\n  %c = alloca %struct.kinds_b82c3a01__Conn, align 4\n  %t2 = getelementptr inbounds %struct.kinds_b82c3a01__Conn, ptr %c, i32 0, i32 0\n  store i32 3, ptr %t2\n  %t3 = load i1, ptr %early\n  br i1 %t3, label %then_0, label %else_1\nthen_0:\n  call void @kinds_b82c3a01__Conn__Disposable__dispose(ptr %c)\n  ret void\n  br label %merge_2\nelse_1:\n  br label %merge_2\nmerge_2:\n  %t4 = getelementptr inbounds [15 x i8], ptr @.str_kinds_b82c3a01_5, i32 0, i32 0\n  %t5 = call i32 (ptr, ...) @printf(ptr %t4)\n  call void @kinds_b82c3a01__Conn__Disposable__dispose(ptr %c)\n  ret void\n}\n\ndefine i32 @main() {\nentry:\n  call void @yoop_runtime_init()\n  call void @yoop_runtime_set_coro_ops(ptr @yoop_coro_resume, ptr @yoop_coro_destroy, ptr @yoop_coro_done)\n  call void @kinds_b82c3a01__plain()\n  call void @kinds_b82c3a01__kinded()\n  call void @kinds_b82c3a01__bail(i1 1)\n  call void @yoop_runtime_shutdown()\n  ret i32 0\n}",
-    "totalLines": 4456,
-    "shownLines": 82
+    "text": "define void @kinds_3__Conn__dispose(ptr %self.arg) {\nentry:\n  %t1 = load %struct.kinds_3__Conn, ptr %self.arg\n  %t2 = extractvalue %struct.kinds_3__Conn %t1, 0\n  %t3 = sext i32 %t2 to i64\n  %t4 = call ptr @malloc(i64 24)\n  call i32 (ptr, ptr, ...) @sprintf(ptr %t4, ptr @.str.1, i64 %t3)\n  %t5 = call i64 @strlen(ptr @.str.0)\n  %t6 = call i64 @strlen(ptr %t4)\n  %t7 = call i64 @strlen(ptr @.str.2)\n  %t8 = add i64 0, %t5\n  %t9 = add i64 %t8, %t6\n  %t10 = add i64 %t9, %t7\n  %t11 = add i64 %t10, 1\n  %t12 = call ptr @malloc(i64 %t11)\n  %t13 = getelementptr i8, ptr %t12, i64 0\n  call ptr @memcpy(ptr %t13, ptr @.str.0, i64 %t5)\n  %t14 = getelementptr i8, ptr %t12, i64 %t8\n  call ptr @memcpy(ptr %t14, ptr %t4, i64 %t6)\n  %t15 = getelementptr i8, ptr %t12, i64 %t9\n  call ptr @memcpy(ptr %t15, ptr @.str.2, i64 %t7)\n  %t16 = getelementptr i8, ptr %t12, i64 %t10\n  store i8 0, ptr %t16\n  %t17 = call i32 (ptr, ...) @printf(ptr @.str.3, ptr %t12)\n  ret void\n}\n\ndefine void @kinds_3__plain() {\nentry:\n  %sc.1.addr = alloca %struct.kinds_3__Conn\n  %c.2.addr = alloca %struct.kinds_3__Conn\n  %t1 = call i32 (ptr, ...) @printf(ptr @.str.4)\n  %t2 = getelementptr inbounds %struct.kinds_3__Conn, ptr %sc.1.addr, i32 0, i32 0\n  store i32 1, ptr %t2\n  %t3 = load %struct.kinds_3__Conn, ptr %sc.1.addr\n  store %struct.kinds_3__Conn %t3, ptr %c.2.addr\n  %t4 = load %struct.kinds_3__Conn, ptr %c.2.addr\n  %t5 = extractvalue %struct.kinds_3__Conn %t4, 0\n  %t6 = sext i32 %t5 to i64\n  %t7 = call ptr @malloc(i64 24)\n  call i32 (ptr, ptr, ...) @sprintf(ptr %t7, ptr @.str.6, i64 %t6)\n  %t8 = call i64 @strlen(ptr @.str.5)\n  %t9 = call i64 @strlen(ptr %t7)\n  %t10 = call i64 @strlen(ptr @.str.7)\n  %t11 = add i64 0, %t8\n  %t12 = add i64 %t11, %t9\n  %t13 = add i64 %t12, %t10\n  %t14 = add i64 %t13, 1\n  %t15 = call ptr @malloc(i64 %t14)\n  %t16 = getelementptr i8, ptr %t15, i64 0\n  call ptr @memcpy(ptr %t16, ptr @.str.5, i64 %t8)\n  %t17 = getelementptr i8, ptr %t15, i64 %t11\n  call ptr @memcpy(ptr %t17, ptr %t7, i64 %t9)\n  %t18 = getelementptr i8, ptr %t15, i64 %t12\n  call ptr @memcpy(ptr %t18, ptr @.str.7, i64 %t10)\n  %t19 = getelementptr i8, ptr %t15, i64 %t13\n  store i8 0, ptr %t19\n  %t20 = call i32 (ptr, ...) @printf(ptr @.str.8, ptr %t15)\n  ret void\n}\n\ndefine void @kinds_3__kinded() {\nentry:\n  %sc.1.addr = alloca %struct.kinds_3__Conn\n  %c.2.addr = alloca %struct.kinds_3__Conn\n  %t1 = call i32 (ptr, ...) @printf(ptr @.str.9)\n  %t2 = getelementptr inbounds %struct.kinds_3__Conn, ptr %sc.1.addr, i32 0, i32 0\n  store i32 2, ptr %t2\n  %t3 = load %struct.kinds_3__Conn, ptr %sc.1.addr\n  store %struct.kinds_3__Conn %t3, ptr %c.2.addr\n  %t4 = load %struct.kinds_3__Conn, ptr %c.2.addr\n  %t5 = extractvalue %struct.kinds_3__Conn %t4, 0\n  %t6 = sext i32 %t5 to i64\n  %t7 = call ptr @malloc(i64 24)\n  call i32 (ptr, ptr, ...) @sprintf(ptr %t7, ptr @.str.11, i64 %t6)\n  %t8 = call i64 @strlen(ptr @.str.10)\n  %t9 = call i64 @strlen(ptr %t7)\n  %t10 = call i64 @strlen(ptr @.str.12)\n  %t11 = add i64 0, %t8\n  %t12 = add i64 %t11, %t9\n  %t13 = add i64 %t12, %t10\n  %t14 = add i64 %t13, 1\n  %t15 = call ptr @malloc(i64 %t14)\n  %t16 = getelementptr i8, ptr %t15, i64 0\n  call ptr @memcpy(ptr %t16, ptr @.str.10, i64 %t8)\n  %t17 = getelementptr i8, ptr %t15, i64 %t11\n  call ptr @memcpy(ptr %t17, ptr %t7, i64 %t9)\n  %t18 = getelementptr i8, ptr %t15, i64 %t12\n  call ptr @memcpy(ptr %t18, ptr @.str.12, i64 %t10)\n  %t19 = getelementptr i8, ptr %t15, i64 %t13\n  store i8 0, ptr %t19\n  %t20 = call i32 (ptr, ...) @printf(ptr @.str.13, ptr %t15)\n  call void @kinds_3__Conn__dispose(ptr %c.2.addr)\n  ret void\n}\n\ndefine void @kinds_3__bail(i1 %early.arg) {\nentry:\n  %early.1.addr = alloca i1\n  %sc.2.addr = alloca %struct.kinds_3__Conn\n  %c.3.addr = alloca %struct.kinds_3__Conn\n  store i1 %early.arg, ptr %early.1.addr\n  %t1 = call i32 (ptr, ...) @printf(ptr @.str.14)\n  %t2 = getelementptr inbounds %struct.kinds_3__Conn, ptr %sc.2.addr, i32 0, i32 0\n  store i32 3, ptr %t2\n  %t3 = load %struct.kinds_3__Conn, ptr %sc.2.addr\n  store %struct.kinds_3__Conn %t3, ptr %c.3.addr\n  %t4 = load i1, ptr %early.1.addr\n  br i1 %t4, label %L1, label %L3\nL1:\n  call void @kinds_3__Conn__dispose(ptr %c.3.addr)\n  ret void\nL3:\n  %t5 = call i32 (ptr, ...) @printf(ptr @.str.15)\n  call void @kinds_3__Conn__dispose(ptr %c.3.addr)\n  ret void\n}\n\ndefine i32 @main() {\nentry:\n  call void @kinds_3__plain()\n  call void @kinds_3__kinded()\n  call void @kinds_3__bail(i1 true)\n  ret i32 0\n}",
+    "totalLines": 213,
+    "shownLines": 125
    },
    "output": "plain:\n  use 1\nkinded:\n  use 2\n  close 2\nbail:\n  close 3",
    "exitCode": 0
