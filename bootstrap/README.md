@@ -7,6 +7,10 @@ That last part is the first thing to know about working here: building it needs
 a Yoop compiler that already exists, so a build starts from a SEED - a
 previously released `yoopiler_boot` binary. See "Running it" below.
 
+## Note about this file
+
+After the Layers header below here, this is a large info dump of stuff the LLMs gleaned after refactoring larger concepts into smaller pieces when cutting over from the original JS. This is not laid out to be used by a human. I have not even read most of this.
+
 ## Layers
 
 1. Lexer -> token stream
