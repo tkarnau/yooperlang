@@ -10,7 +10,7 @@
 // away and every fixture still tests exactly what it tested before. Never
 // capture a `.expected` from compiler output - write it from what the program
 // should do. See the bootstrap testing rule in CLAUDE.md.
-import { describe, it, before } from "node:test";
+import { describe, it, before, after } from "node:test";
 import assert from "node:assert";
 import fs from "fs";
 import path from "path";
@@ -93,6 +93,16 @@ describe("vertical slice: the bootstrap compiler produces working executables", 
       { cwd: REPO, timeout: COMPILE_TIMEOUT_MS },
     );
   });
+
+  // Every run of this suite used to leave its temp dir behind - `mkdtempSync`
+  // makes a new one each time and nothing removed it. One session of iterating
+  // left 9,882 of them and filled a 16G tmpfs, which surfaces as a LINK failure
+  // in whatever runs next ("No space left on device") rather than as anything
+  // pointing here.
+  after(() => {
+    if (work) fs.rmSync(work, { recursive: true, force: true });
+  });
+
 
   it("has fixtures", () => {
     assert.ok(fixtures.length > 0, `no .yoop fixtures in ${SLICE}`);

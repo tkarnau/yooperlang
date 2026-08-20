@@ -1,0 +1,124 @@
+module comptime;
+
+// What every comptime evaluation function needs, in one value, plus the two
+// things a walk has to carry that the AST cannot: the locals in scope, and how
+// deep the call stack is.
+//
+// The `ref` fields make it a VIEW rather than a copy, the same way codegen's Cx
+// does - a slot written during a call is written in the one arena, and a
+// binding introduced by a `let` is visible to the statements after it.
+
+import { Vec }, * as vec from "std/core/vec.yoop";
+import * as str from "std/core/strings.yoop";
+import { Option } from "std/core/types.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import { AST } from "../ast";
+import { Module, ModuleGraph, SourceFile } from "../source_graph";
+import { Program, TypedModule, TypeId } from "../typecheck";
+
+// How deep a comptime call chain may go before the evaluator gives up.
+//
+// This is a RUNAWAY guard and not a budget: nothing legitimate in the corpus
+// nests anywhere near it, and what it stops is an accidental infinite recursion
+// turning a build into a hang. A hang is the worst failure a compiler has,
+// because it looks like a slow machine rather than like a bug.
+//
+// The number is MEASURED rather than derived, and it is the one place this
+// design pays for not being the reference's. That one lowers to a bytecode and
+// interprets it with an explicit frame stack, so its cap is about patience; this
+// one walks the AST and recurses on the HOST stack, so its cap is about how many
+// native frames a comptime frame costs. 512 overflowed an 8MB stack once the
+// call path grew a frame; 256 has margin at every shape in the corpus.
+//
+// What the cap does NOT bound is native depth from a deeply NESTED expression,
+// which adds host frames without adding comptime ones. No corpus program comes
+// close, and the fix if one ever does is an explicit stack rather than a smaller
+// number.
+export const MAX_CALL_DEPTH: usize = 256;
+
+// One local, and the scope depth it was introduced at. Popping a scope drops
+// every binding at or past its depth, which is what a block's closing brace
+// means - and what keeps a `let` inside a loop body from surviving into the
+// next iteration.
+@derive(display)
+export type Binding {
+  name: string,
+  slot: ValueId,
+  depth: usize,
+}
+
+@derive(display)
+export type EvalScope propagates<disposable> {
+  bindings: Vec<Binding>,
+  depth: usize,
+}
+
+export function newEvalScope(): EvalScope propagates<disposable> {
+  let bindings: Vec<Binding> = vec.vecNew(8);
+  return { bindings: bindings, depth: 0 };
+}
+
+export function scopeEnter(ref s: EvalScope): void {
+  s.depth += 1;
+}
+
+// Drop every binding introduced at the depth being left. The bindings are
+// pushed in order, so the ones to drop are a suffix and this is a truncation
+// rather than a search.
+export function scopeLeave(ref s: EvalScope): void {
+  // Dropped by shortening the Vec, which is how codegen's loop and block stacks
+  // pop too - there is no `vecPop`, and a pop here wants nothing back.
+  while (s.bindings.len > 0 && vec.vecGet(ref s.bindings, s.bindings.len - 1).depth >= s.depth) {
+    s.bindings.len -= 1;
+  }
+  if (s.depth > 0) {
+    s.depth -= 1;
+  }
+}
+
+export function bindLocal(ref s: EvalScope, name: string, slot: ValueId): void {
+  vec.vecPush(ref s.bindings, { name: name, slot: slot, depth: s.depth });
+}
+
+// The slot a name is bound to, searched INNERMOST FIRST so an inner block's
+// `let` shadows an outer one of the same name.
+export function lookupLocal(ref s: EvalScope, name: string): Option<ValueId> {
+  let i: usize = s.bindings.len;
+  while (i > 0) {
+    i -= 1;
+    const b = vec.vecGet(ref s.bindings, i);
+    if (str.stringEq(b.name, name)) {
+      return Option.Some { value: b.slot };
+    }
+  }
+  return Option.None;
+}
+
+// The evaluator's view of the world.
+//
+// `tm` and `ast` are the module being WALKED rather than the one that started
+// the evaluation: a call into an imported function swaps both for the callee's,
+// which is why they are here rather than fixed for the whole fold. `va` and
+// `folded` are shared across every frame, because a value outlives the call
+// that built it and a folded const is a whole-program fact.
+export type EvalCx {
+  prog: ref Program,
+  tm: ref TypedModule,
+  // The module being walked. `ast` is its arena, held separately only because
+  // every node lookup wants it and `cx.mod.ast` would read as though a module
+  // had several.
+  mod: ref Module,
+  ast: ref AST,
+  graph: ref ModuleGraph,
+  va: ref ValueArena,
+  scope: ref EvalScope,
+  // Module-level consts already folded, by name within `tm`. Read when an IDENT
+  // is not a local; written by the fold pass as it walks a module's decls in
+  // order, which is what lets `const M = N + 1;` see `N`.
+  folded: ref FoldedConsts,
+  // The return type of the function being evaluated. `?` is the only reader:
+  // its failure path builds a value of THIS type's `Err` case, so it needs the
+  // type rather than just the value it was handed.
+  fnRet: TypeId,
+  depth: usize,
+}

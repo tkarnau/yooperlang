@@ -43,7 +43,9 @@ export function emitSwitchOpen(ref cx: Cx, ty: string, value: Operand, defaultLa
   part(ref cx, ", label %");
   label(ref cx, defaultLabel);
   part(ref cx, " [");
-  endInstr(ref cx);
+  // The instruction CONTINUES - the cases and the closing `]` are still to
+  // come, and the `!dbg` goes after that.
+  endInstrContinued(ref cx);
 }
 
 //     i32 2, label %L1

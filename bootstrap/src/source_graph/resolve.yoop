@@ -37,7 +37,11 @@ export function resolveImportPath(
     const isAbs = str.stringStartsWith(sourcePath, "/");
     if (!isRel && !isAbs) {
       return Result.Err {
-        error: `import path "${sourcePath}" must be relative (./...), absolute, or start with std/`
+        // Every form that works is named, `modules/` included: a bare
+        // specifier is nearly always a `modules/` import with the prefix left
+        // off, and a message listing only the other three sends that author
+        // looking for a relative path they do not want.
+        error: `import path "${sourcePath}" must be relative (./...), absolute, or start with std/ or modules/`
       };
     }
     if (isAbs) {

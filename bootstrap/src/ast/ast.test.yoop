@@ -1,0 +1,95 @@
+// Tests for the `ast` module.
+//
+// The arena itself is exercised by every parse test there is, so what is worth
+// asserting here is the one thing nothing else reads: the JSON dump, whose
+// SHAPE is a contract with the pipeline viewer on the web site rather than an
+// internal detail.
+
+import.test;
+import * as t from "std/test.yoop";
+import { suite, test, Case } from "std/test.yoop";
+import * as str from "std/core/strings.yoop";
+import * as intr from "std/core/intrinsics.yoop";
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { Text }, * as text from "std/core/text.yoop";
+import { Result } from "std/core/types.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import { AST, dumpAstJson } from "../ast";
+import { parse } from "../parse";
+
+suite function theJsonDumpCarriesWhatTheViewerReads(): void {
+  const json = dumpOf("function twice(n: int32): int32 { return n * 2; }");
+
+  let test theory: Case = t.asserts("the payload has the three top-level keys") {
+    theory.isSuccessful = has(json, "\"filename\":") && has(json, "\"source\":") &&
+      has(json, "\"ast\":");
+    theory.detail = `wanted filename, source and ast; got: ${firstBytes(json)}`;
+  }
+
+  // The child LABELS are what make a dump readable - `childD` says nothing and
+  // `functionBody` says everything - and they come from slots.yoop rather than
+  // from a second list kept in step by hand.
+  let test theory: Case = t.asserts("named child slots carry their meaning as a label") {
+    theory.isSuccessful = has(json, "\"label\":\"functionBody\"") &&
+      has(json, "\"label\":\"functionParamList\"");
+    theory.detail = "a named slot came out unlabelled";
+  }
+
+  let test theory: Case = t.asserts("a node carries its kind, its position and its fields") {
+    theory.isSuccessful = has(json, "\"kind\":\"FUNCTION_DECL\"") &&
+      has(json, "\"name\":\"twice\"") && has(json, "\"loc\":{\"pos\":");
+    theory.detail = "a node is missing its kind, name or position";
+  }
+
+  // The operator is spelled by NAME. A reader of a dump cannot tell token 37
+  // from token 38.
+  let test theory: Case = t.asserts("an operator is named rather than numbered") {
+    theory.isSuccessful = has(json, "\"operator\":\"MULT\"");
+    theory.detail = "the binary operator did not come out by name";
+  }
+}
+
+// Escaping is the half of writing JSON that is easy to get wrong and silent
+// when it is: an unescaped quote or newline produces a payload that parses as
+// something ELSE rather than failing.
+suite function theJsonDumpEscapesWhatItMust(): void {
+  // The source is echoed into the payload, so a quote in it has to survive as
+  // `\"` rather than closing the string early - which would not fail, it would
+  // parse as something ELSE.
+  const json = dumpOf("function f(): string { return \"ab\"; }");
+  let test theory: Case = t.asserts("a quote in the source is escaped") {
+    theory.isSuccessful = has(json, "\\\"");
+    theory.detail = "a quote in the source was not escaped";
+  }
+
+  const withNewline = dumpOf("function f(): int32 {\n  return 1;\n}");
+  let test theory: Case = t.asserts("a newline is escaped rather than written raw") {
+    theory.isSuccessful = has(withNewline, "\\n") && !has(withNewline, "\n");
+    theory.detail = "the payload has a raw newline, so it is not one JSON line";
+  }
+}
+
+// Parse `src` and render the payload.
+function dumpOf(src: string): string {
+  let buf: Vec<uint8> = vec.vecNew(src.len + 1);
+  vec.vecExtendFrom(ref buf, intr.stringAsBytes(src));
+  switch (parse(vec.vecAsArray(ref buf))) {
+    case Result.Err { error: e }: { return ""; }
+    case Result.Ok { value: parsed }: {
+      let ast: AST = parsed;
+      let payload: Text = dumpAstJson(ref ast, ast.root, "test.yoop", vec.vecAsArray(ref buf));
+      return text.view(ref payload);
+    }
+  }
+}
+
+function has(haystack: string, needle: string): bool {
+  return str.stringIndexOf(haystack, needle) < haystack.len;
+}
+
+function firstBytes(s: string): string {
+  switch (str.stringSlice(s, 0, 60)) {
+    case Result.Ok { value: v }: { return v; }
+    case Result.Err { error: e }: { return s; }
+  }
+}

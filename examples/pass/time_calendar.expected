@@ -1,0 +1,17 @@
+epoch  1970-01-01T00:00:00Z
+before 1969-12-31T23:59:59Z
+recent 2025-08-12T12:00:00Z
+leapday 2024-02-29T00:00:00Z
+nyeve   2024-12-31T23:59:59Z
+nyday   2025-01-01T00:00:00Z
+date  2025-08-12
+time  12:00:00
+stamp 20250812-120000
+names Tue Aug
+parts 2025 8 12 12 0 0
+wday 2 yday 223 offset 0
+display 2025-08-12T12:00:00Z
+local ok=true
+now ahead=true
+ms consistent=true
+exit=0

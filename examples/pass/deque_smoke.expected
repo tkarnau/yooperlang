@@ -1,0 +1,5 @@
+len=4 at0=1 at3=20
+pop_front=1 pop_back=20 len=2
+grown len=22 at0=5 at10=108
+empty pop=-42
+exit=0

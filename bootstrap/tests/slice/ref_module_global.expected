@@ -1,0 +1,6 @@
+after=6 counter=6
+a=7 b=8 counter=8
+total=16
+pair.lo=1 pair.hi=12
+h=13 pair.hi=13
+exit=0

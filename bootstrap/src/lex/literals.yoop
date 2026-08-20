@@ -121,7 +121,7 @@ function lexCharLiteral(src: uint8[], pos: usize): Result<LexedVal, LexedError> 
       // keep top 5 bites using F8 (1111 1000), etc.
 
       // keep bottom 3 value bits
-      codepoint = int(0x07);
+      codepoint = int(lead & 0x07);
       extraBytes = 3;
     } else {
       return createLexedError(ref src, pos, "invalid UTF-8 lead byte in char literal");

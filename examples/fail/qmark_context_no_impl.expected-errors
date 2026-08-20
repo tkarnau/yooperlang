@@ -1,0 +1,4 @@
+# Illegal: a context string on `?` renders through WithContext<RetErr>, and
+# ParseError is neither a plain `string` payload nor a WithContext<ParseError>
+# implementer.
+16:26: needs a WithContext<ParseError> impl

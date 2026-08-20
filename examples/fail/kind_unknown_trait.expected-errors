@@ -1,0 +1,3 @@
+# Illegal: `NotATrait` is not a trait declared or imported in this module, so
+# the `requires` clause names nothing.
+3:14: which is not a trait

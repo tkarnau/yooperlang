@@ -1,0 +1,479 @@
+module codegen;
+
+/*
+  DWARF metadata - enough for a debugger to give a backtrace, resolve a frame
+  to a `.yoop` file and line, and stop on a source-line breakpoint.
+
+  LLVM's debug info is a graph of numbered metadata nodes hung off the module:
+
+    define i32 @main() !dbg !4 {
+      %t1 = add i32 1, 2, !dbg !9
+    }
+    !llvm.dbg.cu = !{!2}
+    !llvm.module.flags = !{!10, !11}
+    !0 = !DIFile(filename: "main.yoop", directory: "/src")
+    !2 = distinct !DICompileUnit(language: DW_LANG_C99, file: !0, ...)
+    !4 = distinct !DISubprogram(name: "main", ..., unit: !2)
+    !9 = !DILocation(line: 7, column: 3, scope: !4)
+
+  An ARENA, for the reason the AST is one: a node is referred to by NUMBER, and
+  a subprogram has to exist before the locations inside it can name it as their
+  scope. `reserveDebugNode` hands out the id and `setDebugNode` fills it in,
+  which is also what would let a self-referential TYPE terminate when the type
+  side is built.
+
+  THE TWO NAMED NODES ARE NOT OPTIONAL. Without `!llvm.dbg.cu` and the two
+  `!llvm.module.flags` entries, clang silently STRIPS every bit of this and
+  emits a warning - so a program compiles, runs, and has no debug info, with
+  nothing in the output saying why. `finalizeDebugInfo` always writes them.
+*/
+
+import { Vec }, * as vec from "std/core/vec.yoop";
+import * as str from "std/core/strings.yoop";
+import * as fmt from "std/core/format.yoop";
+import * as map from "std/collections/map.yoop";
+import { Map } from "std/collections/map.yoop";
+import { Option, Result } from "std/core/types.yoop";
+import { Text }, * as text from "std/core/text.yoop";
+import { Disposable, disposable } from "std/core/kinds.yoop";
+
+// A metadata node id. 0 is a real id here - `!0` is a perfectly good node - so
+// "none" is spelled by `has*` flags rather than by a sentinel.
+export type DebugNodeId = usize;
+
+// `implements Disposable` for the reason ExternTable does: disposing the
+// Emitter reaches its disposable fields, and a `propagates<disposable>` type
+// with no method leaves a call to a symbol nothing defines.
+@derive(display)
+export type DebugInfo implements Disposable propagates<disposable> {
+  // The rendered `!N = ...` bodies, indexed by N. A node reserved and never
+  // filled stays "" and is skipped, which is what makes reserving safe.
+  nodes: Vec<string>,
+  // The DICompileUnit ids, for `!llvm.dbg.cu`. One per module.
+  compileUnits: Vec<DebugNodeId>,
+  // DILocation nodes are the one kind emitted per INSTRUCTION, so they are
+  // deduped - a loop body of ten instructions on one line wants one node, not
+  // ten. Keyed by scope, line and column PACKED into a uint64 rather than by a
+  // built string: this is on the emit path, and one malloc per instruction is
+  // exactly what the codebase's string rule exists to stop.
+  locations: Map<uint64, DebugNodeId>,
+  // The DWARF description of a TYPE, keyed by TypeId.
+  //
+  // The reference keys this by a structural string built per lookup, because
+  // its types are values. The bootstrap INTERNS types, so a TypeId already IS
+  // the structural key - two identical shapes are the same id - and the cache
+  // is an integer map. That is also what makes a self-referential type
+  // terminate: the id is cached BEFORE the members are built, so a field of the
+  // enclosing type finds the node already reserved.
+  types: Map<uint64, DebugNodeId>,
+  // DIBasicType nodes by name. A primitive's shape does not depend on where it
+  // is used, so one node serves the whole program.
+  basics: Map<string, DebugNodeId>,
+  function dispose(ref self): void {
+    Disposable.dispose(ref self.nodes);
+    Disposable.dispose(ref self.compileUnits);
+    Disposable.dispose(ref self.locations);
+    Disposable.dispose(ref self.types);
+    Disposable.dispose(ref self.basics);
+  }
+}
+
+export function debugInfoNew(): DebugInfo propagates<disposable> {
+  return {
+    nodes: vec.vecNew(64),
+    compileUnits: vec.vecNew(4),
+    locations: map.mapNew(64, map.uint64KeyOps()),
+    types: map.mapNew(32, map.uint64KeyOps()),
+    basics: map.mapNew(16, map.stringKeyOps()),
+  };
+}
+
+export function reserveDebugNode(ref d: DebugInfo): DebugNodeId {
+  vec.vecPush(ref d.nodes, "");
+  return d.nodes.len - 1;
+}
+
+export function setDebugNode(ref d: DebugInfo, id: DebugNodeId, body: string): void {
+  vec.vecSet(ref d.nodes, id, body);
+}
+
+// `!7` - a reference to a node, as it appears inside another one.
+// A source line as DWARF counts them.
+//
+// `SourceLocation.line` is ZERO-based - `formatLocation` in diagnostics adds
+// the one - and DWARF is one-based, where 0 means "no location" and a debugger
+// will not stop there. Converted in ONE place because the mistake is silent:
+// every frame and breakpoint lands a line early, the text a debugger prints is
+// a real line of the file, and nothing looks wrong until someone compares a
+// breakpoint against the statement it was meant to stop on.
+export function dwarfLine(line0: usize): usize {
+  return line0 + 1;
+}
+
+export function debugRef(id: DebugNodeId): string {
+  disposable parts: Vec<string> = vec.vecNew(2);
+  vec.vecPush(ref parts, "!");
+  vec.vecPush(ref parts, fmt.uintToString(uint64(id)));
+  return str.stringConcatAll(vec.vecAsArray(ref parts));
+}
+
+// The directory and the file name of an absolute path, split at the last `/`.
+//
+// Its own two lines rather than std/fs.yoop's `dirName`, because a DIFile wants
+// BOTH halves and splitting twice means scanning twice - and because a path
+// with no slash at all has to give the whole thing as the name rather than as
+// the directory.
+export function debugPathDir(absPath: string): string {
+  const at = str.lastIndexOf(absPath, "/");
+  if (at >= absPath.len) {
+    return "";
+  }
+  switch (str.stringSlice(absPath, 0, at)) {
+    case Result.Ok { value: d }: { return d; }
+    case Result.Err { error: e }: { return ""; }
+  }
+}
+
+export function debugPathFile(absPath: string): string {
+  const at = str.lastIndexOf(absPath, "/");
+  if (at >= absPath.len) {
+    return absPath;
+  }
+  switch (str.stringSlice(absPath, at + 1, absPath.len)) {
+    case Result.Ok { value: f }: { return f; }
+    case Result.Err { error: e }: { return absPath; }
+  }
+}
+
+// One module's DIFile and DICompileUnit.
+//
+// `distinct` and `emissionKind: FullDebug` together are what keep the unit in
+// the output even when nothing references it, which is the difference between
+// a debuggable binary and one that merely has the metadata in its IR.
+export function beginDebugModule(ref d: DebugInfo, dir: string, filename: string): DebugNodeId {
+  const fileId = reserveDebugNode(ref d);
+  disposable fileParts: Vec<string> = vec.vecNew(5);
+  vec.vecPush(ref fileParts, "!DIFile(filename: \"");
+  vec.vecPush(ref fileParts, filename);
+  vec.vecPush(ref fileParts, "\", directory: \"");
+  vec.vecPush(ref fileParts, dir);
+  vec.vecPush(ref fileParts, "\")");
+  setDebugNode(ref d, fileId, str.stringConcatAll(vec.vecAsArray(ref fileParts)));
+
+  const cuId = reserveDebugNode(ref d);
+  disposable cuParts: Vec<string> = vec.vecNew(3);
+  vec.vecPush(ref cuParts, "distinct !DICompileUnit(language: DW_LANG_C99, file: ");
+  vec.vecPush(ref cuParts, debugRef(fileId));
+  vec.vecPush(ref cuParts, ", producer: \"yoopiler_boot\", isOptimized: false, runtimeVersion: 0, emissionKind: FullDebug)");
+  setDebugNode(ref d, cuId, str.stringConcatAll(vec.vecAsArray(ref cuParts)));
+
+  vec.vecPush(ref d.compileUnits, cuId);
+  return fileId;
+}
+
+// The DICompileUnit belonging to a DIFile. They are allocated as a pair, so the
+// unit is always the id after the file - which saves threading both through
+// every caller.
+export function debugUnitOf(fileId: DebugNodeId): DebugNodeId {
+  return fileId + 1;
+}
+
+/*
+  A function's DISubprogram - the node a `define` hangs off and the SCOPE every
+  location inside the body names.
+
+    define i32 @main() !dbg !4 {
+
+  `distinct` is required by the verifier for a definition: two functions that
+  happened to render identically would otherwise share a node, and a debugger
+  would resolve both frames to one of them.
+
+  The `types:` tuple of its DISubroutineType is the RETURN type followed by the
+  parameters, and a `null` entry means "no description for this slot" - which is
+  legal, and what a void return and an undescribable type both fall back to.
+*/
+export function debugSubprogram(
+  ref d: DebugInfo,
+  name: string,
+  linkageName: string,
+  line: usize,
+  fileId: DebugNodeId,
+  subroutineText: string
+): DebugNodeId {
+  const typeId = reserveDebugNode(ref d);
+  setDebugNode(ref d, typeId, subroutineText);
+
+  const subId = reserveDebugNode(ref d);
+  const fileRef = debugRef(fileId);
+  const lineText = fmt.uintToString(uint64(dwarfLine(line)));
+  disposable parts: Vec<string> = vec.vecNew(16);
+  vec.vecPush(ref parts, "distinct !DISubprogram(name: \"");
+  vec.vecPush(ref parts, name);
+  vec.vecPush(ref parts, "\", linkageName: \"");
+  vec.vecPush(ref parts, linkageName);
+  vec.vecPush(ref parts, "\", scope: ");
+  vec.vecPush(ref parts, fileRef);
+  vec.vecPush(ref parts, ", file: ");
+  vec.vecPush(ref parts, fileRef);
+  vec.vecPush(ref parts, ", line: ");
+  vec.vecPush(ref parts, lineText);
+  vec.vecPush(ref parts, ", type: ");
+  vec.vecPush(ref parts, debugRef(typeId));
+  vec.vecPush(ref parts, ", scopeLine: ");
+  vec.vecPush(ref parts, lineText);
+  vec.vecPush(ref parts, ", spFlags: DISPFlagDefinition, unit: ");
+  vec.vecPush(ref parts, debugRef(debugUnitOf(fileId)));
+  vec.vecPush(ref parts, ")");
+  setDebugNode(ref d, subId, str.stringConcatAll(vec.vecAsArray(ref parts)));
+  return subId;
+}
+
+/*
+  A DILocation, deduped.
+
+  Line 0 means "no location" in DWARF and a debugger will not stop there, so a
+  synthesized statement that carries no source position is clamped to line 1 -
+  attached to the top of its function rather than made invisible.
+*/
+export function debugLocation(
+  ref d: DebugInfo,
+  line: usize,
+  column: usize,
+  scope: DebugNodeId
+): DebugNodeId {
+  const ln = dwarfLine(line);
+  const key = packLocationKey(scope, ln, column);
+  switch (map.mapGet(ref d.locations, key)) {
+    case Option.Some { value: id }: { return id; }
+    case Option.None: {}
+  }
+
+  const id = reserveDebugNode(ref d);
+  disposable parts: Vec<string> = vec.vecNew(6);
+  vec.vecPush(ref parts, "!DILocation(line: ");
+  vec.vecPush(ref parts, fmt.uintToString(uint64(ln)));
+  vec.vecPush(ref parts, ", column: ");
+  vec.vecPush(ref parts, fmt.uintToString(uint64(column)));
+  vec.vecPush(ref parts, ", scope: ");
+  vec.vecPush(ref parts, debugRef(scope));
+  vec.vecPush(ref parts, ")");
+  setDebugNode(ref d, id, str.stringConcatAll(vec.vecAsArray(ref parts)));
+  map.mapInsert(ref d.locations, key, id);
+  return id;
+}
+
+// Scope, line and column in one integer. The widths are generous rather than
+// exact - a collision would reuse a node with a wrong line, so they are sized
+// past anything a real file reaches.
+function packLocationKey(scope: DebugNodeId, line: usize, column: usize): uint64 {
+  let col: uint64 = uint64(column);
+  if (col > 4095) {
+    col = 4095;
+  }
+  return (uint64(scope) << 32) | ((uint64(line) & 1048575) << 12) | col;
+}
+
+// ----- the primitives the type side builds out of --------------------------
+
+// `!DIBasicType(name: "int32", size: 32, encoding: DW_ATE_signed)`.
+//
+// Cached by NAME rather than by type: a primitive's shape does not depend on
+// where it is used, so one node serves every reference to it in the program.
+export function basicDebugType(ref cx: Cx, name: string, bits: usize, encoding: string): DebugType {
+  switch (map.mapGet(ref cx.e.debug.basics, name)) {
+    case Option.Some { value: id }: { return { id: id, found: true }; }
+    case Option.None: {}
+  }
+  const id = reserveDebugNode(ref cx.e.debug);
+  disposable parts: Vec<string> = vec.vecNew(6);
+  vec.vecPush(ref parts, "!DIBasicType(name: \"");
+  vec.vecPush(ref parts, name);
+  vec.vecPush(ref parts, "\", size: ");
+  vec.vecPush(ref parts, fmt.uintToString(uint64(bits)));
+  vec.vecPush(ref parts, ", encoding: ");
+  vec.vecPush(ref parts, encoding);
+  vec.vecPush(ref parts, ")");
+  setDebugNode(ref cx.e.debug, id, str.stringConcatAll(vec.vecAsArray(ref parts)));
+  map.mapInsert(ref cx.e.debug.basics, name, id);
+  return { id: id, found: true };
+}
+
+export function debugPointerTo(ref cx: Cx, to: DebugType, name: string): DebugType {
+  const id = reserveDebugNode(ref cx.e.debug);
+  disposable parts: Vec<string> = vec.vecNew(6);
+  vec.vecPush(ref parts, "!DIDerivedType(tag: DW_TAG_pointer_type, ");
+  if (name.len > 0) {
+    vec.vecPush(ref parts, "name: \"");
+    vec.vecPush(ref parts, name);
+    vec.vecPush(ref parts, "\", ");
+  }
+  vec.vecPush(ref parts, "baseType: ");
+  vec.vecPush(ref parts, debugBaseRef(to));
+  vec.vecPush(ref parts, ", size: 64)");
+  setDebugNode(ref cx.e.debug, id, str.stringConcatAll(vec.vecAsArray(ref parts)));
+  return { id: id, found: true };
+}
+
+// A pointer to nothing - the shape for anything with no bytes worth walking
+// into. A debugger shows it as an address.
+export function debugOpaquePointer(ref cx: Cx): DebugType {
+  return debugPointerTo(ref cx, noDebugType(), "");
+}
+
+export function debugTypedef(ref cx: Cx, name: string, base: DebugType): DebugType {
+  const id = reserveDebugNode(ref cx.e.debug);
+  disposable parts: Vec<string> = vec.vecNew(5);
+  vec.vecPush(ref parts, "!DIDerivedType(tag: DW_TAG_typedef, name: \"");
+  vec.vecPush(ref parts, name);
+  vec.vecPush(ref parts, "\", baseType: ");
+  vec.vecPush(ref parts, debugBaseRef(base));
+  vec.vecPush(ref parts, ")");
+  setDebugNode(ref cx.e.debug, id, str.stringConcatAll(vec.vecAsArray(ref parts)));
+  return { id: id, found: true };
+}
+
+// A member of a composite. DWARF counts in BITS and the callers work in bytes,
+// so the conversion happens here rather than at nine call sites.
+export function debugMember(
+  ref cx: Cx,
+  scope: DebugNodeId,
+  name: string,
+  base: DebugType,
+  byteSize: usize,
+  byteAlign: usize,
+  byteOffset: usize
+): DebugNodeId {
+  const id = reserveDebugNode(ref cx.e.debug);
+  disposable parts: Vec<string> = vec.vecNew(12);
+  vec.vecPush(ref parts, "!DIDerivedType(tag: DW_TAG_member, name: \"");
+  vec.vecPush(ref parts, name);
+  vec.vecPush(ref parts, "\", scope: ");
+  vec.vecPush(ref parts, debugRef(scope));
+  vec.vecPush(ref parts, ", baseType: ");
+  vec.vecPush(ref parts, debugBaseRef(base));
+  vec.vecPush(ref parts, ", size: ");
+  vec.vecPush(ref parts, fmt.uintToString(uint64(byteSize * 8)));
+  vec.vecPush(ref parts, ", align: ");
+  vec.vecPush(ref parts, fmt.uintToString(uint64(byteAlign * 8)));
+  vec.vecPush(ref parts, ", offset: ");
+  vec.vecPush(ref parts, fmt.uintToString(uint64(byteOffset * 8)));
+  vec.vecPush(ref parts, ")");
+  setDebugNode(ref cx.e.debug, id, str.stringConcatAll(vec.vecAsArray(ref parts)));
+  return id;
+}
+
+// Fill a composite whose id was reserved before its members were built.
+export function finishComposite(
+  ref cx: Cx,
+  id: DebugNodeId,
+  tag: string,
+  name: string,
+  byteSize: usize,
+  byteAlign: usize,
+  ref members: Vec<DebugNodeId>
+): void {
+  disposable parts: Vec<string> = vec.vecNew(12);
+  vec.vecPush(ref parts, "!DICompositeType(tag: ");
+  vec.vecPush(ref parts, tag);
+  vec.vecPush(ref parts, ", name: \"");
+  vec.vecPush(ref parts, name);
+  vec.vecPush(ref parts, "\", size: ");
+  vec.vecPush(ref parts, fmt.uintToString(uint64(byteSize * 8)));
+  vec.vecPush(ref parts, ", align: ");
+  vec.vecPush(ref parts, fmt.uintToString(uint64(byteAlign * 8)));
+  vec.vecPush(ref parts, ", elements: !{");
+  vec.vecPush(ref parts, debugRefList(ref members));
+  vec.vecPush(ref parts, "})");
+  setDebugNode(ref cx.e.debug, id, str.stringConcatAll(vec.vecAsArray(ref parts)));
+}
+
+// An opaque run of bytes, for a variant's payload: the bytes hold whichever
+// case the tag names, so there is no one description of them.
+export function debugOpaqueBlob(ref cx: Cx, name: string, bytes: usize): DebugType {
+  const id = reserveDebugNode(ref cx.e.debug);
+  disposable empty: Vec<DebugNodeId> = vec.vecNew(1);
+  disposable parts: Vec<string> = vec.vecNew(3);
+  vec.vecPush(ref parts, name);
+  vec.vecPush(ref parts, ".payload");
+  finishComposite(ref cx, id, "DW_TAG_union_type",
+    str.stringConcatAll(vec.vecAsArray(ref parts)), bytes, 4, ref empty);
+  return { id: id, found: true };
+}
+
+// `!3, !7, !9` - a metadata id list, as it appears inside `elements:`.
+export function debugRefList(ref ids: Vec<DebugNodeId>): string {
+  disposable parts: Vec<string> = vec.vecNew(ids.len * 2);
+  let i: usize = 0;
+  while (i < ids.len) {
+    if (i > 0) {
+      vec.vecPush(ref parts, ", ");
+    }
+    vec.vecPush(ref parts, debugRef(vec.vecGet(ref ids, i)));
+    i += 1;
+  }
+  if (parts.len == 0) {
+    return "";
+  }
+  return str.stringConcatAll(vec.vecAsArray(ref parts));
+}
+
+// A `baseType:` slot - `null` when there is no description, which DWARF reads
+// as "unspecified" rather than rejecting.
+export function debugBaseRef(t: DebugType): string {
+  if (!t.found) {
+    return "null";
+  }
+  return debugRef(t.id);
+}
+
+// The whole metadata block, appended after the last function.
+//
+// The named nodes come FIRST because they are what makes the rest count: clang
+// strips every DI node in a module that does not declare them, and says so only
+// in a warning nobody reads.
+export function finalizeDebugInfo(ref d: DebugInfo, ref out: Text): void {
+  if (d.compileUnits.len == 0) {
+    return;
+  }
+
+  text.push(ref out, "\n!llvm.dbg.cu = !{");
+  let i: usize = 0;
+  while (i < d.compileUnits.len) {
+    if (i > 0) {
+      text.push(ref out, ", ");
+    }
+    text.pushByte(ref out, '!');
+    text.pushUint(ref out, uint64(vec.vecGet(ref d.compileUnits, i)));
+    i += 1;
+  }
+  text.push(ref out, "}\n");
+
+  // The behaviour code in slot 0 is `7 = Max` for the Dwarf version, so linking
+  // several modules picks the highest, and `2 = Warning` for the Debug Info
+  // version, which LLVM expects to match its own exactly.
+  const flagA = reserveDebugNode(ref d);
+  setDebugNode(ref d, flagA, "!{i32 7, !\"Dwarf Version\", i32 4}");
+  const flagB = reserveDebugNode(ref d);
+  setDebugNode(ref d, flagB, "!{i32 2, !\"Debug Info Version\", i32 3}");
+  text.push(ref out, "!llvm.module.flags = !{");
+  text.push(ref out, debugRef(flagA));
+  text.push(ref out, ", ");
+  text.push(ref out, debugRef(flagB));
+  text.push(ref out, "}\n\n");
+
+  let n: usize = 0;
+  while (n < d.nodes.len) {
+    const body = vec.vecGet(ref d.nodes, n);
+    // A node reserved and never filled is skipped rather than emitted empty,
+    // which is what makes reserving an id safe even when the build that wanted
+    // it failed.
+    if (body.len > 0) {
+      text.pushByte(ref out, '!');
+      text.pushUint(ref out, uint64(n));
+      text.push(ref out, " = ");
+      text.push(ref out, body);
+      text.pushByte(ref out, 10);
+    }
+    n += 1;
+  }
+}

@@ -13,7 +13,7 @@ import { Vec }, * as vec from "std/core/vec.yoop";
 import { Map }, * as map from "std/collections/map.yoop";
 import { disposable } from "std/core/kinds.yoop";
 import { Option } from "std/core/types.yoop";
-import { AST, ASTNode, ASTNodeKind, NodeId, childAt, declOf, nodeAt } from "../ast";
+import { AST, ASTNode, ASTNodeKind, NodeId, attributeNameOf, childAt, declOf, nodeAt } from "../ast";
 import { Module } from "../source_graph";
 import { TokenTags } from "../lex";
 
@@ -52,6 +52,33 @@ export function passCFillShells(
   // template they can reach is populated - this module's just were, and
   // earlier modules' were before this module was reached at all.
   materializeInstances(ref prog);
+
+  // A type that contains ITSELF by value has no size, and LLVM refuses the
+  // struct rather than laying one out. The cycle only exists to be seen once
+  // the fields are filled AND every instance a field named is materialized, so
+  // this is the last thing pass C does. See typecheck/recursion.yoop.
+  checkEachFileRecursion(ref prog, ref tm, m);
+}
+
+function checkEachFileRecursion(ref prog: Program, ref tm: TypedModule, m: Module): void {
+  let f: usize = 0;
+  while (f < m.files.len) {
+    const file = vec.vecGet(ref m.files, f);
+    beginFile(ref prog, file.absPath);
+    const programNode = nodeAt(ref m.ast, file.root);
+    let i: usize = 0;
+    while (i < programNode.childCount) {
+      const declNode = nodeAt(ref m.ast, declOf(ref m.ast, childAt(ref m.ast, programNode, i)));
+      // An ALIAS (`type X = Y;`) has a childC and no fields of its own; its
+      // own cycle check is forceAliasDecl's.
+      if ((declNode.kind == ASTNodeKind.TYPE_DECL && declNode.childC == 0) ||
+          declNode.kind == ASTNodeKind.VARIANT_DECL) {
+        checkRecursiveFields(ref prog, ref tm, ref m.ast, declNode);
+      }
+      i += 1;
+    }
+    f += 1;
+  }
 }
 
 // Which decls a sweep is for. A trait is neither generic nor concrete for this
@@ -120,8 +147,17 @@ function fillFileShells(
       case ASTNodeKind.FUNCTION_DECL: {
         fillFunctionSignature(ref prog, ref tm, ref m.ast, declNode);
         checkFunctionKinds(ref prog, ref tm, ref m.ast, declNode);
+        // The clearance transitions the SIGNATURE performs, which a free
+        // function is never authorized to perform. See typecheck/clearance.yoop.
+        checkFunctionClearance(ref prog, ref m.ast, declNode);
       }
       case ASTNodeKind.TYPE_DECL: {
+        // The clauses the declaration writes about kinds: the prefix in front
+        // of the body, and what the type says it propagates. Both name a kind
+        // by word, and this is the earliest pass where every kind in the graph
+        // is registered. See typecheck/kind_use.yoop.
+        checkTypeDeclKindPrefix(ref prog, ref m.ast, declNode);
+        checkPropagatesClause(ref prog, ref m.ast, declNode);
         // An ALIAS has no shell to fill - its name resolves straight to the
         // RHS's TypeId. It is forced here anyway so a LATER module reading it
         // through an import finds the answer already computed, in the one place
@@ -133,6 +169,7 @@ function fillFileShells(
         }
       }
       case ASTNodeKind.VARIANT_DECL: {
+        checkPropagatesClause(ref prog, ref m.ast, declNode);
         fillVariantCases(ref prog, ref tm, ref m.ast, declNode, moduleId);
       }
       case ASTNodeKind.ENUM_DECL: {
@@ -144,8 +181,15 @@ function fillFileShells(
       case ASTNodeKind.TRAIT_DECL: {
         fillTraitMethods(ref prog, ref tm, ref m.ast, declNode, moduleId);
       }
+      case ASTNodeKind.KIND_DECL: {
+        // Nothing to fill - a kind has no shell. What it has is two clauses
+        // that name a TRAIT, and a trait's method table is filled by the sweep
+        // above, so this is the earliest pass that can answer either.
+        checkKindDeclTraits(ref prog, ref tm, ref m.ast, declNode);
+      }
       case ASTNodeKind.CONST_DECL: {
-        fillModuleConst(ref prog, ref tm, ref m.ast, declNode);
+        fillModuleConst(ref prog, ref tm, ref m.ast, declNode,
+          str.stringEq(attributeNameOf(ref m.ast, childAt(ref m.ast, programNode, i)), "precompile"));
       }
       case ASTNodeKind.LET_DECL: {
         fillModuleGlobal(ref prog, ref tm, ref m.ast, declNode);
@@ -301,6 +345,7 @@ function fillFunctionSignature(
     while (p < list.childCount) {
       const paramNode = nodeAt(ref ast, childAt(ref ast, list, p));
       checkParamKind(ref prog, ref ast, paramNode);
+      checkParamKindSites(ref prog, ref ast, paramNode);
       const annotated = resolveTypeAnnotation(ref prog, ref tm, ref ast, paramNode.childA);
       // `ref v: Vec<T>` is `ref Vec<T>` in the SIGNATURE - which is what makes
       // passing a bare `v` a type error rather than a silent copy. The body
@@ -314,7 +359,14 @@ function fillFunctionSignature(
     }
   }
   const ret = resolveTypeAnnotation(ref prog, ref tm, ref ast, declNode.childC);
+  checkReturnIsNotRef(ref prog, ref ast, declNode);
   endTypeParams(ref prog);
+
+  // What this signature says about clearance markers, keyed by SymbolId. Here
+  // rather than in pass D because a CALL to it may be in any later module and
+  // this is the one pass that has the declaration's AST in hand. See
+  // typecheck/markers.yoop.
+  recordSignatureMarkers(ref prog, ref tm, ref ast, declNode);
 
   setType(ref prog, typeId, Type.Func {
     params: params,
@@ -390,10 +442,14 @@ function fillStructFields(
       f += 1;
       continue;
     }
+    const carried = carriedKindNameOf(ref ast, fieldNode.childA);
+    checkFieldKindUse(ref prog, ref ast, declNode, fieldNode, carried);
+    const fieldType = resolveTypeAnnotation(ref prog, ref tm, ref ast, fieldNode.childA);
+    checkFieldTypeKindUse(ref prog, ref ast, declNode, fieldNode, fieldType, carried);
     vec.vecPush(ref fields, {
       name: fieldNode.name,
-      typeId: resolveTypeAnnotation(ref prog, ref tm, ref ast, fieldNode.childA),
-      carriedKind: carriedKindNameOf(ref ast, fieldNode.childA),
+      typeId: fieldType,
+      carriedKind: carried,
     });
     f += 1;
   }
@@ -508,7 +564,8 @@ function fillModuleConst(
   ref prog: Program,
   ref tm: TypedModule,
   ref ast: AST,
-  declNode: ASTNode
+  declNode: ASTNode,
+  precompiled: bool
 ): void {
   const symId = lookupOwnName(ref tm, declNode.name);
   if (symId == SYMBOL_NONE_ID) {
@@ -526,24 +583,24 @@ function fillModuleConst(
   }
   const declared = resolveTypeAnnotation(ref prog, ref tm, ref ast, declNode.childA);
 
+  // `@precompile` promises the value is computed at BUILD time, so the decl
+  // stays an inlined const whatever its initializer looks like right now - the
+  // comptime pass replaces that initializer with the literal it folded to, and
+  // fails the build if it cannot. Routing it to a global instead would compile
+  // and silently do the work at startup, which is the one thing the attribute
+  // exists to prevent.
+  if (precompiled) {
+    setSymbol(ref prog, symId, Symbol.Value { typeId: declared, intVal: 0 });
+    return;
+  }
+
+  // Not inlinable, so the const is backed by a real GLOBAL and its initializer
+  // runs in the module's init function - the same path a `let` takes, and the
+  // only one available for a value like `vec.vecNew(8)` that is a heap
+  // allocation rather than anything an immediate could spell. `mutable: false`
+  // is what still refuses `NAME = ...` afterwards.
   if (!isInlinableConst(ref prog, ref ast, declNode.childB, declared)) {
-    // A CALL gets its own message. The reference FOLDS one at compile time, so
-    // "needs a literal" reads as a syntax complaint about a program that is
-    // perfectly well formed - the missing piece is a comptime interpreter, and
-    // saying so is what points at that rather than at the line.
-    if (isCallInitializer(ref ast, declNode.childB)) {
-      reportError(
-        ref prog,
-        `module-level const "${declNode.name}" is initialized by a CALL - the reference folds one at compile time and the bootstrap has no comptime interpreter, so there is nothing to inline`,
-        declNode.sourceLoc
-      );
-      return;
-    }
-    reportError(
-      ref prog,
-      `module-level const "${declNode.name}" needs a literal initializer of type ${formatType(ref prog, declared)} - the bootstrap inlines consts, so it has to be a number, a bool, a string, or an array of those`,
-      declNode.sourceLoc
-    );
+    setSymbol(ref prog, symId, Symbol.Global { typeId: declared, intVal: 0, mutable: false });
     return;
   }
 
@@ -594,7 +651,7 @@ function fillModuleGlobal(
   if (moduleGlobalIsBaked(ref prog, ref ast, declNode.childB, declared)) {
     constIntValue(ref ast, declNode.childB, ref value);
   }
-  setSymbol(ref prog, symId, Symbol.Global { typeId: declared, intVal: value });
+  setSymbol(ref prog, symId, Symbol.Global { typeId: declared, intVal: value, mutable: true });
 }
 
 // Whether a module-level `let`'s value is BAKED into the LLVM global rather
@@ -714,15 +771,40 @@ export function checkFunctionKinds(
   }
 }
 
+// `function bad(): ref int32` - a borrow handed back out of the frame it
+// borrows FROM. The only thing a body has to borrow is its own storage, and
+// that storage is gone at the `ret`, so the caller is handed a pointer into a
+// dead frame.
+//
+// An EXTERN is exempt, and the difference is real rather than a carve-out: a C
+// signature's `ref FILE` is an opaque pointer the library owns, and no yoop
+// frame is involved in either direction. `examples/pass/language_showcase.yoop`
+// declares `fopen` exactly that way.
+function checkReturnIsNotRef(ref prog: Program, ref ast: AST, declNode: ASTNode): void {
+  if (declNode.childC == 0 || declNode.kind == ASTNodeKind.EXTERN_FUNCTION_DECL) {
+    return;
+  }
+  const annot = nodeAt(ref ast, declNode.childC);
+  if (annot.kind != ASTNodeKind.TYPE_ANNOTATION_REF_TYPE) {
+    return;
+  }
+  reportError(
+    ref prog,
+    `"${declNode.name}" returns a "ref" - the storage a body can borrow is its own frame, and that is gone by the time the caller reads it`,
+    declNode.sourceLoc
+  );
+}
+
 // `scoped h: ref FileHandle` - the kind a PARAMETER carries.
 //
-// Only that the kind EXISTS. Whether it may apply to a parameter at all is a
-// clause the bootstrap does not record (`appliesTo`), so that half is the
-// reference's and not ours - but an unknown NAME is refused on both sides, and
-// it is the half that catches a typo.
+// That the kind EXISTS is answered here; whether it may be written on a
+// parameter at all is `checkParamKindSites`, which reads the same list against
+// the `appliesTo` set. Two functions rather than one loop because the unknown
+// name has to be reported even when the kind cannot be looked up, and the site
+// rule has nothing to say in that case.
 //
-// Nothing reads the prefix after this. A kind on a parameter is provenance, and
-// none of the clauses that could mean something at run time apply to one.
+// Nothing else reads the prefix. A kind on a parameter is provenance, and none
+// of the clauses that mean something at run time apply to one.
 function checkParamKind(ref prog: Program, ref ast: AST, paramNode: ASTNode): void {
   if (paramNode.childE == 0) {
     return;
@@ -1007,4 +1089,30 @@ function checkDeclTraits(
   }
   checkMethodsRequired(ref prog, ref ast, declNode, ref traits);
   checkTraitsSatisfied(ref prog, ref tm, declNode, typeId, ref traits);
+  checkMethodClearances(ref prog, ref ast, declNode, ref traits);
+}
+
+// Each method's clearance transitions, against the traits this type actually
+// implements. Here rather than in collectMethods because the authority is the
+// `implements` list, and that is what this sweep just resolved.
+function checkMethodClearances(
+  ref prog: Program,
+  ref ast: AST,
+  declNode: ASTNode,
+  ref traits: Vec<TypeId>
+): void {
+  disposable traitNames: Vec<string> = vec.vecNew(traits.len);
+  let t: usize = 0;
+  while (t < traits.len) {
+    vec.vecPush(ref traitNames, nominalNameOf(ref prog, vec.vecGet(ref traits, t)));
+    t += 1;
+  }
+  let i: usize = 0;
+  while (i < declNode.childCount) {
+    const member = nodeAt(ref ast, childAt(ref ast, declNode, i));
+    if (member.kind == ASTNodeKind.METHOD_DECL) {
+      checkMethodClearance(ref prog, ref ast, member, declNode.name, ref traitNames);
+    }
+    i += 1;
+  }
 }

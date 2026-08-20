@@ -1,0 +1,205 @@
+module comptime;
+
+// What a comptime evaluation produces, in an ARENA.
+//
+// Same shape ast/arena.yoop uses, and mostly for the same reason: a value NAMES
+// its parts by id instead of containing them, so a struct holding a struct
+// needs no recursive ownership in a value-semantic language.
+//
+// The arena buys one thing here that the AST does not need, and it is the
+// reason this is not a tree of nested values:
+//
+//   A `ref` IS A ValueId. `ref x` is the id of x's slot, and `ref p.field` is
+//   the id of that field's child slot. Writing through a borrow is writing that
+//   slot, so a callee mutating `ref p: Point` mutates the caller's binding with
+//   no aliasing machinery at all. The reference had to take care NOT to copy on
+//   a borrow read to keep that working; here there is nothing to copy.
+//
+// A LOCAL is a slot too, which is what makes `ref` of one possible and makes
+// assignment a write rather than a rebind.
+
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import { TypeId } from "../typecheck";
+
+// An index into ValueArena.slots. 0 is the reserved "no value" sentinel, so an
+// empty slot reference is just a 0 - the same convention NodeId uses.
+export type ValueId = usize;
+
+export const VALUE_NONE: ValueId = 0;
+
+// What a slot holds. The payload it reads is a property of the kind:
+//
+//   INT      bits, as the value zero- or sign-extended to 64
+//   FLOAT    bits, as the 64 bits of the double - never a decimal rendering,
+//            for the reason utils/float_bits.yoop already spells out
+//   BOOL     bits, 0 or 1
+//   STR      text
+//   STRUCT   the child run, one per field in DECLARED order
+//   ARRAY    the child run, one per element; the length IS childCount
+//   VARIANT  bits as the case TAG, the child run as that case's payload fields
+//   REF      target
+//   VTABLE   bits as the CONCRETE type behind it, target as the value it was
+//            built over - which is what the emitted vtable holds too, with the
+//            method lookup deferred to the dispatch instead of stored
+//   VOID     nothing; what a `void` call evaluates to
+export enum ValueKind {
+  NONE, INT, FLOAT, BOOL, STR, STRUCT, ARRAY, VARIANT, REF, VTABLE, VOID,
+}
+
+@derive(display)
+export type ValueSlot {
+  kind: ValueKind,
+  // What pass D resolved the producing expression to. Carried per slot rather
+  // than derived, because an int's WIDTH and SIGNEDNESS decide what its bits
+  // mean and there is no second place to ask by the time arithmetic runs.
+  typeId: TypeId,
+  bits: uint64,
+  text: string,
+  childStart: usize,
+  childCount: usize,
+  target: ValueId,
+}
+
+@derive(display)
+export type ValueArena propagates<disposable> {
+  slots: Vec<ValueSlot>,
+  children: Vec<ValueId>,
+}
+
+// A fresh arena, seeded with one dead slot so real ids begin at 1.
+export function newValueArena(): ValueArena propagates<disposable> {
+  let slots: Vec<ValueSlot> = vec.vecNew(32);
+  vec.vecPush(ref slots, emptySlot());
+  let children: Vec<ValueId> = vec.vecNew(32);
+  return { slots: slots, children: children };
+}
+
+export function emptySlot(): ValueSlot {
+  return {
+    kind: ValueKind.NONE,
+    typeId: 0,
+    bits: 0,
+    text: "",
+    childStart: 0,
+    childCount: 0,
+    target: VALUE_NONE,
+  };
+}
+
+export function pushValue(ref va: ValueArena, slot: ValueSlot): ValueId {
+  vec.vecPush(ref va.slots, slot);
+  return va.slots.len - 1;
+}
+
+export function valueAt(ref va: ValueArena, id: ValueId): ValueSlot {
+  return vec.vecGet(ref va.slots, id);
+}
+
+// Overwrite a slot IN PLACE. This is the whole of assignment and of a write
+// through a borrow, which is why it is a set rather than a rebind: whoever else
+// holds this id has to see the new value.
+export function setValue(ref va: ValueArena, id: ValueId, slot: ValueSlot): void {
+  vec.vecSet(ref va.slots, id, slot);
+}
+
+// The i'th part of an aggregate: a struct's field, an array's element, a
+// variant case's payload field.
+export function childValueAt(ref va: ValueArena, slot: ValueSlot, i: usize): ValueId {
+  return vec.vecGet(ref va.children, slot.childStart + i);
+}
+
+export function intValue(ref va: ValueArena, typeId: TypeId, bits: uint64): ValueId {
+  let s = emptySlot();
+  s.kind = ValueKind.INT;
+  s.typeId = typeId;
+  s.bits = bits;
+  return pushValue(ref va, s);
+}
+
+export function floatValue(ref va: ValueArena, typeId: TypeId, bits: uint64): ValueId {
+  let s = emptySlot();
+  s.kind = ValueKind.FLOAT;
+  s.typeId = typeId;
+  s.bits = bits;
+  return pushValue(ref va, s);
+}
+
+export function boolValue(ref va: ValueArena, typeId: TypeId, v: bool): ValueId {
+  let s = emptySlot();
+  s.kind = ValueKind.BOOL;
+  s.typeId = typeId;
+  if (v) {
+    s.bits = 1;
+  }
+  return pushValue(ref va, s);
+}
+
+export function strValue(ref va: ValueArena, typeId: TypeId, text: string): ValueId {
+  let s = emptySlot();
+  s.kind = ValueKind.STR;
+  s.typeId = typeId;
+  s.text = text;
+  return pushValue(ref va, s);
+}
+
+export function voidValue(ref va: ValueArena): ValueId {
+  let s = emptySlot();
+  s.kind = ValueKind.VOID;
+  return pushValue(ref va, s);
+}
+
+// A borrow. `target` is the slot it names, and nothing about it is copied.
+export function refValue(ref va: ValueArena, typeId: TypeId, target: ValueId): ValueId {
+  let s = emptySlot();
+  s.kind = ValueKind.REF;
+  s.typeId = typeId;
+  s.target = target;
+  return pushValue(ref va, s);
+}
+
+// An aggregate over parts that already exist. The parts are SPLICED as one
+// contiguous run, for the reason the AST arena splices its children: a partial
+// copy would interleave with the run a nested build appended in the meantime.
+export function aggregateValue(
+  ref va: ValueArena,
+  kind: ValueKind,
+  typeId: TypeId,
+  tag: uint64,
+  ref parts: Vec<ValueId>
+): ValueId {
+  let s = emptySlot();
+  s.kind = kind;
+  s.typeId = typeId;
+  s.bits = tag;
+  s.childStart = va.children.len;
+  s.childCount = parts.len;
+  let i: usize = 0;
+  while (i < parts.len) {
+    vec.vecPush(ref va.children, vec.vecGet(ref parts, i));
+    i += 1;
+  }
+  return pushValue(ref va, s);
+}
+
+// A deep copy, which is what yoop's value semantics make of `let a = b` on an
+// aggregate. A scalar copies as itself; a REF does NOT follow its target,
+// because copying a borrow copies the borrow and not the object.
+export function cloneValue(ref va: ValueArena, id: ValueId): ValueId {
+  if (id == VALUE_NONE) {
+    return VALUE_NONE;
+  }
+  const s = valueAt(ref va, id);
+  if (s.childCount == 0) {
+    return pushValue(ref va, s);
+  }
+  // The parts are cloned FIRST and collected, because cloning one appends to
+  // the same child pool this aggregate's run will occupy.
+  disposable parts: Vec<ValueId> = vec.vecNew(s.childCount);
+  let i: usize = 0;
+  while (i < s.childCount) {
+    vec.vecPush(ref parts, cloneValue(ref va, childValueAt(ref va, s, i)));
+    i += 1;
+  }
+  return aggregateValue(ref va, s.kind, s.typeId, s.bits, ref parts);
+}

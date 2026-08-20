@@ -1,0 +1,9 @@
+deadline: timed out
+deadline: expired
+manual: cancelled
+manual: flagged
+child: cancelled with parent
+child2: timed out
+parent2: still live
+none: ready
+exit=0

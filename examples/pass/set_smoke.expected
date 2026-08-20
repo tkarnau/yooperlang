@@ -1,0 +1,4 @@
+insert: a=0 b=0 a2=1 len=2
+contains: alpha=1 zeta=0
+remove: beta=1 zeta=0 len=1
+exit=0

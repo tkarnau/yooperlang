@@ -30,8 +30,16 @@ function checkExpr(ref cx: Cx, exprId: NodeId, expected: TypeId): TypeId {
       // an INTEGER type - the JS reference rejects untyped-int-to-float too.
       // With no expectation, or an expectation it cannot satisfy, it falls back
       // to int32 and the caller's own check reports the mismatch.
+      // Taken here whatever happens next, so a flag set for this literal can
+      // never be read by a later one. Same one-step discipline as awaitPending.
+      const negated = cx.prog.negatedLiteral;
+      cx.prog.negatedLiteral = false;
       if (expected != TYPE_ERROR_ID && isIntPrimType(cx.prog, expected)) {
         resolved = expected;
+        // The pin is what makes the range question answerable: an unpinned
+        // literal defaults to int32 and refusing it against a width nobody
+        // wrote would refuse programs on a type the author never named.
+        checkIntLiteralRange(cx.prog, expr, resolved, negated);
       } else {
         if (expected == TYPE_ERROR_ID) {
           resolved = primTypeId(PrimKind.INT32);
@@ -171,23 +179,17 @@ function checkExpr(ref cx: Cx, exprId: NodeId, expected: TypeId): TypeId {
           `operator "${tagSpelling(expr.operator)}" cannot be applied to ${formatType(cx.prog, left)} and ${formatType(cx.prog, right)}`,
           expr.sourceLoc
         );
-      } else if (isFloatPrimType(cx.prog, left) &&
-                 !checkFloatOperator(cx.prog, expr)) {
-        // A float keeps arithmetic and comparison and loses the bitwise family.
-        // checkFloatOperator reported it.
-      } else if (isValueEnumType(cx.prog, left) &&
-                 !checkEnumOperator(cx.prog, expr, left)) {
-        // An enum keeps equality and, when it is integer-backed, ordering and
-        // the bitwise family. It loses arithmetic: two enums added produce
-        // something that names no case. checkEnumOperator reported it.
+      } else if (!checkOperandClass(cx.prog, expr, left)) {
+        // AGREEING is not enough: two strings agree and `a + b` on them emits
+        // `add ptr`, which is not an instruction. checkOperandClass owns the
+        // whole table of which class keeps which operator - including the float
+        // and value-enum rows, which it forwards to their own modules - and it
+        // reported this one.
       } else if (compares) {
         resolved = primTypeId(PrimKind.BOOL);
       } else if (logical) {
-        if (left != primTypeId(PrimKind.BOOL)) {
-          reportError(cx.prog, "logical operands must be bool", expr.sourceLoc);
-        } else {
-          resolved = primTypeId(PrimKind.BOOL);
-        }
+        // Both operands are bool by now; nothing else survives `&&` above.
+        resolved = primTypeId(PrimKind.BOOL);
       } else {
         resolved = left;
       }
@@ -373,6 +375,14 @@ function checkUnary(ref cx: Cx, expr: ASTNode, expected: TypeId): TypeId {
   // Unary minus. The expectation flows through so `-1` in an int64 slot pins to
   // int64 rather than defaulting to int32, and `-1.5` in a float32 slot pins to
   // float32 the same way.
+  //
+  // The sign also has to reach the RANGE check, and it cannot travel as a value
+  // because the magnitude is on a different node: `-128` is this node over the
+  // literal 128. Set only when the operand IS a bare literal, so `-(a + 1)`
+  // leaves the 1 positive, which is what it is. See typecheck/int_range.yoop.
+  if (nodeAt(cx.ast, expr.childA).kind == ASTNodeKind.INT_LITERAL) {
+    cx.prog.negatedLiteral = true;
+  }
   const got = checkExpr(ref cx, expr.childA, expected);
   if (got != TYPE_ERROR_ID &&
       !isIntPrimType(cx.prog, got) &&

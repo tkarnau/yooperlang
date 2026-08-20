@@ -137,6 +137,53 @@ function taskBindOfPrefixes(ref prog: Program, ref ast: AST, listId: NodeId): Ta
   return TaskBind.NONE;
 }
 
+// `pooled h = 7;` - a handle kind on a binding whose right-hand side is not a
+// handle.
+//
+// A REFCOUNTED kind asks for the one storage discipline that only a task handle
+// has: the value is heap-allocated with a count, the binding takes one, and the
+// scope end releases it. There is nothing to count on an `int32`, so the
+// binding promises a release of something that was never retained.
+//
+// Only the refcounted spelling needs this. A kind asking for a scope-end CALL
+// (`joined`, whose `mustCall` is `join`) is already refused by
+// checkDisposableBinding, which finds no such method on the bound type and says
+// so - which is the same mistake reported from the other side.
+//
+// A type that PROPAGATES the kind is legal and is why the check is not simply
+// "the initializer is a Task": `pooled j: Job` where `Job propagates<pooled>`
+// holds the handle in a field, and the release is one per field that supplies
+// it. Same carve-out checkDisposableBinding makes for `mustCall`.
+//
+// Reached only when `taskBindOf` said NONE, so a real handle binding never gets
+// here.
+export function checkHandleKindHasTask(ref cx: Cx, stmt: ASTNode, typeId: TypeId): void {
+  if (stmt.childC == 0 || typeId == TYPE_ERROR_ID ||
+      taskResultOf(cx.prog, typeId) != TYPE_ERROR_ID) {
+    return;
+  }
+  const list = nodeAt(cx.ast, stmt.childC);
+  let i: usize = 0;
+  while (i < list.childCount) {
+    const prefix = nodeAt(cx.ast, childAt(cx.ast, list, i));
+    switch (lookupKind(cx.prog, prefix.name)) {
+      case Option.Some { value: info }: {
+        if (info.refcounted &&
+            !str.stringEq(propagatedKindOf(cx.prog, typeId), prefix.name)) {
+          reportError(
+            cx.prog,
+            `"${stmt.name}" is ${prefix.name}, which holds a refcounted Task<T> handle, but its initializer is ${formatType(cx.prog, typeId)} - there is nothing there to hold a count`,
+            stmt.sourceLoc
+          );
+          return;
+        }
+      }
+      case Option.None: { }
+    }
+    i += 1;
+  }
+}
+
 // The two things a `task` declaration may not be, both refused where the kind
 // is already in hand. Both are the reference's rules.
 //

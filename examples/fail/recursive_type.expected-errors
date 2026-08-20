@@ -1,0 +1,12 @@
+# Illegal: every one of these types contains itself by value, so it has no
+# finite size. Without the check clang is what refuses the program
+# ("identified structure type ... is recursive"), which is a failure with the
+# compiler's name nowhere on it.
+#
+# The MUTUAL pair reports at both ends on purpose: either field can be the one
+# turned into a `ref`, and the reader should see both.
+17:5: field "next" of "Node" reaches "Node" again by value
+21:5: field "r" of "Left" reaches "Left" again by value
+25:5: field "l" of "Right" reaches "Right" again by value
+33:5: field "b" of "Wrapped" reaches "Wrapped" again by value
+37:14: field "left" of "Tree" reaches "Tree" again by value

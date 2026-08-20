@@ -1,0 +1,8 @@
+fresh: a=0 b=0 c=0 len=3
+overwrite: ow=1 len=3
+get: alpha=1 beta=22 zeta=-1
+contains: alpha=1 zeta=0
+remove: alpha=1 xeno=0 len=2
+after-remove get alpha=-1
+grown len=14 k05=50 k10=100
+exit=0

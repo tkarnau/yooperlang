@@ -1,0 +1,7 @@
+This program never terminates on its own. It binds 127.0.0.1:18080 and blocks
+in accept waiting for a client that the suite does not supply, so it has no
+stdout and no exit code to assert - it is a demo you drive with curl. Its
+outcome also depends on whether port 18080 happens to be free on the machine.
+The socket-free equivalent that IS asserted is examples/pass/http_no_socket,
+and examples/pass/http_client_loopback drives a real server from a client in
+the same process.

@@ -1,0 +1,48 @@
+// The externs a comptime fold is allowed to call.
+//
+// A fold cannot call an arbitrary extern - the program is being COMPILED, so
+// its runtime does not exist. What is safe is the PURE subset, and the math
+// half of it is not reimplemented: the compiler calls the same libm the
+// compiled program would, so a folded `sqrt` is bit-identical to the one the
+// program would have computed at run time.
+//
+// The values here are chosen to print exactly, so the fixture is about the
+// FOLD rather than about float rendering.
+
+extern "C" from library "m" {
+  function sqrt(x: float64): float64;
+  function pow(base: float64, exp: float64): float64;
+  function floor(x: float64): float64;
+  function ceil(x: float64): float64;
+  function fabs(x: float64): float64;
+}
+
+extern "C" from "string.h" {
+  function strlen(s: string): int64;
+  function strcmp(a: string, b: string): int32;
+}
+
+@precompile const ROOT_16: float64 = sqrt(16.0);
+@precompile const TWO_10: float64 = pow(2.0, 10.0);
+// Composed: the whole expression is one fold, not three.
+@precompile const HYPOT: float64 = sqrt(pow(3.0, 2.0) + pow(4.0, 2.0));
+@precompile const FLOOR_D: float64 = floor(3.9);
+@precompile const CEIL_D: float64 = ceil(3.1);
+@precompile const ABS_D: float64 = fabs(0.0 - 7.0);
+
+@precompile const NAME_LEN: int64 = strlen("yoopalicious");
+@precompile const CMP_EQ: int32 = strcmp("alpha", "alpha");
+// `strcmp` promises only the SIGN, so the fold normalizes to -1 / 0 / 1 - the
+// answer that cannot disagree with a libc.
+@precompile const CMP_LT: int32 = strcmp("alpha", "beta");
+@precompile const CMP_GT: int32 = strcmp("beta", "alpha");
+// A prefix is LESS than the string that extends it.
+@precompile const CMP_PREFIX: int32 = strcmp("al", "alpha");
+
+function main(): int {
+  printf(`ROOT_16=${ROOT_16} TWO_10=${TWO_10} HYPOT=${HYPOT}\n`);
+  printf(`FLOOR_D=${FLOOR_D} CEIL_D=${CEIL_D} ABS_D=${ABS_D}\n`);
+  printf(`NAME_LEN=${NAME_LEN}\n`);
+  printf(`CMP_EQ=${CMP_EQ} CMP_LT=${CMP_LT} CMP_GT=${CMP_GT} CMP_PREFIX=${CMP_PREFIX}\n`);
+  return 0;
+}

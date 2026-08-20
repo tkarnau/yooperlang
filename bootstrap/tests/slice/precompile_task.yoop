@@ -1,0 +1,58 @@
+// A `task` call inside a `@precompile` fold.
+//
+// There is no scheduler at compile time and no run time to have one, so a task
+// call is just a CALL: the body runs synchronously, and the handle it hands
+// back already holds the answer. That makes `wait` the identity here.
+//
+// `joined` and `pooled` differ in handle LIFETIME at run time, which is a
+// distinction with nothing to say about a fold - so both fold the same way, and
+// the fixture asserts that by using each.
+//
+// This lives in the slice suite rather than beside the module because `task`,
+// `joined` and `pooled` are KINDS declared in std, and the unit harness builds
+// a single module with no std root to declare them.
+
+task compute(x: int32): int32 {
+  return x * x;
+}
+
+task sumTwo(a: int32, b: int32): int32 {
+  return a + b;
+}
+
+// The immediate form: the binding's type is the inner int32, so the call and
+// the join are one step.
+function viaImmediate(n: int32): int32 {
+  const r: int32 = compute(n);
+  return r + 1;
+}
+
+function viaJoined(n: int32): int32 {
+  joined h = compute(n);
+  const v: int32 = wait h;
+  return v + 2;
+}
+
+// A multi-argument task, through a wrapper for the same reason the others use
+// one: a task call in a const initializer is typed `Task<T>`, and the binding
+// that unwraps it has to be inside a function.
+function viaMulti(): int32 {
+  const r: int32 = sumTwo(11, 31);
+  return r;
+}
+
+function viaPooled(n: int32): int32 {
+  pooled h = compute(n);
+  const v: int32 = wait h;
+  return v + 3;
+}
+
+@precompile const IMM: int32 = viaImmediate(7);
+@precompile const JOIN: int32 = viaJoined(8);
+@precompile const POOL: int32 = viaPooled(9);
+@precompile const MULTI: int32 = viaMulti();
+
+function main(): int {
+  printf(`IMM=${IMM} JOIN=${JOIN} POOL=${POOL} MULTI=${MULTI}\n`);
+  return 0;
+}

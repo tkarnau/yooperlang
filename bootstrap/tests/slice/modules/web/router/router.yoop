@@ -1,0 +1,4 @@
+module router;
+// Reached as `modules/web/router`: `web/` is a GROUPING directory and not a
+// module, so the path past the root is walked rather than treated as one name.
+export function route(n: int32): int32 { return n * 10; }

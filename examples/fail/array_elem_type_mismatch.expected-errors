@@ -1,0 +1,3 @@
+# Illegal: an array literal has one element type, and `[1, 2, "oops"]` mixes
+# int32 with string.
+2:23: array elements have different types

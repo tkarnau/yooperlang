@@ -1,0 +1,7 @@
+plain happy: ok 5
+plain sad: err "reading count: negative input"
+template happy: ok 5
+  (formatting context for tag 9)
+template sad: err "reading field 9: negative input"
+nested sad: err "loading config: reading count: negative input"
+exit=0

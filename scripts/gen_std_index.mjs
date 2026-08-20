@@ -15,6 +15,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { seedCompiler, seedEnv } from "./seed.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const tool = path.join(repoRoot, "tools/stdindex/main.yoop");
@@ -24,10 +25,12 @@ const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "yoop_stdindex_"));
 const bin = path.join(tmpDir, "stdindex" + (process.platform === "win32" ? ".exe" : ""));
 
 try {
+  // Built with the bootstrap seed. The index generator is itself a Yoop
+  // program, so there is one compiler in this script and it is the real one.
   execFileSync(
-    process.execPath,
-    [path.join(repoRoot, "src/yoopiler.js"), tool, "-o", bin],
-    { stdio: "inherit", cwd: repoRoot },
+    seedCompiler(),
+    [tool, "-o", bin],
+    { stdio: "inherit", cwd: repoRoot, env: seedEnv() },
   );
   // Run from the repo root: the tool takes the std directory and the output
   // path as ordinary relative paths.

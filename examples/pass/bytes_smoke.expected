@@ -1,0 +1,5 @@
+eq(a,b)=1 eq(a,c)=0
+idx_l=2
+starts=1
+sub.len=3 sub[0]=101 sub[1]=108 sub[2]=108
+exit=0

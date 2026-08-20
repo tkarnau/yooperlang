@@ -1,0 +1,4 @@
+get  200 origin-hello via=origin proxied=yes
+post 200 origin-echo:payload via=origin proxied=yes
+done
+exit=0

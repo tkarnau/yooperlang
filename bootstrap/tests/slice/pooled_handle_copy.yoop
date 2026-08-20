@@ -1,0 +1,39 @@
+// `pooled h2 = h1;` - a second binding onto the same task handle.
+//
+// A `pooled` handle is heap-allocated and REFCOUNTED, so a second binding takes
+// its own count and each releases once at its own scope end. Leaving the retain
+// out is a use-after-free rather than a leak: the first release frees a handle
+// the second one still names.
+//
+// The fixture is written so a missing retain would be OBSERVABLE rather than
+// merely undefined - the copy outlives the original's scope, and the value is
+// read back through it after the original has been released.
+
+task compute(x: int32): int32 {
+  return x * x;
+}
+
+// The original binding's scope ENDS here, releasing its count. Whatever the
+// caller holds has to survive that.
+function spawnAndCopy(n: int32): int32 {
+  pooled first = compute(n);
+  pooled second = first;
+  const a: int32 = wait first;
+  const b: int32 = wait second;
+  return a + b;
+}
+
+// A THIRD binding onto the same handle, so the count goes past two and every
+// release has to be matched rather than merely paired.
+function threeWays(n: int32): int32 {
+  pooled first = compute(n);
+  pooled second = first;
+  pooled third = second;
+  return wait third;
+}
+
+function main(): int {
+  printf(`both=${spawnAndCopy(6)}\n`);
+  printf(`three=${threeWays(9)}\n`);
+  return 0;
+}

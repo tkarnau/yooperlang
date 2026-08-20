@@ -1,0 +1,5 @@
+Red==Red
+Red!=Green
+Circle(5)==Circle(99) (tag-only)
+Circle!=Square
+exit=0

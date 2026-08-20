@@ -22,7 +22,7 @@
 // nothing to do with the compiler. The emitted `.ll` is compared too, and it is
 // the stronger assertion of the two: that IS the compiler's output, and clang
 // is downstream of it.
-import { describe, it, before } from "node:test";
+import { describe, it, before, after } from "node:test";
 import assert from "node:assert";
 import fs from "fs";
 import path from "path";
@@ -63,6 +63,16 @@ describe("self-hosting: the bootstrap compiles itself to a fixpoint", () => {
     await runProcOrThrow(stage1, [BOOT_SRC, "-o", stage2], opts);
     await runProcOrThrow(stage2, [BOOT_SRC, "-o", stage3], opts);
   });
+
+  // Every run of this suite used to leave its temp dir behind - `mkdtempSync`
+  // makes a new one each time and nothing removed it. One session of iterating
+  // left 9,882 of them and filled a 16G tmpfs, which surfaces as a LINK failure
+  // in whatever runs next ("No space left on device") rather than as anything
+  // pointing here.
+  after(() => {
+    if (work) fs.rmSync(work, { recursive: true, force: true });
+  });
+
 
   it("stage1 - the JS reference builds the bootstrap", () => {
     assert.ok(fs.existsSync(stage1), "stage1 was not produced");

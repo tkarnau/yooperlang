@@ -1,0 +1,5 @@
+main: temp used=64
+task: temp used=512
+main: after task used=64 rc=0
+hog rc=0
+exit=0

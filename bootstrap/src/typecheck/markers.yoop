@@ -1,0 +1,528 @@
+module typecheck;
+
+// What a value CARRIES and what a slot DEMANDS - the USE-SITE half of the
+// clearance rules.
+//
+// typecheck/clearance.yoop is the other half: it reads a SIGNATURE and asks who
+// is authorized to move a value across a marker. This file asks the question
+// every place a value actually moves - a binding initializer, a call argument -
+// and it needs something clearance.yoop deliberately does not have: the marker
+// set of an EXPRESSION.
+//
+// Two bounds, running in opposite directions:
+//
+//   conferred    a capability that cannot be FORGED. The slot's conferred set
+//                has to be a SUBSET of the value's, so a plain value cannot
+//                reach a slot that asks for the marker.
+//   restrictive  a hazard that cannot be silently DROPPED. The value's
+//                restrictive set has to be a subset of the SLOT's, so a marked
+//                value cannot reach a slot that says nothing about it.
+//
+// A third bit rides along, because it is read at exactly the same place and off
+// exactly the same annotations: `mustNotEscape scope`. Passing a scope-bounded
+// binding into a parameter that carries no such bound is the third escape route
+// (see kind_use.yoop for the two that read the binding alone), and the callee's
+// parameter kinds are the one thing that can answer it.
+//
+// A marker set is a BITMASK, not a list of names. Every conferred or
+// restrictive kind is handed one bit when it is registered (`registerKind`),
+// which is what lets a set ride inside a `Binding` and inside a signature table
+// with nothing to dispose and no allocation per comparison. A graph declaring
+// more than 64 marker kinds runs out of bits; the ones past the 64th get NONE,
+// which leaves them untracked rather than mis-tracked.
+//
+// PERMISSIVE IS THE ONLY SAFE DIRECTION HERE, and `MarkerSet.known` is how that
+// is spelled. A value whose markers nothing established - a payload destructured
+// out of a switch, a binding with no annotation, a call through a trait or a
+// vtable - reads as UNKNOWN and satisfies every bound. The reference tracks
+// those cases (a marker tree that mirrors type arguments, and a launder
+// boundary at a trait-method call); the bootstrap does not, so treating them as
+// unknown is what keeps `examples/pass/owned_payload.yoop` and
+// `examples/pass/clearance_marker.yoop` compiling. The cost is a forge through
+// one of those routes that is accepted; the alternative cost is refusing
+// correct programs, which is not a trade this pass is allowed to make.
+
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { Map }, * as map from "std/collections/map.yoop";
+import { Option } from "std/core/types.yoop";
+import { AST, ASTNode, ASTNodeKind, NodeId, childAt, nodeAt } from "../ast";
+import { SourceLocation } from "../diagnostics";
+
+// The markers on one value or one slot.
+//
+// `noEscape` is deliberately OUTSIDE the `known` gate: it is read off a written
+// kind prefix on both sides, so "nothing said" and "said nothing" are the same
+// answer for it, while for a marker they are not.
+@derive(display)
+export type MarkerSet {
+  conf: uint64,
+  restr: uint64,
+  noEscape: bool,
+  known: bool,
+}
+
+// What a signature says, keyed by the function's SymbolId. The parameters are a
+// RUN in `Program.sigParams` rather than a vector per entry, so the table holds
+// no storage of its own and a lookup is one map get plus an index.
+@derive(display)
+export type SigMarkers {
+  retConf: uint64,
+  retRestr: uint64,
+  paramStart: usize,
+  paramCount: usize,
+}
+
+// "Nothing established what this carries." Satisfies every bound.
+export function markersUnknown(): MarkerSet {
+  return { conf: 0, restr: 0, noEscape: false, known: false };
+}
+
+// "This carries nothing", which is a real answer and not the absence of one - a
+// string literal was never allocated and a struct literal was never laundered.
+export function markersEmpty(): MarkerSet {
+  return { conf: 0, restr: 0, noEscape: false, known: true };
+}
+
+// ----- reading markers off the source ----------------------------------------
+
+// The kind-prefix list an annotation writes in front of its type, or 0. Only a
+// TYPE_ANNOTATION_TYPE_NAME has one; `ref T` and `T[]` are other node kinds and
+// carry their prefixes nowhere.
+function annotationKindList(ref ast: AST, annotId: NodeId): NodeId {
+  if (annotId == 0) {
+    return 0;
+  }
+  const annot = nodeAt(ref ast, annotId);
+  if (annot.kind != ASTNodeKind.TYPE_ANNOTATION_TYPE_NAME) {
+    return 0;
+  }
+  return annot.childB;
+}
+
+// OR one kind-prefix NODE_LIST into a set. A kind the registry does not know is
+// skipped - the pass that owns "unknown kind here" has already reported it, and
+// a second diagnostic from this one would say nothing new.
+export function addPrefixMarkers(
+  ref prog: Program,
+  ref ast: AST,
+  listId: NodeId,
+  ref out: MarkerSet
+): void {
+  if (listId == 0) {
+    return;
+  }
+  const list = nodeAt(ref ast, listId);
+  let i: usize = 0;
+  while (i < list.childCount) {
+    const name = nodeAt(ref ast, childAt(ref ast, list, i)).name;
+    switch (lookupKind(ref prog, name)) {
+      case Option.Some { value: info }: {
+        if (info.conferred) {
+          out.conf = out.conf | info.markerBit;
+        }
+        if (info.restrictive) {
+          out.restr = out.restr | info.markerBit;
+        }
+        if (info.noEscape) {
+          out.noEscape = true;
+        }
+      }
+      case Option.None: { }
+    }
+    i += 1;
+  }
+}
+
+// `owned string` - the markers one ANNOTATION states, at its top level. Type
+// ARGUMENTS are not read: `Result<owned string, string>` carries nothing here,
+// which is the reference's answer too (it keeps a marker TREE and compares it
+// positionally; the bootstrap keeps only the root, so a marker inside a type
+// argument is untracked rather than wrong).
+export function markersOfAnnotation(
+  ref prog: Program,
+  ref ast: AST,
+  annotId: NodeId
+): MarkerSet {
+  let out = markersEmpty();
+  addPrefixMarkers(ref prog, ref ast, annotationKindList(ref ast, annotId), ref out);
+  return out;
+}
+
+// A parameter writes its kinds in two places - `f(owned s: string)` puts them
+// on the PARAM and `f(s: owned string)` on the annotation - and the two mean
+// the same thing, so both are read. Same rule as `kindsOnParam` in
+// clearance.yoop.
+export function markersOfParam(
+  ref prog: Program,
+  ref ast: AST,
+  paramNode: ASTNode
+): MarkerSet {
+  let out = markersOfAnnotation(ref prog, ref ast, paramNode.childA);
+  addPrefixMarkers(ref prog, ref ast, paramNode.childE, ref out);
+  return out;
+}
+
+// ----- the signature table ---------------------------------------------------
+
+// Record what one function's signature says about markers, keyed by its
+// SymbolId. Called from pass C, where the declaration's AST is the one in hand.
+//
+// A SymbolId is program-wide and an import binds the DEFINING module's id
+// directly (see pass_b.yoop), so one table answers a same-module call, a
+// by-name imported call and a `ns.f(...)` call with no per-module translation.
+//
+// Only a plain `Symbol.Func` is recorded. A METHOD is not a module-level name
+// and a GENERIC function's parameters are its template's, whose annotations may
+// name type parameters rather than kinds; both read back as "no entry", which
+// the use sites treat as unknown.
+export function recordSignatureMarkers(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  declNode: ASTNode
+): void {
+  if (declNode.kind != ASTNodeKind.FUNCTION_DECL &&
+      declNode.kind != ASTNodeKind.EXTERN_FUNCTION_DECL) {
+    return;
+  }
+  const symId = lookupOwnName(ref tm, declNode.name);
+  if (symId == SYMBOL_NONE_ID) {
+    return;
+  }
+  let plain = false;
+  switch (symbolAt(ref prog, symId)) {
+    case Symbol.Func { typeId: t }: { plain = true; }
+    default: { }
+  }
+  if (!plain) {
+    return;
+  }
+
+  const start = prog.sigParams.len;
+  let count: usize = 0;
+  if (declNode.childB != 0) {
+    const list = nodeAt(ref ast, declNode.childB);
+    let p: usize = 0;
+    while (p < list.childCount) {
+      const param = nodeAt(ref ast, childAt(ref ast, list, p));
+      vec.vecPush(ref prog.sigParams, markersOfParam(ref prog, ref ast, param));
+      count += 1;
+      p += 1;
+    }
+  }
+  const ret = markersOfAnnotation(ref prog, ref ast, declNode.childC);
+  map.mapInsert(ref prog.sigMarkers, uint64(symId), {
+    retConf: ret.conf,
+    retRestr: ret.restr,
+    paramStart: start,
+    paramCount: count,
+  });
+}
+
+// ----- the two bounds --------------------------------------------------------
+
+// The conferred bits the slot asks for and the value does not carry.
+function missingConferred(value: MarkerSet, slot: MarkerSet): uint64 {
+  if (!value.known) {
+    return 0;
+  }
+  return slot.conf & (~value.conf);
+}
+
+// The restrictive bits the value carries and the slot does not permit.
+function leakedRestrictive(value: MarkerSet, slot: MarkerSet): uint64 {
+  if (!value.known) {
+    return 0;
+  }
+  return value.restr & (~slot.restr);
+}
+
+// One diagnostic per violating kind, at `loc`, naming the slot as `role`.
+//
+// `role` is built by the caller and only when there IS something to say - the
+// message is a template literal, and building one for every argument of every
+// call in the program to throw it away would be a real cost.
+function reportMarkerFlow(
+  ref prog: Program,
+  value: MarkerSet,
+  slot: MarkerSet,
+  loc: SourceLocation,
+  role: string
+): void {
+  let missing = missingConferred(value, slot);
+  let i: usize = 0;
+  while (i < prog.markerNames.len) {
+    const bit = uint64(1) << uint64(i);
+    if ((missing & bit) != 0) {
+      const name = vec.vecGet(ref prog.markerNames, i);
+      reportError(
+        ref prog,
+        `${role} requires kind "${name}", which this value does not carry - a conferred kind comes from a signature that declares it, never from an annotation on the value`,
+        loc
+      );
+    }
+    i += 1;
+  }
+
+  let leaked = leakedRestrictive(value, slot);
+  let j: usize = 0;
+  while (j < prog.markerNames.len) {
+    const bit = uint64(1) << uint64(j);
+    if ((leaked & bit) != 0) {
+      const name = vec.vecGet(ref prog.markerNames, j);
+      reportError(
+        ref prog,
+        `${role} does not accept kind "${name}", which this value carries - only a function that takes it and returns without it may shed it`,
+        loc
+      );
+    }
+    j += 1;
+  }
+}
+
+// True when there is anything to report at all, so the caller can skip building
+// the `role` string on the overwhelmingly common clean path.
+function markerFlowViolates(value: MarkerSet, slot: MarkerSet): bool {
+  return missingConferred(value, slot) != 0 || leakedRestrictive(value, slot) != 0;
+}
+
+// ----- what an expression carries --------------------------------------------
+
+// The markers of the value `nodeId` produces.
+//
+// Four shapes answer, and everything else is UNKNOWN:
+//
+//   IDENT           the binding's own markers, recorded when it was declared
+//   REF_EXPRESSION  its operand's - `ref a` moves the same value `a` names
+//   CALL            what the callee's return declared, stamped onto the node by
+//                   `checkCallMarkers` when the call was checked
+//   a LITERAL       nothing, and that is a real answer: a string literal was
+//                   never allocated and a struct literal was never laundered
+//
+// The CALL case reads a decoration rather than re-resolving the callee, because
+// resolving one is the whole of check_call.yoop and check_qualified.yoop. Every
+// call has already been checked by the time anything asks - an initializer is
+// checked before its binding is bound, and an argument before the argument
+// check runs - so the decoration is there whenever the callee had a signature.
+export function exprMarkers(ref cx: Cx, nodeId: NodeId): MarkerSet {
+  if (nodeId == 0) {
+    return markersUnknown();
+  }
+  const node = nodeAt(cx.ast, nodeId);
+  switch (node.kind) {
+    case ASTNodeKind.IDENT: {
+      switch (scopeBinding(cx.scope, node.name)) {
+        case Option.Some { value: b }: {
+          return {
+            conf: b.markConf,
+            restr: b.markRestr,
+            noEscape: b.noEscape,
+            known: b.markKnown,
+          };
+        }
+        case Option.None: { return markersUnknown(); }
+      }
+    }
+    case ASTNodeKind.REF_EXPRESSION: {
+      return exprMarkers(ref cx, node.childA);
+    }
+    case ASTNodeKind.CALL_EXPRESSION: {
+      switch (map.mapGet(ref cx.tm.valueMarkers, uint64(nodeId))) {
+        case Option.Some { value: m }: { return m; }
+        case Option.None: { return markersUnknown(); }
+      }
+    }
+    case ASTNodeKind.STRING_LITERAL,
+         ASTNodeKind.TEMPLATE_LITERAL,
+         ASTNodeKind.INT_LITERAL,
+         ASTNodeKind.FLOAT_LITERAL,
+         ASTNodeKind.BOOL_LITERAL,
+         ASTNodeKind.ARRAY_LITERAL,
+         ASTNodeKind.STRUCT_LITERAL,
+         ASTNodeKind.VARIANT_CONSTRUCTOR: {
+      return markersEmpty();
+    }
+    default: { return markersUnknown(); }
+  }
+}
+
+// ----- the use sites ---------------------------------------------------------
+
+// Every argument of a call against the callee's parameters, plus the stamp that
+// tells a later reader what the call's own value carries.
+//
+// A callee with no entry in the table is left alone entirely: a method, a
+// generic function, a trait dispatch, a call through a function value and
+// `printf` all reach here (or do not) with nothing to compare against, and
+// checking them against an empty signature would refuse correct code.
+export function checkCallMarkers(
+  ref cx: Cx,
+  expr: ASTNode,
+  exprId: NodeId,
+  symId: SymbolId,
+  calleeName: string
+): void {
+  let sm: SigMarkers = { retConf: 0, retRestr: 0, paramStart: 0, paramCount: 0 };
+  let found = false;
+  switch (map.mapGet(ref cx.prog.sigMarkers, uint64(symId))) {
+    case Option.Some { value: v }: { sm = v; found = true; }
+    case Option.None: { }
+  }
+  if (!found) {
+    return;
+  }
+
+  map.mapInsert(ref cx.tm.valueMarkers, uint64(exprId), {
+    conf: sm.retConf,
+    restr: sm.retRestr,
+    noEscape: false,
+    known: true,
+  });
+
+  if (expr.childA == 0) {
+    return;
+  }
+  const args = nodeAt(cx.ast, expr.childA);
+  let a: usize = 0;
+  while (a < args.childCount && a < sm.paramCount) {
+    const argId = childAt(cx.ast, args, a);
+    const slot = vec.vecGet(ref cx.prog.sigParams, sm.paramStart + a);
+    const value = exprMarkers(ref cx, argId);
+    const loc = nodeAt(cx.ast, argId).sourceLoc;
+    if (markerFlowViolates(value, slot)) {
+      reportMarkerFlow(
+        cx.prog, value, slot, loc,
+        `argument ${a + 1} of "${calleeName}"`
+      );
+    }
+    // THE THIRD ESCAPE ROUTE. The other two (a `return` of a bounded binding,
+    // and an alias of one) read the binding alone and live in kind_use.yoop;
+    // this one needs the callee's parameter kinds, which is the table above.
+    if (value.noEscape && !slot.noEscape) {
+      reportError(
+        cx.prog,
+        `argument ${a + 1} of "${calleeName}" is bounded by the scope that declares it (mustNotEscape scope), and that parameter carries no kind with the same bound`,
+        loc
+      );
+    }
+    a += 1;
+  }
+}
+
+// `let c: cleared string = plain();` - the initializer flows into the binding's
+// declared type, so the annotation is the slot.
+//
+// Skipped entirely when the binding has NO annotation: with nothing written
+// down there is no slot for the value to fail to fit. Such a binding INHERITS
+// the initializer's markers instead - see `bindLocal` in check_stmt.yoop.
+export function checkBindingMarkers(ref cx: Cx, stmt: ASTNode): void {
+  if (stmt.childA == 0 || stmt.childB == 0) {
+    return;
+  }
+  const slot = bindingMarkersOf(ref cx, stmt);
+  const value = exprMarkers(ref cx, stmt.childB);
+  if (!markerFlowViolates(value, slot)) {
+    return;
+  }
+  reportMarkerFlow(
+    cx.prog, value, slot, nodeAt(cx.ast, stmt.childB).sourceLoc,
+    `binding "${stmt.name}"`
+  );
+}
+
+// The markers a `let` / `const` declares, from both places one may be written:
+// the annotation (`let out: owned string`) and the binding prefix
+// (`scoped a: FileHandle`).
+export function bindingMarkersOf(ref cx: Cx, stmt: ASTNode): MarkerSet {
+  let out = markersOfAnnotation(cx.prog, cx.ast, stmt.childA);
+  addPrefixMarkers(cx.prog, cx.ast, stmt.childC, ref out);
+  return out;
+}
+
+// ----- the conferred PASSTHROUGH ---------------------------------------------
+//
+// A function is only CONFERRING a kind when it hands back a value carrying it
+// that did not carry it on the way in. When every `return` in the body already
+// yields a carrying value the kind is TRAVELLING, and no authority is involved -
+// which is what makes wrapping a conferring API possible at all.
+//
+// "Every" is the load-bearing word, not "any": a body that launders on one path
+// and forges on the other is still forging. An empty list is not vacuous
+// passthrough either - with no returns to inspect, nothing establishes that the
+// kind came from anywhere.
+//
+// The tally is ambient on Program for the reason `currentReturn` is: a `return`
+// sits at an arbitrary depth of the statement walk, and threading an
+// accumulator down every statement form would be a parameter that all but one
+// of them ignores.
+
+// Start a body's tally. `~0` is the identity for the intersection below, so a
+// body with no returns and a body all of whose returns carry K are told apart
+// by the COUNT rather than by the mask.
+export function beginReturnMarkers(ref prog: Program): void {
+  prog.retMarkerAll = ~uint64(0);
+  prog.retMarkerCount = 0;
+}
+
+// One `return <value>;`. An UNKNOWN value contributes every bit, which is the
+// permissive reading: nothing established that it does not carry the kind.
+export function noteReturnMarkers(ref cx: Cx, valueId: NodeId): void {
+  const m = exprMarkers(ref cx, valueId);
+  if (m.known) {
+    cx.prog.retMarkerAll = cx.prog.retMarkerAll & m.conf;
+  }
+  cx.prog.retMarkerCount += 1;
+}
+
+// The half of the decl-authority check that needs a BODY.
+//
+// clearance.yoop performs the rest of it in pass C, off the signature alone,
+// and skips exactly one case: a conferred kind naming no `appliedBy`, where its
+// only passthrough evidence would be a syntactic "is this kind written anywhere
+// else in the declaration". std's `owned` is that kind by design - no trait
+// impl can be its authority, because the only thing that mints owned storage is
+// a bodyless allocating intrinsic - so every legitimate `owned`-returning
+// function in the tree reaches the kind by passthrough, and the check has to be
+// able to see that to be worth having.
+//
+// Reported at the DECLARATION rather than at a `return`, because the claim is
+// about the signature: it is the return annotation that promises the kind.
+export function checkConferredPassthrough(
+  ref prog: Program,
+  ref ast: AST,
+  declNode: ASTNode
+): void {
+  if (declNode.childC == 0) {
+    return;
+  }
+  const ret = markersOfAnnotation(ref prog, ref ast, declNode.childC);
+  if (ret.conf == 0) {
+    return;
+  }
+  let i: usize = 0;
+  while (i < prog.markerNames.len) {
+    const bit = uint64(1) << uint64(i);
+    if ((ret.conf & bit) != 0 && !kindHasAppliedBy(ref prog, i)) {
+      const passthrough = prog.retMarkerCount != 0 && (prog.retMarkerAll & bit) != 0;
+      if (!passthrough) {
+        const name = vec.vecGet(ref prog.markerNames, i);
+        reportError(
+          ref prog,
+          `"${declNode.name}" returns kind "${name}", which names no appliedBy - so nothing is authorized to confer it, and no return in this body hands back a value that already carries it`,
+          declNode.sourceLoc
+        );
+      }
+    }
+    i += 1;
+  }
+}
+
+// Whether the marker kind holding bit `index` names a method that may confer
+// it. A kind that DOES name one is clearance.yoop's business, in pass C.
+function kindHasAppliedBy(ref prog: Program, index: usize): bool {
+  const name = vec.vecGet(ref prog.markerNames, index);
+  switch (lookupKind(ref prog, name)) {
+    case Option.Some { value: info }: { return info.appliedBy.len != 0; }
+    case Option.None: { return false; }
+  }
+}

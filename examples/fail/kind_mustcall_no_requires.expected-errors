@@ -1,0 +1,4 @@
+# Illegal: the scope-end call is made through a trait the kind REQUIRES, and
+# this kind requires none - so `dispose` names a method with no route to be
+# called by, on any type the kind is written on.
+3:14: but requires no trait

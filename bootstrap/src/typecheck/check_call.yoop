@@ -258,6 +258,13 @@ function checkAgainstSignature(
     funcType,
     calleeName
   );
+  // The CLEARANCE half of the same arguments, and the stamp saying what this
+  // call's own value carries. After the type check, because it reads the marker
+  // decoration that checking a nested call leaves behind. This is the one
+  // funnel every call with a SYMBOL reaches - a plain name and `ns.f(...)` both
+  // arrive here - which is what makes a cross-module sink enforceable at all.
+  // See typecheck/markers.yoop.
+  checkCallMarkers(ref cx, expr, exprId, symId, calleeName);
   // ...and the OTHER half of `provides Task`: the call evaluates to `Task<T>`
   // while the body still returns T. Wrapped here rather than stored on the
   // signature (which is what the reference does) because the body's check reads

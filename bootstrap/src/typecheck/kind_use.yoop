@@ -1,0 +1,386 @@
+module typecheck;
+
+// Where a kind may be WRITTEN, and what writing one there costs.
+//
+// typecheck/kinds.yoop is the other half of this: it asks whether a kind
+// DECLARATION says something coherent. This file asks whether a USE of one is
+// somewhere the declaration allows, and whether the surrounding declaration
+// keeps the promises the kind attaches to that place. Four rules, and every one
+// of them reads a fact that is already in hand at the site:
+//
+//   the SITE       `appliesTo binding parameter field type region` is a set of
+//                  bits on KindInfo, so "may this be written here" is one mask
+//                  test. A kind written where it does not apply is silently
+//                  inert otherwise - no pass would ever look at it again.
+//   OWNSBLOCK      the trailing-block form `disposable f: T = e { ... }` makes
+//                  the block the binding's whole scope. A kind that did not ask
+//                  to own one has nothing to say about when that block ends.
+//   PROPAGATION    a field carrying a kind is an obligation the enclosing type
+//                  now holds, and `propagates<k>` is where a type says so. A
+//                  field that carries one the type does not propagate is a
+//                  cleanup nothing will emit.
+//   MUSTNOTESCAPE  a binding bounded by its scope may not leave it, so a
+//                  `return` of it and an alias under a name that does not carry
+//                  the bound are both refused.
+//
+// WHERE THE LINE IS. The two escape rules here read the BINDING's own kinds,
+// which pass D records on the scope entry. The THIRD escape route - passing the
+// binding into a call whose parameter does not carry the bound - reads the
+// CALLEE's parameter kinds instead, so it lives with the signature table that
+// holds them: see `checkCallMarkers` in typecheck/markers.yoop.
+
+import { Vec }, * as vec from "std/core/vec.yoop";
+import * as str from "std/core/strings.yoop";
+import { Text }, * as text from "std/core/text.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import { Option } from "std/core/types.yoop";
+import { AST, ASTNode, ASTNodeKind, NodeId, childAt, nodeAt } from "../ast";
+
+// ----- the sites -------------------------------------------------------------
+
+// `disposable a: FileHandle = ...` - the kinds a BINDING carries, and the
+// trailing block one of them has to own.
+//
+// Called for every `let` / `const`, including the task-handle forms, so the
+// site rule does not depend on which storage discipline the kind asked for.
+export function checkBindingKindUse(ref cx: Cx, stmt: ASTNode): void {
+  if (stmt.childC == 0) {
+    return;
+  }
+  const list = nodeAt(cx.ast, stmt.childC);
+  let owningKind = false;
+  let i: usize = 0;
+  while (i < list.childCount) {
+    const prefix = nodeAt(cx.ast, childAt(cx.ast, list, i));
+    switch (lookupKind(cx.prog, prefix.name)) {
+      case Option.Some { value: info }: {
+        checkSite(cx.prog, info, prefix, SITE_BINDING, "bindings");
+        owningKind = owningKind || info.ownsBlock;
+      }
+      case Option.None: { }
+    }
+    i += 1;
+  }
+
+  // The trailing block. `stmt.childD` is the block the binding owns, and it is
+  // the kind that decides whether owning one is a thing this binding may do.
+  if (stmt.childD != 0 && !owningKind) {
+    reportError(
+      cx.prog,
+      `"${stmt.name}" is written with a trailing block, and no kind on it declares ownsBlock - without that clause nothing says the block is the binding's scope`,
+      stmt.sourceLoc
+    );
+  }
+}
+
+// `function use(disposable h: ref FileHandle)` - the kinds a PARAMETER carries,
+// written in front of the name. The annotation spelling (`h: owned string`) is
+// a different node and is not read here; see the header of clearance.yoop for
+// where the two are read together.
+export function checkParamKindSites(ref prog: Program, ref ast: AST, paramNode: ASTNode): void {
+  if (paramNode.childE == 0) {
+    return;
+  }
+  const list = nodeAt(ref ast, paramNode.childE);
+  let i: usize = 0;
+  while (i < list.childCount) {
+    const prefix = nodeAt(ref ast, childAt(ref ast, list, i));
+    switch (lookupKind(ref prog, prefix.name)) {
+      case Option.Some { value: info }: {
+        checkSite(ref prog, info, prefix, SITE_PARAMETER, "parameters");
+      }
+      case Option.None: { }
+    }
+    i += 1;
+  }
+}
+
+// `type Sock c_layout { ... }` - the kind prefix a TYPE declaration carries.
+// `childB` is where the parser puts it, arguments and all.
+export function checkTypeDeclKindPrefix(ref prog: Program, ref ast: AST, declNode: ASTNode): void {
+  if (declNode.childB == 0) {
+    return;
+  }
+  const prefix = nodeAt(ref ast, declNode.childB);
+  switch (lookupKind(ref prog, prefix.name)) {
+    case Option.Some { value: info }: {
+      checkSite(ref prog, info, prefix, SITE_TYPE, "types");
+    }
+    case Option.None: {
+      reportError(
+        ref prog,
+        `unknown kind "${prefix.name}" on type "${declNode.name}"`,
+        prefix.sourceLoc
+      );
+    }
+  }
+}
+
+// One site test, and the message that names both halves of the disagreement:
+// where the kind was written, and where the declaration said it may be.
+function checkSite(
+  ref prog: Program,
+  info: KindInfo,
+  prefix: ASTNode,
+  site: uint32,
+  siteWord: string
+): void {
+  if (kindAppliesTo(info, site)) {
+    return;
+  }
+  disposable sites: Text = siteWordsOf(info.sites);
+  reportError(
+    ref prog,
+    `kind "${info.name}" does not apply to ${siteWord} - it declares "appliesTo ${sites}"`,
+    prefix.sourceLoc
+  );
+}
+
+// The `appliesTo` set spelled back out, in the order the bits are declared in.
+// "nothing" for the empty set, which kinds.yoop already refuses on its own for
+// a written-out kind and reports differently for a composition.
+function siteWordsOf(sites: uint32): Text propagates<disposable> {
+  let out: Text = text.make(32);
+  pushSiteWord(ref out, sites, SITE_BINDING, "binding");
+  pushSiteWord(ref out, sites, SITE_TYPE, "type");
+  pushSiteWord(ref out, sites, SITE_FUNCTION, "function");
+  pushSiteWord(ref out, sites, SITE_PARAMETER, "parameter");
+  pushSiteWord(ref out, sites, SITE_FIELD, "field");
+  pushSiteWord(ref out, sites, SITE_RETURN, "return");
+  pushSiteWord(ref out, sites, SITE_REGION, "region");
+  if (text.isEmpty(ref out)) {
+    text.push(ref out, "nothing");
+  }
+  return out;
+}
+
+function pushSiteWord(ref out: Text, sites: uint32, bit: uint32, word: string): void {
+  if ((sites & bit) == 0) {
+    return;
+  }
+  if (!text.isEmpty(ref out)) {
+    text.push(ref out, " ");
+  }
+  text.push(ref out, word);
+}
+
+// ----- a kind on a FIELD -----------------------------------------------------
+
+// `handle: disposable FileHandle` inside `type Wrapper { ... }`.
+//
+// The enclosing type has to PROPAGATE the kind: a field carrying `disposable`
+// inside a type that says nothing is an obligation with no holder, and the
+// scope-end call for it is emitted by nobody.
+//
+// `propagatedFieldsOf` is the reader that would have wanted it - it counts a
+// field as supplying the kind only when the type propagates one - so this is
+// the check that keeps that walk's silence honest.
+//
+// The comparison is between two WORDS, the field's prefix and the type's
+// clause, and that is deliberate: `Program.kinds` is keyed by bare name for the
+// whole graph, so a file declaring its own `disposable` beside std's reads back
+// std's KindInfo. A site rule cannot be applied to a field for that reason -
+// see the note in plans/retire_js_compiler.md section A8 - but two words
+// compared to each other are not affected by it.
+export function checkFieldKindUse(
+  ref prog: Program,
+  ref ast: AST,
+  declNode: ASTNode,
+  fieldNode: ASTNode,
+  carried: string
+): void {
+  if (carried.len == 0) {
+    return;
+  }
+  switch (lookupKind(ref prog, carried)) {
+    case Option.Some { value: info }: {
+      if (!str.stringEq(propagatedKindNameOf(ref ast, declNode), carried)) {
+        reportError(
+          ref prog,
+          `field "${fieldNode.name}" carries kind "${carried}", which "${declNode.name}" does not propagate - write "propagates<${carried}>" on the type, or the obligation has no holder`,
+          fieldNode.sourceLoc
+        );
+      }
+    }
+    case Option.None: {
+      reportError(
+        ref prog,
+        `unknown kind "${carried}" on field "${fieldNode.name}"`,
+        fieldNode.sourceLoc
+      );
+    }
+  }
+}
+
+// ----- a kind arriving through a field's TYPE --------------------------------
+
+// `work: Task<int32>` inside `type Job { ... }` - the same propagation rule as
+// above, reached from the other direction.
+//
+// checkFieldKindUse reads a kind the field WRITES. This reads one the field's
+// TYPE already carries, which is the far more common way an obligation gets
+// into a struct: nobody writes `disposable` in front of a `Vec<int32>` field,
+// and the vector still has to be freed by somebody.
+//
+// The rule is the reference's and it is transitive by construction, because the
+// carried kind is read off the field type's own `propagates<>`: a `Vec` field
+// makes its holder propagate `disposable`, and a field of THAT holder makes its
+// holder propagate it too. Nothing walks - each link is one comparison, and the
+// chain is established one declaration at a time.
+//
+// A `Task<T>` is the base case and the reason `Program.refcountedKind` exists.
+// It is a compiler type with no declaration to hang a `propagates<>` clause on,
+// so it carries its kind by being the storage discipline the kind asked for
+// rather than by naming it.
+//
+// TWO DELIBERATE LIMITS, both matching the reference:
+//
+//   Only a STRUCT field. A variant CASE payload holding a `Vec` is accepted, by
+//   the reference and so by this. The hazard is the same one and the carve-out
+//   is not principled; it is what the corpus is written against, and widening a
+//   refusal is not a thing to do from inference.
+//
+//   A field whose type is not yet POPULATED reads as carrying nothing. Pass A
+//   stamps the `propagates<>` word on the shell, so a forward reference within
+//   the graph is answered correctly; what is left unanswered is a type whose
+//   shell pass A never reached, and that file has a bigger problem than this.
+export function checkFieldTypeKindUse(
+  ref prog: Program,
+  ref ast: AST,
+  declNode: ASTNode,
+  fieldNode: ASTNode,
+  fieldTypeId: TypeId,
+  carried: string
+): void {
+  const held = heldKindOfType(ref prog, fieldTypeId);
+  if (held.len == 0) {
+    return;
+  }
+  // The field WROTE the kind, so checkFieldKindUse already had this out with
+  // it. Reporting again would name the same field twice for one mistake.
+  if (str.stringEq(held, carried)) {
+    return;
+  }
+  if (str.stringEq(propagatedKindNameOf(ref ast, declNode), held)) {
+    return;
+  }
+  reportError(
+    ref prog,
+    `field "${fieldNode.name}" holds a value carrying kind "${held}", which "${declNode.name}" does not propagate - write "propagates<${held}>" on the type, or the obligation has no holder`,
+    fieldNode.sourceLoc
+  );
+}
+
+// The kind a VALUE of this type carries, or "".
+//
+// A task handle answers with the refcounted kind's name; everything else
+// answers with its own `propagates<>` clause. Deliberately NOT recursive: see
+// the transitivity note above.
+function heldKindOfType(ref prog: Program, typeId: TypeId): string {
+  if (typeId == TYPE_ERROR_ID) {
+    return "";
+  }
+  if (isTaskType(ref prog, typeId)) {
+    return prog.refcountedKind;
+  }
+  return propagatedKindOf(ref prog, typeId);
+}
+
+// `type S propagates<bogus>` - the clause has to name a kind that exists.
+//
+// Read here rather than where `propagatesKind` is stamped, because the stamp is
+// deliberately a NAME with no lookup: a decl records the word in pass A, before
+// any kind in a later file is registered.
+export function checkPropagatesClause(ref prog: Program, ref ast: AST, declNode: ASTNode): void {
+  if (declNode.childF == 0) {
+    return;
+  }
+  const list = nodeAt(ref ast, declNode.childF);
+  let i: usize = 0;
+  while (i < list.childCount) {
+    const named = nodeAt(ref ast, childAt(ref ast, list, i));
+    switch (lookupKind(ref prog, named.name)) {
+      case Option.Some { value: info }: { }
+      case Option.None: {
+        reportError(
+          ref prog,
+          `"${declNode.name}" propagates "${named.name}", which no kind declares`,
+          named.sourceLoc
+        );
+      }
+    }
+    i += 1;
+  }
+}
+
+// ----- mustNotEscape ---------------------------------------------------------
+
+// Whether any kind in a prefix list bounds its value by the declaring scope.
+// The one question both escape rules ask, of two different lists.
+export function prefixesBoundToScope(ref cx: Cx, listId: NodeId): bool {
+  if (listId == 0) {
+    return false;
+  }
+  const list = nodeAt(cx.ast, listId);
+  let i: usize = 0;
+  while (i < list.childCount) {
+    const prefix = nodeAt(cx.ast, childAt(cx.ast, list, i));
+    switch (lookupKind(cx.prog, prefix.name)) {
+      case Option.Some { value: info }: {
+        if (info.noEscape) {
+          return true;
+        }
+      }
+      case Option.None: { }
+    }
+    i += 1;
+  }
+  return false;
+}
+
+// `return a;` where `a` is bounded by the scope that declared it. The value
+// outlives the frame the bound was about, which is the whole thing the clause
+// was written to prevent.
+export function checkReturnDoesNotEscape(ref cx: Cx, valueId: NodeId): void {
+  const value = nodeAt(cx.ast, valueId);
+  if (value.kind != ASTNodeKind.IDENT) {
+    return;
+  }
+  switch (scopeBinding(cx.scope, value.name)) {
+    case Option.Some { value: bound }: {
+      if (bound.noEscape) {
+        reportError(
+          cx.prog,
+          `"${value.name}" is bounded by the scope that declares it (mustNotEscape scope), so it cannot be returned out of one`,
+          value.sourceLoc
+        );
+      }
+    }
+    case Option.None: { }
+  }
+}
+
+// `let b: FileHandle = a;` where `a` is bounded and `b` is not. The second name
+// outlives nothing the first one did not, but it carries no bound - so every
+// later check on it, this one included, would pass.
+export function checkAliasKeepsBound(ref cx: Cx, stmt: ASTNode): void {
+  if (stmt.childB == 0 || prefixesBoundToScope(ref cx, stmt.childC)) {
+    return;
+  }
+  const init = nodeAt(cx.ast, stmt.childB);
+  if (init.kind != ASTNodeKind.IDENT) {
+    return;
+  }
+  switch (scopeBinding(cx.scope, init.name)) {
+    case Option.Some { value: bound }: {
+      if (bound.noEscape) {
+        reportError(
+          cx.prog,
+          `"${stmt.name}" aliases "${init.name}", which is bounded by its scope (mustNotEscape scope), under a name that carries no such bound`,
+          stmt.sourceLoc
+        );
+      }
+    }
+    case Option.None: { }
+  }
+}

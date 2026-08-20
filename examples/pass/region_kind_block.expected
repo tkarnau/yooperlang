@@ -1,0 +1,13 @@
+push 1
+inside
+pop 1
+after
+push 1
+push 2
+body
+pop 2
+pop 1
+push 5
+use 5
+pop 5
+exit=0

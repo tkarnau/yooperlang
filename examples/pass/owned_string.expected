@@ -1,0 +1,6 @@
+built [hello, world]
+forwarded [hello, world]
+borrowed [hello, world] eq=1
+pad [0007] [longer]
+raw [hi]
+exit=0

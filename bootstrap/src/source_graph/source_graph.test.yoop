@@ -191,6 +191,40 @@ suite function theModulesRootIsTheNearestOneAtOrAboveTheImporter(): void {
     theory.isSuccessful = loadFails("modules_missing.yoop", "searched the modules root");
     theory.detail = `wanted a searched-root diagnostic, got: ${loadError("graph", "modules_missing.yoop")}`;
   }
+
+  // The DECOY, and it is the only assertion here that can tell "stops at the
+  // first root" apart from "walks the whole way up". PORTED from
+  // src/jsyoopdriver/moduleGraph.test.js; nothing else in the tree poses it,
+  // because `modules_missing.yoop` has no second root above it to fall through
+  // TO, so the two behaviours produce the same refusal there.
+  //
+  // `nearer/modules_decoy.yoop` imports a name the NEARER root does not hold
+  // and the outer one does. Continuing the walk would resolve it, which is how
+  // a typo gets answered by a stray `modules/` in a home directory. So the
+  // refusal is the correct outcome, and it has to name the NEAR root.
+  let test theory: Case = t.asserts("the first root wins even when it does NOT hold the name") {
+    theory.isSuccessful = loadFails("nearer/modules_decoy.yoop", "graph/nearer/modules");
+    theory.detail = `wanted the NEAR root named, got: ${loadError("graph", "nearer/modules_decoy.yoop")}`;
+  }
+}
+
+// A path that is neither relative, absolute, nor under one of the two roots.
+// PORTED from src/jsyoopdriver/moduleGraph.test.js, which is where the claim
+// that the message names every WORKING form lived; nothing on this side
+// asserted the refusal at all, and the message had been listing three of the
+// four.
+suite function aBareImportSpecifierIsRefusedAndNamesTheFormsThatWork(): void {
+  let test theory: Case = t.asserts("a bare specifier is refused") {
+    theory.isSuccessful = loadFails("bare_specifier.yoop", "must be relative");
+    theory.detail = `wanted a bare-specifier diagnostic, got: ${loadError("graph", "bare_specifier.yoop")}`;
+  }
+
+  // `modules/` is the form the author of a bare specifier usually wanted, so
+  // leaving it out of the list is what makes the message actively unhelpful.
+  let test theory: Case = t.asserts("and names modules/ among the forms that work") {
+    theory.isSuccessful = loadFails("bare_specifier.yoop", "modules/");
+    theory.detail = `wanted modules/ named, got: ${loadError("graph", "bare_specifier.yoop")}`;
+  }
 }
 
 suite function importingTheWrongThingNamesTheRightForm(): void {

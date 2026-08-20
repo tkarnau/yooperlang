@@ -1,0 +1,4 @@
+# Illegal: `memory` is not an effect category. The two the compiler has are
+# `io` and `globalState`, and a category it cannot name is a promise nothing
+# would keep - so it is refused rather than ignored.
+3:13: which is not an effect category

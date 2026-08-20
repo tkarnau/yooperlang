@@ -1,0 +1,23 @@
+enc  -> 
+enc f -> Zg==
+enc fo -> Zm8=
+enc foo -> Zm9v
+enc foob -> Zm9vYg==
+enc fooba -> Zm9vYmE=
+enc foobar -> Zm9vYmFy
+dec Zg== -> f (1)
+dec Zm9vYmE= -> fooba (5)
+dec Zm9vYmFy -> foobar (6)
+dec Zm9vYmE -> fooba (5)
+dec Zm9v
+YmFy -> foobar (6)
+url ->>>??? -> Pj4-Pz8_
+std ->>>??? -> Pj4+Pz8/
+dec Pj4-Pz8_ -> >>>??? (6)
+dec Pj4+Pz8/ -> >>>??? (6)
+dec !!!! -> ERR base64: invalid character
+dec Z -> ERR base64: truncated input
+dec Zg==Zg== -> ERR base64: data after padding
+binary encoded len=344 predicted=344
+binary roundtrip true (256 bytes)
+exit=0

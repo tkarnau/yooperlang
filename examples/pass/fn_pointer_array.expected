@@ -1,0 +1,5 @@
+aF3: ok end=3
+a_3: ok end=3
+_a3: err leading underscore
+aFxy: ok end=2
+exit=0

@@ -1,0 +1,287 @@
+module comptime;
+
+// Statement execution, and the control flow that leaves one.
+//
+// Codegen answers the same question with labels and branches; here the answer
+// is a value the caller switches on, because there is nowhere to branch TO. A
+// `Flow` other than `Normal` means the statement did not fall out of its
+// bottom, and every construct that contains statements has to say what it does
+// with that: a loop swallows `Broke`, a block passes everything up, and a
+// function body turns `Returned` into its result.
+
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { Result, Option } from "std/core/types.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import { ASTNode, ASTNodeKind, NodeId, childAt, kindName, nodeAt } from "../ast";
+import { SourceLocation } from "../diagnostics";
+import { TypeId } from "../typecheck";
+
+// How a statement left. `Returned` carries the value, since the frame that
+// started the body is the one that needs it and every block in between only
+// passes it along.
+export variant Flow {
+  Normal,
+  Returned { value: ValueId },
+  Broke,
+  Continued,
+}
+
+export function isNormal(f: Flow): bool {
+  switch (f) {
+    case Flow.Normal: { return true; }
+    default: { return false; }
+  }
+}
+
+// A `{ ... }`, in its own scope. The scope is what makes a `let` inside a loop
+// body a fresh binding each iteration rather than a redeclaration.
+export function execBlock(ref cx: EvalCx, blockId: NodeId): Result<Flow, ComptimeError> {
+  if (blockId == 0) {
+    return Result.Ok { value: Flow.Normal };
+  }
+  const block = nodeAt(cx.ast, blockId);
+  scopeEnter(cx.scope);
+  const flow = execStatements(ref cx, block)?;
+  scopeLeave(cx.scope);
+  return Result.Ok { value: flow };
+}
+
+// The statements of a block, in order, stopping at the first that does not fall
+// through. Split out so the scope push and pop stay adjacent above.
+function execStatements(ref cx: EvalCx, block: ASTNode): Result<Flow, ComptimeError> {
+  if (block.childA == 0) {
+    return Result.Ok { value: Flow.Normal };
+  }
+  const list = nodeAt(cx.ast, block.childA);
+  let i: usize = 0;
+  while (i < list.childCount) {
+    const flow = execStmt(ref cx, childAt(cx.ast, list, i))?;
+    if (!isNormal(flow)) {
+      return Result.Ok { value: flow };
+    }
+    i += 1;
+  }
+  return Result.Ok { value: Flow.Normal };
+}
+
+export function execStmt(ref cx: EvalCx, stmtId: NodeId): Result<Flow, ComptimeError> {
+  const stmt = nodeAt(cx.ast, stmtId);
+  switch (stmt.kind) {
+    case ASTNodeKind.BLOCK: {
+      return execBlock(ref cx, stmtId);
+    }
+    case ASTNodeKind.EXPRESSION_STATEMENT, ASTNodeKind.DISCARD_STATEMENT: {
+      const ignored = evalExpr(ref cx, stmt.childA)?;
+      return Result.Ok { value: Flow.Normal };
+    }
+    case ASTNodeKind.RETURN_STATEMENT: {
+      if (stmt.childA == 0) {
+        return Result.Ok { value: Flow.Returned { value: voidValue(cx.va) } };
+      }
+      // Cloned on the way out: the callee's locals are about to go out of
+      // scope, and a returned aggregate that still named one of their slots
+      // would be written through by the next call to reuse them.
+      const v = evalExprValue(ref cx, stmt.childA)?;
+      return Result.Ok { value: Flow.Returned { value: cloneValue(cx.va, v) } };
+    }
+    case ASTNodeKind.LET_DECL, ASTNodeKind.CONST_DECL: {
+      return execVarDecl(ref cx, stmt, stmtId);
+    }
+    case ASTNodeKind.ASSIGNMENT: {
+      const ignored = evalAssignment(ref cx, stmt)?;
+      return Result.Ok { value: Flow.Normal };
+    }
+    case ASTNodeKind.IF_STATEMENT: {
+      const cond = valueAt(cx.va, evalExprValue(ref cx, stmt.childA)?);
+      if (cond.bits != 0) {
+        return execBlock(ref cx, stmt.childB);
+      }
+      // An `else if` is an IF_STATEMENT in the else slot rather than a block,
+      // so the slot is executed as a STATEMENT and both shapes work.
+      if (stmt.childC != 0) {
+        return execStmt(ref cx, stmt.childC);
+      }
+      return Result.Ok { value: Flow.Normal };
+    }
+    case ASTNodeKind.WHILE_STATEMENT: {
+      return execWhile(ref cx, stmt);
+    }
+    case ASTNodeKind.FOR_LOOP: {
+      return execForLoop(ref cx, stmt, stmtId);
+    }
+    case ASTNodeKind.FOR_IN_LOOP: {
+      return execForIn(ref cx, stmt, stmtId);
+    }
+    case ASTNodeKind.SWITCH_STATEMENT: {
+      return execSwitch(ref cx, stmt);
+    }
+    case ASTNodeKind.BREAK_STATEMENT: {
+      return Result.Ok { value: Flow.Broke };
+    }
+    case ASTNodeKind.CONTINUE_STATEMENT: {
+      return Result.Ok { value: Flow.Continued };
+    }
+    default: {
+      return Result.Err { error: comptimeError(
+        `the comptime evaluator does not handle ${kindName(stmt.kind)}`, stmt.sourceLoc
+      )};
+    }
+  }
+}
+
+// `let x: T = init;`. The binding gets its OWN slot rather than naming the
+// initializer's, because assignment writes a slot and two bindings sharing one
+// would alias. That is also why the value is cloned in.
+function execVarDecl(ref cx: EvalCx, stmt: ASTNode, stmtId: NodeId): Result<Flow, ComptimeError> {
+  const declared = typeOfNode(ref cx, stmtId);
+  let slot: ValueId = VALUE_NONE;
+  if (stmt.childB == 0) {
+    slot = zeroOfType(ref cx, declared);
+  } else {
+    slot = cloneValue(cx.va, evalExprValue(ref cx, stmt.childB)?);
+  }
+  bindLocal(cx.scope, stmt.name, slot);
+  return Result.Ok { value: Flow.Normal };
+}
+
+// `target = value`. The place is resolved first and written in place, which is
+// what makes a write through a `ref` parameter land on the caller's binding.
+//
+// An EXPRESSION rather than a statement, because that is what the parser makes
+// of it: `x = 1;` is an EXPRESSION_STATEMENT wrapping an ASSIGNMENT, and `?`
+// handlers put one in expression position outright. It produces nothing, which
+// pass D already typed as void.
+export function evalAssignment(ref cx: EvalCx, stmt: ASTNode): Result<ValueId, ComptimeError> {
+  const place = openBorrow(ref cx, evalPlace(ref cx, stmt.childA)?);
+  const value = evalExprValue(ref cx, stmt.childB)?;
+  writeInto(ref cx, place, value);
+  return Result.Ok { value: voidValue(cx.va) };
+}
+
+// Copy `src`'s contents INTO the slot `dst`, keeping dst's identity. A plain
+// `setValue` of an aggregate would share src's child run, so a later write
+// through one binding would be visible through the other.
+export function writeInto(ref cx: EvalCx, dst: ValueId, src: ValueId): void {
+  const copied = cloneValue(cx.va, src);
+  setValue(cx.va, dst, valueAt(cx.va, copied));
+}
+
+function execWhile(ref cx: EvalCx, stmt: ASTNode): Result<Flow, ComptimeError> {
+  let guard: usize = 0;
+  while (true) {
+    guard += 1;
+    if (guard > MAX_LOOP_ITERATIONS) {
+      return Result.Err { error: comptimeError(
+        `a loop ran for more than ${MAX_LOOP_ITERATIONS} iterations at compile time and was stopped`,
+        stmt.sourceLoc
+      )};
+    }
+    const cond = valueAt(cx.va, evalExprValue(ref cx, stmt.childA)?);
+    if (cond.bits == 0) {
+      return Result.Ok { value: Flow.Normal };
+    }
+    const flow = execBlock(ref cx, stmt.childB)?;
+    switch (flow) {
+      case Flow.Broke: { return Result.Ok { value: Flow.Normal }; }
+      case Flow.Returned { value: v }: { return Result.Ok { value: flow }; }
+      default: {}
+    }
+  }
+}
+
+// `for (let i = 0; i < n; i = i + 1)`. The counter is scoped to the STATEMENT
+// rather than to the body, so it survives the body's own scope and is dropped
+// when the loop is.
+function execForLoop(ref cx: EvalCx, stmt: ASTNode, stmtId: NodeId): Result<Flow, ComptimeError> {
+  scopeEnter(cx.scope);
+  const flow = runForLoop(ref cx, stmt, stmtId)?;
+  scopeLeave(cx.scope);
+  return Result.Ok { value: flow };
+}
+
+function runForLoop(ref cx: EvalCx, stmt: ASTNode, stmtId: NodeId): Result<Flow, ComptimeError> {
+  const init = cloneValue(cx.va, evalExprValue(ref cx, stmt.childB)?);
+  if (stmt.flagA) {
+    bindLocal(cx.scope, stmt.name, init);
+  } else {
+    switch (lookupLocal(cx.scope, stmt.name)) {
+      case Option.Some { value: existing }: { writeInto(ref cx, existing, init); }
+      case Option.None: {
+        return Result.Err { error: comptimeError(
+          `the for-loop counter "${stmt.name}" is not in scope`, stmt.sourceLoc
+        )};
+      }
+    }
+  }
+
+  let guard: usize = 0;
+  while (true) {
+    guard += 1;
+    if (guard > MAX_LOOP_ITERATIONS) {
+      return Result.Err { error: comptimeError(
+        `a loop ran for more than ${MAX_LOOP_ITERATIONS} iterations at compile time and was stopped`,
+        stmt.sourceLoc
+      )};
+    }
+    const cond = valueAt(cx.va, evalExprValue(ref cx, stmt.childC)?);
+    if (cond.bits == 0) {
+      return Result.Ok { value: Flow.Normal };
+    }
+    const flow = execBlock(ref cx, stmt.childE)?;
+    switch (flow) {
+      case Flow.Broke: { return Result.Ok { value: Flow.Normal }; }
+      case Flow.Returned { value: v }: { return Result.Ok { value: flow }; }
+      default: {}
+    }
+    // The STEP runs after a `continue` as well as after a normal iteration,
+    // which is what separates it from a `while` whose increment is the last
+    // statement of the body.
+    const stepped = evalExprValue(ref cx, stmt.childD)?;
+    switch (lookupLocal(cx.scope, stmt.name)) {
+      case Option.Some { value: slot }: { writeInto(ref cx, slot, stepped); }
+      case Option.None: {}
+    }
+  }
+}
+
+// `for x in xs`. The iterable is evaluated ONCE and the loop variable is a COPY
+// of each element, which is the array lowering's rule and the reference's.
+// An iterator-driven `for in` is refused by name: it calls `next`, and that is
+// a trait dispatch this evaluator does not do yet.
+function execForIn(ref cx: EvalCx, stmt: ASTNode, stmtId: NodeId): Result<Flow, ComptimeError> {
+  const iterable = openBorrow(ref cx, evalExpr(ref cx, stmt.childA)?);
+  const iterSlot = valueAt(cx.va, iterable);
+  if (iterSlot.kind != ValueKind.ARRAY) {
+    return Result.Err { error: comptimeError(
+      "`for in` over anything but an array needs a trait dispatch the comptime evaluator does not do yet",
+      stmt.sourceLoc
+    )};
+  }
+
+  scopeEnter(cx.scope);
+  let i: usize = 0;
+  let out: Flow = Flow.Normal;
+  while (i < iterSlot.childCount) {
+    // The loop variable is REBOUND each iteration rather than written, so a
+    // body that borrows it does not see the next element through that borrow.
+    scopeEnter(cx.scope);
+    bindLocal(cx.scope, stmt.name, cloneValue(cx.va, childValueAt(cx.va, iterSlot, i)));
+    const flow = execBlock(ref cx, stmt.childB)?;
+    scopeLeave(cx.scope);
+    switch (flow) {
+      case Flow.Broke: { i = iterSlot.childCount; }
+      case Flow.Returned { value: v }: {
+        out = flow;
+        i = iterSlot.childCount;
+      }
+      default: { i += 1; }
+    }
+  }
+  scopeLeave(cx.scope);
+  return Result.Ok { value: out };
+}
+
+// How many times a comptime loop may go round before the evaluator gives up.
+// A runaway guard, like MAX_CALL_DEPTH: what it stops is a build that hangs,
+// which is the failure mode that reads as a broken machine rather than a bug.
+export const MAX_LOOP_ITERATIONS: usize = 1000000;

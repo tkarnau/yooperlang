@@ -1,0 +1,13 @@
+# Illegal: a string literal was never allocated, so it cannot reach `strFree`'s
+# `owned string` parameter - and a violation inside a SWITCH ARM is reached by
+# the walk exactly as one outside it is.
+#
+# The fixture asserts three more forgeries the bootstrap does not yet catch,
+# all of them in a PAYLOAD position: `Result.Ok { value: "a literal" }` against
+# a declared `Result<owned string, string>` (line 18), the concrete
+# `Slot.Held { text: "a literal" }` (line 24), and freeing an `Err` payload
+# destructured out of a `Result<owned string, string>` (line 31). All three
+# need markers to travel through a type ARGUMENT and through a payload
+# binding, which typecheck/markers.yoop deliberately treats as unknown; see
+# plans/retire_js_compiler.md section A8.
+39:31: argument 1 of "strFree" requires kind "owned"

@@ -1,0 +1,4 @@
+# Illegal: the kind `disposable` says `requires Disposable`, and PlainStruct
+# does not implement it, so the `mustCall dispose` obligation has no method to
+# call at scope end.
+16:5: requires a "dispose" method, but PlainStruct has none

@@ -1,0 +1,4 @@
+# Illegal: an inline operand in a composition has no name, so there is nowhere
+# it could be written and nothing for its own `appliesTo` to say. A composition
+# takes its sites from its named operands.
+2:21: declares appliesTo

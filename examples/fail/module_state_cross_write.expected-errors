@@ -1,0 +1,6 @@
+# Illegal: a module's mutable state is its own. The import makes `counter`
+# VISIBLE, not writable - a write from outside is invisible to every invariant
+# the declaring module keeps about it.
+#
+# A DIRECTORY fixture: the harness builds `module_state_cross_write/main.yoop`.
+4:13: written only inside the module that declares it

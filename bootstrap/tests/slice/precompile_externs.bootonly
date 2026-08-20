@@ -1,0 +1,16 @@
+Not a fold divergence - a float RENDERING one, and the same one bootstrap/
+README.md lists among the four where the bootstrap is the correct side.
+
+The reference interpolates a float through `%f` and prints six decimal places:
+
+  ROOT_16=4.000000 TWO_10=1024.000000 HYPOT=5.000000
+  FLOOR_D=3.000000 CEIL_D=4.000000 ABS_D=7.000000
+
+The bootstrap prints the value. Every folded NUMBER agrees - the two compilers
+compute the same bits, because both of them call the same libm rather than
+modelling it - so the parity worth having here is already asserted by
+comptime.test.yoop, which checks the emitted constant as a hex bit pattern
+(`0x4014000000000000`) rather than as a rendering.
+
+The integer half of the fixture agrees with the reference exactly, including
+`strcmp` normalizing to -1 / 0 / 1.

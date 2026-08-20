@@ -1,0 +1,5 @@
+# Illegal: the consumer never launders the value, and hands raw data to a
+# `cleared` sink reached through its namespace. The guarantee has to survive
+# the module boundary, which is what makes the callee's SymbolId - not its
+# spelling - the thing the marker table is keyed by.
+14:20: argument 1 of "runQuery" requires kind "cleared"

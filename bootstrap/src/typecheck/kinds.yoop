@@ -1,0 +1,709 @@
+module typecheck;
+
+// What a `kind` DECLARATION is allowed to say.
+//
+// The parser records a kind's clauses without interpreting any of them (see
+// parse/kind_decl.yoop), so a contradictory or meaningless declaration parses
+// fine. This file is where it stops: a kind that applies to nothing, that names
+// a site twice, that mixes a function site with a value site, that forbids a
+// category nobody has heard of, or whose `mustCall` names a method no required
+// trait declares, is refused HERE rather than silently promising something no
+// pass will keep.
+//
+// Two entry points, because the facts arrive in two passes:
+//
+//   checkKindDecl        pass A. Everything answerable from the declaration's
+//                        own words - sites, categories, parameter types,
+//                        composition shape. Pass A is also where KindInfo is
+//                        built, so the site set is computed once and read by
+//                        both.
+//   checkKindDeclTraits  pass C. The two rules that need a TRAIT: `requires`
+//                        naming something that is not one, and `mustCall`
+//                        naming a method none of the required traits declares.
+//                        A trait's method table is filled in pass C, so pass A
+//                        would see an empty one and refuse every kind in std.
+
+import * as str from "std/core/strings.yoop";
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import { Option } from "std/core/types.yoop";
+import { AST, ASTNode, ASTNodeKind, NodeId, childAt, nodeAt } from "../ast";
+import { COMPOSE_CLAUSE } from "../parse";
+
+// ----- application sites -----------------------------------------------------
+
+// The places a kind can be written, as bits so a set is one integer: composing
+// two kinds intersects their sites, and a duplicate site is a bit already set.
+export const SITE_BINDING: uint32 = 1;
+export const SITE_TYPE: uint32 = 2;
+export const SITE_FUNCTION: uint32 = 4;
+export const SITE_PARAMETER: uint32 = 8;
+export const SITE_FIELD: uint32 = 16;
+export const SITE_RETURN: uint32 = 32;
+export const SITE_REGION: uint32 = 64;
+
+// Every site that names a VALUE rather than a declaration. A `function` kind
+// marks the declaration itself, which is why it cannot be combined with any of
+// these - see checkSiteCombination.
+const VALUE_SITES: uint32 = 123; // BINDING|TYPE|PARAMETER|FIELD|RETURN|REGION
+
+// The bit a site word names, or 0 for a word this compiler does not know. An
+// unknown word is deliberately NOT an error: the site vocabulary is the
+// language's and this list is what the bootstrap has rules for, so refusing an
+// unrecognized one would turn a missing rule into a refused program.
+export function siteBit(word: string): uint32 {
+  if (str.stringEq(word, "binding")) { return SITE_BINDING; }
+  if (str.stringEq(word, "type")) { return SITE_TYPE; }
+  if (str.stringEq(word, "function")) { return SITE_FUNCTION; }
+  if (str.stringEq(word, "parameter")) { return SITE_PARAMETER; }
+  if (str.stringEq(word, "field")) { return SITE_FIELD; }
+  if (str.stringEq(word, "return")) { return SITE_RETURN; }
+  if (str.stringEq(word, "region")) { return SITE_REGION; }
+  return 0;
+}
+
+// Whether a kind may be written at this site.
+export function kindAppliesTo(info: KindInfo, site: uint32): bool {
+  return (info.sites & site) != 0;
+}
+
+// The site set a declaration's `appliesTo` clauses name, with no diagnostics.
+// Pass A builds KindInfo with this before any check runs, because the checks
+// below read the finished set.
+export function kindSitesOf(ref ast: AST, declNode: ASTNode): uint32 {
+  let sites: uint32 = 0;
+  let i: usize = 0;
+  while (i < declNode.childCount) {
+    const clause = nodeAt(ref ast, childAt(ref ast, declNode, i));
+    if (str.stringEq(clause.name, APPLIES_TO_CLAUSE)) {
+      let w: usize = 0;
+      while (w < clause.childCount) {
+        sites = sites | siteBit(nodeAt(ref ast, childAt(ref ast, clause, w)).name);
+        w += 1;
+      }
+    }
+    i += 1;
+  }
+  return sites;
+}
+
+// How many parameters `kind aligned(n: usize)` declares.
+export function kindParamCountOf(ref ast: AST, declNode: ASTNode): usize {
+  if (declNode.childA == 0) {
+    return 0;
+  }
+  return nodeAt(ref ast, declNode.childA).childCount;
+}
+
+// ----- pass A: the declaration's own words -----------------------------------
+
+// `info` is the finished KindInfo, composition merge included, so the site set
+// a composition INHERITED is the one checked.
+export function checkKindDecl(
+  ref prog: Program,
+  ref ast: AST,
+  declNode: ASTNode,
+  info: KindInfo
+): void {
+  checkClauseVocabulary(ref prog, ref ast, declNode);
+  checkAppliesToClauses(ref prog, ref ast, declNode);
+  checkSiteCombination(ref prog, declNode, info);
+  checkForbidsClauses(ref prog, ref ast, declNode);
+  checkEscapeClauses(ref prog, ref ast, declNode);
+  checkParamTypes(ref prog, ref ast, declNode);
+  checkLayoutClauses(ref prog, ref ast, declNode);
+  checkMarkerClauses(ref prog, ref ast, declNode, info);
+  if (declNode.flagA) {
+    checkCompositionShape(ref prog, ref ast, declNode, info);
+  }
+}
+
+// A clause word this compiler has never heard of.
+//
+// Unlike an `appliesTo` SITE, a clause word is not open vocabulary: the set
+// below is every word a kind declaration may lead a clause with, and anything
+// else is a promise no pass could keep. `restricts iteration { single; };`
+// reads like a real restriction and enforces nothing, which is worse than not
+// parsing - so it is named here rather than recorded and forgotten.
+//
+// A word this compiler RECORDS but does not yet act on (`mustNotShare`,
+// `signature`, `enumerable`, `layout`) still belongs on the list: those are
+// declared in the tree today, and refusing them would turn a missing rule into
+// a refused program.
+function checkClauseVocabulary(ref prog: Program, ref ast: AST, declNode: ASTNode): void {
+  let i: usize = 0;
+  while (i < declNode.childCount) {
+    const clause = nodeAt(ref ast, childAt(ref ast, declNode, i));
+    if (!isKnownClauseWord(clause.name)) {
+      reportError(
+        ref prog,
+        `kind "${declNode.name}" states "${clause.name}", which is not a kind clause this compiler knows - a clause it recorded and acted on nowhere would be a promise nothing keeps`,
+        clause.sourceLoc
+      );
+    }
+    i += 1;
+  }
+}
+
+function isKnownClauseWord(word: string): bool {
+  return str.stringEq(word, APPLIES_TO_CLAUSE) ||
+    str.stringEq(word, REQUIRES_CLAUSE) ||
+    str.stringEq(word, MUST_CALL_CLAUSE) ||
+    str.stringEq(word, MUST_NOT_ESCAPE_CLAUSE) ||
+    str.stringEq(word, MUST_NOT_SHARE_CLAUSE) ||
+    str.stringEq(word, OWNS_BLOCK_CLAUSE) ||
+    str.stringEq(word, FORBIDS_CLAUSE) ||
+    str.stringEq(word, LAYOUT_CLAUSE) ||
+    str.stringEq(word, PAUSABLE_CLAUSE) ||
+    str.stringEq(word, PROVIDES_CLAUSE) ||
+    str.stringEq(word, REFCOUNTED_CLAUSE) ||
+    str.stringEq(word, SIGNATURE_CLAUSE) ||
+    str.stringEq(word, ENUMERABLE_CLAUSE) ||
+    str.stringEq(word, CONFERRED_CLAUSE) ||
+    str.stringEq(word, RESTRICTIVE_CLAUSE) ||
+    str.stringEq(word, APPLIED_BY_CLAUSE) ||
+    str.stringEq(word, CLEARED_BY_CLAUSE) ||
+    str.stringEq(word, COMPOSE_CLAUSE);
+}
+
+// `appliesTo;` names nothing, and `appliesTo binding binding` names the same
+// place twice. Both are written rather than meant, and neither has a reading
+// that differs from the one-site form.
+function checkAppliesToClauses(ref prog: Program, ref ast: AST, declNode: ASTNode): void {
+  let seen: uint32 = 0;
+  let i: usize = 0;
+  while (i < declNode.childCount) {
+    const clause = nodeAt(ref ast, childAt(ref ast, declNode, i));
+    if (!str.stringEq(clause.name, APPLIES_TO_CLAUSE)) {
+      i += 1;
+      continue;
+    }
+    if (clause.childCount == 0) {
+      reportError(
+        ref prog,
+        `appliesTo on kind "${declNode.name}" names no site - say where the kind may be written, as in "appliesTo binding"`,
+        clause.sourceLoc
+      );
+    }
+    let w: usize = 0;
+    while (w < clause.childCount) {
+      const word = nodeAt(ref ast, childAt(ref ast, clause, w));
+      const bit = siteBit(word.name);
+      if (bit != 0 && (seen & bit) != 0) {
+        reportError(
+          ref prog,
+          `kind "${declNode.name}" already applies to "${word.name}" - naming a site twice says nothing the first one did not`,
+          word.sourceLoc
+        );
+      }
+      seen = seen | bit;
+      w += 1;
+    }
+    i += 1;
+  }
+}
+
+// A FUNCTION kind marks the declaration it is written in front of; every other
+// site marks a VALUE. One kind cannot be both, because the two carry different
+// obligations and nothing says which one a use meant.
+function checkSiteCombination(ref prog: Program, declNode: ASTNode, info: KindInfo): void {
+  if ((info.sites & SITE_FUNCTION) == 0 || (info.sites & VALUE_SITES) == 0) {
+    return;
+  }
+  reportError(
+    ref prog,
+    `kind "${declNode.name}" applies to a function and to a value site - a function kind marks the declaration rather than a value, so it can be one or the other`,
+    declNode.sourceLoc
+  );
+}
+
+// `forbids` names EFFECT categories, and the compiler has two of them. A
+// category it cannot name is a promise nothing will keep, so it is refused
+// rather than ignored - unlike an appliesTo site, the whole vocabulary is this
+// compiler's.
+function checkForbidsClauses(ref prog: Program, ref ast: AST, declNode: ASTNode): void {
+  let i: usize = 0;
+  while (i < declNode.childCount) {
+    const clause = nodeAt(ref ast, childAt(ref ast, declNode, i));
+    if (!str.stringEq(clause.name, FORBIDS_CLAUSE)) {
+      i += 1;
+      continue;
+    }
+    if (clause.childCount == 0) {
+      reportError(
+        ref prog,
+        `forbids on kind "${declNode.name}" names no category - the categories are "io" and "globalState"`,
+        clause.sourceLoc
+      );
+    }
+    let w: usize = 0;
+    while (w < clause.childCount) {
+      const word = nodeAt(ref ast, childAt(ref ast, clause, w));
+      if (!str.stringEq(word.name, FORBIDS_IO) && !str.stringEq(word.name, FORBIDS_GLOBAL_STATE)) {
+        reportError(
+          ref prog,
+          `kind "${declNode.name}" forbids "${word.name}", which is not an effect category - the categories are "io" and "globalState"`,
+          word.sourceLoc
+        );
+      }
+      w += 1;
+    }
+    i += 1;
+  }
+}
+
+// `mustNotEscape` bounds a value by a SCOPE, and that is the only bound the
+// compiler can enforce: a scope has a closing brace to place the check at.
+// `mustNotEscape function` reads like a weaker promise and is not one anything
+// implements, so it is refused instead of being read as `scope`.
+//
+// Two of them on one kind is the same clause twice, which is written rather
+// than meant.
+function checkEscapeClauses(ref prog: Program, ref ast: AST, declNode: ASTNode): void {
+  let seen: usize = 0;
+  let i: usize = 0;
+  while (i < declNode.childCount) {
+    const clause = nodeAt(ref ast, childAt(ref ast, declNode, i));
+    if (!str.stringEq(clause.name, MUST_NOT_ESCAPE_CLAUSE)) {
+      i += 1;
+      continue;
+    }
+    seen += 1;
+    if (seen > 1) {
+      reportError(
+        ref prog,
+        `kind "${declNode.name}" states mustNotEscape twice - one clause is the whole promise`,
+        clause.sourceLoc
+      );
+    }
+    if (clause.childCount != 1 ||
+        !str.stringEq(nodeAt(ref ast, childAt(ref ast, clause, 0)).name, ESCAPE_SCOPE)) {
+      reportError(
+        ref prog,
+        `kind "${declNode.name}" bounds mustNotEscape by something other than "scope" - a scope is the only bound with a place to check it`,
+        clause.sourceLoc
+      );
+    }
+    i += 1;
+  }
+}
+
+// The four clearance clauses, and every way of writing them that contradicts
+// itself.
+//
+// A MARKER kind is the one kind of kind that emits nothing: `conferred` names a
+// capability a value cannot forge, `restrictive` names a hazard it cannot
+// silently drop, and both are enforced purely as a bound where a value moves.
+// That is what the rules below are protecting - each of these declarations
+// reads as a promise and none of them can be one:
+//
+//   conferred; restrictive;        the two bounds run in OPPOSITE directions,
+//                                  so a value would have to both already carry
+//                                  the kind and never carry it.
+//   conferred; mustCall dispose;   a marker carries no obligation. There is no
+//                                  value to call anything on and no scope end
+//                                  to call it at.
+//   conferred; clearedBy f;        `clearedBy` sheds a hazard, and a capability
+//                                  is not one. `appliedBy` is the conferred
+//                                  half.
+//   appliedBy f;   (no requires)   the authority is a TRAIT IMPL: a type opts
+//                                  in by implementing the required trait, and
+//                                  the method is reached through it. With no
+//                                  trait named there is nothing to opt into, so
+//                                  no impl could ever be authorized.
+//   appliedBy f;   (no polarity)   a transition needs something to transition.
+function checkMarkerClauses(
+  ref prog: Program,
+  ref ast: AST,
+  declNode: ASTNode,
+  info: KindInfo
+): void {
+  if (info.conferred && info.restrictive) {
+    reportError(
+      ref prog,
+      `kind "${declNode.name}" is both conferred and restrictive - the two bounds run in opposite directions, so no value could satisfy both`,
+      declNode.sourceLoc
+    );
+    return;
+  }
+  const marker = info.conferred || info.restrictive;
+  if (marker && info.disposeMethod.len != 0) {
+    reportError(
+      ref prog,
+      `kind "${declNode.name}" is a marker and states mustCall - a marker kind carries no obligation, so there is nothing to call "${info.disposeMethod}" on`,
+      declNode.sourceLoc
+    );
+  }
+  checkTransitionClause(ref prog, ref ast, declNode, info, APPLIED_BY_CLAUSE, info.restrictive, marker);
+  checkTransitionClause(ref prog, ref ast, declNode, info, CLEARED_BY_CLAUSE, info.conferred, marker);
+}
+
+// One of the two transition clauses, against the polarity it belongs to.
+// `wrongPolarity` is the OTHER polarity being declared, which is the one thing
+// that makes the clause read backwards.
+function checkTransitionClause(
+  ref prog: Program,
+  ref ast: AST,
+  declNode: ASTNode,
+  info: KindInfo,
+  word: string,
+  wrongPolarity: bool,
+  marker: bool
+): void {
+  const clause = clauseNamed(ref ast, declNode, word);
+  if (clause == 0) {
+    return;
+  }
+  const at = nodeAt(ref ast, clause);
+  if (wrongPolarity) {
+    reportError(
+      ref prog,
+      `kind "${declNode.name}" states ${word}, which is the ${polarityOf(word)} half - a ${polarityOf(oppositeClause(word))} kind wants "${oppositeClause(word)}" instead`,
+      at.sourceLoc
+    );
+    return;
+  }
+  if (!marker) {
+    reportError(
+      ref prog,
+      `kind "${declNode.name}" states ${word} but is neither conferred nor restrictive - a transition needs a marker to transition`,
+      at.sourceLoc
+    );
+    return;
+  }
+  if (info.requiresTrait.len == 0) {
+    reportError(
+      ref prog,
+      `kind "${declNode.name}" states ${word} but requires no trait - the authorized method is reached through a required trait, so with none named no impl could ever be the authority`,
+      at.sourceLoc
+    );
+  }
+}
+
+// Which polarity a transition clause belongs to, for the diagnostic above.
+function polarityOf(word: string): string {
+  if (str.stringEq(word, APPLIED_BY_CLAUSE)) {
+    return "conferred";
+  }
+  return "restrictive";
+}
+
+function oppositeClause(word: string): string {
+  if (str.stringEq(word, APPLIED_BY_CLAUSE)) {
+    return CLEARED_BY_CLAUSE;
+  }
+  return APPLIED_BY_CLAUSE;
+}
+
+// The NodeId of a declaration's clause with this leading word, or 0. The
+// diagnostics above point at the clause rather than at the declaration, which
+// is what makes a contradiction between two clauses readable: the message names
+// the other one.
+function clauseNamed(ref ast: AST, declNode: ASTNode, word: string): NodeId {
+  let i: usize = 0;
+  while (i < declNode.childCount) {
+    const id = childAt(ref ast, declNode, i);
+    if (str.stringEq(nodeAt(ref ast, id).name, word)) {
+      return id;
+    }
+    i += 1;
+  }
+  return 0;
+}
+
+// `kind aligned(n: usize)` - a parameter is a compile-time NUMBER, because the
+// only thing a kind argument reaches is a layout clause. A `string` parameter
+// has nowhere to be used.
+function checkParamTypes(ref prog: Program, ref ast: AST, declNode: ASTNode): void {
+  if (declNode.childA == 0) {
+    return;
+  }
+  const params = nodeAt(ref ast, declNode.childA);
+  let i: usize = 0;
+  while (i < params.childCount) {
+    const param = nodeAt(ref ast, childAt(ref ast, params, i));
+    if (param.childA == 0) {
+      i += 1;
+      continue;
+    }
+    const annot = nodeAt(ref ast, param.childA);
+    if (annot.kind != ASTNodeKind.TYPE_ANNOTATION_TYPE_NAME || !isKindParamType(annot.name)) {
+      reportError(
+        ref prog,
+        `parameter "${param.name}" of kind "${declNode.name}" is not a compile-time number - a kind parameter is usize, int32 or uint32`,
+        param.sourceLoc
+      );
+    }
+    i += 1;
+  }
+}
+
+function isKindParamType(name: string): bool {
+  return str.stringEq(name, "usize") ||
+    str.stringEq(name, "int32") ||
+    str.stringEq(name, "uint32");
+}
+
+// `layout { abi "C"; align 32; };` - the two sub-clauses a layout body may
+// state, and what each of them may say.
+//
+// `abi` names a CALLING and LAYOUT convention, and this compiler lays a type
+// out one way: C's. A body naming another one reads as a promise to match a
+// foreign ABI, and a struct laid out to the wrong one is not a diagnostic at
+// run time - it is a garbled read across an FFI boundary.
+//
+// A sub-clause word neither of those is refused for the same reason an unknown
+// CLAUSE word is: nothing would read it, so it promises a layout nobody emits.
+function checkLayoutClauses(ref prog: Program, ref ast: AST, declNode: ASTNode): void {
+  let i: usize = 0;
+  while (i < declNode.childCount) {
+    const clause = nodeAt(ref ast, childAt(ref ast, declNode, i));
+    if (!str.stringEq(clause.name, LAYOUT_CLAUSE) || clause.childA == 0) {
+      i += 1;
+      continue;
+    }
+    const body = nodeAt(ref ast, clause.childA);
+    let b: usize = 0;
+    while (b < body.childCount) {
+      checkLayoutSubClause(ref prog, ref ast, declNode, nodeAt(ref ast, childAt(ref ast, body, b)));
+      b += 1;
+    }
+    i += 1;
+  }
+}
+
+function checkLayoutSubClause(
+  ref prog: Program,
+  ref ast: AST,
+  declNode: ASTNode,
+  sub: ASTNode
+): void {
+  if (str.stringEq(sub.name, LAYOUT_ALIGN)) {
+    return;   // a number or a kind parameter; checkParamTypes owns the latter
+  }
+  if (!str.stringEq(sub.name, LAYOUT_ABI)) {
+    reportError(
+      ref prog,
+      `kind "${declNode.name}" states layout sub-clause "${sub.name}", which this compiler does not implement - a layout body states "abi" or "align"`,
+      sub.sourceLoc
+    );
+    return;
+  }
+  if (sub.childCount != 1) {
+    reportError(
+      ref prog,
+      `kind "${declNode.name}" states layout abi with no marker - the one this compiler lays a type out for is "C"`,
+      sub.sourceLoc
+    );
+    return;
+  }
+  const marker = nodeAt(ref ast, childAt(ref ast, sub, 0));
+  if (!str.stringEq(marker.name, LAYOUT_ABI_C)) {
+    reportError(
+      ref prog,
+      `kind "${declNode.name}" states layout abi ${marker.name}, and "C" is the only ABI this compiler lays a type out for`,
+      marker.sourceLoc
+    );
+  }
+}
+
+// The word a decl's `layout { align W; }` states, or "". Read for the
+// composition contradiction below, which compares two operands' answers - the
+// word rather than a number, because `align n` on a parameterized kind has no
+// number to read and still has to compare equal to itself.
+export function kindAlignWordOf(ref ast: AST, declNode: ASTNode): string {
+  let i: usize = 0;
+  while (i < declNode.childCount) {
+    const clause = nodeAt(ref ast, childAt(ref ast, declNode, i));
+    if (str.stringEq(clause.name, LAYOUT_CLAUSE) && clause.childA != 0) {
+      const body = nodeAt(ref ast, clause.childA);
+      let b: usize = 0;
+      while (b < body.childCount) {
+        const sub = nodeAt(ref ast, childAt(ref ast, body, b));
+        if (str.stringEq(sub.name, LAYOUT_ALIGN) && sub.childCount == 1) {
+          return nodeAt(ref ast, childAt(ref ast, sub, 0)).name;
+        }
+        b += 1;
+      }
+    }
+    i += 1;
+  }
+  return "";
+}
+
+// The two rules that are about the COMPOSITION rather than about a clause.
+//
+//   `kind bad = base & { appliesTo binding; };`  an inline body cannot declare
+//   sites: a composition is written where every one of its named operands may
+//   be, and an inline body has no name to be written anywhere at all.
+//
+//   `kind bad = only_binding & only_type;`       and if that intersection is
+//   empty there is no place left to write the composed kind, so it is a name
+//   for nothing.
+function checkCompositionShape(
+  ref prog: Program,
+  ref ast: AST,
+  declNode: ASTNode,
+  info: KindInfo
+): void {
+  let sitedOperands: usize = 0;
+  let i: usize = 0;
+  while (i < declNode.childCount) {
+    const clause = nodeAt(ref ast, childAt(ref ast, declNode, i));
+    if (str.stringEq(clause.name, APPLIES_TO_CLAUSE)) {
+      reportError(
+        ref prog,
+        `the inline body in kind "${declNode.name}" declares appliesTo - a composition takes its sites from its named operands, so there is nothing for an inline one to say`,
+        clause.sourceLoc
+      );
+    }
+    if (str.stringEq(clause.name, COMPOSE_CLAUSE) && composedOperandHasSites(ref prog, ref ast, clause)) {
+      sitedOperands += 1;
+    }
+    i += 1;
+  }
+
+  if (sitedOperands > 0 && info.sites == 0) {
+    reportError(
+      ref prog,
+      `the operands of kind "${declNode.name}" share no application site, so there is nowhere the composition may be written`,
+      declNode.sourceLoc
+    );
+  }
+}
+
+function composedOperandHasSites(ref prog: Program, ref ast: AST, clause: ASTNode): bool {
+  if (clause.strId >= ast.strings.len) {
+    return false;
+  }
+  switch (lookupKind(ref prog, vec.vecGet(ref ast.strings, clause.strId))) {
+    case Option.Some { value: operand }: { return operand.sites != 0; }
+    case Option.None: { return false; }
+  }
+}
+
+// ----- pass C: the rules that need a trait -----------------------------------
+
+// `requires NotATrait` and `mustCall close` against a trait that declares no
+// `close`. Both are about the METHOD a scope end will call, and both can only
+// be answered once trait method tables are filled - which is this pass.
+//
+// A COMPOSITION is skipped: its `requires` and its `mustCall` come from
+// different operands, each already checked where it was declared.
+export function checkKindDeclTraits(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  declNode: ASTNode
+): void {
+  if (declNode.flagA) {
+    return;
+  }
+
+  disposable required: Vec<TypeId> = vec.vecNew(2);
+  let allResolved = true;
+  let requiresClauses: usize = 0;
+  let i: usize = 0;
+  while (i < declNode.childCount) {
+    const clause = nodeAt(ref ast, childAt(ref ast, declNode, i));
+    if (!str.stringEq(clause.name, REQUIRES_CLAUSE) || clause.childCount == 0) {
+      i += 1;
+      continue;
+    }
+    requiresClauses += 1;
+    const named = nodeAt(ref ast, childAt(ref ast, clause, 0));
+    const traitId = traitTypeNamed(ref prog, ref tm, named.name);
+    if (traitId == TYPE_ERROR_ID) {
+      allResolved = false;
+      reportError(
+        ref prog,
+        `kind "${declNode.name}" requires "${named.name}", which is not a trait declared or imported here`,
+        named.sourceLoc
+      );
+    } else {
+      vec.vecPush(ref required, traitId);
+    }
+    i += 1;
+  }
+
+  checkMustCallIsRequired(ref prog, ref ast, declNode, ref required, allResolved, requiresClauses);
+}
+
+// The method a `mustCall` names is called through a trait the kind REQUIRES -
+// that is what makes the call resolvable on any type the kind is written on.
+// So there are two ways to promise a call nothing could make: name a method no
+// required trait declares, and require no trait at all.
+//
+// Silent when a required trait failed to resolve: the diagnostic for that
+// already stands, and the method may well be declared by the trait that is
+// missing.
+function checkMustCallIsRequired(
+  ref prog: Program,
+  ref ast: AST,
+  declNode: ASTNode,
+  ref required: Vec<TypeId>,
+  allResolved: bool,
+  requiresClauses: usize
+): void {
+  if (!allResolved) {
+    return;
+  }
+  let i: usize = 0;
+  while (i < declNode.childCount) {
+    const clause = nodeAt(ref ast, childAt(ref ast, declNode, i));
+    if (!str.stringEq(clause.name, MUST_CALL_CLAUSE) || clause.childCount == 0) {
+      i += 1;
+      continue;
+    }
+    const method = nodeAt(ref ast, childAt(ref ast, clause, 0));
+    if (requiresClauses == 0) {
+      reportError(
+        ref prog,
+        `kind "${declNode.name}" must call "${method.name}", but requires no trait - the scope-end call is reached through a required trait, so there is nothing here to call it on`,
+        method.sourceLoc
+      );
+    } else if (!anyRequiredTraitDeclares(ref prog, ref required, method.name)) {
+      reportError(
+        ref prog,
+        `kind "${declNode.name}" must call "${method.name}", which none of the traits it requires declares`,
+        method.sourceLoc
+      );
+    }
+    i += 1;
+  }
+}
+
+function anyRequiredTraitDeclares(ref prog: Program, ref required: Vec<TypeId>, name: string): bool {
+  let i: usize = 0;
+  while (i < required.len) {
+    if (lookupMethod(ref prog, vec.vecGet(ref required, i), name) != TYPE_ERROR_ID) {
+      return true;
+    }
+    i += 1;
+  }
+  return false;
+}
+
+// ----- the clause words this file matches on ---------------------------------
+
+const FORBIDS_CLAUSE: string = "forbids";
+const FORBIDS_IO: string = "io";
+const FORBIDS_GLOBAL_STATE: string = "globalState";
+const MUST_NOT_ESCAPE_CLAUSE: string = "mustNotEscape";
+const ESCAPE_SCOPE: string = "scope";
+const REQUIRES_CLAUSE: string = "requires";
+// The clearance clauses. `conferred` and `restrictive` are the two marker
+// polarities; `appliedBy` and `clearedBy` name the trait method authorized to
+// mint the capability or to shed the hazard. See checkMarkerClauses.
+const MUST_NOT_SHARE_CLAUSE: string = "mustNotShare";
+const LAYOUT_CLAUSE: string = "layout";
+const LAYOUT_ABI: string = "abi";
+const LAYOUT_ALIGN: string = "align";
+// The marker's SOURCE spelling, quotes included - see parseKindSubClause.
+const LAYOUT_ABI_C: string = "\"C\"";
+const SIGNATURE_CLAUSE: string = "signature";
+const ENUMERABLE_CLAUSE: string = "enumerable";
+const CONFERRED_CLAUSE: string = "conferred";
+const RESTRICTIVE_CLAUSE: string = "restrictive";
+const APPLIED_BY_CLAUSE: string = "appliedBy";
+const CLEARED_BY_CLAUSE: string = "clearedBy";

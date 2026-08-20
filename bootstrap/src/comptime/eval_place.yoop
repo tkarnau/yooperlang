@@ -1,0 +1,73 @@
+module comptime;
+
+// A PLACE: the slot an expression names, rather than a copy of what is in it.
+//
+// Three things want one, and they want the same answer:
+//
+//   `ref x`      the borrow IS the slot's id
+//   `x = v`      the assignment writes that slot
+//   `p.f = v`    the write lands in the field's own child slot
+//
+// Which is why this is one function rather than three: a borrow that resolved
+// a place differently from an assignment would let a callee write somewhere its
+// caller could not read.
+//
+// The difference from `evalExpr` is only that nothing is cloned on the way out.
+// Reading `p.x` and borrowing `ref p.x` reach the same slot; the read is free
+// to be copied afterwards and the borrow must not be.
+
+import * as str from "std/core/strings.yoop";
+import { Result, Option } from "std/core/types.yoop";
+import { ASTNode, ASTNodeKind, NodeId, kindName, nodeAt } from "../ast";
+import { derefType, lookupField } from "../typecheck";
+
+export function evalPlace(ref cx: EvalCx, exprId: NodeId): Result<ValueId, ComptimeError> {
+  const expr = nodeAt(cx.ast, exprId);
+  switch (expr.kind) {
+    // A local's slot. A module-level name has no comptime storage to name, so
+    // it is refused here rather than silently borrowed as a copy.
+    case ASTNodeKind.IDENT: {
+      switch (lookupLocal(cx.scope, expr.name)) {
+        case Option.Some { value: slot }: { return Result.Ok { value: slot }; }
+        case Option.None: {
+          return Result.Err { error: comptimeError(
+            `"${expr.name}" has no storage at compile time, so there is nothing to borrow or assign`,
+            expr.sourceLoc
+          )};
+        }
+      }
+    }
+    case ASTNodeKind.FIELD_ACCESS: {
+      const base = openBorrow(ref cx, evalPlace(ref cx, expr.childA)?);
+      const baseSlot = valueAt(cx.va, base);
+      if (baseSlot.kind != ValueKind.STRUCT) {
+        return unhandled("a field of something that is not a struct", expr.sourceLoc);
+      }
+      const found = lookupField(cx.prog, derefType(cx.prog, baseSlot.typeId), expr.name);
+      if (!found.found || found.index >= baseSlot.childCount) {
+        return Result.Err { error: comptimeError(
+          `"${expr.name}" is not a field of this struct`, expr.sourceLoc
+        )};
+      }
+      return Result.Ok { value: childValueAt(cx.va, baseSlot, found.index) };
+    }
+    case ASTNodeKind.INDEX_EXPRESSION: {
+      const base = openBorrow(ref cx, evalPlace(ref cx, expr.childA)?);
+      const baseSlot = valueAt(cx.va, base);
+      if (baseSlot.kind != ValueKind.ARRAY) {
+        return unhandled("an index of something that is not an array", expr.sourceLoc);
+      }
+      const idx = valueAt(cx.va, evalExprValue(ref cx, expr.childB)?);
+      if (idx.bits >= uint64(baseSlot.childCount)) {
+        return Result.Err { error: comptimeError(
+          `index ${idx.bits} is past the end of a ${baseSlot.childCount}-element array`,
+          expr.sourceLoc
+        )};
+      }
+      return Result.Ok { value: childValueAt(cx.va, baseSlot, usize(idx.bits)) };
+    }
+    default: {
+      return unhandled(`${kindName(expr.kind)} in a position that needs storage`, expr.sourceLoc);
+    }
+  }
+}

@@ -1,0 +1,43 @@
+// Illegal: each of these types contains itself by value, so laying it out asks
+// for its own size in order to compute its own size.
+//
+// Without the check the compiler emits IR and clang refuses it -
+// `identified structure type "%struct.m__Node" is recursive` - which is a
+// failure with the compiler's name nowhere on it. The cycle may be direct, may
+// run through a second declaration, or may run through a generic; all three are
+// the same infinity.
+//
+// The LEGAL neighbours are the whole reason this needs a check rather than a
+// ban: `next: ref Node`, `kids: Node[]`, `next: unsafe_ptr<Node>` and
+// `kids: Vec<Node>` are all fine, because a pointer has a size whatever it
+// points at. Those are asserted in
+// bootstrap/src/typecheck/typecheck.test.yoop.
+type Node {
+    v: int32,
+    next: Node,
+}
+
+type Left {
+    r: Right,
+}
+
+type Right {
+    l: Left,
+}
+
+type Box<T> {
+    v: T,
+}
+
+type Wrapped {
+    b: Box<Wrapped>,
+}
+
+variant Tree {
+    Branch { left: Tree },
+    Leaf,
+}
+
+function main(): int32 {
+    return 0;
+}

@@ -1,0 +1,13 @@
+// Illegal: a `Task<T>` field is a refcounted handle, and the struct holding it
+// says nothing. The handle in the field has no count of its own, so the release
+// the spawning scope emits is the last one and the field is left dangling.
+//
+// `propagates<pooled>` on the type is what gives the obligation a holder. The
+// companion is examples/pass/propagates_full/, which writes the clause.
+type Job {
+    work: Task<int32>,
+}
+
+function main(): int32 {
+    return 0;
+}

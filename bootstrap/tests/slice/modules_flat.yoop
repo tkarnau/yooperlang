@@ -1,0 +1,36 @@
+// The `modules/` import root, in the three shapes a program actually writes.
+//
+// PORTED from src/jsyoopdriver/moduleGraph.test.js. `examples/modules_demo/`
+// covers the same ground and is reached by nothing that survives the JS
+// reference - `scripts/probe_programs.sh` and `src/e2e.test.js` are the only
+// two things that build it, and both retire with `src/`. The unit tests in
+// bootstrap/src/source_graph/ cover WHICH root answers; none of them covers a
+// module that itself imports through the root.
+//
+// Three things at once, all resolved against ONE root beside this file:
+//
+//   modules/helper.yoop   a single-FILE module, named with its extension
+//   modules/web/router    a module under a GROUPING directory, so the path
+//                         past the root is more than one segment
+//   modules/dep           a directory module whose OWN import of modules/leaf
+//                         resolves against that same flat root
+//
+// The last one is the point. `dep` is installed here by whoever installed it
+// and carries no path to `leaf`; it walks up from its own directory and lands
+// on the root the entry uses, which is what "dependencies are flat" means.
+
+import * as helper from "modules/helper.yoop";
+import * as router from "modules/web/router";
+import * as dep from "modules/dep";
+
+extern "C" from "stdio.h" {
+  function printf(fmt: string, ...): int32;
+}
+
+function main(): int32 {
+  printf("helper=%d\n", helper.helperValue());
+  printf("router=%d\n", router.route(5));
+  // 5 * leaf.leafValue(), and the entry never imported leaf.
+  printf("dep=%d\n", dep.depTimesLeaf(5));
+  return 0;
+}

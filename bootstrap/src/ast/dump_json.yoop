@@ -1,0 +1,246 @@
+module ast;
+
+/*
+  The AST as JSON, for the pipeline viewer on the web site.
+
+      { "filename": "hello.yoop", "source": "...", "ast": { ... } }
+
+  and each node
+
+      { "id": 3, "kind": "BINARY_EXPRESSION", "label": "leftNode",
+        "loc": { "pos": 41, "length": 1, "line": 4, "column": 12 },
+        "fields": { "operator": "PLUS" },
+        "children": [ ... ] }
+
+  WHAT THIS IS NOT is the JS reference's dump. The two ASTs are not the same
+  shape - this side wraps a variable-arity list in a NODE_LIST node and makes a
+  type annotation a real node - so a byte-identical payload was never available
+  and pretending otherwise would describe a tree that does not exist. What is
+  the same is the SHAPE THE VIEWER READS: kind, label, loc, fields, children.
+
+  The child LABELS come from slots.yoop, which already names every slot per
+  kind. That is the whole reason this reads as well as it does: `childD` is
+  meaningless in a dump, and `bodyBlock` is not.
+
+  NO JSON LIBRARY. Writing JSON is escaping plus structure; reading it needs a
+  value model, and that is a design worth doing on purpose rather than as a side
+  effect of a dump. If `std/encoding/json.yoop` ever exists this switches to it.
+*/
+
+import { Vec }, * as vec from "std/core/vec.yoop";
+import * as fmt from "std/core/format.yoop";
+import { Text }, * as text from "std/core/text.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import * as intr from "std/core/intrinsics.yoop";
+import { TokenTags, tagName } from "../lex";
+
+// The whole payload, ready to write to a file.
+export function dumpAstJson(
+  ref ast: AST,
+  root: NodeId,
+  filename: string,
+  src: uint8[]
+): Text propagates<disposable> {
+  let out: Text = text.make(8192);
+  text.push(ref out, "{\"filename\":");
+  pushJsonString(ref out, filename);
+  text.push(ref out, ",\"source\":");
+  pushJsonBytes(ref out, src);
+  text.push(ref out, ",\"ast\":");
+  let nextId: usize = 1;
+  pushNodeJson(ref out, ref ast, root, "", ref nextId);
+  text.push(ref out, "}");
+  return out;
+}
+
+// One node and everything under it.
+//
+// `id` is a running counter rather than the NodeId, because the viewer wants a
+// number unique to the RENDERED tree and a node reached through two slots would
+// otherwise collide with itself.
+function pushNodeJson(
+  ref out: Text,
+  ref ast: AST,
+  id: NodeId,
+  label: string,
+  ref nextId: usize
+): void {
+  const node = nodeAt(ref ast, id);
+  text.push(ref out, "{\"id\":");
+  text.pushUint(ref out, uint64(nextId));
+  // `nextId = nextId + 1` rather than `nextId += 1`, and only because the JS
+  // reference miscompiles the compound form through a `ref` scalar parameter -
+  // it emits `add ptr %n, 1` without opening the borrow, which clang refuses.
+  // The bootstrap compiles both correctly. Remove this note with the reference.
+  nextId = nextId + 1;
+  text.push(ref out, ",\"kind\":");
+  pushJsonString(ref out, kindName(node.kind));
+  if (label.len > 0) {
+    text.push(ref out, ",\"label\":");
+    pushJsonString(ref out, label);
+  }
+
+  text.push(ref out, ",\"loc\":{\"pos\":");
+  text.pushUint(ref out, uint64(node.sourceLoc.pos));
+  text.push(ref out, ",\"length\":");
+  text.pushUint(ref out, uint64(node.sourceLoc.length));
+  text.push(ref out, ",\"line\":");
+  // One-based, the way a reader counts and the way every other line number the
+  // compiler prints is - `SourceLocation.line` itself is zero-based.
+  text.pushUint(ref out, uint64(node.sourceLoc.line + 1));
+  text.push(ref out, ",\"column\":");
+  text.pushUint(ref out, uint64(node.sourceLoc.column));
+  text.push(ref out, "}");
+
+  pushFieldsJson(ref out, ref ast, node);
+  pushChildrenJson(ref out, ref ast, node, ref nextId);
+  text.push(ref out, "}");
+}
+
+// The scalar slots that carry something. Omitted when empty rather than written
+// as zero: the viewer summarizes whatever is here, and a node listing six zeros
+// tells a reader nothing.
+function pushFieldsJson(ref out: Text, ref ast: AST, node: ASTNode): void {
+  disposable keys: Vec<string> = vec.vecNew(4);
+  disposable values: Vec<string> = vec.vecNew(4);
+
+  if (node.name.len > 0) {
+    vec.vecPush(ref keys, "name");
+    vec.vecPush(ref values, node.name);
+  }
+  if (node.operator != TokenTags.NOTOKEN) {
+    vec.vecPush(ref keys, "operator");
+    vec.vecPush(ref values, tagName(node.operator));
+  }
+  if (node.intVal != 0) {
+    vec.vecPush(ref keys, "intVal");
+    vec.vecPush(ref values, fmt.uintToString(node.intVal));
+  }
+  if (node.strId != 0 && node.strId < ast.strings.len) {
+    vec.vecPush(ref keys, "text");
+    vec.vecPush(ref values, vec.vecGet(ref ast.strings, node.strId));
+  }
+  if (node.flagA) {
+    vec.vecPush(ref keys, "flagA");
+    vec.vecPush(ref values, "true");
+  }
+
+  if (keys.len == 0) {
+    return;
+  }
+  text.push(ref out, ",\"fields\":{");
+  let i: usize = 0;
+  while (i < keys.len) {
+    if (i > 0) {
+      text.pushByte(ref out, ',');
+    }
+    pushJsonString(ref out, vec.vecGet(ref keys, i));
+    text.pushByte(ref out, ':');
+    pushJsonString(ref out, vec.vecGet(ref values, i));
+    i += 1;
+  }
+  text.push(ref out, "}");
+}
+
+// The named slots, each labelled with what it MEANS for this kind, then the
+// node's own child run.
+function pushChildrenJson(ref out: Text, ref ast: AST, node: ASTNode, ref nextId: usize): void {
+  disposable slots: Vec<NodeId> = vec.vecNew(6);
+  disposable labels: Vec<string> = vec.vecNew(6);
+  noteSlot(ref slots, ref labels, node.childA, astNodeChildAName(node.kind));
+  noteSlot(ref slots, ref labels, node.childB, astNodeChildBName(node.kind));
+  noteSlot(ref slots, ref labels, node.childC, astNodeChildCName(node.kind));
+  noteSlot(ref slots, ref labels, node.childD, astNodeChildDName(node.kind));
+  noteSlot(ref slots, ref labels, node.childE, astNodeChildEName(node.kind));
+  noteSlot(ref slots, ref labels, node.childF, "childF");
+
+  if (slots.len == 0 && node.childCount == 0) {
+    return;
+  }
+  text.push(ref out, ",\"children\":[");
+  let wrote: usize = 0;
+  let i: usize = 0;
+  while (i < slots.len) {
+    if (wrote > 0) {
+      text.pushByte(ref out, ',');
+    }
+    pushNodeJson(ref out, ref ast, vec.vecGet(ref slots, i), vec.vecGet(ref labels, i), ref nextId);
+    wrote += 1;
+    i += 1;
+  }
+  let c: usize = 0;
+  while (c < node.childCount) {
+    if (wrote > 0) {
+      text.pushByte(ref out, ',');
+    }
+    pushNodeJson(ref out, ref ast, childAt(ref ast, node, c), "", ref nextId);
+    wrote += 1;
+    c += 1;
+  }
+  text.push(ref out, "]");
+}
+
+function noteSlot(ref slots: Vec<NodeId>, ref labels: Vec<string>, id: NodeId, label: string): void {
+  if (id == 0) {
+    return;
+  }
+  vec.vecPush(ref slots, id);
+  vec.vecPush(ref labels, label);
+}
+
+// A JSON string, quoted and escaped.
+//
+// The escape set is the one the spec REQUIRES: the quote, the backslash, and
+// every control character below 0x20. Anything above is passed through as its
+// own bytes, which is correct for UTF-8 - JSON is defined over text, not over
+// ASCII, and re-encoding it as `\u` escapes would only make the payload bigger.
+export function pushJsonString(ref out: Text, s: string): void {
+  text.pushByte(ref out, '"');
+  pushJsonEscaped(ref out, intr.stringAsBytes(s));
+  text.pushByte(ref out, '"');
+}
+
+export function pushJsonBytes(ref out: Text, bytes: uint8[]): void {
+  text.pushByte(ref out, '"');
+  pushJsonEscaped(ref out, bytes);
+  text.pushByte(ref out, '"');
+}
+
+function pushJsonEscaped(ref out: Text, bytes: uint8[]): void {
+  let i: usize = 0;
+  while (i < bytes.len) {
+    const b = bytes[i];
+    if (b == '"') {
+      text.push(ref out, "\\\"");
+    } else if (b == '\\') {
+      text.push(ref out, "\\\\");
+    } else if (b == '\n') {
+      text.push(ref out, "\\n");
+    } else if (b == '\r') {
+      text.push(ref out, "\\r");
+    } else if (b == '\t') {
+      text.push(ref out, "\\t");
+    } else if (b < 32) {
+      // The remaining controls have no short escape, so they go out as \u00XX.
+      text.push(ref out, "\\u00");
+      pushHexDigit(ref out, b >> 4);
+      pushHexDigit(ref out, b & 15);
+    } else {
+      text.pushByte(ref out, b);
+    }
+    i += 1;
+  }
+}
+
+// Spelled with the code points rather than `'0' + v`: arithmetic on a char
+// literal is one of the places the JS reference mistypes, and the numbers are
+// no less clear with the letters written beside them.
+function pushHexDigit(ref out: Text, v: uint8): void {
+  const ZERO: uint8 = 48;   // '0'
+  const LOWER_A: uint8 = 97; // 'a'
+  if (v < 10) {
+    text.pushByte(ref out, ZERO + v);
+  } else {
+    text.pushByte(ref out, LOWER_A + (v - 10));
+  }
+}

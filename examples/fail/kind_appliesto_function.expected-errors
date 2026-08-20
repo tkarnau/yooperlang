@@ -1,0 +1,4 @@
+# Illegal: a `function` kind marks the DECLARATION it is written in front of,
+# while every other site marks a value. One kind cannot be both, because a use
+# would have no way to say which of the two obligations it meant.
+3:6: applies to a function and to a value site

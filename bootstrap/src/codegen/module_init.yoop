@@ -33,7 +33,7 @@ import { Option } from "std/core/types.yoop";
 import { disposable } from "std/core/kinds.yoop";
 import { AST, ASTNode, ASTNodeKind, NodeId, childAt, declOf, nodeAt } from "../ast";
 import { Module } from "../source_graph";
-import { Program, TypedModule, Symbol, symbolAt, TypeId, TYPE_ERROR_ID, TYPE_VOID_ID, arrayElementOf, moduleGlobalIsBaked } from "../typecheck";
+import { Program, TypedModule, Symbol, symbolAt, TypeId, TYPE_ERROR_ID, TYPE_VOID_ID, arrayElementOf, moduleGlobalIsBaked, declIsModuleGlobal } from "../typecheck";
 
 // The symbol one source file's init function is defined under. One per FILE
 // rather than per module, because a directory module's files are separate
@@ -76,7 +76,7 @@ export function moduleGlobalTypeId(ref prog: Program, ref tm: TypedModule, name:
     case Option.None: { return TYPE_ERROR_ID; }
     case Option.Some { value: symId }: {
       switch (symbolAt(ref prog, symId)) {
-        case Symbol.Global { typeId: t, intVal: v }: { return t; }
+        case Symbol.Global { typeId: t, intVal: v, mutable: mu }: { return t; }
         default: { return TYPE_ERROR_ID; }
       }
     }
@@ -123,7 +123,7 @@ export function emitModuleInitFn(
   let d: usize = 0;
   while (d < programNode.childCount) {
     const declNode = nodeAt(cx.ast, declOf(cx.ast, childAt(cx.ast, programNode, d)));
-    if (declNode.kind == ASTNodeKind.LET_DECL) {
+    if (declIsModuleGlobal(cx.prog, cx.tm, declNode)) {
       emitModuleGlobalStore(ref cx, declNode)?;
     }
     d += 1;
@@ -155,7 +155,7 @@ function fileHasModuleInit(ref prog: Program, ref tm: TypedModule, ref ast: AST,
   let d: usize = 0;
   while (d < programNode.childCount) {
     const declNode = nodeAt(ref ast, declOf(ref ast, childAt(ref ast, programNode, d)));
-    if (declNode.kind == ASTNodeKind.LET_DECL) {
+    if (declIsModuleGlobal(ref prog, ref tm, declNode)) {
       const declared = moduleGlobalTypeId(ref prog, ref tm, declNode.name);
       if (declared != TYPE_ERROR_ID && moduleGlobalNeedsStore(ref prog, ref ast, declNode, declared)) {
         return true;

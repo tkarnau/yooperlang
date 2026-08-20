@@ -1,0 +1,3 @@
+Bag { xs: [1, 2, 3], v: [7, 8], m: [{ key: u, value: 10 }, { key: t, value: 9 }], cb: <fn> }
+Bag { xs: [], v: [], m: [], cb: <fn> }
+exit=0

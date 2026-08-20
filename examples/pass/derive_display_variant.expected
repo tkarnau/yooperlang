@@ -1,0 +1,6 @@
+Shape.Circle { c: <1,2>, r: 5 }
+Shape.Named { label: hi }
+Shape.Bytes { xs: [1, 2, 3] }
+Shape.Many { v: [7, 8], tag: 9 }
+Envelope { body: Shape.Dot, seq: 42 }
+exit=0

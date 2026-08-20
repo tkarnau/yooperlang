@@ -14,6 +14,8 @@ module codegen;
 // and `printf`, which is libc's. A home module of "" means exactly that.
 
 import * as map from "std/collections/map.yoop";
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { disposable } from "std/core/kinds.yoop";
 import { Option } from "std/core/types.yoop";
 import * as str from "std/core/strings.yoop";
 import { ASTNode, NodeId, nodeAt } from "../ast";
@@ -107,6 +109,22 @@ export function calleeSymbol(ref cx: Cx, expr: ASTNode, exprId: NodeId): SymbolN
       return { home: cx.tm.moduleId, name: expr.name };
     }
   }
+}
+
+// A SymbolName as the linker spells it - `mathx_1__add`, or a bare `main`.
+//
+// The one place a symbol is rendered to a string rather than pushed into the
+// emit buffer, because DWARF's `linkageName:` is an attribute of a metadata
+// node and not a line of IR.
+export function debugSymbolText(symbol: SymbolName): string {
+  if (symbol.home.len == 0) {
+    return symbol.name;
+  }
+  disposable parts: Vec<string> = vec.vecNew(3);
+  vec.vecPush(ref parts, symbol.home);
+  vec.vecPush(ref parts, SYMBOL_MODULE_SEPARATOR);
+  vec.vecPush(ref parts, symbol.name);
+  return str.stringConcatAll(vec.vecAsArray(ref parts));
 }
 
 // The symbol a module-level `let` is READ and WRITTEN through.

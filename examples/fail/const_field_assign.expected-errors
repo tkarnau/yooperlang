@@ -1,0 +1,4 @@
+# Illegal: `const` freezes the binding, and a field of the value it holds is
+# part of what was frozen. The companion to examples/pass/elem_field_assign.yoop,
+# where the chain reaches its storage THROUGH an index and is allowed.
+10:6: which is bound by const

@@ -193,6 +193,54 @@ suite function variantDeclsCarryTheirCasesInOrder(): void {
   }
 }
 
+// A case and the member after it are told apart by the COMMA and by nothing
+// else, so a case written with a bare TYPE where its payload belongs -
+// `Special MyType,` - is two payload-less cases and not one case with a
+// payload. Refused by name, because accepting it is silent: the payload the
+// writer meant is dropped, a case named after the payload TYPE appears beside
+// it, and the only symptom anywhere downstream is a switch that will not go
+// exhaustive until an arm is added for a case nobody wrote. Verified end to
+// end before the check landed - the program compiled, ran, and printed from
+// the wrong shape.
+suite function aVariantCasePayloadMustBeARecord(): void {
+  const bare = "type MyType { q: int }\nvariant V { Normal { p: int }, Special MyType, }";
+  let test theory: Case = t.asserts("a bare-type payload is refused, and the message names both words") {
+    theory.isSuccessful = refusalMentions(bare, "\"Special\" is followed by \"MyType\" with no separator")
+      && refusalMentions(bare, "Special { value: MyType }");
+    theory.detail = `wanted the no-separator refusal with its fix-it, got: ${parseError(bare)}`;
+  }
+
+  // The record spelling is what the refusal points at, so it has to keep
+  // working - otherwise the check is just breaking payloads to catch one.
+  let record = parseOk("type MyType { q: int }\nvariant V { Normal { p: int }, Special { value: MyType }, }");
+  let test theory: Case = t.asserts("the record payload form still parses as ONE case with a field") {
+    const decl = topLevel(ref record, 1);
+    const special = nodeAt(ref record, childAt(ref record, decl, 1));
+    theory.isSuccessful = decl.childCount == 2
+      && special.kind == ASTNodeKind.VARIANT_CASE
+      && str.stringEq(special.name, "Special")
+      && special.childCount == 1;
+    theory.detail = `the variant has ${decl.childCount} member(s); "${special.name}" carries ${special.childCount} field(s)`;
+  }
+
+  // The last member may still omit its trailing comma, and a METHOD still
+  // follows a case with the ordinary comma in front of it - the two shapes the
+  // check has to leave alone.
+  let terse = parseOk("variant V { A, B { x: int } }");
+  let test theory: Case = t.asserts("the last case needs no trailing comma") {
+    theory.isSuccessful = topLevel(ref terse, 0).childCount == 2;
+    theory.detail = `the variant has ${topLevel(ref terse, 0).childCount} member(s), wanted 2`;
+  }
+
+  let withMethod = parseOk("variant V implements D { A, B { x: int }, function f(ref self): int { return 1; } }");
+  let test theory: Case = t.asserts("a method after a case is unaffected") {
+    const decl = topLevel(ref withMethod, 0);
+    theory.isSuccessful = decl.childCount == 3
+      && nodeAt(ref withMethod, childAt(ref withMethod, decl, 2)).kind == ASTNodeKind.METHOD_DECL;
+    theory.detail = `the variant has ${decl.childCount} member(s), wanted 3 ending in a METHOD_DECL`;
+  }
+}
+
 suite function variantConstructorsAndPatternsShareOneShape(): void {
   // The braces are what make a constructor unambiguous at parse time.
   let ast = parseOk("function f(): int { return Shape.Circle { r: 2 }; }");
@@ -834,10 +882,88 @@ suite function variantMethodsShareTheMemberRunWithCases(): void {
     theory.detail = `the variant has ${decl.childCount} member(s), wanted 3`;
   }
 
-  let test theory: Case = t.asserts("the method is a METHOD_DECL, told apart by the keyword alone") {
+  let test theory: Case = t.asserts("the method is a METHOD_DECL") {
     const method = nodeAt(ref ast, childAt(ref ast, decl, 2));
     theory.isSuccessful = method.kind == ASTNodeKind.METHOD_DECL;
     theory.detail = `the third member is ${method.kind}, wanted METHOD_DECL`;
+  }
+}
+
+// A case name is metadata and may be spelled with a reserved word, `function`
+// included - so the keyword is at the head of both kinds of member and cannot
+// tell them apart on its own. What does is the token after it. C-shaped code
+// writes case names like this, and generated bindings would otherwise fail to
+// parse on the first collision.
+suite function functionAsACaseNameIsToldFromAMethodByWhatFollowsIt(): void {
+  let bare = parseOk("variant Shape { function, type { kind: int } }");
+  const bareDecl = topLevel(ref bare, 0);
+
+  let test theory: Case = t.asserts("a bare case named `function` is a case, not a method") {
+    const first = nodeAt(ref bare, childAt(ref bare, bareDecl, 0));
+    theory.isSuccessful = bareDecl.childCount == 2
+      && first.kind == ASTNodeKind.VARIANT_CASE
+      && str.stringEq(first.name, "function");
+    theory.detail = `member 0 of ${bareDecl.childCount} is ${first.kind} named "${first.name}", wanted VARIANT_CASE "function"`;
+  }
+
+  // A method cannot be nameless, so `function {` is unambiguous the other way.
+  let payload = parseOk("variant Shape { function { n: int }, Empty }");
+  const payloadDecl = topLevel(ref payload, 0);
+
+  let test theory: Case = t.asserts("a case named `function` may carry a payload") {
+    const first = nodeAt(ref payload, childAt(ref payload, payloadDecl, 0));
+    theory.isSuccessful = first.kind == ASTNodeKind.VARIANT_CASE && first.childCount == 1;
+    theory.detail = `member 0 is ${first.kind} with ${first.childCount} field(s), wanted VARIANT_CASE with 1`;
+  }
+
+  // And the disambiguation does not cost the ordinary reading: a real method
+  // still parses as one when it sits beside a case wearing its keyword.
+  let both = parseOk("variant Shape { function, function code(ref self): int { return 0; } }");
+  const bothDecl = topLevel(ref both, 0);
+
+  let test theory: Case = t.asserts("a real method beside it still parses as a method") {
+    const second = nodeAt(ref both, childAt(ref both, bothDecl, 1));
+    theory.isSuccessful = bothDecl.childCount == 2 && second.kind == ASTNodeKind.METHOD_DECL;
+    theory.detail = `member 1 of ${bothDecl.childCount} is ${second.kind}, wanted METHOD_DECL`;
+  }
+}
+
+// The struct and union half of the same rule, told apart by the COLON rather
+// than by the `{` / `,` / `}` a variant body reads.
+suite function functionAsAFieldNameIsToldFromAMethodByTheColon(): void {
+  let structBody = parseOk("type S implements Get { function: int32, function get(ref self): int32 { return 0; } }");
+  const structDecl = topLevel(ref structBody, 0);
+
+  let test theory: Case = t.asserts("`function: T` is a field") {
+    const first = nodeAt(ref structBody, childAt(ref structBody, structDecl, 0));
+    theory.isSuccessful = first.kind == ASTNodeKind.FIELD_DECL
+      && str.stringEq(first.name, "function");
+    theory.detail = `member 0 is ${first.kind} named "${first.name}", wanted FIELD_DECL "function"`;
+  }
+
+  let test theory: Case = t.asserts("`function name(...)` beside it is still a method") {
+    const second = nodeAt(ref structBody, childAt(ref structBody, structDecl, 1));
+    theory.isSuccessful = structDecl.childCount == 2 && second.kind == ASTNodeKind.METHOD_DECL;
+    theory.detail = `member 1 of ${structDecl.childCount} is ${second.kind}, wanted METHOD_DECL`;
+  }
+
+  // A union has no methods at all, so the colon is the whole of the question
+  // there: with one it is storage, and without one it is the thing a union
+  // cannot declare.
+  let unionBody = parseOk("union U { function: int32, b: int32 }");
+  const unionDecl = topLevel(ref unionBody, 0);
+
+  let test theory: Case = t.asserts("a union field may be named `function` too") {
+    const first = nodeAt(ref unionBody, childAt(ref unionBody, unionDecl, 0));
+    theory.isSuccessful = first.kind == ASTNodeKind.FIELD_DECL
+      && str.stringEq(first.name, "function");
+    theory.detail = `member 0 is ${first.kind} named "${first.name}", wanted FIELD_DECL "function"`;
+  }
+
+  let test theory: Case = t.asserts("a union that really does declare a method is still refused by name") {
+    const src = "union U { function fn(ref self): int32 { return 0; }, b: int32 }";
+    theory.isSuccessful = refusalMentions(src, "a union cannot declare methods");
+    theory.detail = `wanted a union-method refusal, got: ${parseError(src)}`;
   }
 }
 
@@ -1083,6 +1209,34 @@ suite function kindDeclarationsRecordTheirClauses(): void {
     theory.isSuccessful = topLevel(ref composed, 0).kind == ASTNodeKind.KIND_DECL &&
       topLevel(ref composed, 1).kind == ASTNodeKind.FUNCTION_DECL;
     theory.detail = `after a composition the next decl is ${topLevel(ref composed, 1).kind}, wanted FUNCTION_DECL`;
+  }
+
+  // A composition is a FLAT intersection. Consuming a parenthesis silently
+  // parsed `(b & c) & d` as `b & c & d`, which reads as a grouping the grammar
+  // does not have and quietly agreed with whatever the writer meant by it.
+  let test theory: Case = t.asserts("a parenthesized composition operand is refused") {
+    const err = parseError("kind a = (b & c) & d;");
+    theory.isSuccessful = str.stringIndexOf(err, "parenthesizes its composition operands") < err.len;
+    theory.detail = `wanted a grouping refusal, got: ${err}`;
+  }
+
+  // A layout body holds SUB-CLAUSES, not loose words: `abi "C"` is a leading
+  // word plus its own argument, the same shape the outer level has. Recorded
+  // that way so a rule can tell which argument belongs to which sub-clause.
+  let layout = parseOk("kind c_layout { appliesTo type; layout { abi \"C\"; align 8; }; }");
+  let test theory: Case = t.asserts("a layout body is recorded as sub-clauses on the clause") {
+    const clause = nodeAt(ref layout, childAt(ref layout, topLevel(ref layout, 0), 1));
+    const body = nodeAt(ref layout, clause.childA);
+    theory.isSuccessful = clause.childA != 0 && body.childCount == 2;
+    theory.detail = `the layout body recorded ${body.childCount} sub-clause(s), wanted 2`;
+  }
+  let test theory: Case = t.asserts("a sub-clause keeps its argument's source spelling, quotes included") {
+    const clause = nodeAt(ref layout, childAt(ref layout, topLevel(ref layout, 0), 1));
+    const body = nodeAt(ref layout, clause.childA);
+    const abi = nodeAt(ref layout, childAt(ref layout, body, 0));
+    const marker = nodeAt(ref layout, childAt(ref layout, abi, 0));
+    theory.isSuccessful = str.stringEq(abi.name, "abi") && str.stringEq(marker.name, "\"C\"");
+    theory.detail = `recorded "${abi.name}" with argument ${marker.name}, wanted abi with "C" quoted`;
   }
 }
 
@@ -1961,14 +2115,28 @@ suite function attributesWrapTheDeclarationTheyDecorate(): void {
     theory.detail = `wanted an unknown-derive refusal, got: ${parseError(src)}`;
   }
 
-  // `@precompile` is the one deliberate DIVERGENCE: the reference folds its
-  // initializer at compile time and the bootstrap has no comptime interpreter,
-  // so it is refused by name rather than emitted unfolded - which would compile
-  // and silently do the work at run time instead.
-  let test theory: Case = t.asserts("@precompile parses and is refused by name, not as bad syntax") {
+  // `@precompile` on a const parses and is ACCEPTED - the fold itself happens
+  // between typecheck and codegen, so nothing here has an opinion about it
+  // beyond the target being a const. See comptime/precompile.yoop.
+  let test theory: Case = t.asserts("@precompile on a const parses") {
     const src = "@precompile const X: int = 6 * 7;";
-    theory.isSuccessful = refusalMentions(src, "no comptime interpreter");
-    theory.detail = `wanted a precompile refusal, got: ${parseError(src)}`;
+    theory.isSuccessful = parseError(src).len == 0;
+    theory.detail = `a precompiled const was refused: ${parseError(src)}`;
+  }
+
+  // The BLOCK form is a different mechanism rather than the same one with a
+  // different target: it runs statements and keeps what they wrote to the
+  // module's globals. Both parse; comptime/precompile.yoop tells them apart.
+  let test theory: Case = t.asserts("the @precompile block form parses too") {
+    const src = "@precompile { let a: int = 1; }";
+    theory.isSuccessful = parseError(src).len == 0;
+    theory.detail = `a precompile block was refused: ${parseError(src)}`;
+  }
+
+  let test theory: Case = t.asserts("@precompile on something that is not a const is refused by name") {
+    const src = "@precompile type P { n: int }";
+    theory.isSuccessful = refusalMentions(src, "decorates a const declaration");
+    theory.detail = `wanted a target refusal, got: ${parseError(src)}`;
   }
 }
 
@@ -2178,6 +2346,45 @@ suite function tryOpIsPostfixAndWrapsItsOperand(): void {
     const t0 = firstLetInitializer(ref plainQ);
     theory.isSuccessful = t0.kind == ASTNodeKind.TRY_OP && t0.childB == 0 && t0.childC == 0;
     theory.detail = `childB=${t0.childB} childC=${t0.childC}`;
+  }
+}
+
+// The two shapes that make `?`'s suffixes decidable at ONE token, asserted from
+// the other side: what a `?` must NOT swallow. Both are the reason for a rule
+// stated in expressions.yoop and neither had a test, because neither is written
+// anywhere in std, examples or this tree - so nothing that compiles today would
+// notice either rule being relaxed, and relaxing one is a SILENT wrong parse
+// rather than an error.
+suite function tryOpSuffixesDoNotSwallowWhatFollowsThem(): void {
+  // A general expression after the `?` would make this a context clause on a
+  // negated `x` instead of a subtraction - which is why the context is
+  // restricted to the two LITERAL token forms. A string can never continue an
+  // expression; a `-` always can.
+  let sub = parseOk("function f(): R { return g()? - x; }");
+  let test theory: Case = t.asserts("`g()? - x` is a subtraction, not a context clause") {
+    const outer = returnedExpression(ref sub);
+    const left = nodeAt(ref sub, outer.childA);
+    theory.isSuccessful = outer.kind == ASTNodeKind.BINARY_EXPRESSION
+      && outer.operator == TokenTags.MINUS
+      && left.kind == ASTNodeKind.TRY_OP
+      && left.childB == 0;
+    theory.detail = `the outer node is ${outer.kind} over ${left.kind}, whose context slot is ${left.childB}`;
+  }
+
+  // The handler form's BINDING is what keeps this a loop. A bare `? { ... }`
+  // would be these exact tokens, so an optional binding would take the loop
+  // BODY as the handler block and leave the loop with none - and the body is
+  // then simply gone, which no later pass can see.
+  let loop = parseOk("function f(): R { for x in items()? { g(x); } }");
+  let test theory: Case = t.asserts("`for x in items()? { ... }` keeps the brace as the loop body") {
+    const stmt = firstStatement(ref loop);
+    const iterable = nodeAt(ref loop, stmt.childA);
+    theory.isSuccessful = stmt.kind == ASTNodeKind.FOR_IN_LOOP
+      && iterable.kind == ASTNodeKind.TRY_OP
+      && iterable.childC == 0
+      && stmt.childB != 0
+      && nodeAt(ref loop, stmt.childB).kind == ASTNodeKind.BLOCK;
+    theory.detail = `the statement is ${stmt.kind} over ${iterable.kind}, whose handler slot is ${iterable.childC}`;
   }
 }
 

@@ -1,0 +1,4 @@
+# Illegal: the field carries `scoped`, and `Wrapper` declares no
+# `propagates<scoped>`. The obligation then has no holder, and the scope-end
+# call for that field is emitted by nobody - a leak that compiles.
+24:5: which "Wrapper" does not propagate

@@ -1,0 +1,3 @@
+# Illegal: `only_binding` declares `appliesTo binding`, and it is written as
+# the kind prefix of a TYPE declaration.
+3:8: does not apply to types

@@ -1,0 +1,5 @@
+fields: 1 2 3 4 5 6
+more:   7 8 9 10 11 12
+sum=78
+locals: 42 43
+exit=0

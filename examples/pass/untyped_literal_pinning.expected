@@ -1,0 +1,9 @@
+int32 rhs
+int32 lhs
+uint8 ok
+int64 ok
+float32 ok
+both untyped int
+both untyped float
+done
+exit=0

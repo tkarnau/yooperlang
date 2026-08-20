@@ -1,0 +1,4 @@
+# Illegal: the impl of `dispose` takes an extra `extra: int32` the trait's
+# signature does not declare. An impl has the signature the trait declared, not
+# merely the name.
+5:6: parameter(s) after the receiver

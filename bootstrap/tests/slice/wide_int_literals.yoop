@@ -1,0 +1,64 @@
+// Integer literals wider than 2^53, end to end.
+//
+// The FNV-1a offset basis in std/core/strings.yoop is 14695981039346656037.
+// That is past 2^63, and well past the 2^53 where a double stops holding an
+// integer exactly. The JS reference carries int literals as JS numbers, so it
+// ROUNDS that one - and with it every string hash in every program it compiles.
+// Nothing in a program can read a hash directly; what it sees is a hash map
+// iterating its entries in a different order than it should, which is exactly
+// how this was found (examples/pass/derive_display_array_vec.yoop).
+//
+// So this pins the two things that go wrong there, both of which the bootstrap
+// gets right:
+//
+//   1. a literal past 2^53 survives lex, parse, typecheck and codegen EXACTLY
+//   2. a `uint64` interpolates UNSIGNED - the reference renders the basis as
+//      -3750763034362896616, which is wrong twice over
+//
+// The FNV loop is inlined rather than imported from std, so the fixture needs
+// no std root and covers the MECHANISM the basis depends on rather than the
+// one library function that happens to use it.
+//
+// The numbers below are computed by hand, not captured from a compiler:
+//   h = 14695981039346656037, then for each byte h = (h ^ byte) * 1099511628211
+// truncated to 64 bits. The bytes are "t" (116) and "u" (117).
+
+const FNV_BASIS: uint64 = 14695981039346656037;
+const FNV_PRIME: uint64 = 1099511628211;
+
+function fnv1a(bytes: uint8[]): uint64 {
+  let h: uint64 = FNV_BASIS;
+  let i: usize = 0;
+  while (i < bytes.len) {
+    h = h ^ uint64(bytes[i]);
+    h = h * FNV_PRIME;
+    i = i + 1;
+  }
+  return h;
+}
+
+function main(): int {
+  // The literal itself, straight through - as a module const, which is the
+  // path std/core/strings.yoop actually uses.
+  printf(`basis=${FNV_BASIS}\n`);
+
+  // The first integer a double cannot represent. A rounded one reads
+  // ...992 rather than ...993.
+  const past53: uint64 = 9007199254740993;
+  printf(`past53=${past53}\n`);
+
+  // The top of the range, and arithmetic on it that has to stay exact.
+  const max: uint64 = 18446744073709551615;
+  printf(`max=${max}\n`);
+  printf(`half=${max / 2}\n`);
+
+  // The multiply wraps mod 2^64 rather than saturating or promoting.
+  printf(`wrapped=${FNV_BASIS * FNV_PRIME}\n`);
+
+  // And the hashes those literals exist to produce.
+  const t: uint8[] = [116];
+  const u: uint8[] = [117];
+  printf(`t=${fnv1a(t)}\n`);
+  printf(`u=${fnv1a(u)}\n`);
+  return 0;
+}

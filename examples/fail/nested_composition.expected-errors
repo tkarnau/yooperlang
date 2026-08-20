@@ -1,0 +1,4 @@
+# Illegal: a kind composition is a FLAT intersection, so `(b & c) & d` writes a
+# grouping the grammar does not have. A parse error, so the column is one past
+# the offending token - see the header of src/fail.test.js.
+4:11: parenthesizes its composition operands

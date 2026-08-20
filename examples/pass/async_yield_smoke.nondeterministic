@@ -1,0 +1,3 @@
+The two "reader N woke" lines are emitted by two tasks woken independently
+by the multiplexer, so their relative order is decided by the scheduler and
+is not determined by the program.

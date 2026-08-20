@@ -1,0 +1,271 @@
+module typecheck;
+
+/*
+  `unhandled-disposable` - a binding that carries a cleanup obligation and does
+  nothing about it.
+
+      let w: Widget = makeWidget();   // Widget propagates<disposable>
+      return 0;                        // and nothing ever disposes w
+
+  The ownership model is ADVISORY by design, so this is a warning and never an
+  error - `examples/pass/propagates_binding_missing_kind.yoop` is a program that
+  compiles cleanly and is meant to. What silence would cost is the leaks nobody
+  finds, so the diagnostic exists and the BUILD opts into it (`--warn-disposable`).
+
+  Three things answer the obligation, and any one of them is enough:
+
+    the KIND KEYWORD   `disposable w: Widget = ...` - auto-cleanup at scope end
+    a MANUAL call      `Disposable.dispose(ref w)` - discharge.yoop decides this
+                       one, path-sensitively, because a call in one arm of an
+                       `if` answers nothing at the join
+    a TRANSFER         the value is handed on - returned, passed by value,
+                       stored into an aggregate - after which its cleanup is
+                       somebody else's business
+
+  ERRING TOWARD SILENCE is deliberate, and it is the reference's rule too: a
+  missed leak is a worse outcome than a warning on correct code, because the
+  second teaches people to stop reading them. So anything that looks like a
+  transfer counts as one.
+
+  `ref w` is NOT a transfer. A borrow lends the value for the duration of a call
+  and hands it straight back, and that distinction is what makes the warning
+  usable at all - without it every `vecPush(ref v, x)` and every method call on
+  a local would read as a handoff and the warning would never fire.
+
+  TWO KNOWN FALSE POSITIVES, both inherited from the reference and both
+  documented in docs/writing_yoop.md section 4: a value living in an ARENA
+  scope, where not disposing is the point, and a copy read back out of a
+  container, where disposing would double-free. Neither is suppressed here -
+  they are the reason the warning is opt-in rather than on by default.
+*/
+
+import { Vec }, * as vec from "std/core/vec.yoop";
+import * as str from "std/core/strings.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import { AST, ASTNode, ASTNodeKind, NodeId, childAt, declOf, nodeAt } from "../ast";
+import { Module } from "../source_graph";
+
+export const UNHANDLED_DISPOSABLE: string = "unhandled-disposable";
+
+// One binding under consideration, while its function is being walked.
+type Candidate {
+  binding: NodeId,   // the LET_DECL / CONST_DECL
+  name: string,
+  kindName: string,  // the kind whose obligation is unanswered
+  handled: bool,     // a transfer or a manual discharge was found
+}
+
+// Every function body in the module, after the checks and the discharge walk -
+// this reads what both of them left behind.
+export function reportUnhandledDisposables(ref prog: Program, ref tm: TypedModule, m: Module): void {
+  let f: usize = 0;
+  while (f < m.files.len) {
+    const root = vec.vecGet(ref m.files, f).root;
+    const programNode = nodeAt(ref m.ast, root);
+    let i: usize = 0;
+    while (i < programNode.childCount) {
+      const declId = declOf(ref m.ast, childAt(ref m.ast, programNode, i));
+      const declNode = nodeAt(ref m.ast, declId);
+      if (declNode.kind == ASTNodeKind.FUNCTION_DECL && declNode.childD != 0) {
+        checkBodyForUnhandled(ref prog, ref tm, ref m.ast, declNode.childD);
+      }
+      i += 1;
+    }
+    f += 1;
+  }
+}
+
+function checkBodyForUnhandled(ref prog: Program, ref tm: TypedModule, ref ast: AST, bodyId: NodeId): void {
+  disposable candidates: Vec<Candidate> = vec.vecNew(4);
+  collectCandidates(ref prog, ref tm, ref ast, bodyId, ref candidates);
+  if (candidates.len == 0) {
+    return;
+  }
+  markDischarged(ref tm, ref candidates);
+  markTransfers(ref ast, bodyId, ref candidates);
+
+  let i: usize = 0;
+  while (i < candidates.len) {
+    const c = vec.vecGet(ref candidates, i);
+    if (!c.handled) {
+      const decl = nodeAt(ref ast, c.binding);
+      reportWarning(
+        ref prog,
+        `"${c.name}" carries kind '${c.kindName}' but nothing handles it - add the '${c.kindName}' keyword to auto-clean it at scope exit, call its cleanup directly, or return it`,
+        decl.sourceLoc,
+        UNHANDLED_DISPOSABLE
+      );
+    }
+    i += 1;
+  }
+}
+
+// Every binding below `nodeId` that owes something and has not opted in.
+//
+// A binding that DECLARES the kind is not a candidate at all rather than one
+// marked handled: it is the ordinary way to answer the obligation, and there is
+// nothing to report about it.
+function collectCandidates(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  nodeId: NodeId,
+  ref out: Vec<Candidate>
+): void {
+  if (nodeId == 0) {
+    return;
+  }
+  const node = nodeAt(ref ast, nodeId);
+  if (node.kind == ASTNodeKind.LET_DECL || node.kind == ASTNodeKind.CONST_DECL) {
+    const declared = resolvedTypeOfNode(ref tm, nodeId);
+    const kindName = propagatedKindOf(ref prog, declared);
+    if (kindName.len > 0 && !declaresKind(ref ast, node, kindName)) {
+      vec.vecPush(ref out, {
+        binding: nodeId, name: node.name, kindName: kindName, handled: false
+      });
+    }
+  }
+  walkChildren(ref ast, node, nodeId, ref out, ref prog, ref tm);
+}
+
+// The recursion, shared by the collect walk. Every named slot and the node's
+// own run, because a binding can be declared anywhere a statement can appear.
+function walkChildren(
+  ref ast: AST,
+  node: ASTNode,
+  nodeId: NodeId,
+  ref out: Vec<Candidate>,
+  ref prog: Program,
+  ref tm: TypedModule
+): void {
+  collectCandidates(ref prog, ref tm, ref ast, node.childA, ref out);
+  collectCandidates(ref prog, ref tm, ref ast, node.childB, ref out);
+  collectCandidates(ref prog, ref tm, ref ast, node.childC, ref out);
+  collectCandidates(ref prog, ref tm, ref ast, node.childD, ref out);
+  collectCandidates(ref prog, ref tm, ref ast, node.childE, ref out);
+  collectCandidates(ref prog, ref tm, ref ast, node.childF, ref out);
+  let i: usize = 0;
+  while (i < node.childCount) {
+    collectCandidates(ref prog, ref tm, ref ast, childAt(ref ast, node, i), ref out);
+    i = i + 1;
+  }
+}
+
+// Does this binding write the kind keyword?
+function declaresKind(ref ast: AST, node: ASTNode, kindName: string): bool {
+  if (node.childC == 0) {
+    return false;
+  }
+  const list = nodeAt(ref ast, node.childC);
+  let i: usize = 0;
+  while (i < list.childCount) {
+    if (str.stringEq(nodeAt(ref ast, childAt(ref ast, list, i)).name, kindName)) {
+      return true;
+    }
+    i = i + 1;
+  }
+  return false;
+}
+
+// A manual `dispose` that discharge.yoop proved happens on every path.
+function markDischarged(ref tm: TypedModule, ref candidates: Vec<Candidate>): void {
+  let d: usize = 0;
+  while (d < tm.discharges.len) {
+    const entry = vec.vecGet(ref tm.discharges, d);
+    let i: usize = 0;
+    while (i < candidates.len) {
+      let c = vec.vecGet(ref candidates, i);
+      if (c.binding == entry.binding) {
+        c.handled = true;
+        vec.vecSet(ref candidates, i, c);
+      }
+      i = i + 1;
+    }
+    d = d + 1;
+  }
+}
+
+/*
+  A BY-VALUE use hands the binding on, and after that its cleanup is not this
+  scope's business.
+
+  The rule is stated as an EXCLUSION rather than a list of transfer positions,
+  and that is the erring-toward-silence choice: anything not named below counts
+  as a handoff, so a form nobody thought of goes quiet rather than warning about
+  correct code.
+
+  What is excluded is exactly the reads that hand nothing on:
+
+    ref x          a borrow - lent for a call and handed straight back
+    x.field        reading a part of it
+    x[i]           the same
+    x = ...        the binding as an assignment TARGET
+    `${x}`         an interpolation RENDERS the value - it calls `toString`
+                   through a borrow and hands nothing on. Reading it as a
+                   transfer silenced every leak that happened to get printed,
+                   which is most of them.
+*/
+function markTransfers(ref ast: AST, nodeId: NodeId, ref candidates: Vec<Candidate>): void {
+  if (nodeId == 0) {
+    return;
+  }
+  const node = nodeAt(ref ast, nodeId);
+
+  noteUse(ref ast, node.childA, ref candidates, borrowsChildA(node.kind));
+  noteUse(ref ast, node.childB, ref candidates, false);
+  noteUse(ref ast, node.childC, ref candidates, false);
+  noteUse(ref ast, node.childD, ref candidates, false);
+  noteUse(ref ast, node.childE, ref candidates, false);
+  noteUse(ref ast, node.childF, ref candidates, false);
+  let i: usize = 0;
+  while (i < node.childCount) {
+    noteUse(ref ast, childAt(ref ast, node, i), ref candidates, false);
+    i = i + 1;
+  }
+
+  markTransfers(ref ast, node.childA, ref candidates);
+  markTransfers(ref ast, node.childB, ref candidates);
+  markTransfers(ref ast, node.childC, ref candidates);
+  markTransfers(ref ast, node.childD, ref candidates);
+  markTransfers(ref ast, node.childE, ref candidates);
+  markTransfers(ref ast, node.childF, ref candidates);
+  let c: usize = 0;
+  while (c < node.childCount) {
+    markTransfers(ref ast, childAt(ref ast, node, c), ref candidates);
+    c = c + 1;
+  }
+}
+
+// The kinds whose childA is a read rather than a handoff.
+function borrowsChildA(kind: ASTNodeKind): bool {
+  return kind == ASTNodeKind.REF_EXPRESSION || kind == ASTNodeKind.FIELD_ACCESS ||
+         kind == ASTNodeKind.INDEX_EXPRESSION || kind == ASTNodeKind.ASSIGNMENT ||
+         kind == ASTNodeKind.EXPR_PART;
+}
+
+function noteUse(ref ast: AST, exprId: NodeId, ref candidates: Vec<Candidate>, excluded: bool): void {
+  if (exprId == 0 || excluded) {
+    return;
+  }
+  const expr = nodeAt(ref ast, exprId);
+  if (expr.kind != ASTNodeKind.IDENT) {
+    return;
+  }
+  let i: usize = 0;
+  while (i < candidates.len) {
+    let c = vec.vecGet(ref candidates, i);
+    if (str.stringEq(c.name, expr.name)) {
+      c.handled = true;
+      vec.vecSet(ref candidates, i, c);
+    }
+    i = i + 1;
+  }
+}
+
+// The type pass D recorded for a node, or 0.
+function resolvedTypeOfNode(ref tm: TypedModule, nodeId: NodeId): TypeId {
+  if (nodeId >= tm.resolvedTypes.len) {
+    return TYPE_ERROR_ID;
+  }
+  return vec.vecGet(ref tm.resolvedTypes, nodeId);
+}

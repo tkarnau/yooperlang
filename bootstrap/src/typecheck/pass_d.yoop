@@ -52,6 +52,11 @@ export function passDCheckBodies(ref prog: Program, ref tm: TypedModule, m: Modu
   // is a merge over paths and the checks run in source order - see
   // discharge.yoop.
   computeDischarges(ref prog, ref tm, m);
+
+  // And which obligations nothing answered. After the discharge walk, because
+  // it reads what that left behind. Advisory: `--warn-disposable` decides
+  // whether the build prints them. See unhandled.yoop.
+  reportUnhandledDisposables(ref prog, ref tm, m);
 }
 
 function checkFileBodies(ref prog: Program, ref tm: TypedModule, m: Module, root: NodeId): void {
@@ -75,30 +80,65 @@ function checkFileBodies(ref prog: Program, ref tm: TypedModule, m: Module, root
     // an ordinary expression that codegen will walk, and it needs checking and
     // decorating exactly like one in a body. See fillModuleGlobal in
     // pass_c.yoop for the split, and codegen/module_init.yoop for the store.
-    if (declNode.kind == ASTNodeKind.LET_DECL) {
+    if (declNode.kind == ASTNodeKind.LET_DECL || declNode.kind == ASTNodeKind.CONST_DECL) {
       checkModuleGlobalInit(ref prog, ref tm, ref m.ast, declNode);
+    }
+    // An `@precompile { ... }` block. Its statements are ordinary ones and the
+    // comptime pass is going to WALK them, so they need checking and decorating
+    // exactly as a body's do - an undecorated statement folds to zeros.
+    if (declNode.kind == ASTNodeKind.BLOCK) {
+      checkPrecompileBlock(ref prog, ref tm, ref m.ast, declId);
     }
     i += 1;
   }
 }
 
-// The initializer of a module-level `let` that runs at RUN TIME.
+// An `@precompile { ... }` block's statements.
+//
+// Not a body: there are no parameters and no enclosing function, so the scope
+// starts empty and the ambient return type is void. Module-level names resolve
+// the way they do anywhere else, which is what lets the block read and write
+// the globals it exists to fill.
+function checkPrecompileBlock(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  blockId: NodeId
+): void {
+  beginFunction(ref prog, "@precompile", TYPE_VOID_ID, false, false);
+  disposable scope: LocalScope = scopeNew();
+  let cx: Cx = { prog: ref prog, tm: ref tm, ast: ref ast, scope: ref scope };
+  checkBlock(ref cx, blockId);
+}
+
+// The initializer of a module-level `let` or `const`.
 //
 // It is not a body: there are no parameters, no locals in scope, and no
 // enclosing function for `?` or `await` to belong to - so the scope it is
 // checked in is empty and the ambient return type is void, which is what makes
 // a `?` written here refuse itself rather than propagate into nothing.
+//
+// EVERY initializer is walked, including one that will never be emitted because
+// its const inlines. Decoration is the point rather than the check: the
+// comptime evaluator reads an expression's resolved types, and an initializer
+// nobody typed folds to zeros - silently, because every operation on an
+// untyped slot is a mask by a width of nothing. The check itself is a
+// no-op for a decl pass C already validated by shape.
 function checkModuleGlobalInit(
   ref prog: Program,
   ref tm: TypedModule,
   ref ast: AST,
   declNode: ASTNode
 ): void {
-  const declared = moduleGlobalType(ref prog, ref tm, declNode.name);
-  if (declared == TYPE_ERROR_ID) {
+  const declared = moduleLevelValueType(ref prog, ref tm, declNode.name);
+  if (declared == TYPE_ERROR_ID || declNode.childB == 0) {
     return;
   }
-  if (moduleGlobalIsBaked(ref prog, ref ast, declNode.childB, declared)) {
+  // A BAKED `let` is an integer literal whose value rides in the symbol. There
+  // is no expression for codegen to walk and nothing for comptime to fold, so
+  // it is the one initializer left undecorated.
+  if (declNode.kind == ASTNodeKind.LET_DECL &&
+      moduleGlobalIsBaked(ref prog, ref ast, declNode.childB, declared)) {
     return;
   }
   beginFunction(ref prog, declNode.name, TYPE_VOID_ID, false, false);
@@ -106,9 +146,16 @@ function checkModuleGlobalInit(
   let cx: Cx = { prog: ref prog, tm: ref tm, ast: ref ast, scope: ref scope };
   const got = checkExpr(ref cx, declNode.childB, declared);
   if (got != TYPE_ERROR_ID && !typeAccepts(ref prog, declared, got)) {
+    // Named for the keyword that was actually written. This walk covers both
+    // kinds now, and calling a `const` a `let` sends the reader looking for a
+    // declaration that is not there.
+    let keyword: string = "let";
+    if (declNode.kind == ASTNodeKind.CONST_DECL) {
+      keyword = "const";
+    }
     reportError(
       ref prog,
-      `module-level "let ${declNode.name}" is ${formatType(ref prog, declared)}, but its initializer is ${formatType(ref prog, got)}`,
+      `module-level "${keyword} ${declNode.name}" is ${formatType(ref prog, declared)}, but its initializer is ${formatType(ref prog, got)}`,
       declNode.sourceLoc
     );
   }
@@ -283,9 +330,53 @@ function checkBodyAgainst(
     );
     disposable scope: LocalScope = scopeNew();
     let cx: Cx = { prog: ref prog, tm: ref tm, ast: ref ast, scope: ref scope };
+    beginReturnMarkers(ref prog);
     bindParams(ref cx, declNode, ref paramTypes);
     checkBlock(ref cx, declNode.childD);
+    // The half of the clearance decl-authority check that needs a BODY: a
+    // conferred kind on the return that nothing is authorized to confer is only
+    // legal when every return hands back a value already carrying it. See the
+    // passthrough section of typecheck/markers.yoop.
+    checkConferredPassthrough(ref prog, ref ast, declNode);
+    checkAllPathsReturn(ref prog, ref ast, declNode, retType);
   }
+}
+
+// A function that declares a return type has to hand one back on EVERY path.
+//
+// The question is answered by `alwaysReturns` in typecheck/diverge.yoop, which
+// is the near twin of the `alwaysDiverges` the `?` handler rule and the
+// unreachable-code warning read - and it has to be the twin rather than the
+// same function, because a `break` LEAVES THE STATEMENT while staying inside a
+// function that still owes a value. See that module's header.
+//
+// This belongs here rather than in codegen, which is where it used to be
+// noticed: codegen has no value to return either, so it reported an INTERNAL
+// error, without a location, and stopped at the first offender. Refusing it
+// here gives the function's own location and reports every one of them, and
+// leaves the codegen check standing as what it now is - an assertion that pass
+// D ran.
+//
+// Two exemptions. A `void` function falling off the end IS its return, and a
+// return type that already failed to resolve has reported once and should not
+// report twice on top of it.
+function checkAllPathsReturn(
+  ref prog: Program,
+  ref ast: AST,
+  declNode: ASTNode,
+  retType: TypeId
+): void {
+  if (retType == TYPE_VOID_ID || retType == TYPE_ERROR_ID) {
+    return;
+  }
+  if (alwaysReturns(ref ast, declNode.childD)) {
+    return;
+  }
+  reportError(
+    ref prog,
+    `"${declNode.name}" returns ${formatType(ref prog, retType)}, and control can reach the end of its body without returning one - every path out has to return a value`,
+    declNode.sourceLoc
+  );
 }
 
 // Parameters are locals the caller filled in. Their types come from the Func
@@ -325,6 +416,12 @@ function bindParams(ref cx: Cx, declNode: ASTNode, ref paramTypes: Vec<TypeId>):
     }
     if (!declared) {
       reportError(cx.prog, `parameter "${paramNode.name}" is declared more than once`, paramNode.sourceLoc);
+    } else {
+      // The clearance markers the parameter declares, in both spellings -
+      // `f(owned s: string)` and `f(s: owned string)`. See
+      // typecheck/markers.yoop.
+      scopeSetMarkers(cx.scope, paramNode.name,
+        markersOfParam(cx.prog, cx.ast, paramNode));
     }
     // The DECORATION keeps the signature type: it is what codegen emits the
     // parameter as, and a `ref` parameter arrives as a pointer.

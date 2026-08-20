@@ -1,0 +1,4 @@
+# Illegal: `${u}` needs something to render with. Untemplated is a plain struct
+# - not one of the primitives the interpolator knows, and carrying no
+# `toString(ref self): string`.
+9:17: cannot interpolate a value of type "Untemplated"

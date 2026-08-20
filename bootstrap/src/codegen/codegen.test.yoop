@@ -22,7 +22,7 @@ import { emptyArena } from "../ast";
 import { Module, ModuleGraph, LoadModuleResult, LoadGraphResult, moduleFromSource,
   singleModuleGraph, loadModuleGraph } from "../source_graph";
 import { Program, typecheckProgram } from "../typecheck";
-import { codegenProgram } from "../codegen";
+import { codegenProgram, defaultCodegenOptions, CodegenOptions } from "../codegen";
 
 // std/core/alloc.yoop's own libc block, which is the collision the
 // template-literal lowering had with it: `malloc` and `free` spelled exactly as
@@ -369,7 +369,7 @@ suite function anAsyncFunctionIsACoroutine(): void {
       `${ASYNC_KIND}async a(): int32 { return 1; } function plain(): int32 { return 2; }`
     );
     const ir = text.view(ref e.ir);
-    theory.isSuccessful = occurrences(ir, "define i32 @test__plain() {") == 1 &&
+    theory.isSuccessful = occurrences(ir, "define i32 @test__plain()") == 1 &&
       occurrences(ir, "presplitcoroutine") == 1;
     theory.detail = "the plain function did not keep the ordinary ABI";
   }
@@ -435,7 +435,7 @@ suite function theSuspendPrimitiveIsABareSuspend(): void {
 
 // ----- the SPAWN --------------------------------------------------------------
 
-const TASK_KINDS: string = "kind task { appliesTo function; pausable; provides Task; } kind pooled { appliesTo binding; refcounted retain release; } kind joined { appliesTo binding; mustCall join beforeScopeEnd; } ";
+const TASK_KINDS: string = "trait Joins { function join(ref self): void; } kind task { appliesTo function; pausable; provides Task; } kind pooled { appliesTo binding; refcounted retain release; } kind joined { appliesTo binding; requires Joins; mustCall join beforeScopeEnd; } ";
 
 // THE BYTE OFFSETS. The C runtime reaches the handle's prefix through
 // `(char*)h + 16` and friends, so a field in the wrong place is a corrupted
@@ -829,7 +829,7 @@ suite function aVoidMainCarriesCsEntryPointSignature(): void {
   let test theory: Case = t.asserts("a void main is `define i32 @main()` returning 0") {
     disposable e: Emitted = emitSource("function main(): void { }");
     const ir = text.view(ref e.ir);
-    theory.isSuccessful = occurrences(ir, "define i32 @main() {") == 1 &&
+    theory.isSuccessful = occurrences(ir, "define i32 @main()") == 1 &&
       occurrences(ir, "ret i32 0") == 1 &&
       occurrences(ir, "define void @main") == 0;
     theory.detail = `codegen said "${e.error}"; a void main did not get C's signature`;
@@ -841,7 +841,7 @@ suite function aVoidMainCarriesCsEntryPointSignature(): void {
   let test theory: Case = t.asserts("an explicit `return;` in a void main returns 0 too") {
     disposable e: Emitted = emitSource("function main(): void { return; }");
     const ir = text.view(ref e.ir);
-    theory.isSuccessful = occurrences(ir, "define i32 @main() {") == 1 &&
+    theory.isSuccessful = occurrences(ir, "define i32 @main()") == 1 &&
       occurrences(ir, "ret i32 0") == 1 &&
       occurrences(ir, "ret void") == 0;
     theory.detail = `codegen said "${e.error}"; the early return still says void`;
@@ -852,7 +852,7 @@ suite function aVoidMainCarriesCsEntryPointSignature(): void {
       "function f(): void { return; } function main(): int32 { f(); return 0; }"
     );
     const ir = text.view(ref e.ir);
-    theory.isSuccessful = occurrences(ir, "define void @test__f() {") == 1 &&
+    theory.isSuccessful = occurrences(ir, "define void @test__f()") == 1 &&
       occurrences(ir, "ret void") == 1;
     theory.detail = `codegen said "${e.error}"; the entry point's signature leaked into an ordinary function`;
   }
@@ -860,9 +860,391 @@ suite function aVoidMainCarriesCsEntryPointSignature(): void {
   let test theory: Case = t.asserts("a main DECLARED int32 is unchanged") {
     disposable e: Emitted = emitSource("function main(): int32 { return 7; }");
     const ir = text.view(ref e.ir);
-    theory.isSuccessful = occurrences(ir, "define i32 @main() {") == 1 &&
+    theory.isSuccessful = occurrences(ir, "define i32 @main()") == 1 &&
       occurrences(ir, "ret i32 7") == 1;
     theory.detail = `codegen said "${e.error}"`;
+  }
+}
+
+// `--track-heap`. The counting itself is the C runtime's; what codegen owes is
+// a counter call beside every allocation and free, and the atexit dump in
+// `main`.
+//
+// The counter calls themselves are NOT asserted here, and the reason is the
+// harness rather than the feature: `--track-heap` counts `heapAlloc` and
+// `ctxAlloc`, which are std intrinsics, and this harness builds a single module
+// with no std root to import them from. What that leaves is the half that needs
+// no allocation - that an ordinary build pays nothing, and that a tracked one
+// installs the dump - which is also the half a regression is most likely to
+// break. The pairing is covered end to end by
+// `examples/pass/track_heap_basic.yoop`, whose output matches the reference's
+// byte for byte.
+suite function trackHeapIsOffUnlessAskedFor(): void {
+  const SRC = "function main(): int32 { return 0; }";
+
+  disposable off: Emitted = emitSourceWith(SRC, { trackHeap: false });
+  let test theory: Case = t.asserts("an ordinary build emits none of it") {
+    const ir = text.view(ref off.ir);
+    theory.isSuccessful = occurrences(ir, "yoop_diag") == 0 && occurrences(ir, "atexit") == 0;
+    theory.detail = `codegen said "${off.error}"; a build that did not ask still pays for it`;
+  }
+
+  disposable on: Emitted = emitSourceWith(SRC, { trackHeap: true });
+  // Through atexit rather than before each `ret`, so an `exit()` or an abort
+  // prints the totals too.
+  let test theory: Case = t.asserts("main installs the dump as an atexit handler") {
+    const ir = text.view(ref on.ir);
+    theory.isSuccessful = occurrences(ir, "call i32 @atexit(ptr @yoop_diag_dump)") == 1 &&
+      occurrences(ir, "declare void @yoop_diag_dump()") == 1;
+    theory.detail = `codegen said "${on.error}"; the dump is never installed`;
+  }
+
+  // The counters live in the C runtime, so a tracked build has to LINK it even
+  // when the program never calls into it otherwise. Without this a hello-world
+  // compiles to valid IR and fails at the link - which is how it was found.
+  let test theory: Case = t.asserts("a tracked build links the runtime") {
+    theory.isSuccessful = on.needsRuntime && !off.needsRuntime;
+    theory.detail = "a tracked build did not ask for the runtime the counters live in";
+  }
+}
+
+// DWARF. What these assert is the SHAPE of the metadata, because the shape is
+// what a debugger reads and because getting it wrong fails silently: clang
+// strips every DI node in a module that does not declare the two named ones,
+// and says so in a warning nobody reads. A program then compiles, runs, and is
+// not debuggable, with nothing in the output saying why.
+suite function emittedIrCarriesDwarfMetadata(): void {
+  disposable e: Emitted = emitSource(
+    "function pow(a: int32, b: int32): int32 { return a * b; }\nfunction main(): int32 { return pow(2, 3); }");
+  const ir = text.view(ref e.ir);
+
+  let test theory: Case = t.asserts("the two named nodes are emitted") {
+    theory.isSuccessful = occurrences(ir, "!llvm.dbg.cu = !{") == 1 &&
+      occurrences(ir, "!llvm.module.flags = !{") == 1 &&
+      occurrences(ir, "!\"Dwarf Version\", i32 4}") == 1 &&
+      occurrences(ir, "!\"Debug Info Version\", i32 3}") == 1;
+    theory.detail = `codegen said "${e.error}"; without these clang strips every DI node`;
+  }
+
+  let test theory: Case = t.asserts("the source file gets a DIFile and a distinct DICompileUnit") {
+    theory.isSuccessful = occurrences(ir, "!DIFile(filename: \"test.yoop\"") == 1 &&
+      occurrences(ir, "distinct !DICompileUnit(language: DW_LANG_C99") == 1 &&
+      occurrences(ir, "emissionKind: FullDebug") == 1;
+    theory.detail = `codegen said "${e.error}"; the compile unit is missing`;
+  }
+
+  // The LINKAGE name is the mangled symbol, which is what a debugger matches
+  // against the binary's symbol table - `pow` alone would not resolve.
+  let test theory: Case = t.asserts("each function gets a distinct DISubprogram naming its symbol") {
+    theory.isSuccessful =
+      occurrences(ir, "distinct !DISubprogram(name: \"pow\", linkageName: \"test__pow\"") == 1 &&
+      occurrences(ir, "distinct !DISubprogram(name: \"main\", linkageName: \"main\"") == 1;
+    theory.detail = `codegen said "${e.error}"; a subprogram is missing or misnamed`;
+  }
+
+  // Without `!dbg` on the define, every location inside names a scope the
+  // function does not declare and the verifier rejects the module.
+  let test theory: Case = t.asserts("the define lines carry their subprogram") {
+    theory.isSuccessful = occurrences(ir, "define i32 @main() !dbg !") == 1 &&
+      occurrences(ir, "define i32 @test__pow(i32 %a.arg, i32 %b.arg) !dbg !") == 1;
+    theory.detail = `codegen said "${e.error}"; a define is not tied to a frame`;
+  }
+
+  let test theory: Case = t.asserts("instructions are tagged with a source location") {
+    theory.isSuccessful = occurrences(ir, "!DILocation(line: 2, column: ") > 0 &&
+      occurrences(ir, ", !dbg !") > 0;
+    theory.detail = `codegen said "${e.error}"; no instruction carries a line`;
+  }
+}
+
+// The TYPE side. What these assert is that the description matches the layout
+// CODEGEN EMITS rather than the type as the source writes it - an `int32[]` is
+// not an array in DWARF's sense, it is the two-word fat pointer, and describing
+// it as anything else makes a debugger read the wrong bytes.
+suite function dwarfDescribesTheLayoutCodegenEmits(): void {
+  disposable e: Emitted = emitSource(
+    "type Point { x: int32, y: int32 }\nvariant Shape { Dot, Rect { w: int32 } }\nfunction main(): int32 {\n  let pt: Point = { x: 1, y: 2 };\n  let who: string = \"t\";\n  let nums: int32[] = [1, 2];\n  let shape: Shape = Shape.Rect { w: 3 };\n  return pt.x;\n}");
+  const ir = text.view(ref e.ir);
+
+  // A struct: one member per field, at the byte offset the layout gives it -
+  // in BITS, which is DWARF's unit.
+  let test theory: Case = t.asserts("a struct is a composite with a member per field") {
+    theory.isSuccessful =
+      occurrences(ir, "!DICompositeType(tag: DW_TAG_structure_type, name: \"Point\", size: 64") == 1 &&
+      occurrences(ir, "name: \"y\"") == 1 && occurrences(ir, "offset: 32)") > 0;
+    theory.detail = `codegen said "${e.error}"; the struct is not described`;
+  }
+
+  // `string` is a typedef over char*, which is what makes a debugger print the
+  // TEXT rather than the address.
+  let test theory: Case = t.asserts("a string is a typedef over char*") {
+    theory.isSuccessful =
+      occurrences(ir, "!DIDerivedType(tag: DW_TAG_typedef, name: \"string\"") == 1 &&
+      occurrences(ir, "!DIBasicType(name: \"char\", size: 8, encoding: DW_ATE_signed_char)") == 1;
+    theory.detail = `codegen said "${e.error}"; a string would print as an address`;
+  }
+
+  let test theory: Case = t.asserts("an array is the two-word fat pointer") {
+    theory.isSuccessful =
+      occurrences(ir, "!DICompositeType(tag: DW_TAG_structure_type, name: \"int32[]\", size: 128") == 1 &&
+      occurrences(ir, "name: \"len\"") > 0;
+    theory.detail = `codegen said "${e.error}"; the array descriptor is not described`;
+  }
+
+  // The tag is an ENUMERATION so a debugger prints `tag = Rect` rather than
+  // `tag = 1`.
+  let test theory: Case = t.asserts("a variant is a tag enumeration plus a payload") {
+    theory.isSuccessful =
+      occurrences(ir, "!DICompositeType(tag: DW_TAG_enumeration_type, name: \"Shape.tag\"") == 1 &&
+      occurrences(ir, "!DIEnumerator(name: \"Rect\", value: 1)") == 1 &&
+      occurrences(ir, "name: \"Shape.payload\"") == 1;
+    theory.detail = `codegen said "${e.error}"; the variant tag would print as a number`;
+  }
+
+  // Every local gets a variable and a declare tying it to its slot.
+  let test theory: Case = t.asserts("each local gets a DILocalVariable and a dbg.declare") {
+    theory.isSuccessful =
+      occurrences(ir, "!DILocalVariable(name: \"pt\"") == 1 &&
+      occurrences(ir, "!DILocalVariable(name: \"who\"") == 1 &&
+      occurrences(ir, "!DILocalVariable(name: \"nums\"") == 1 &&
+      occurrences(ir, "!DILocalVariable(name: \"shape\"") == 1 &&
+      occurrences(ir, "call void @llvm.dbg.declare(metadata ptr") == 4;
+    theory.detail = `codegen said "${e.error}"; a local is not declared to the debugger`;
+  }
+}
+
+// A parameter is described too, and its subprogram carries a real signature
+// rather than an empty tuple - which is what makes a backtrace show `inner(n=5)`
+// instead of `inner()`.
+suite function dwarfDescribesParametersAndSignatures(): void {
+  disposable e: Emitted = emitSource(
+    "function twice(n: int32): int32 { return n * 2; }\nfunction main(): int32 { return twice(4); }");
+  const ir = text.view(ref e.ir);
+
+  let test theory: Case = t.asserts("a parameter is a DILocalVariable with a 1-based arg index") {
+    theory.isSuccessful = occurrences(ir, "!DILocalVariable(name: \"n\", arg: 1") == 1;
+    theory.detail = `codegen said "${e.error}"; the parameter is not described`;
+  }
+
+  let test theory: Case = t.asserts("the subroutine type carries the return and parameter types") {
+    theory.isSuccessful = occurrences(ir, "!DISubroutineType(types: !{}") == 0 &&
+      occurrences(ir, "!DISubroutineType(types: !{!") > 0;
+    theory.detail = `codegen said "${e.error}"; the signature is still an empty tuple`;
+  }
+}
+
+// A LABEL goes through the same line-ending path an instruction does, and a
+// `switch` spans several lines. Both would produce invalid IR if the `!dbg`
+// were attached blindly - `Lfoo:, !dbg !5` is not a label, and a tag on the
+// opening line of a switch lands inside the bracket.
+suite function dwarfTagsOnlyWhereAnInstructionEnds(): void {
+  disposable e: Emitted = emitSource(
+    "function classify(n: int32): int32 { let r: int32 = 0; switch (n) { case 0: { r = 1; } case 1, 2: { r = 2; } default: { r = 3; } } return r; }\nfunction main(): int32 { return classify(1); }");
+  const ir = text.view(ref e.ir);
+
+  let test theory: Case = t.asserts("a label is not tagged") {
+    theory.isSuccessful = occurrences(ir, ":, !dbg") == 0;
+    theory.detail = "a label line was given a source location";
+  }
+
+  // The tag belongs after the closing bracket, which is where the instruction
+  // actually ends.
+  let test theory: Case = t.asserts("a switch is tagged at its close, not at its open") {
+    theory.isSuccessful = occurrences(ir, "[, !dbg") == 0 &&
+      occurrences(ir, "], !dbg !") > 0;
+    theory.detail = "the switch's location landed inside the bracket";
+  }
+}
+
+/*
+  The DWARF layout ARITHMETIC, which nothing else in the tree can check.
+
+  `structDebugType`, `unionDebugType` and `vtableDebugType` compute member
+  offsets, composite sizes and alignments BY HAND. Codegen itself never does:
+  it names an LLVM struct type and geps by field INDEX, and LLVM works the
+  offsets out. So these two are independent implementations of one layout rule,
+  and a disagreement between them is invisible to every other test here - the
+  program still prints the right answer, and clang still accepts the IR,
+  because the metadata is not what the instructions read. A debugger is the
+  only thing that ever sees it, and it reports the wrong field rather than an
+  error.
+
+  Names are asserted for the same reason. An unnamed composite is legal DWARF,
+  so nothing rejects one; it just prints as an anonymous type with no way to
+  tell what it was.
+*/
+suite function dwarfLaysOutCompositesTheWayLlvmDoes(): void {
+  // A field wider than the one before it is bumped to its own alignment, and
+  // the whole is rounded up to the widest - so `{ i8, i64 }` is 16 bytes with
+  // the i64 at byte 8, not 9 bytes with it at byte 1.
+  let test theory: Case = t.asserts("a struct member is padded to its own alignment") {
+    disposable e: Emitted = emitSource(
+      "type S { flag: int8, big: int64 }\nfunction main(): int32 {\n  let s: S = { flag: 1, big: 2 };\n  return int32(s.big);\n}");
+    const ir = text.view(ref e.ir);
+    theory.isSuccessful =
+      occurrences(ir, "name: \"S\", size: 128, align: 64") == 1 &&
+      occurrences(ir, "name: \"flag\", scope: !") == 1 &&
+      occurrences(ir, "name: \"big\", scope: !") == 1 &&
+      occurrences(ir, "size: 64, align: 64, offset: 64)") == 1;
+    theory.detail = `codegen said "${e.error}"; a debugger would read "big" out of the padding`;
+  }
+
+  // A union's fields OVERLAP, so every member sits at offset 0 and the whole is
+  // as wide as the widest. Getting this wrong is the same silent failure from
+  // the other direction - a debugger reading `chans` out of byte 4.
+  let test theory: Case = t.asserts("a named union puts every member at offset 0") {
+    disposable e: Emitted = emitSource(
+      "union Color { rgba: uint32, chans: uint16 }\nfunction main(): int32 {\n  let c: Color = { rgba: 7 };\n  return int32(c.rgba);\n}");
+    const ir = text.view(ref e.ir);
+    theory.isSuccessful =
+      occurrences(ir, "!DICompositeType(tag: DW_TAG_union_type, name: \"Color\", size: 32, align: 32") == 1 &&
+      occurrences(ir, "name: \"rgba\", scope: !") == 1 &&
+      occurrences(ir, "name: \"chans\", scope: !") == 1 &&
+      occurrences(ir, "size: 16, align: 16, offset: 0)") == 1;
+    theory.detail = `codegen said "${e.error}"; the union is unnamed or its members are not overlapped`;
+  }
+
+  // A vtable value is `{ ptr ctx, ptr m0, ... }`, so the erased receiver is at
+  // 0 and each slot is one machine word after it, in the vtable's own
+  // declaration order - the order dispatch geps with.
+  let test theory: Case = t.asserts("a named vtable is ctx followed by one word per slot") {
+    disposable e: Emitted = emitSource(
+      "trait Handler {\n  function handle(ref self, n: int32): int32;\n  function reset(ref self): int32;\n}\ntype Impl implements Handler {\n  k: int32,\n  function handle(ref self, n: int32): int32 { return n; }\n  function reset(ref self): int32 { return 0; }\n}\nvtable Dispatcher for Handler {\n  handle: (n: int32) => int32,\n  reset: () => int32,\n}\nfunction main(): int32 {\n  let im: Impl = { k: 1 };\n  let d: Dispatcher = Dispatcher.from(ref im);\n  return Dispatcher.handle(ref d, 0);\n}");
+    const ir = text.view(ref e.ir);
+    theory.isSuccessful =
+      occurrences(ir, "name: \"Dispatcher\", size: 192, align: 64") == 1 &&
+      occurrences(ir, "name: \"ctx\", scope: !") == 1 &&
+      occurrences(ir, "name: \"handle\", scope: !") == 1 &&
+      occurrences(ir, "name: \"reset\", scope: !") == 1 &&
+      occurrences(ir, "size: 64, align: 64, offset: 128)") == 1;
+    theory.detail = `codegen said "${e.error}"; the vtable is unnamed or its slots are misplaced`;
+  }
+
+  // A value enum IS its underlying primitive at run time, so that is what a
+  // debugger has to READ - but the typedef keeps the name, which is what makes
+  // it print as `Level` rather than as a bare `int32`.
+  let test theory: Case = t.asserts("a value enum is a named typedef over its underlying") {
+    disposable e: Emitted = emitSource(
+      "enum Level { Info, Warn }\nfunction main(): int32 {\n  let lv: Level = Level.Warn;\n  return int32(lv);\n}");
+    const ir = text.view(ref e.ir);
+    theory.isSuccessful =
+      occurrences(ir, "!DIDerivedType(tag: DW_TAG_typedef, name: \"Level\"") == 1 &&
+      occurrences(ir, "!DIBasicType(name: \"int32\", size: 32, encoding: DW_ATE_signed)") == 1;
+    theory.detail = `codegen said "${e.error}"; the enum would print with no name of its own`;
+  }
+}
+
+/*
+  A type that reaches itself.
+
+  `debugTypeOf` writes its cache entry BEFORE building a composite's members,
+  so the walk into `next` finds the enclosing type already there and points at
+  it. Without that the walk restarts the same build forever: the compiler HANGS
+  rather than emitting anything wrong, which is why no corpus program can catch
+  it - and nothing in `std/`, `bootstrap/src/` or `examples/pass/` declares a
+  type that reaches itself, so this is the only place the cycle is closed.
+*/
+suite function dwarfTerminatesOnASelfReferentialType(): void {
+  disposable e: Emitted = emitSource(
+    "type Node { value: int32, next: ref Node }\nfunction hold(ref a: Node): int32 {\n  let b: Node = { value: 2, next: ref a };\n  return b.value;\n}\nfunction main(): int32 { return 0; }");
+  const ir = text.view(ref e.ir);
+
+  let test theory: Case = t.asserts("the cycle closes onto one composite rather than rebuilding it") {
+    theory.isSuccessful =
+      occurrences(ir, "!DICompositeType(tag: DW_TAG_structure_type, name: \"Node\"") == 1 &&
+      occurrences(ir, "name: \"next\", scope: !") == 1;
+    theory.detail = `codegen said "${e.error}"; a second Node node means the walk copied instead of reusing`;
+  }
+
+  // The self-reference is a POINTER, so it is one word wherever it appears -
+  // a composite that inlined itself would have no finite size at all.
+  let test theory: Case = t.asserts("the self-reference is a pointer, so the struct has a finite size") {
+    theory.isSuccessful = occurrences(ir, "name: \"Node\", size: 128, align: 64") == 1;
+    theory.detail = `codegen said "${e.error}"; Node is not the { i32, ptr } codegen emits`;
+  }
+}
+
+// A module-level `const` whose value is not something there IS to inline is
+// backed by a real global, and its initializer runs in the module's init
+// function. `const` is about immutability; the inlining is a fast path for the
+// literal shapes and not what the keyword means.
+suite function aConstThatCannotInlineBecomesAGlobal(): void {
+  let test theory: Case = t.asserts("a literal const still inlines, with no global and no init") {
+    disposable e: Emitted = emitSource(
+      "const N: int32 = 7;\nfunction main(): int32 { return N; }"
+    );
+    const ir = text.view(ref e.ir);
+    theory.isSuccessful = occurrences(ir, "@test__N") == 0 && occurrences(ir, "module_init") == 0;
+    theory.detail = `codegen said "${e.error}"; the fast path grew storage`;
+  }
+
+  let test theory: Case = t.asserts("a call-initialized const gets a zeroed global and a run-time store") {
+    disposable e: Emitted = emitSource(
+      "function five(): int32 { return 5; }\nconst N: int32 = five();\nfunction main(): int32 { return N; }"
+    );
+    const ir = text.view(ref e.ir);
+    theory.isSuccessful =
+      occurrences(ir, "@test__N = internal global i32 zeroinitializer, align 8") == 1 &&
+      occurrences(ir, "store i32 %t1, ptr @test__N") == 1 &&
+      occurrences(ir, "define internal void @test__module_init0() {") == 1;
+    theory.detail = `codegen said "${e.error}"; the const did not land as an initialized global`;
+  }
+
+  // And a READ of one is a load, which is the half that would otherwise still
+  // be looking for an immediate to inline.
+  let test theory: Case = t.asserts("reading it is a load rather than an inlined immediate") {
+    disposable e: Emitted = emitSource(
+      "function five(): int32 { return 5; }\nconst N: int32 = five();\nfunction main(): int32 { return N; }"
+    );
+    const ir = text.view(ref e.ir);
+    theory.isSuccessful = occurrences(ir, "load i32, ptr @test__N") == 1;
+    theory.detail = `codegen said "${e.error}"; the read did not load the global`;
+  }
+}
+
+// `ref` on a module-level `let`. A global already IS storage, so a borrow of one
+// is its SYMBOL and costs no instruction - the same answer a local gets out of
+// its alloca, one address form over. Reading and writing a global already took
+// this fall-through; the borrow is the third position that has to know a name
+// can live outside the frame.
+suite function aBorrowOfAModuleGlobalIsItsSymbol(): void {
+  let test theory: Case = t.asserts("`ref g` hands over the global's symbol, with no instruction") {
+    disposable e: Emitted = emitSource(
+      "let counter: int32 = 0;\nfunction bump(ref n: int32): int32 { n = n + 1; return n; }\nfunction main(): int32 { return bump(ref counter); }"
+    );
+    const ir = text.view(ref e.ir);
+    theory.isSuccessful =
+      occurrences(ir, "@test__counter = internal global i32 0, align 8") == 1 &&
+      occurrences(ir, "call i32 @test__bump(ptr @test__counter)") == 1;
+    theory.detail = `codegen said "${e.error}"; wanted the global passed as a bare symbol`;
+  }
+
+  // The borrow, the read and the write all have to name the SAME address, or a
+  // write through the borrow would be invisible to a later read.
+  let test theory: Case = t.asserts("a borrow, a read and a write agree on one address") {
+    disposable e: Emitted = emitSource(
+      "let counter: int32 = 0;\nfunction bump(ref n: int32): int32 { n = n + 1; return n; }\nfunction main(): int32 { counter = 1; const a = bump(ref counter); return counter; }"
+    );
+    const ir = text.view(ref e.ir);
+    theory.isSuccessful =
+      occurrences(ir, "store i32 1, ptr @test__counter") == 1 &&
+      occurrences(ir, "call i32 @test__bump(ptr @test__counter)") == 1 &&
+      occurrences(ir, "load i32, ptr @test__counter") == 1;
+    theory.detail = `codegen said "${e.error}"; the three positions do not name one global`;
+  }
+
+  // A FIELD of a global. The gep starts from the symbol rather than from a
+  // slot, which is the one thing the address form had to make possible.
+  let test theory: Case = t.asserts("`ref g.field` geps off the symbol") {
+    disposable e: Emitted = emitSource(
+      "type Pair { lo: int32, hi: int32 }\nlet pair: Pair = { lo: 1, hi: 2 };\nfunction bump(ref n: int32): int32 { n = n + 1; return n; }\nfunction main(): int32 { return bump(ref pair.hi); }"
+    );
+    const ir = text.view(ref e.ir);
+    theory.isSuccessful = occurrences(
+      ir,
+      "getelementptr inbounds %struct.test__Pair, ptr @test__pair, i32 0, i32 1"
+    ) == 1;
+    theory.detail = `codegen said "${e.error}"; wanted a gep off the global's symbol`;
   }
 }
 
@@ -1040,6 +1422,19 @@ suite function aDeepCodegenRefusalReachesTheDriver(): void {
   }
 }
 
+function emitSourceWith(src: string, opts: CodegenOptions): Emitted propagates<disposable> {
+  let graph: ModuleGraph = graphOfSource(src);
+  disposable prog: Program = typecheckProgram(ref graph);
+  switch (codegenProgram(ref prog, ref graph, opts)) {
+    case Result.Ok { value: out }: {
+      return { ir: out.ir, error: "", needsRuntime: out.needsRuntime, linkLibraries: out.linkLibraries };
+    }
+    case Result.Err { error: e }: {
+      return { ir: text.make(0), error: e, needsRuntime: false, linkLibraries: vec.vecNew(1) };
+    }
+  }
+}
+
 function emitSource(src: string): Emitted propagates<disposable> {
   // Not disposed, matching typecheck.test.yoop: a ModuleGraph owns the arena
   // every later layer borrows from, and a test process exits before the leak
@@ -1059,7 +1454,7 @@ function emitFixture(name: string): Emitted propagates<disposable> {
 
 function emitGraph(ref graph: ModuleGraph): Emitted propagates<disposable> {
   disposable prog: Program = typecheckProgram(ref graph);
-  switch (codegenProgram(ref prog, ref graph)) {
+  switch (codegenProgram(ref prog, ref graph, defaultCodegenOptions())) {
     case Result.Ok { value: out }: {
       return { ir: out.ir, error: "", needsRuntime: out.needsRuntime, linkLibraries: out.linkLibraries };
     }

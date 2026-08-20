@@ -1,0 +1,334 @@
+module typecheck;
+
+// Who is allowed to MOVE a value across a clearance marker.
+//
+// A marker kind is a bound rather than an obligation - see KindInfo's clearance
+// half - and the bound is only worth anything if the transition across it is
+// gated. That is what the kind declaration's `requires` / `appliedBy` and
+// `requires` / `clearedBy` pairs name: a TRAIT and one of its methods. A type
+// opts in by implementing the trait, and the named method on such a type is the
+// only place the transition may happen.
+//
+//   `appliedBy cleanse` on a conferred kind   minting a capability
+//   `clearedBy cleanse` on a restrictive kind shedding a hazard
+//
+// Both are refused for a free function categorically. A capability anyone can
+// mint is not a capability, and a hazard anyone can drop is not a hazard - and
+// the free-function version of either looks exactly like the real thing at
+// every call site, which is what makes it worth a diagnostic rather than a
+// convention.
+//
+// Read off SIGNATURES, which is where both facts already are: the parameters
+// say what came in, the return says what goes out, and the difference between
+// them is the transition. Nothing here walks a body.
+//
+// WHERE THE LINE IS. This file answers everything a SIGNATURE can answer on its
+// own. The two-bound check at every place a value MOVES - a binding
+// initializer, a call argument - needs the marker set of an expression, which
+// is typecheck/markers.yoop. So does the one direction this file skips: a
+// conferred kind naming no `appliedBy` at all, where the only legal route is
+// passthrough and establishing that means reading every `return` in the body.
+// See `checkConferredPassthrough`.
+
+import { Vec }, * as vec from "std/core/vec.yoop";
+import * as str from "std/core/strings.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import { Option } from "std/core/types.yoop";
+import { AST, ASTNode, ASTNodeKind, NodeId, childAt, nodeAt } from "../ast";
+
+// A free function: nothing it declares can be authorized, so every transition
+// its signature performs is refused.
+export function checkFunctionClearance(
+  ref prog: Program,
+  ref ast: AST,
+  declNode: ASTNode
+): void {
+  disposable noTraits: Vec<string> = vec.vecNew(0);
+  checkClearanceAuthority(ref prog, ref ast, declNode, false, "", ref noTraits);
+}
+
+// A method, with the traits its owning type actually implements. Those are what
+// a kind's `requires` is matched against - by NAME, because a kind is
+// registered in pass A and a trait TYPE does not exist yet then.
+export function checkMethodClearance(
+  ref prog: Program,
+  ref ast: AST,
+  declNode: ASTNode,
+  ownerName: string,
+  ref traitNames: Vec<string>
+): void {
+  checkClearanceAuthority(ref prog, ref ast, declNode, true, ownerName, ref traitNames);
+}
+
+// The two directions, each read straight off the signature.
+function checkClearanceAuthority(
+  ref prog: Program,
+  ref ast: AST,
+  declNode: ASTNode,
+  isMethod: bool,
+  ownerName: string,
+  ref traitNames: Vec<string>
+): void {
+  checkStrips(ref prog, ref ast, declNode, isMethod, ownerName, ref traitNames);
+  checkConfers(ref prog, ref ast, declNode, isMethod, ownerName, ref traitNames);
+}
+
+// The RESTRICTIVE direction: a hazard came in on a parameter and does not go
+// back out on the return, so this signature sheds it.
+//
+// A return that carries the same kind is a PASSTHROUGH and needs no authority -
+// the hazard travels with the value rather than being dropped.
+function checkStrips(
+  ref prog: Program,
+  ref ast: AST,
+  declNode: ASTNode,
+  isMethod: bool,
+  ownerName: string,
+  ref traitNames: Vec<string>
+): void {
+  if (declNode.childB == 0) {
+    return;
+  }
+  const params = nodeAt(ref ast, declNode.childB);
+  disposable reported: Vec<string> = vec.vecNew(2);
+  let p: usize = 0;
+  while (p < params.childCount) {
+    const param = nodeAt(ref ast, childAt(ref ast, params, p));
+    disposable carried: Vec<string> = kindsOnParam(ref ast, param);
+    let k: usize = 0;
+    while (k < carried.len) {
+      const name = vec.vecGet(ref carried, k);
+      if (isRestrictiveKind(ref prog, name) &&
+          !annotationCarries(ref ast, declNode.childC, name) &&
+          !containsName(ref reported, name)) {
+        vec.vecPush(ref reported, name);
+        reportTransition(ref prog, declNode, name, false, isMethod, ownerName, ref traitNames);
+      }
+      k += 1;
+    }
+    p += 1;
+  }
+}
+
+// The CONFERRED direction: a capability goes out on the return.
+//
+// PASSTHROUGH is approximated by asking whether the kind is written ANYWHERE
+// else in the declaration - a parameter, a local binding's annotation. The
+// reference answers the same question exactly, by walking every `return` and
+// asking whether the value already carried the kind; that needs the expression
+// marker sets this file's header says the bootstrap does not have. The
+// approximation is deliberately the PERMISSIVE one: it can miss a forge that
+// happens to sit beside an unrelated mention of the kind, and it cannot refuse
+// a legal wrapper.
+//
+// A kind that names no `appliedBy` is skipped HERE and refused in pass D
+// instead. Nothing can be its authority, so the only legal route to it is
+// passthrough, and the approximation above is not good enough to decide that -
+// std's `owned` is exactly that kind, and every `owned` string in std is
+// produced by an intrinsic and forwarded. `checkConferredPassthrough` in
+// typecheck/markers.yoop answers it off the body's real `return` values.
+function checkConfers(
+  ref prog: Program,
+  ref ast: AST,
+  declNode: ASTNode,
+  isMethod: bool,
+  ownerName: string,
+  ref traitNames: Vec<string>
+): void {
+  if (declNode.childC == 0) {
+    return;
+  }
+  disposable carried: Vec<string> = kindsOnAnnotation(ref ast, declNode.childC);
+  let k: usize = 0;
+  while (k < carried.len) {
+    const name = vec.vecGet(ref carried, k);
+    if (isConferredKind(ref prog, name) &&
+        kindAuthorityOf(ref prog, name, true).len != 0 &&
+        !mentionsKindElsewhere(ref ast, declNode, name)) {
+      reportTransition(ref prog, declNode, name, true, isMethod, ownerName, ref traitNames);
+    }
+    k += 1;
+  }
+}
+
+// One diagnostic, saying which of the four ways the declaration failed to be
+// the authorized site. Silent when it IS one.
+function reportTransition(
+  ref prog: Program,
+  declNode: ASTNode,
+  kindName: string,
+  conferring: bool,
+  isMethod: bool,
+  ownerName: string,
+  ref traitNames: Vec<string>
+): void {
+  const verb = transitionVerb(conferring);
+  const clause = transitionClause(conferring);
+  const method = kindAuthorityOf(ref prog, kindName, conferring);
+  const traitName = requiredTraitOf(ref prog, kindName);
+
+  if (method.len == 0) {
+    reportError(
+      ref prog,
+      `"${declNode.name}" would ${verb} kind "${kindName}", which names no ${clause} - so nothing is authorized to ${verb} it`,
+      declNode.sourceLoc
+    );
+    return;
+  }
+  if (!isMethod) {
+    reportError(
+      ref prog,
+      `function "${declNode.name}" would ${verb} kind "${kindName}" - only "${traitName}.${method}" may do that, and a free function is not an impl of it`,
+      declNode.sourceLoc
+    );
+    return;
+  }
+  if (!containsName(ref traitNames, traitName)) {
+    reportError(
+      ref prog,
+      `method "${declNode.name}" on "${ownerName}" would ${verb} kind "${kindName}", but "${ownerName}" does not implement "${traitName}" - implement it to opt into the transition`,
+      declNode.sourceLoc
+    );
+    return;
+  }
+  if (!str.stringEq(declNode.name, method)) {
+    reportError(
+      ref prog,
+      `method "${declNode.name}" on "${ownerName}" would ${verb} kind "${kindName}", but kind "${kindName}" names "${method}" as the only method that may`,
+      declNode.sourceLoc
+    );
+  }
+}
+
+function transitionVerb(conferring: bool): string {
+  if (conferring) {
+    return "confer";
+  }
+  return "strip";
+}
+
+function transitionClause(conferring: bool): string {
+  if (conferring) {
+    return "appliedBy";
+  }
+  return "clearedBy";
+}
+
+// ----- reading the kind registry ---------------------------------------------
+
+function isConferredKind(ref prog: Program, name: string): bool {
+  switch (lookupKind(ref prog, name)) {
+    case Option.Some { value: info }: { return info.conferred; }
+    case Option.None: { return false; }
+  }
+}
+
+function isRestrictiveKind(ref prog: Program, name: string): bool {
+  switch (lookupKind(ref prog, name)) {
+    case Option.Some { value: info }: { return info.restrictive; }
+    case Option.None: { return false; }
+  }
+}
+
+// The method the kind names as the authority for this direction, or "".
+function kindAuthorityOf(ref prog: Program, name: string, conferring: bool): string {
+  switch (lookupKind(ref prog, name)) {
+    case Option.Some { value: info }: {
+      if (conferring) {
+        return info.appliedBy;
+      }
+      return info.clearedBy;
+    }
+    case Option.None: { return ""; }
+  }
+}
+
+function requiredTraitOf(ref prog: Program, name: string): string {
+  switch (lookupKind(ref prog, name)) {
+    case Option.Some { value: info }: { return info.requiresTrait; }
+    case Option.None: { return ""; }
+  }
+}
+
+// ----- reading the kinds off a signature -------------------------------------
+
+// The kind names an annotation writes in front of its type. 0 and a non-type
+// annotation both read as none.
+function kindsOnAnnotation(ref ast: AST, annotId: NodeId): Vec<string> propagates<disposable> {
+  let names: Vec<string> = vec.vecNew(2);
+  if (annotId == 0) {
+    return names;
+  }
+  const annot = nodeAt(ref ast, annotId);
+  if (annot.kind != ASTNodeKind.TYPE_ANNOTATION_TYPE_NAME || annot.childB == 0) {
+    return names;
+  }
+  const list = nodeAt(ref ast, annot.childB);
+  let i: usize = 0;
+  while (i < list.childCount) {
+    vec.vecPush(ref names, nodeAt(ref ast, childAt(ref ast, list, i)).name);
+    i += 1;
+  }
+  return names;
+}
+
+// A parameter writes its kind in two places - `f(tainted s: string)` puts it on
+// the PARAM and `f(s: tainted string)` puts it on the annotation - and the two
+// mean the same thing, so both are read.
+function kindsOnParam(ref ast: AST, param: ASTNode): Vec<string> propagates<disposable> {
+  let names: Vec<string> = kindsOnAnnotation(ref ast, param.childA);
+  if (param.childE == 0) {
+    return names;
+  }
+  const list = nodeAt(ref ast, param.childE);
+  let i: usize = 0;
+  while (i < list.childCount) {
+    vec.vecPush(ref names, nodeAt(ref ast, childAt(ref ast, list, i)).name);
+    i += 1;
+  }
+  return names;
+}
+
+// Whether one annotation writes this kind in front of its type.
+function annotationCarries(ref ast: AST, annotId: NodeId, name: string): bool {
+  disposable names: Vec<string> = kindsOnAnnotation(ref ast, annotId);
+  return containsName(ref names, name);
+}
+
+// Whether the kind is written anywhere in the declaration OTHER than on the
+// return annotation - the passthrough approximation checkConfers documents.
+function mentionsKindElsewhere(ref ast: AST, declNode: ASTNode, name: string): bool {
+  return subtreeMentionsKind(ref ast, declNode.childB, name) ||
+    subtreeMentionsKind(ref ast, declNode.childD, name);
+}
+
+// Any annotation under this node that writes the kind. A plain recursive walk
+// of the fat node's slots and its child run; a declaration's body is the only
+// thing of any size it reaches, and every annotation in one is a leaf.
+function subtreeMentionsKind(ref ast: AST, nodeId: NodeId, name: string): bool {
+  if (nodeId == 0) {
+    return false;
+  }
+  if (annotationCarries(ref ast, nodeId, name)) {
+    return true;
+  }
+  const node = nodeAt(ref ast, nodeId);
+  if (subtreeMentionsKind(ref ast, node.childA, name) ||
+      subtreeMentionsKind(ref ast, node.childB, name) ||
+      subtreeMentionsKind(ref ast, node.childC, name) ||
+      subtreeMentionsKind(ref ast, node.childD, name) ||
+      subtreeMentionsKind(ref ast, node.childE, name) ||
+      subtreeMentionsKind(ref ast, node.childF, name)) {
+    return true;
+  }
+  let i: usize = 0;
+  while (i < node.childCount) {
+    if (subtreeMentionsKind(ref ast, childAt(ref ast, node, i), name)) {
+      return true;
+    }
+    i += 1;
+  }
+  return false;
+}
+
+// `containsName` is pass_c.yoop's - one module, one copy.

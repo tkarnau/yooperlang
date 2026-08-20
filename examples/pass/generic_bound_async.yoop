@@ -1,0 +1,66 @@
+// Asyncness surviving MONOMORPHIZATION, through a bound on a type parameter.
+//
+// `sum<T implements Fetcher>` is generic and `async`, and its body awaits a
+// method it only knows about through the bound. Nothing at that point knows
+// which concrete type T will be, so the await resolves against the TRAIT's
+// declared signature; the copy emitted per instantiation has to keep the
+// asyncness that signature carried, or the call in the instantiated body is a
+// direct call to a coroutine and the result read is a coroutine handle.
+//
+// Two instantiations, on purpose: one copy that happened to work would say
+// nothing about substitution, and the second is what shows the bound is
+// re-resolved against each argument type rather than pinned to the first.
+//
+// The other two shapes of async trait dispatch already have homes -
+// reader_vtable_smoke covers an async slot through a vtable, and
+// async_await_smoke covers a plain async call - so this one is only about the
+// generic path.
+
+import * as k from "std/core/kinds.yoop";
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+trait Fetcher {
+    async fetch(ref self): int32;
+}
+
+type Counter implements Fetcher {
+    n: int32,
+    async fetch(ref self): int32 { return self.n; }
+}
+
+type Doubler implements Fetcher {
+    n: int32,
+    async fetch(ref self): int32 { return self.n * 2; }
+}
+
+// The generic body. `Fetcher.fetch` is a static dispatch resolved through the
+// bound, and it is awaited twice so the drive loop runs more than once per
+// instantiation.
+async sum<T implements Fetcher>(ref f: T): int32 {
+    let a: int32 = await Fetcher.fetch(ref f);
+    let b: int32 = await Fetcher.fetch(ref f);
+    return a + b;
+}
+
+// `main` cannot be async, so the async work runs in a task.
+task run(): int32 {
+    let c: Counter = { n: 7 };
+    let d: Doubler = { n: 7 };
+    let fromCounter: int32 = await sum(ref c);
+    let fromDoubler: int32 = await sum(ref d);
+    printf("counter=%d doubler=%d\n", fromCounter, fromDoubler);
+    return fromCounter + fromDoubler;
+}
+
+function main(): int32 {
+    pooled h = run();
+    printf("total=%d\n", wait h);
+    return 0;
+}
+
+// expected output:
+// counter=14 doubler=28
+// total=42

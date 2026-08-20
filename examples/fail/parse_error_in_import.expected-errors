@@ -1,0 +1,7 @@
+# Illegal: `return 1` in lib.yoop has no semicolon.
+#
+# What this fixture really pins is WHERE the error is reported. The broken file
+# is the IMPORTED one, not the entry, so the diagnostic has to name lib.yoop.
+# A driver that renders every parse error against the entry file would put a
+# caret on unrelated code in main.yoop.
+1:40: expected SEMICOLON, got RCURLY

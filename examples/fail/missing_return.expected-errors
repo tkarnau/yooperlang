@@ -1,0 +1,14 @@
+# Illegal: a function that declares a return type has to hand one back on every
+# path, and all three of these reach the closing brace without returning - an
+# `if` with no else, an `if` whose else falls through, and a CONDITIONAL loop,
+# whose body may not run at all.
+#
+# Refused at typecheck rather than in codegen, so each one carries the location
+# of the function it is about and all three are reported at once.
+#
+# `loopOnly` is the case the loop rule has to tell apart from a legal
+# `while (true) { ... }`, which never reaches the statement after it and is
+# accepted.
+6:10: "noElse" returns int32
+13:10: "oneArm" returns int32
+23:10: "loopOnly" returns int32

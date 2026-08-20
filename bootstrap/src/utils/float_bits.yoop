@@ -41,6 +41,16 @@ export function floatBits(x: float64): uint64 {
   return bits;
 }
 
+// The float64 those 64 bits spell. The inverse of `floatBits`, and the one the
+// comptime evaluator needs: a float VALUE is carried as its bit pattern, so
+// every arithmetic step has to get the number back out.
+export function floatFromBits(bits: uint64): float64 {
+  let x: float64 = 0.0;
+  let tmp: uint64 = bits;
+  memcpy(&x, &tmp, 8);
+  return x;
+}
+
 // The bits of `x` after ROUNDING to float32 and widening back - what LLVM wants
 // for a `float` constant. A value too large for float32 rounds to an infinity,
 // and its bits are that infinity's, which is what the reference emits for

@@ -22,7 +22,7 @@ module parse;
 import { Result } from "std/core/types.yoop";
 import { Vec }, * as vec from "std/core/vec.yoop";
 import { disposable } from "std/core/kinds.yoop";
-import { NodeId, ASTNodeKind } from "../ast";
+import { NodeId, ASTNodeKind, nodeAt } from "../ast";
 import { TokenTags, posToSourceLocation } from "../lex";
 import { ParsingError } from "../diagnostics";
 
@@ -47,16 +47,31 @@ export function parseVariantDecl(ref ps: ParserState): Result<NodeId, ParsingErr
   SelfLexing.expect(ref ps, TokenTags.LCURLY)?;
   disposable caseIds: Vec<NodeId> = vec.vecNew(4);
   while (untilClosing(ref ps, TokenTags.RCURLY)) {
-    // A method, not a case. `function` cannot start a case name, so the two
-    // members never have to be told apart by anything but the keyword.
-    if (SelfLexing.peek(ref ps).tag == TokenTags.FUNCTION ||
-        atKindPrefixedMethod(ref ps, true)) {
+    if (atVariantMethod(ref ps)) {
       vec.vecPush(ref caseIds, parseMethodDecl(ref ps, node.name, node.childA)?);
       continue;
     }
-    vec.vecPush(ref caseIds, parseVariantCase(ref ps)?);
+    const caseId = parseVariantCase(ref ps)?;
+    vec.vecPush(ref caseIds, caseId);
     if (SelfLexing.peek(ref ps).tag == TokenTags.COMMA) {
       SelfLexing.advance(ref ps)?;
+      continue;
+    }
+    // A case with no `,` after it may only be the LAST member. Without this,
+    // `Special MyType,` reads as two payload-less cases - the comma between
+    // members is what tells them apart, and there is none - so the payload the
+    // writer meant is silently dropped and a case named after the payload TYPE
+    // appears in its place. Nothing downstream can see the mistake: the only
+    // symptom is a switch that is not exhaustive until an arm is added for a
+    // case nobody wrote. Refused by name, with the record spelling in the
+    // message, because that is the edit to make.
+    if (SelfLexing.peek(ref ps).tag != TokenTags.RCURLY) {
+      const caseName = nodeAt(ref ps.ast, caseId).name;
+      return Result.Err { error: SelfLexing.createParsingError(
+        ref ps,
+        `variant case "${caseName}" is followed by "${peekText(ref ps)}" with no separator - a case payload must be a record, e.g. "${caseName} { value: ${peekText(ref ps)} }"`,
+        peekLengthUsize(ref ps),
+      )};
     }
   }
   SelfLexing.expect(ref ps, TokenTags.RCURLY)?;
@@ -66,6 +81,34 @@ export function parseVariantDecl(ref ps: ParserState): Result<NodeId, ParsingErr
   spliceChildren(ref ps, ref node, ref caseIds);
 
   return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
+}
+
+// Is the member at the cursor a METHOD rather than a case?
+//
+// The `function` keyword alone does not say. A case name is metadata and may be
+// spelled with a reserved word - `variant Shape { function, type { ... } }` is
+// legal, and C-shaped code writes it - so the keyword appears at the head of
+// both members. What tells them apart is the token AFTER it: a method's NAME
+// follows, while a case is followed by its payload `{`, the `,` before the next
+// case, or the `}` that closes the body. A method can never show any of those,
+// because it cannot be nameless. Same rule as the reference, and the same
+// reason.
+//
+// A kind-prefixed method (`async function`, `disposable function`) starts with
+// an IDENT instead and is asked about separately.
+function atVariantMethod(ref ps: ParserState): bool {
+  if (atKindPrefixedMethod(ref ps, true)) {
+    return true;
+  }
+  if (SelfLexing.peek(ref ps).tag != TokenTags.FUNCTION) {
+    return false;
+  }
+  // Nothing following `function` at all reads as a method, so the failure is
+  // parseMethodDecl's - it knows what it wanted, while a case would report the
+  // missing `}` from a place that never looked for one.
+  return !followingTokenIs(ref ps, TokenTags.LCURLY)
+    && !followingTokenIs(ref ps, TokenTags.COMMA)
+    && !followingTokenIs(ref ps, TokenTags.RCURLY);
 }
 
 // One `Case { field: T, ... }` or a bare `Case`.

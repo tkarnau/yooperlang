@@ -1,0 +1,3 @@
+file fd=1
+socket sock=99
+exit=0

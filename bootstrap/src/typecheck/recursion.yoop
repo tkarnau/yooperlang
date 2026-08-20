@@ -1,0 +1,245 @@
+module typecheck;
+
+/*
+  Does a type contain ITSELF by value.
+
+      type Node { next: Node }
+
+  has no finite size: laying it out asks for the size of `Node` in order to
+  compute the size of `Node`. LLVM says so and stops - `identified structure
+  type "%struct.m__Node" is recursive` - so without this check the compiler
+  emits a .ll file that clang refuses, having said nothing itself. The MUTUAL
+  form (`type A { b: B }` beside `type B { a: A }`) is the same type with the
+  cycle spread over two declarations, and the cycle may be any length.
+
+  WHAT BREAKS A CYCLE IS A POINTER, and three field shapes are one:
+
+      next: ref Node        a borrow - one address, size 8
+      kids: Node[]          a `{ ptr, len }` descriptor - the elements are not
+                            in the struct
+      kids: Vec<Node>       the same, one level down: a Vec holds a `T[]`
+      next: unsafe_ptr<Node>
+
+  All four stay legal and are asserted, because a tree or a linked list is the
+  whole reason anyone writes a self-referential type. So the walk descends
+  through the shapes that store their contents INLINE - a struct's fields, a
+  variant case's payload, a union's fields - and stops at everything else. A
+  `ref`, an array, a pointer and a function type are all "the storage is
+  somewhere else", which is exactly the property being asked about.
+
+  WHEN. Pass A stamps a shell with no fields and pass C fills them, so a cycle
+  does not exist to be seen until the fields are resolved - and a field naming a
+  generic (`b: Box<Node>`) needs its INSTANCE materialized too, which is the
+  last thing pass C does. So this runs after all of it, once per module, over
+  the decls that module wrote.
+
+  A shell that is still empty answers "no" and that is not a weakness: a cycle
+  has to close, so whichever member of it is filled LAST sees every other member
+  populated and finds the loop. The earlier members simply do not report it
+  twice. Once every member IS filled - the ordinary case, since the sweep runs
+  after the fills - every field on the cycle reports, which is deliberate: a
+  mutual cycle can be broken at either end, and the reader should see both ends.
+*/
+
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import * as str from "std/core/strings.yoop";
+import { AST, ASTNode, ASTNodeKind, childAt, nodeAt } from "../ast";
+
+// One declaration, already filled. Reports one diagnostic per field that closes
+// a cycle, pointing at the field rather than at the type - the field is the
+// thing to change.
+export function checkRecursiveFields(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  declNode: ASTNode
+): void {
+  const holder = nominalTypeOfDecl(ref prog, ref tm, declNode);
+  if (holder == TYPE_ERROR_ID) {
+    return;
+  }
+
+  if (declNode.kind == ASTNodeKind.VARIANT_DECL) {
+    let c: usize = 0;
+    while (c < declNode.childCount) {
+      const caseNode = nodeAt(ref ast, childAt(ref ast, declNode, c));
+      if (caseNode.kind != ASTNodeKind.METHOD_DECL) {
+        checkFieldRun(ref prog, ref ast, caseNode, holder, caseNode.name, declNode.name);
+      }
+      c += 1;
+    }
+    return;
+  }
+
+  checkFieldRun(ref prog, ref ast, declNode, holder, "", declNode.name);
+}
+
+// The FIELD_DECL children of one node - a struct decl, or one case of a variant.
+// `caseName` is "" for a struct and names the case for a variant, because two
+// cases may both have a field called `next` with two different types.
+function checkFieldRun(
+  ref prog: Program,
+  ref ast: AST,
+  owner: ASTNode,
+  holder: TypeId,
+  caseName: string,
+  holderName: string
+): void {
+  let f: usize = 0;
+  while (f < owner.childCount) {
+    const fieldNode = nodeAt(ref ast, childAt(ref ast, owner, f));
+    if (fieldNode.kind != ASTNodeKind.FIELD_DECL) {
+      f += 1;
+      continue;
+    }
+    const fieldType = fieldTypeByName(ref prog, holder, caseName, fieldNode.name);
+    if (reachesInline(ref prog, holder, fieldType)) {
+      reportError(
+        ref prog,
+        `field "${fieldNode.name}" of "${holderName}" reaches "${holderName}" again by value, so the type has no finite size - hold it behind a "ref", an array or a pointer`,
+        fieldNode.sourceLoc
+      );
+    }
+    f += 1;
+  }
+}
+
+// Does `ty` contain `target` in its own storage, at any depth.
+//
+// The `seen` list is what makes this terminate at all: a diamond
+// (`type D { a: A, b: A }` with a cycle below A) would otherwise be walked
+// twice, and a cycle that does NOT involve the target would be walked forever.
+function reachesInline(ref prog: Program, target: TypeId, ty: TypeId): bool {
+  disposable seen: Vec<TypeId> = vec.vecNew(8);
+  return reachesInlineFrom(ref prog, target, ty, ref seen);
+}
+
+function reachesInlineFrom(
+  ref prog: Program,
+  target: TypeId,
+  ty: TypeId,
+  ref seen: Vec<TypeId>
+): bool {
+  if (ty == target) {
+    return true;
+  }
+  if (alreadySeen(ref seen, ty)) {
+    return false;
+  }
+  vec.vecPush(ref seen, ty);
+
+  switch (typeAt(ref prog, ty)) {
+    case Type.Struct { decl: d, fields: fs, methods: mm, implementsTraits: it, generic: g }: {
+      return anyFieldReaches(ref prog, target, ref fs, ref seen);
+    }
+    case Type.Variant { decl: d, cases: cs, methods: mm, implementsTraits: it, generic: g }: {
+      // Every case's payload lives in the SAME storage - the variant is as big
+      // as its widest case - so any one of them closing the cycle is enough.
+      let c: usize = 0;
+      while (c < cs.len) {
+        let vcase = vec.vecGet(ref cs, c);
+        if (anyFieldReaches(ref prog, target, ref vcase.fields, ref seen)) {
+          return true;
+        }
+        c += 1;
+      }
+      return false;
+    }
+    case Type.Union { decl: d, fields: fs }: {
+      return anyFieldReaches(ref prog, target, ref fs, ref seen);
+    }
+    // Everything else stores its contents somewhere this type is not: a `ref`,
+    // an array descriptor, a pointer, a function value, a Task handle. Each is
+    // a fixed number of bytes whatever it points at, which is precisely what
+    // breaks the cycle.
+    default: { return false; }
+  }
+}
+
+function anyFieldReaches(
+  ref prog: Program,
+  target: TypeId,
+  ref fields: Vec<Field>,
+  ref seen: Vec<TypeId>
+): bool {
+  let i: usize = 0;
+  while (i < fields.len) {
+    let fld = vec.vecGet(ref fields, i);
+    if (reachesInlineFrom(ref prog, target, fld.typeId, ref seen)) {
+      return true;
+    }
+    i += 1;
+  }
+  return false;
+}
+
+function alreadySeen(ref seen: Vec<TypeId>, ty: TypeId): bool {
+  let i: usize = 0;
+  while (i < seen.len) {
+    if (vec.vecGet(ref seen, i) == ty) {
+      return true;
+    }
+    i += 1;
+  }
+  return false;
+}
+
+// The filled type a decl node names, or TYPE_ERROR_ID for anything this check
+// has no question about.
+//
+// A GENERIC decl answers TYPE_ERROR_ID and is skipped on purpose: its template's
+// fields are written in terms of `T`, which has no storage of its own, and the
+// thing that can actually be laid out is the INSTANCE - which is reached, and
+// walked, from whatever concrete field named it.
+function nominalTypeOfDecl(ref prog: Program, ref tm: TypedModule, declNode: ASTNode): TypeId {
+  const symId = lookupOwnName(ref tm, declNode.name);
+  if (symId == SYMBOL_NONE_ID) {
+    return TYPE_ERROR_ID;
+  }
+  switch (symbolAt(ref prog, symId)) {
+    case Symbol.Struct { typeId: t }: { return t; }
+    case Symbol.VariantT { typeId: t }: { return t; }
+    default: { return TYPE_ERROR_ID; }
+  }
+}
+
+// The field's RESOLVED type, read back off the filled record rather than
+// resolved a second time from the annotation - resolving again would report a
+// bad annotation twice.
+function fieldTypeByName(
+  ref prog: Program,
+  holder: TypeId,
+  caseName: string,
+  name: string
+): TypeId {
+  switch (typeAt(ref prog, holder)) {
+    case Type.Struct { decl: d, fields: fs, methods: mm, implementsTraits: it, generic: g }: {
+      return namedFieldType(ref fs, name);
+    }
+    case Type.Variant { decl: d, cases: cs, methods: mm, implementsTraits: it, generic: g }: {
+      let c: usize = 0;
+      while (c < cs.len) {
+        let vcase = vec.vecGet(ref cs, c);
+        if (str.stringEq(vcase.name, caseName)) {
+          return namedFieldType(ref vcase.fields, name);
+        }
+        c += 1;
+      }
+      return TYPE_ERROR_ID;
+    }
+    default: { return TYPE_ERROR_ID; }
+  }
+}
+
+function namedFieldType(ref fields: Vec<Field>, name: string): TypeId {
+  let i: usize = 0;
+  while (i < fields.len) {
+    let fld = vec.vecGet(ref fields, i);
+    if (str.stringEq(fld.name, name)) {
+      return fld.typeId;
+    }
+    i += 1;
+  }
+  return TYPE_ERROR_ID;
+}

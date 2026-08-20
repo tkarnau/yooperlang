@@ -271,6 +271,18 @@ function emitRefBase(ref cx: Cx, target: ASTNode, targetId: NodeId, ref out: Ope
 
   switch (lookupLocal(cx.locals, target.name)) {
     case Option.None: {
+      // `ref counter` on a module-level `let` - a global, which already IS
+      // storage, so its address is its symbol and there is nothing to emit.
+      // The same fall-through a READ and a WRITE of one already take; a borrow
+      // is the third position that has to know a name can live outside the
+      // frame. A module-level `const` never reaches here: pass D refuses `ref`
+      // on one, because an inlined value has no address to hand out.
+      const globalTy = moduleGlobalTypeOf(ref cx, target.name);
+      if (globalTy.len > 0) {
+        const sym = globalSymbol(ref cx, target.name);
+        out = Operand.GlobalAddr { home: sym.home, name: sym.name };
+        return EmitResult.Ok;
+      }
       return internalError("no stack slot to borrow", target.name);
     }
     case Option.Some { value: slotInfo }: {
