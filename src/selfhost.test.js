@@ -1,7 +1,7 @@
 // The self-hosting fixpoint: the bootstrap compiles ITSELF, twice, to the same
 // thing.
 //
-//   stage1   bootstrap/src, compiled by the JS reference
+//   stage1   bootstrap/src, compiled by the released seed
 //   stage2   bootstrap/src, compiled by stage1
 //   stage3   bootstrap/src, compiled by stage2
 //
@@ -22,12 +22,19 @@
 // nothing to do with the compiler. The emitted `.ll` is compared too, and it is
 // the stronger assertion of the two: that IS the compiler's output, and clang
 // is downstream of it.
+//
+// How far downstream is the whole reason compareStageBinaries exists. On macOS
+// `clang -g` leaves DWARF in temp object files and records their paths and
+// mtimes in the executable, so linking one unchanged `.ll` twice already
+// differs by 324 bytes. src/fixpointCompare.js normalizes exactly those three
+// regions and nothing else; read its header before trusting a green run here.
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert";
 import fs from "fs";
 import path from "path";
 import os from "os";
 
+import { compareStageBinaries } from "./fixpointCompare.js";
 import { runProcOrThrow } from "./testProc.js";
 import { seedCompiler } from "../scripts/seed.mjs";
 
@@ -100,10 +107,9 @@ describe("self-hosting: the bootstrap compiles itself to a fixpoint", () => {
     );
   });
 
-  it("stage2 and stage3 are byte-identical binaries", () => {
-    const a = fs.readFileSync(stage2);
-    const b = fs.readFileSync(stage3);
-    assert.ok(a.equals(b), "stage2 and stage3 differ as binaries");
+  it("stage2 and stage3 link to the same binary", () => {
+    const detail = compareStageBinaries(stage2, stage3);
+    assert.equal(detail, "", `stage2 and stage3 differ as binaries: ${detail}`);
   });
 
   it("stage3 is a working compiler", async () => {

@@ -144,10 +144,11 @@ check on a change, and say so when you do.
 
 ## Run / test
 
-- `npm test` - every Node-driven suite. 464 tests, about two minutes. Needs
+- `npm test` - every Node-driven suite. 467 tests, about two minutes. Needs
   `clang` and a seed.
-- `npm run test:unit` - fast, no clang: the C runtime's own tests and the std
-  index check.
+- `npm run test:unit` - fast, needs no seed: the C runtime's own tests, the std
+  index check, and the stage comparison the fixpoint is decided by. The last of
+  those links two tiny C programs and SKIPS without `clang`.
 - `npm run test:e2e` - the five suites that build and run real programs
   (`slice`, `pass`, `fail`, `selfhost`, `lsp`). Requires `clang` on PATH.
 - `npm run test:pass` - the PROGRAM corpus, 247 tests: every example under
@@ -232,7 +233,7 @@ check on a change, and say so when you do.
   emits; SKIPS when neither is on PATH). `YOOP_SLICE_CONCURRENCY`,
   `YOOP_PASS_CONCURRENCY` and `YOOP_FAIL_CONCURRENCY` override how many fixtures
   those suites run at once.
-- Every Yoop unit test at once, 1435 of them, in ONE build of the graph:
+- Every Yoop unit test at once, 1436 of them, in ONE build of the graph:
 
       YOOP_STD_ROOT=$PWD/std YOOP_RUNTIME_ROOT=$PWD/runtime \
         $(node scripts/seed.mjs) --test bootstrap/src

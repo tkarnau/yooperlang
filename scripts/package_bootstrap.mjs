@@ -34,6 +34,7 @@
 // compiler, not the toolchain underneath it.
 
 import { execFileSync } from "node:child_process";
+import { compareStageBinaries } from "../src/fixpointCompare.js";
 import { seedCompiler } from "./seed.mjs";
 import crypto from "node:crypto";
 import fs from "node:fs";
@@ -123,18 +124,28 @@ run(stage.s2, [bootSrc, "-o", stage.s3]);
 // 2. The fixpoint. The IR comparison is the stronger of the two: that IS the
 //    compiler's output, and clang is downstream of it.
 step("checking the self-hosting fixpoint");
-for (const [what, a, b] of [
-  ["IR", `${stage.s2}.ll`, `${stage.s3}.ll`],
-  ["binary", stage.s2, stage.s3],
+for (const [what, compare] of [
+  [
+    "IR",
+    () =>
+      fs.readFileSync(`${stage.s2}.ll`).equals(fs.readFileSync(`${stage.s3}.ll`))
+        ? ""
+        : "the IR differs",
+  ],
+  // Not a plain byte comparison on macOS, where the linker is not reproducible
+  // with `-g`. See src/fixpointCompare.js for which three regions it normalizes
+  // and why every other byte is still compared exactly.
+  ["binary", () => compareStageBinaries(stage.s2, stage.s3)],
 ]) {
-  if (!fs.readFileSync(a).equals(fs.readFileSync(b))) {
+  const detail = compare();
+  if (detail) {
     fail(
-      `stage2 and stage3 differ (${what}).\n` +
+      `stage2 and stage3 differ (${what}): ${detail}.\n` +
         `stage1 and stage2 disagree about how to compile something, so this build\n` +
         `is not shippable. Diff the two:\n\n  diff ${stage.s2}.ll ${stage.s3}.ll\n`,
     );
   }
-  process.stdout.write(`    ok    stage2 and stage3 ${what} are byte-identical\n`);
+  process.stdout.write(`    ok    stage2 and stage3 ${what} agree\n`);
 }
 
 // 3. Stage the package. The binary probes <exeDir>/../lib/std and
