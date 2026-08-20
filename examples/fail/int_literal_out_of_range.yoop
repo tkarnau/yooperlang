@@ -1,0 +1,17 @@
+// Illegal: an integer literal has to fit the type it was pinned to.
+//
+// Without the check each of these is TRUNCATED on the way into codegen: the
+// program compiles to valid IR, links, runs, and prints 0 and 44. A silent
+// wrong answer is a much worse outcome than a refusal, and there is nothing
+// downstream that could notice - the value is a perfectly ordinary uint8 by
+// then.
+//
+// The companion legal cases (255 in a uint8, -128 in an int8) are asserted in
+// bootstrap/src/typecheck/typecheck.test.yoop.
+function main(): int32 {
+    let a: uint8 = 256;
+    let b: uint8 = 300;
+    let c: int8 = 128;
+    let d: uint16 = -1;
+    return int32(a) + int32(b) + int32(c) + int32(d);
+}

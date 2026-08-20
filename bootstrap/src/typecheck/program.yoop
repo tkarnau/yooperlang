@@ -229,6 +229,15 @@ export type Program propagates<disposable> {
   // spans - the first for exactly one step, the second for the whole of one
   // call's checking, saved and restored around any call nested in an argument.
   callWasAwaited: bool,
+  // Set by unary minus immediately before its operand is checked, and taken by
+  // the very next INT_LITERAL that reaches checkExpr - which is that operand.
+  //
+  // It exists because `-128` is TWO nodes in this parser: the sign is on the
+  // unary node and the magnitude on the literal, and the range check needs both
+  // at once. Set only when the operand is a bare int literal, so it can never
+  // leak into a deeper expression - `-(a + 1)` leaves the 1 positive, which is
+  // what it is. Same one-step handoff as `awaitPending`, for the same reason.
+  negatedLiteral: bool,
   // Every `kind` declared anywhere in the graph, by NAME.
   //
   // Ambient rather than scoped, because a kind prefix is reached by name and
@@ -397,6 +406,7 @@ export function beginFunction(
   prog.currentIsAsync = isAsync;
   prog.currentIsTask = isTask;
   prog.awaitPending = false;
+  prog.negatedLiteral = false;
   prog.callWasAwaited = false;
 }
 
@@ -452,6 +462,7 @@ export function initProgram(): Program propagates<disposable> {
     currentIsTask: false,
     awaitPending: false,
     callWasAwaited: false,
+    negatedLiteral: false,
     currentFn: "",
     kinds: kinds,
     refcountedKind: "",

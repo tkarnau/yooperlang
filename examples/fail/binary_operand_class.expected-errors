@@ -1,0 +1,14 @@
+# Illegal: agreeing on a type is not enough. `+` on two strings emits
+# `add ptr`, which clang will not assemble - so without this check the compiler
+# produces a file that is not a program and reports nothing.
+#
+# `==` on two strings is refused for a reason rather than for a gap: a string is
+# a borrowed view, so it would compare addresses. std/core/text.yoop:equals is
+# the comparison that was meant.
+#
+# All five are reported: one bad operator should not hide the next.
+24:33: operator "+" cannot be applied to string and string
+25:30: operator "==" cannot be applied to string and string
+29:32: operator "+" cannot be applied to Point and Point
+33:37: operator "<" cannot be applied to bool and bool
+37:29: operator "<" cannot be applied to Shape and Shape

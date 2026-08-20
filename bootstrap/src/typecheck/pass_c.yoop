@@ -52,6 +52,33 @@ export function passCFillShells(
   // template they can reach is populated - this module's just were, and
   // earlier modules' were before this module was reached at all.
   materializeInstances(ref prog);
+
+  // A type that contains ITSELF by value has no size, and LLVM refuses the
+  // struct rather than laying one out. The cycle only exists to be seen once
+  // the fields are filled AND every instance a field named is materialized, so
+  // this is the last thing pass C does. See typecheck/recursion.yoop.
+  checkEachFileRecursion(ref prog, ref tm, m);
+}
+
+function checkEachFileRecursion(ref prog: Program, ref tm: TypedModule, m: Module): void {
+  let f: usize = 0;
+  while (f < m.files.len) {
+    const file = vec.vecGet(ref m.files, f);
+    beginFile(ref prog, file.absPath);
+    const programNode = nodeAt(ref m.ast, file.root);
+    let i: usize = 0;
+    while (i < programNode.childCount) {
+      const declNode = nodeAt(ref m.ast, declOf(ref m.ast, childAt(ref m.ast, programNode, i)));
+      // An ALIAS (`type X = Y;`) has a childC and no fields of its own; its
+      // own cycle check is forceAliasDecl's.
+      if ((declNode.kind == ASTNodeKind.TYPE_DECL && declNode.childC == 0) ||
+          declNode.kind == ASTNodeKind.VARIANT_DECL) {
+        checkRecursiveFields(ref prog, ref tm, ref m.ast, declNode);
+      }
+      i += 1;
+    }
+    f += 1;
+  }
 }
 
 // Which decls a sweep is for. A trait is neither generic nor concrete for this

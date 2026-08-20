@@ -1,0 +1,165 @@
+module typecheck;
+
+/*
+  Which operators a given CLASS of operand keeps.
+
+  "Both sides are the same type" is necessary and nowhere near sufficient. Two
+  strings are the same type and `a + b` on them emits `add ptr %t1, %t2`, which
+  clang refuses outright - so without this the compiler produces a file that is
+  not a program and says nothing about it. Two structs, two arrays, two `ref`s,
+  two bools under `<`: same shape, same outcome.
+
+  THE TABLE, established by probing the reference (`unifyArith` in
+  src/jsyooptypecheck/coerce.js is the same rule stated as code). Columns are
+  arithmetic `+ - * / %`, equality `== !=`, ordering `< > <= >=`, bitwise
+  `& | ^ << >>`, logical `&& ||`:
+
+    int (any width)         arith  eq  ord  bit  .
+    float32 / float64       arith  eq  ord  .    .
+    bool                    .      eq  .    .    logical
+    value enum, int-backed  .      eq  ord  bit  .
+    value enum, string-back .      eq  .    .    .
+    unsafe_ptr              (*)    eq  .    .    .
+    variant                 .      eq  .    .    .
+    string                  .      .   .    .    .
+    struct, array, ref, func,
+    vtable, void, ...       .      .   .    .    .
+    type parameter T        unguarded - see below
+
+  (*) POINTER arithmetic is a different question and never reaches here: `p + n`
+  and `p - q` have operands that are deliberately NOT the same type, so
+  check_expr routes them to typecheck/unsafe_ptr_ops.yoop before the agreement
+  rule runs. What is left for a pointer here is `==` and `!=`.
+
+  THE THREE ROWS THAT SURPRISE PEOPLE, and each is the reference's answer:
+
+    - `==` on two STRINGS is NOT legal. A `string` is a borrowed view - a bare
+      pointer - so `town == "Marquette"` would compare addresses and answer
+      false for two equal spellings. `text.equals` in std/core/text.yoop is the
+      comparison that was meant, and examples/tour/strings.yoop says so out
+      loud. Equality is legal on far more types than `+` is, but not on this one.
+    - `<` on two BOOLS is not legal, while `==` is. There is no useful ordering
+      on a truth value, so asking for one is a typo far more often than intent.
+    - `==` on two VARIANTS compares TAGS and nothing else, which is why it is
+      legal at all; a structural comparison is what `switch` is for.
+
+  Two classes are answered by their own modules rather than here, because each
+  has a message that says something this one cannot: typecheck/floats.yoop
+  names the bitwise family as integers-only, and typecheck/enum_use.yoop
+  explains what an enum lost. This is the dispatcher over them, not a rewrite
+  of them.
+
+  A TYPE PARAMETER is the one row left open, deliberately and with a known cost.
+  `a + b` on two `T`s is legal here and is not legal in the reference, and it is
+  legal on purpose: a generic body is checked ONCE with its parameters standing,
+  and comptime folds such a body at the concrete width of the operand VALUE
+  (comptime/comptime.test.yoop:aFoldInsideAGenericRunsAtTheConcreteWidth is the
+  test, and `addT<T>` at uint8 wrapping to 44 rather than folding to 300 is what
+  it asserts). So refusing `T` here would refuse a program this compiler is
+  tested on.
+
+  The cost is that this row is UNGUARDED rather than allowed: monomorphization
+  happens in codegen, not in pass D, so nothing re-asks the question once `T` is
+  known, and `add<T>(a, b) { return a + b; }` instantiated at `string` still
+  reaches codegen and still emits `add ptr`. Closing it means checking each
+  instantiation with its arguments substituted, which is a pass D that runs per
+  instance rather than per body - a different change from this one.
+*/
+
+import { ASTNode } from "../ast";
+import { TokenTags, tagSpelling } from "../lex";
+
+// True when the operator survives on this operand class. Reports and returns
+// false when it does not, so the caller reads as a guard - the same shape
+// `checkFloatOperator` and `checkEnumOperator` have.
+//
+// Asked only once both operands are known to be the SAME type, so one operand
+// answers for both.
+export function checkOperandClass(
+  ref prog: Program,
+  expr: ASTNode,
+  operand: TypeId
+): bool {
+  // An operand that already failed has already been reported. Saying anything
+  // more about it turns one mistake into two diagnostics.
+  if (operand == TYPE_ERROR_ID) {
+    return true;
+  }
+
+  if (isFloatPrimType(ref prog, operand)) {
+    return checkFloatOperator(ref prog, expr);
+  }
+  if (isValueEnumType(ref prog, operand)) {
+    return checkEnumOperator(ref prog, expr, operand);
+  }
+
+  // An integer keeps everything but the logical pair.
+  if (isIntPrimType(ref prog, operand)) {
+    if (isLogicalOperator(expr.operator)) {
+      return refuseOperand(ref prog, expr, operand);
+    }
+    return true;
+  }
+
+  if (operand == primTypeId(PrimKind.BOOL)) {
+    if (isEqualityOperator(expr.operator) || isLogicalOperator(expr.operator)) {
+      return true;
+    }
+    return refuseOperand(ref prog, expr, operand);
+  }
+
+  // A pointer, and `null` before it pins to one. Identity is the only question
+  // a bare address answers; the arithmetic went elsewhere.
+  if (isUnsafePtrType(ref prog, operand) || operand == TYPE_UNTYPED_NULL_ID) {
+    if (isEqualityOperator(expr.operator)) {
+      return true;
+    }
+    return refuseOperand(ref prog, expr, operand);
+  }
+
+  // Tag comparison, and nothing else.
+  if (isVariantType(ref prog, operand)) {
+    if (isEqualityOperator(expr.operator)) {
+      return true;
+    }
+    return refuseOperand(ref prog, expr, operand);
+  }
+
+  // An opaque type parameter, waved through. See the header: the answer depends
+  // on the instantiation, and nothing in pass D has one.
+  if (isTypeParam(ref prog, operand)) {
+    return true;
+  }
+
+  // Everything else - string, struct, array, ref, function, vtable, task,
+  // namespace, void. None of these has a machine instruction behind any
+  // operator, so every one of them is a refusal.
+  return refuseOperand(ref prog, expr, operand);
+}
+
+// The one message, worded exactly as the mismatch and the enum refusals are
+// (`operator "+" cannot be applied to X and Y`), because a reader hitting
+// `string and string` learns the same thing from the same sentence shape.
+function refuseOperand(ref prog: Program, expr: ASTNode, operand: TypeId): bool {
+  const shown = formatType(ref prog, operand);
+  reportError(
+    ref prog,
+    `operator "${tagSpelling(expr.operator)}" cannot be applied to ${shown} and ${shown}`,
+    expr.sourceLoc
+  );
+  return false;
+}
+
+function isEqualityOperator(tag: TokenTags): bool {
+  switch (tag) {
+    case TokenTags.EQEQ, TokenTags.NEQ: { return true; }
+    default: { return false; }
+  }
+}
+
+function isLogicalOperator(tag: TokenTags): bool {
+  switch (tag) {
+    case TokenTags.ANDAND, TokenTags.OROR: { return true; }
+    default: { return false; }
+  }
+}

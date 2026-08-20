@@ -1,0 +1,5 @@
+module lib2;
+// Lives in the OUTER root only, at bootstrap/tests/graph/modules/. The inner
+// root at nearer/modules/ deliberately does NOT hold this name, which is what
+// makes modules_decoy.yoop a test of where the walk STOPS.
+export function two(): int32 { return 2; }

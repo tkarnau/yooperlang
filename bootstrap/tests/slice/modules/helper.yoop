@@ -1,0 +1,3 @@
+// A single-FILE module under a modules root. No `module` header, because one
+// file is one module already - the header is what joins several files into one.
+export function helperValue(): int32 { return 7; }

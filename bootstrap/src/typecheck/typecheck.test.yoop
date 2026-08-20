@@ -1944,6 +1944,33 @@ suite function traitsAreCheckedAgainstTheirImplementers(): void {
     theory.isSuccessful = diagnosticsMention(ref notTrait, "is not a trait");
     theory.detail = `wanted a diagnostic naming the non-trait, got: ${firstDiagnostic(ref notTrait)}`;
   }
+
+  // The two things a method name is ALLOWED to collide with, and both are
+  // ACCEPTANCES, which is why they are here rather than in examples/fail: what
+  // a rule permits is as easy to get wrong as what it refuses, and the only
+  // thing that had ever asserted these was a refusal that is no longer made.
+  //
+  // Two traits requiring the same name. Every call site qualifies through a
+  // trait, so one method body satisfies both promises and there is nothing
+  // ambiguous to resolve. A checker that keyed methods by NAME alone, or that
+  // refused a second trait declaring a name the first already had, would refuse
+  // this.
+  let twoTraits = checkSource("trait A { function go(ref self): void; } trait B { function go(ref self): void; } type T implements (A, B) { n: int, function go(ref self): void { } } function main(): int { const t: T = { n: 1 }; A.go(ref t); B.go(ref t); return 0; }");
+  let test theory: Case = t.asserts("two traits requiring one method name with one signature is allowed") {
+    theory.isSuccessful = twoTraits.diagnostics.len == 0;
+    theory.detail = `reported ${twoTraits.diagnostics.len}: ${firstDiagnostic(ref twoTraits)}`;
+  }
+
+  // ...and a module-level free function of the same name. A method is reached
+  // only as `Trait.method(ref x)` and a free function only as `f(...)`, so the
+  // two live in different namespaces and neither shadows the other. Both
+  // spellings are called here, because "it compiled" would also be true of an
+  // implementation that quietly resolved one to the other.
+  let freeFn = checkSource("function dispose(x: int): void { } trait D { function dispose(ref self): void; } type F implements D { fd: int, function dispose(ref self): void { } } function main(): int { const h: F = { fd: 3 }; D.dispose(ref h); dispose(1); return 0; }");
+  let test theory: Case = t.asserts("a trait method may share a name with a free function") {
+    theory.isSuccessful = freeFn.diagnostics.len == 0;
+    theory.detail = `reported ${freeFn.diagnostics.len}: ${firstDiagnostic(ref freeFn)}`;
+  }
 }
 
 suite function traitCallsResolveThroughTheReceiver(): void {
@@ -2834,10 +2861,13 @@ suite function funcTypesCompareThroughEveryWrapper(): void {
     theory.detail = "passing a B where an A was declared produced no diagnostic";
   }
 
-  // `type Node { next: Node }` is the shape that would make a walk into nominal
-  // members recurse forever. It never enters one, so this terminates - and a
-  // test that HANGS is how a regression here would show up.
-  let selfRef = checkSource("type Node { v: int32, next: Node, } function takes(n: Node): int32 { return n.v; } function other(n: Node): int32 { return takes(n); }");
+  // `next: ref Node` is the shape that would make a walk into nominal members
+  // recurse forever. It never enters one, so this terminates - and a test that
+  // HANGS is how a regression here would show up. The BY-VALUE spelling of the
+  // same cycle is a different question with its own answer
+  // (aTypeCannotContainItselfByValue); the borrow is the one that has to both
+  // compile and terminate.
+  let selfRef = checkSource("type Node { v: int32, next: ref Node, } function takes(n: Node): int32 { return n.v; } function other(n: Node): int32 { return takes(n); }");
   let test theory: Case = t.asserts("a self-referential type compares without recursing forever") {
     theory.isSuccessful = selfRef.diagnostics.len == 0;
     theory.detail = `reported ${selfRef.diagnostics.len}: ${firstDiagnostic(ref selfRef)}`;
@@ -3708,6 +3738,169 @@ suite function tryOpTakesAHandlerBlock(): void {
   }
 }
 
+// The COMPOUND shapes `alwaysDiverges` (typecheck/diverge.yoop) has to see
+// through, asked at the one site that consults it: the `?` handler block.
+//
+// tryOpTakesAHandlerBlock above covers the flat answers - a bare `return`, a
+// bare `continue`, an `if` with no `else`, an `if/else` where both halves
+// return. What is here is the rest of the function's case list, and none of it
+// is reachable any other way: divergence is not a value, so no program can
+// print it, and the only consequence of getting it wrong is a diagnostic. The
+// SWITCH arm in particular had no assertion at all, and a switch is the shape
+// most likely to grow a bug, because "did every arm leave" is a loop over arms
+// rather than a pair of slots.
+//
+// The dangerous direction is a false POSITIVE: a block wrongly called diverging
+// falls out of the bottom into the Ok-payload read, with nothing in the slot
+// the binding names. So every shape is asked in BOTH directions.
+// The dead tail after a statement control never leaves.
+//
+// `alwaysDiverges` already answered "does control leave this statement"; this is
+// the same question asked of a whole run, and the answer is a WARNING rather
+// than an error - dead code is a smell, not a soundness problem, and stopping a
+// build over it is hostile in the middle of editing.
+//
+// So every assertion here checks BOTH halves: the warning is present, and
+// `errorCount` is still zero. A regression that promoted this to an error would
+// otherwise pass a test that only looked for the message.
+suite function deadCodeAfterADivergingStatementIsWarnedAbout(): void {
+  const MAIN: string = "function main(): int32 { ";
+
+  let afterReturn = checkSource(`${MAIN}return 0; let x: int32 = 1; }`);
+  let test theory: Case = t.asserts("a statement after a return is flagged") {
+    theory.isSuccessful = diagnosticsMention(ref afterReturn, "unreachable code");
+    theory.detail = `wanted an unreachable warning, got: ${firstDiagnostic(ref afterReturn)}`;
+  }
+  let test theory: Case = t.asserts("and it is a warning, not an error") {
+    theory.isSuccessful = errorCount(ref afterReturn) == 0;
+    theory.detail = `dead code raised ${errorCount(ref afterReturn)} error(s)`;
+  }
+
+  // The ordinary shape of every function that ends in a return. Flagging this
+  // would make the warning useless on the first program anybody wrote.
+  let lastIsReturn = checkSource(`${MAIN}let x: int32 = 1; return x; }`);
+  let test theory: Case = t.asserts("a block whose LAST statement diverges has no dead tail") {
+    theory.isSuccessful = lastIsReturn.diagnostics.len == 0;
+    theory.detail = `a clean function reported: ${firstDiagnostic(ref lastIsReturn)}`;
+  }
+
+  // break and continue leave the block as permanently as a return does, as far
+  // as what follows them is concerned.
+  let afterBreak = checkSource(
+    `${MAIN}for (let i = 0; i < 3; i += 1) { break; let y: int32 = 2; } return 0; }`);
+  let test theory: Case = t.asserts("a statement after a break is flagged") {
+    theory.isSuccessful = diagnosticsMention(ref afterBreak, "unreachable code");
+    theory.detail = `wanted an unreachable warning, got: ${firstDiagnostic(ref afterBreak)}`;
+  }
+
+  // The compound shapes are where this earns its place: the diverging statement
+  // is not itself a terminator, so nothing simpler than alwaysDiverges could
+  // see it.
+  let afterIfElse = checkSource(
+    "function f(a: bool): int32 { if (a) { return 1; } else { return 2; } let z: int32 = 3; }\nfunction main(): int32 { return f(true); }");
+  let test theory: Case = t.asserts("a statement after an if whose BOTH arms return is flagged") {
+    theory.isSuccessful = diagnosticsMention(ref afterIfElse, "unreachable code");
+    theory.detail = `wanted an unreachable warning, got: ${firstDiagnostic(ref afterIfElse)}`;
+  }
+
+  // The dangerous direction. An `if` with no else always has a path that falls
+  // through, so what follows it is live and flagging it would be a false
+  // positive on correct code.
+  let noElse = checkSource(
+    "function f(a: bool): int32 { if (a) { return 1; } return 2; }\nfunction main(): int32 { return f(true); }");
+  let test theory: Case = t.asserts("an if with no else leaves what follows it reachable") {
+    theory.isSuccessful = noElse.diagnostics.len == 0;
+    theory.detail = `an if with no else reported: ${firstDiagnostic(ref noElse)}`;
+  }
+
+  let afterSwitch = checkSource(
+    "function f(b: bool): int32 { switch (b) { case true: { return 1; } case false: { return 0; } } return -1; }\nfunction main(): int32 { return f(true); }");
+  let test theory: Case = t.asserts("a statement after a switch whose every arm returns is flagged") {
+    theory.isSuccessful = diagnosticsMention(ref afterSwitch, "unreachable code");
+    theory.detail = `wanted an unreachable warning, got: ${firstDiagnostic(ref afterSwitch)}`;
+  }
+
+  // One mistake is one diagnostic: the tail is dead as a RUN, so reporting each
+  // statement in it would bury the one line the reader has to act on.
+  let longTail = checkSource(`${MAIN}return 0; let a: int32 = 1; let b: int32 = 2; let c: int32 = 3; }`);
+  let test theory: Case = t.asserts("a dead run of three statements is reported once") {
+    theory.isSuccessful = longTail.diagnostics.len == 1;
+    theory.detail = `wanted exactly one diagnostic, got ${longTail.diagnostics.len}`;
+  }
+
+  // The statements in a dead tail are still CHECKED. Unreachable code that also
+  // does not compile should say so, rather than hiding one mistake behind the
+  // other.
+  let deadAndBroken = checkSource(`${MAIN}return 0; let x: string = 1; }`);
+  let test theory: Case = t.asserts("a dead statement is still typechecked") {
+    theory.isSuccessful = errorCount(ref deadAndBroken) > 0;
+    theory.detail = `a broken dead statement raised no error: ${firstDiagnostic(ref deadAndBroken)}`;
+  }
+}
+
+suite function aHandlerBlockSeesThroughCompoundDivergence(): void {
+  const DECLS: string = "variant R { Ok { value: int32 }, Err { error: string }, }\nfunction inner(n: int32): R { return R.Ok { value: n }; }\n";
+  const HANDLE: string = "function outer(n: int32): int32 { let x: int32 = inner(n)? e { ";
+  const TAIL: string = " }; return x; }";
+
+  // A switch every one of whose arms leaves. Exhaustive over a bool, so there
+  // is no default to carry the answer.
+  let allArms = checkSource(`${DECLS}${HANDLE}switch (e.len > 0) { case true: { return -1; } case false: { return -2; } }${TAIL}`);
+  let test theory: Case = t.asserts("a switch whose every arm returns counts as leaving") {
+    theory.isSuccessful = allArms.diagnostics.len == 0;
+    theory.detail = `reported ${allArms.diagnostics.len}: ${firstDiagnostic(ref allArms)}`;
+  }
+
+  // ONE arm that falls out is enough to make the whole switch fall out. This is
+  // the assertion an `||` where an `&&` belongs would fail.
+  let oneArm = checkSource(`${DECLS}${HANDLE}switch (e.len > 0) { case true: { return -1; } case false: { let y: int32 = 1; } }${TAIL}`);
+  let test theory: Case = t.asserts("one falling-through arm makes the switch fall through") {
+    theory.isSuccessful = diagnosticsMention(ref oneArm, "must not fall through");
+    theory.detail = `wanted a fall-through refusal, got: ${firstDiagnostic(ref oneArm)}`;
+  }
+
+  // The DEFAULT arm is an arm, so a switch that is nothing but one still
+  // answers. A reader of the arm list that skipped the default would call this
+  // "no arms" and refuse a block that plainly leaves.
+  let defaultOnly = checkSource(`${DECLS}${HANDLE}switch (e.len) { default: { return -1; } }${TAIL}`);
+  let test theory: Case = t.asserts("a default-only switch that returns counts as leaving") {
+    theory.isSuccessful = defaultOnly.diagnostics.len == 0;
+    theory.detail = `reported ${defaultOnly.diagnostics.len}: ${firstDiagnostic(ref defaultOnly)}`;
+  }
+
+  // An `else if` chain is a nested IF_STATEMENT in the else slot, so seeing
+  // through one is the recursion working rather than a case of its own.
+  let chain = checkSource(`${DECLS}${HANDLE}if (e.len > 2) { return -1; } else if (e.len > 1) { return -2; } else { return -3; }${TAIL}`);
+  let test theory: Case = t.asserts("an else-if chain ending in an else counts as leaving") {
+    theory.isSuccessful = chain.diagnostics.len == 0;
+    theory.detail = `reported ${chain.diagnostics.len}: ${firstDiagnostic(ref chain)}`;
+  }
+
+  // The same chain with no final `else`. The tail falls out, and the recursion
+  // has to carry that all the way back up.
+  let openChain = checkSource(`${DECLS}${HANDLE}if (e.len > 2) { return -1; } else if (e.len > 1) { return -2; }${TAIL}`);
+  let test theory: Case = t.asserts("an else-if chain with no final else falls through") {
+    theory.isSuccessful = diagnosticsMention(ref openChain, "must not fall through");
+    theory.detail = `wanted a fall-through refusal, got: ${firstDiagnostic(ref openChain)}`;
+  }
+
+  // An `else` that is PRESENT but falls out. Distinct from the missing-else
+  // case above, and the one a test of "is there an else slot" would pass.
+  let deadElse = checkSource(`${DECLS}${HANDLE}if (e.len > 0) { return -1; } else { let y: int32 = 1; }${TAIL}`);
+  let test theory: Case = t.asserts("an else that falls through is not a leaving path") {
+    theory.isSuccessful = diagnosticsMention(ref deadElse, "must not fall through");
+    theory.detail = `wanted a fall-through refusal, got: ${firstDiagnostic(ref deadElse)}`;
+  }
+
+  // `break` is the third terminator, and the only one with no assertion of its
+  // own - `return` and `continue` have theirs above.
+  let breaks = checkSource(`${DECLS}function outer(n: int32): int32 { let total: int32 = 0; for (let i = 0; i < 3; i += 1) { let x: int32 = inner(i)? e { break; }; total = total + x; } return total; }`);
+  let test theory: Case = t.asserts("`break` counts as leaving the handler block") {
+    theory.isSuccessful = breaks.diagnostics.len == 0;
+    theory.detail = `reported ${breaks.diagnostics.len}: ${firstDiagnostic(ref breaks)}`;
+  }
+}
+
 // `?` yields the OPERAND's Ok payload, so it is an ordinary value of that type
 // everywhere an expression may appear. These are the shapes a statement-level
 // desugar in the parser would have missed.
@@ -3865,6 +4058,351 @@ suite function enumDeclarationsRefuseWhatCannotBeConstant(): void {
   let test theory: Case = t.asserts("a string value in an integer-backed enum is refused") {
     theory.isSuccessful = diagnosticsMention(ref mixed, "string literal in integer-backed enum");
     theory.detail = `wanted a mixed-value refusal, got: ${firstDiagnostic(ref mixed)}`;
+  }
+}
+
+// An int literal has to FIT the type it was pinned to.
+//
+// The enum-case rule above is the same question at a declaration; this is it at
+// every other slot, and it was missing entirely: `let a: uint8 = 256` compiled,
+// emitted VALID IR, and printed 0. Nothing in the corpus could catch that -
+// the program builds, links and runs, it just answers wrongly - which is why
+// this is a unit test rather than a fixture.
+//
+// The boundaries are the point of the suite. Two's complement is asymmetric, so
+// int8 takes -128 and refuses 128, and the sign lives on a DIFFERENT NODE from
+// the magnitude in this parser - see typecheck/int_range.yoop.
+suite function intLiteralsHaveToFitTheTypeTheyPinTo(): void {
+  const MAIN: string = "function main(): int32 { ";
+
+  let over = checkSource(`${MAIN}let a: uint8 = 256; return 0; }`);
+  let test theory: Case = t.asserts("a literal past an unsigned width is refused") {
+    theory.isSuccessful = diagnosticsMention(ref over, "256 does not fit in uint8");
+    theory.detail = `wanted a range refusal, got: ${firstDiagnostic(ref over)}`;
+  }
+
+  let atMax = checkSource(`${MAIN}let a: uint8 = 255; return int32(a); }`);
+  let test theory: Case = t.asserts("the largest value that fits is accepted") {
+    theory.isSuccessful = atMax.diagnostics.len == 0;
+    theory.detail = `uint8 = 255 reported: ${firstDiagnostic(ref atMax)}`;
+  }
+
+  // The asymmetry. Getting this backwards refuses a correct program at one end
+  // or accepts a truncating one at the other, so both directions are asked.
+  let negMin = checkSource(`${MAIN}let a: int8 = -128; return int32(a); }`);
+  let test theory: Case = t.asserts("int8 accepts -128, which only the negative range reaches") {
+    theory.isSuccessful = negMin.diagnostics.len == 0;
+    theory.detail = `int8 = -128 reported: ${firstDiagnostic(ref negMin)}`;
+  }
+
+  let posOver = checkSource(`${MAIN}let a: int8 = 128; return 0; }`);
+  let test theory: Case = t.asserts("int8 refuses 128, which it does not") {
+    theory.isSuccessful = diagnosticsMention(ref posOver, "128 does not fit in int8");
+    theory.detail = `wanted a range refusal, got: ${firstDiagnostic(ref posOver)}`;
+  }
+
+  // Not a value that wraps to 65535 - it is a mistake about the type.
+  let unsignedNeg = checkSource(`${MAIN}let a: uint16 = -1; return 0; }`);
+  let test theory: Case = t.asserts("nothing negative fits an unsigned slot") {
+    theory.isSuccessful = diagnosticsMention(ref unsignedNeg, "-1 does not fit in uint16");
+    theory.detail = `wanted a range refusal, got: ${firstDiagnostic(ref unsignedNeg)}`;
+  }
+
+  // The widest slots have no headroom above them to test with, so the boundary
+  // values themselves are what say the 64-bit path does not overflow its own
+  // arithmetic.
+  let uMax = checkSource(`${MAIN}let a: uint64 = 18446744073709551615; return 0; }`);
+  let test theory: Case = t.asserts("uint64 accepts its maximum") {
+    theory.isSuccessful = uMax.diagnostics.len == 0;
+    theory.detail = `uint64 max reported: ${firstDiagnostic(ref uMax)}`;
+  }
+
+  let iMin = checkSource(`${MAIN}let a: int64 = -9223372036854775808; return 0; }`);
+  let test theory: Case = t.asserts("int64 accepts its minimum") {
+    theory.isSuccessful = iMin.diagnostics.len == 0;
+    theory.detail = `int64 min reported: ${firstDiagnostic(ref iMin)}`;
+  }
+
+  // The sign flag is set for exactly one step, so a minus in front of an
+  // EXPRESSION must not mark the literals inside it. If it leaked, `-(a + 1)`
+  // would range-check the 1 as if it were negative.
+  let notALiteral = checkSource(`${MAIN}let a: int32 = 1; let b: int32 = -(a + 1); return b; }`);
+  let test theory: Case = t.asserts("a minus over an expression does not mark the literals inside it") {
+    theory.isSuccessful = notALiteral.diagnostics.len == 0;
+    theory.detail = `-(a + 1) reported: ${firstDiagnostic(ref notALiteral)}`;
+  }
+
+  // An UNPINNED literal defaults to int32 like any other, and refusing it
+  // against a width nobody wrote would refuse programs on a type the author
+  // never named.
+  let unpinned = checkSource(`${MAIN}let a = 200; return 0; }`);
+  let test theory: Case = t.asserts("a literal with no expectation is not range-checked") {
+    theory.isSuccessful = unpinned.diagnostics.len == 0;
+    theory.detail = `an unpinned 200 reported: ${firstDiagnostic(ref unpinned)}`;
+  }
+}
+
+// The operand-class table in typecheck/operands.yoop, both ways round: every
+// combination that is legal stays legal, and every one that is not is refused.
+//
+// The refusals are the half that did not exist - two operands agreeing on a
+// TypeId was the whole test, so `a + b` on two strings reached codegen and
+// emitted `add ptr %t1, %t2`, which clang will not assemble. The ACCEPTANCES
+// are asserted just as hard, because a table that is one row too strict breaks
+// correct programs and nothing else here would notice.
+suite function binaryOperatorsCheckTheirOperandCLASSNotJustAgreement(): void {
+  const DECLS: string =
+    "variant Sh { Circle { r: int32 }, Empty }\nenum EI { A 1, B 2 }\ntype P { x: int32 }\n";
+
+  // STRINGS keep nothing, and `==` is the row that surprises people: a string
+  // is a borrowed view, so comparing two of them compares ADDRESSES. That is
+  // why std has text.equals and why examples/tour/strings.yoop says so.
+  let strAdd = checkSource("function main(): int32 { let a: string = \"a\"; let b: string = \"b\"; let c: string = a + b; return 0; }");
+  let test theory: Case = t.asserts("adding two strings is refused") {
+    theory.isSuccessful = diagnosticsMention(ref strAdd, "cannot be applied to string and string");
+    theory.detail = `wanted an operand-class refusal, got: ${firstDiagnostic(ref strAdd)}`;
+  }
+
+  let strEq = checkSource("function main(): int32 { let a: string = \"a\"; let b: string = \"b\"; if (a == b) { return 1; } return 0; }");
+  let test theory: Case = t.asserts("comparing two strings with == is refused - it would compare pointers") {
+    theory.isSuccessful = diagnosticsMention(ref strEq, "cannot be applied to string and string");
+    theory.detail = `wanted an operand-class refusal, got: ${firstDiagnostic(ref strEq)}`;
+  }
+
+  // STRUCTS and ARRAYS keep nothing either, equality included.
+  let structAdd = checkSource(`${DECLS}function main(): int32 { let a: P = { x: 1 }; let b: P = { x: 2 }; let c: P = a + b; return 0; }`);
+  let test theory: Case = t.asserts("adding two structs is refused") {
+    theory.isSuccessful = diagnosticsMention(ref structAdd, "cannot be applied to P and P");
+    theory.detail = `wanted an operand-class refusal, got: ${firstDiagnostic(ref structAdd)}`;
+  }
+
+  let structEq = checkSource(`${DECLS}function main(): int32 { let a: P = { x: 1 }; let b: P = { x: 2 }; if (a == b) { return 1; } return 0; }`);
+  let test theory: Case = t.asserts("comparing two structs is refused") {
+    theory.isSuccessful = diagnosticsMention(ref structEq, "cannot be applied to P and P");
+    theory.detail = `wanted an operand-class refusal, got: ${firstDiagnostic(ref structEq)}`;
+  }
+
+  let arrAdd = checkSource("function main(): int32 { let a: int32[] = [1]; let b: int32[] = [2]; let c: int32[] = a + b; return 0; }");
+  let test theory: Case = t.asserts("adding two arrays is refused") {
+    theory.isSuccessful = diagnosticsMention(ref arrAdd, "cannot be applied to int32[] and int32[]");
+    theory.detail = `wanted an operand-class refusal, got: ${firstDiagnostic(ref arrAdd)}`;
+  }
+
+  // BOOLS keep equality and the logical pair, and nothing else. Both halves are
+  // asked: refusing `true && false` would break every condition in the tree.
+  let boolAdd = checkSource("function main(): int32 { let a: bool = true; let b: bool = false; let c: bool = a + b; return 0; }");
+  let test theory: Case = t.asserts("adding two bools is refused") {
+    theory.isSuccessful = diagnosticsMention(ref boolAdd, "cannot be applied to bool and bool");
+    theory.detail = `wanted an operand-class refusal, got: ${firstDiagnostic(ref boolAdd)}`;
+  }
+
+  let boolLt = checkSource("function main(): int32 { let a: bool = true; let b: bool = false; if (a < b) { return 1; } return 0; }");
+  let test theory: Case = t.asserts("ordering two bools is refused - there is no ordering on a truth value") {
+    theory.isSuccessful = diagnosticsMention(ref boolLt, "cannot be applied to bool and bool");
+    theory.detail = `wanted an operand-class refusal, got: ${firstDiagnostic(ref boolLt)}`;
+  }
+
+  let boolOk = checkSource("function main(): int32 { let a: bool = true; let b: bool = false; if ((a == b) || (a && b) || (a != b)) { return 1; } return 0; }");
+  let test theory: Case = t.asserts("bools keep ==, != and the logical pair") {
+    theory.isSuccessful = boolOk.diagnostics.len == 0;
+    theory.detail = `reported ${boolOk.diagnostics.len}: ${firstDiagnostic(ref boolOk)}`;
+  }
+
+  // VARIANTS keep equality - it compares TAGS - and lose ordering.
+  let varEq = checkSource(`${DECLS}function main(): int32 { let a: Sh = Sh.Empty; let b: Sh = Sh.Circle { r: 1 }; if (a == b) { return 1; } return 0; }`);
+  let test theory: Case = t.asserts("two variants compare for equality, which is a tag comparison") {
+    theory.isSuccessful = varEq.diagnostics.len == 0;
+    theory.detail = `reported ${varEq.diagnostics.len}: ${firstDiagnostic(ref varEq)}`;
+  }
+
+  let varLt = checkSource(`${DECLS}function main(): int32 { let a: Sh = Sh.Empty; let b: Sh = Sh.Circle { r: 1 }; if (a < b) { return 1; } return 0; }`);
+  let test theory: Case = t.asserts("ordering two variants is refused") {
+    theory.isSuccessful = diagnosticsMention(ref varLt, "cannot be applied to Sh and Sh");
+    theory.detail = `wanted an operand-class refusal, got: ${firstDiagnostic(ref varLt)}`;
+  }
+
+  // A `ref T` operand is a POINTER at run time, so `+` on two of them is the
+  // same `add ptr` a string is. The borrow OPENS wherever a plain T is wanted,
+  // which is why this needs a position that wants neither.
+  let refAdd = checkSource("type H { r: ref int32 }\nfunction main(): int32 { let n: int32 = 5; let h: H = { r: ref n }; let c = h.r + h.r; return 0; }");
+  let test theory: Case = t.asserts("adding two borrows is refused") {
+    theory.isSuccessful = diagnosticsMention(ref refAdd, "cannot be applied to ref int32 and ref int32");
+    theory.detail = `wanted an operand-class refusal, got: ${firstDiagnostic(ref refAdd)}`;
+  }
+
+  // The LEGAL rows, each asserted whole. An integer keeps everything but the
+  // logical pair; a float loses the bitwise family and keeps the rest.
+  let intAll = checkSource("function main(): int32 { let a: int32 = 6; let b: int32 = 3; let c: int32 = a + b - a * b / b % b; let d: int32 = (a & b) | (a ^ b) | (a << b) | (a >> b); if (a == b || a != b || a < b || a > b || a <= b || a >= b) { return c + d; } return 0; }");
+  let test theory: Case = t.asserts("an integer keeps arithmetic, comparison and the bitwise family") {
+    theory.isSuccessful = intAll.diagnostics.len == 0;
+    theory.detail = `reported ${intAll.diagnostics.len}: ${firstDiagnostic(ref intAll)}`;
+  }
+
+  let intLogical = checkSource("function main(): int32 { let a: int32 = 1; let b: int32 = 2; if (a && b) { return 1; } return 0; }");
+  let test theory: Case = t.asserts("&& on two integers is refused - the logical pair is bools only") {
+    theory.isSuccessful = diagnosticsMention(ref intLogical, "cannot be applied to int32 and int32");
+    theory.detail = `wanted an operand-class refusal, got: ${firstDiagnostic(ref intLogical)}`;
+  }
+
+  let floatAll = checkSource("function main(): int32 { let a: float64 = 6.0; let b: float64 = 3.0; let c: float64 = a + b - a * b / b % b; if (a == b || a != b || a < b || a > b || a <= b || a >= b) { return int32(c); } return 0; }");
+  let test theory: Case = t.asserts("a float keeps arithmetic and comparison") {
+    theory.isSuccessful = floatAll.diagnostics.len == 0;
+    theory.detail = `reported ${floatAll.diagnostics.len}: ${firstDiagnostic(ref floatAll)}`;
+  }
+
+  // An int-backed value ENUM keeps equality, ordering and the bitwise family,
+  // and that row is answered by typecheck/enum_use.yoop through this one - so
+  // it is asked here too, to say the dispatch still reaches it.
+  let enumOk = checkSource(`${DECLS}function main(): int32 { let a: EI = EI.A; let b: EI = EI.B; let c: EI = a | b; if (a < b && a != b) { return int32(c); } return 0; }`);
+  let test theory: Case = t.asserts("an int-backed enum keeps equality, ordering and the bitwise family") {
+    theory.isSuccessful = enumOk.diagnostics.len == 0;
+    theory.detail = `reported ${enumOk.diagnostics.len}: ${firstDiagnostic(ref enumOk)}`;
+  }
+
+  // POINTERS answer identity and nothing else. Arithmetic on one is a separate
+  // question with separate operands (typecheck/unsafe_ptr_ops.yoop), so the
+  // rows here are `==` legal and `<` not.
+  let ptrEq = checkSource("import.unsafe;\nfunction main(): int32 { let x: int32 = 1; let p: unsafe_ptr<int32> = &x; if (p == null || p != null) { return 1; } return 0; }");
+  let test theory: Case = t.asserts("pointers compare for identity, against each other and against null") {
+    theory.isSuccessful = ptrEq.diagnostics.len == 0;
+    theory.detail = `reported ${ptrEq.diagnostics.len}: ${firstDiagnostic(ref ptrEq)}`;
+  }
+
+  let ptrLt = checkSource("import.unsafe;\nfunction main(): int32 { let x: int32 = 1; let y: int32 = 2; let p: unsafe_ptr<int32> = &x; let q: unsafe_ptr<int32> = &y; if (p < q) { return 1; } return 0; }");
+  let test theory: Case = t.asserts("ordering two pointers is refused") {
+    theory.isSuccessful = diagnosticsMention(ref ptrLt, "cannot be applied to unsafe_ptr<int32> and unsafe_ptr<int32>");
+    theory.detail = `wanted an operand-class refusal, got: ${firstDiagnostic(ref ptrLt)}`;
+  }
+
+  let ptrArith = checkSource("import.unsafe;\nfunction main(): int32 { let xs: int32[] = [1, 2, 3]; let p: unsafe_ptr<int32> = xs.ptr; let q: unsafe_ptr<int32> = p + 2; let n: int64 = q - p; return int32(n); }");
+  let test theory: Case = t.asserts("pointer arithmetic is untouched - its operands are not meant to agree") {
+    theory.isSuccessful = ptrArith.diagnostics.len == 0;
+    theory.detail = `reported ${ptrArith.diagnostics.len}: ${firstDiagnostic(ref ptrArith)}`;
+  }
+
+  // ONE diagnostic per mistake. Both operands here are already errors, and an
+  // error has no class, so the table has to wave it through: reporting on it
+  // would turn two unknown names into four diagnostics.
+  let cascade = checkSource("function main(): int32 { return nope + nada; }");
+  let test theory: Case = t.asserts("an already-failed operand does not collect a second diagnostic") {
+    theory.isSuccessful = cascade.diagnostics.len == 2 &&
+      !diagnosticsMention(ref cascade, "cannot be applied to");
+    theory.detail = `wanted the two unknown names and nothing else, got ${cascade.diagnostics.len}: ${firstDiagnostic(ref cascade)}`;
+  }
+}
+
+// A type that contains ITSELF by value has no size, and the refusal has to sit
+// beside the four shapes that DO break the cycle - a `ref`, an array, a pointer
+// and a generic holding one - because a self-referential type is the whole
+// reason anyone writes a tree or a list. Refusing one of those would be worse
+// than the bug this closes: LLVM at least says "identified structure type is
+// recursive", while a wrongly refused `ref Node` says a correct program is
+// wrong. See typecheck/recursion.yoop.
+suite function aTypeCannotContainItselfByValue(): void {
+  const MAIN: string = "function main(): int32 { return 0; }";
+
+  let direct = checkSource(`type Node { next: Node }\n${MAIN}`);
+  let test theory: Case = t.asserts("a field of the type being declared is refused") {
+    theory.isSuccessful = diagnosticsMention(ref direct, "field \"next\" of \"Node\" reaches \"Node\" again by value");
+    theory.detail = `wanted a recursion refusal, got: ${firstDiagnostic(ref direct)}`;
+  }
+
+  // The cycle spread over two declarations is the same type. Both ends report,
+  // because a mutual cycle can be broken at either one.
+  let mutual = checkSource(`type A { b: B }\ntype B { a: A }\n${MAIN}`);
+  let test theory: Case = t.asserts("a mutual cycle is refused at both of its ends") {
+    theory.isSuccessful = diagnosticsMention(ref mutual, "field \"b\" of \"A\" reaches \"A\"") &&
+      diagnosticsMention(ref mutual, "field \"a\" of \"B\" reaches \"B\"");
+    theory.detail = `wanted both ends refused, got ${mutual.diagnostics.len}: ${firstDiagnostic(ref mutual)}`;
+  }
+
+  // Length is not the test - closing is. A three-hop cycle has no member that
+  // names itself, so a check that only compared a field against its own holder
+  // would miss every one of these.
+  let three = checkSource(`type A { b: B }\ntype B { c: C }\ntype C { a: A }\n${MAIN}`);
+  let test theory: Case = t.asserts("a three-hop cycle is refused") {
+    theory.isSuccessful = diagnosticsMention(ref three, "field \"a\" of \"C\" reaches \"C\" again by value");
+    theory.detail = `wanted a recursion refusal, got: ${firstDiagnostic(ref three)}`;
+  }
+
+  // A variant case's payload is stored INLINE, so a case carrying the variant
+  // is the same infinity a struct field is.
+  let asVariant = checkSource(`variant Tree { Node { left: Tree, right: Tree }, Leaf }\n${MAIN}`);
+  let test theory: Case = t.asserts("a variant case carrying its own variant by value is refused") {
+    theory.isSuccessful = diagnosticsMention(ref asVariant, "field \"left\" of \"Tree\" reaches \"Tree\" again by value");
+    theory.detail = `wanted a recursion refusal, got: ${firstDiagnostic(ref asVariant)}`;
+  }
+
+  // A GENERIC in between hides nothing: `Box<Node>` holds a `Node` by value, so
+  // the cycle is one hop longer and just as infinite. This is also the case
+  // that says the sweep runs after instances are materialized - before that,
+  // `Box<Node>` is an empty shell and the walk finds nothing.
+  let throughGeneric = checkSource(`type Box<T> { v: T }\ntype Node { b: Box<Node> }\n${MAIN}`);
+  let test theory: Case = t.asserts("a cycle running through a generic instance is refused") {
+    theory.isSuccessful = diagnosticsMention(ref throughGeneric, "field \"b\" of \"Node\" reaches \"Node\" again by value");
+    theory.detail = `wanted a recursion refusal, got: ${firstDiagnostic(ref throughGeneric)}`;
+  }
+
+  // THE LEGAL NEIGHBOURS. Each of these is a pointer somewhere, so the type has
+  // a finite size and the program is a program.
+  let byRef = checkSource(`type Node { v: int32, next: ref Node }\nfunction head(ref n: Node): int32 { return n.v; }\n${MAIN}`);
+  let test theory: Case = t.asserts("a `ref` to the same type is legal - a borrow is one address") {
+    theory.isSuccessful = byRef.diagnostics.len == 0;
+    theory.detail = `ref Node reported ${byRef.diagnostics.len}: ${firstDiagnostic(ref byRef)}`;
+  }
+
+  let byArray = checkSource(`type Node { v: int32, kids: Node[] }\n${MAIN}`);
+  let test theory: Case = t.asserts("an array of the same type is legal - the elements are behind a pointer") {
+    theory.isSuccessful = byArray.diagnostics.len == 0;
+    theory.detail = `Node[] reported ${byArray.diagnostics.len}: ${firstDiagnostic(ref byArray)}`;
+  }
+
+  let byPointer = checkSource(`import.unsafe;\ntype Node { v: int32, next: unsafe_ptr<Node> }\n${MAIN}`);
+  let test theory: Case = t.asserts("an unsafe_ptr to the same type is legal") {
+    theory.isSuccessful = byPointer.diagnostics.len == 0;
+    theory.detail = `unsafe_ptr<Node> reported ${byPointer.diagnostics.len}: ${firstDiagnostic(ref byPointer)}`;
+  }
+
+  // The `Vec<Node>` shape, with a locally declared holder standing in for Vec:
+  // the generic stores its contents in an ARRAY, so the storage is behind a
+  // pointer one level down and the cycle never closes. Vec is exactly this.
+  let byGenericArray = checkSource(`type Holder<T> { items: T[] }\ntype Node { v: int32, kids: Holder<Node> }\n${MAIN}`);
+  let test theory: Case = t.asserts("a generic holding the type in an ARRAY is legal - this is the Vec<Node> shape") {
+    theory.isSuccessful = byGenericArray.diagnostics.len == 0;
+    theory.detail = `Holder<Node> reported ${byGenericArray.diagnostics.len}: ${firstDiagnostic(ref byGenericArray)}`;
+  }
+
+  let variantByRef = checkSource(`variant Tree { Node { left: ref Tree }, Leaf }\n${MAIN}`);
+  let test theory: Case = t.asserts("a variant case holding its own variant behind a `ref` is legal") {
+    theory.isSuccessful = variantByRef.diagnostics.len == 0;
+    theory.detail = `ref Tree reported ${variantByRef.diagnostics.len}: ${firstDiagnostic(ref variantByRef)}`;
+  }
+
+  // A `ref` ANYWHERE on the cycle breaks it. Only one of the three hops here is
+  // a borrow, and that is enough - the check is about storage, not about how
+  // many names are involved.
+  let refBreaksALongCycle = checkSource(`type A { b: B }\ntype B { c: C }\ntype C { a: ref A }\n${MAIN}`);
+  let test theory: Case = t.asserts("one `ref` anywhere on a long cycle breaks it") {
+    theory.isSuccessful = refBreaksALongCycle.diagnostics.len == 0;
+    theory.detail = `reported ${refBreaksALongCycle.diagnostics.len}: ${firstDiagnostic(ref refBreaksALongCycle)}`;
+  }
+
+  // Two types that MENTION each other in one direction only. Nothing here is a
+  // cycle, and a check that stopped at "these two names appear in each other's
+  // neighbourhood" would refuse the most ordinary composition there is.
+  let oneDirection = checkSource(`type Inner { v: int32 }\ntype Outer { a: Inner, b: Inner }\ntype Third { o: Outer, i: Inner }\n${MAIN}`);
+  let test theory: Case = t.asserts("plain composition, including the same type twice, stays legal") {
+    theory.isSuccessful = oneDirection.diagnostics.len == 0;
+    theory.detail = `reported ${oneDirection.diagnostics.len}: ${firstDiagnostic(ref oneDirection)}`;
+  }
+
+  // A forward reference is not a cycle. This is the shape that made the
+  // reference's own walk crash before it learned about shells: `A` is filled
+  // while `B` is still empty.
+  let forward = checkSource(`type A { b: B }\ntype B { v: int32 }\n${MAIN}`);
+  let test theory: Case = t.asserts("a forward reference is not a cycle") {
+    theory.isSuccessful = forward.diagnostics.len == 0;
+    theory.detail = `reported ${forward.diagnostics.len}: ${firstDiagnostic(ref forward)}`;
   }
 }
 

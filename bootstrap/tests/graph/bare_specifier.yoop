@@ -1,0 +1,5 @@
+// A bare specifier - no `./`, no leading `/`, and neither of the two root
+// prefixes. Refused, and the message has to name every form that WOULD work,
+// because `modules/alpha` is what the author of this line almost always meant.
+import { thing } from "alpha";
+function main(): int32 { return thing(); }

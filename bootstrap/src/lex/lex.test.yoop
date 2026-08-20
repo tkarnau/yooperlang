@@ -303,3 +303,96 @@ function lexRefusalMentions(src: string, needle: string): bool {
   const message = lexError(src);
   return strings.stringIndexOf(message, needle) < message.len;
 }
+
+// Char literals past ASCII, and the refusals.
+//
+// PORTED from src/jsyooplexer/lexer.test.js, which was the only thing in the
+// tree covering either. Everything else that reaches a char literal reaches an
+// ASCII one: bootstrap/tests/slice/char_literals.yoop and
+// examples/pass/char_literals.yoop cover `'a'`, the six simple escapes and
+// `\x0A` through printed output, and bootstrap/tests/parity/literals.yoop
+// covers `'\x41'` - but the parity corpus retires with the JS reference, a
+// corpus file has to LEX so no refusal can live in one, and no program in the
+// tree writes a char literal that needs more than one byte.
+//
+// The multi-byte source is written as BYTES rather than as characters on
+// purpose. The expected UTF-8 encoding is then visible in the test instead of
+// depending on how an editor saved this file, and lex.test.yoop stays ASCII.
+suite function multiByteCharLiteralsDecodeToTheirCodepoint(): void {
+  // U+00E9 LATIN SMALL LETTER E WITH ACUTE - the 2-byte form, 110x xxxx.
+  let test theory: Case = t.asserts("a 2-byte scalar decodes to its codepoint") {
+    const got = charValueOf([39, 0xC3, 0xA9, 39]);
+    theory.isSuccessful = got == 233;
+    theory.detail = `C3 A9 decoded to ${got}, wanted 233 (U+00E9)`;
+  }
+
+  // U+20AC EURO SIGN - the 3-byte form, 1110 xxxx.
+  let test theory: Case = t.asserts("a 3-byte scalar decodes to its codepoint") {
+    const got = charValueOf([39, 0xE2, 0x82, 0xAC, 39]);
+    theory.isSuccessful = got == 8364;
+    theory.detail = `E2 82 AC decoded to ${got}, wanted 8364 (U+20AC)`;
+  }
+
+  // U+1F600 GRINNING FACE - the 4-byte form, 1111 0xxx. This one was WRONG:
+  // the branch seeded the codepoint with the constant `0x07` instead of with
+  // `lead & 0x07`, so every astral literal came out 7 << 18 too high unless its
+  // lead byte happened to be F7. `'\u{1F600}'` decoded to 1963520 rather than
+  // to 128512, silently, with no diagnostic anywhere.
+  let test theory: Case = t.asserts("a 4-byte scalar decodes to its codepoint") {
+    const got = charValueOf([39, 0xF0, 0x9F, 0x98, 0x80, 39]);
+    theory.isSuccessful = got == 128512;
+    theory.detail = `F0 9F 98 80 decoded to ${got}, wanted 128512 (U+1F600)`;
+  }
+
+  // The lead byte's own value bits have to survive, which is what the constant
+  // above destroyed. U+10FFFF is the largest scalar there is and its lead byte
+  // is F4, so its low three bits are 4 rather than 0.
+  let test theory: Case = t.asserts("the lead byte's value bits are kept, not assumed") {
+    const got = charValueOf([39, 0xF4, 0x8F, 0xBF, 0xBF, 39]);
+    theory.isSuccessful = got == 1114111;
+    theory.detail = `F4 8F BF BF decoded to ${got}, wanted 1114111 (U+10FFFF)`;
+  }
+}
+
+// Five ways a char literal is malformed, each refused BY NAME. None of them can
+// live in a slice fixture or in the parity corpus - both require the file to
+// compile, or at least to lex - and a fail fixture would build the whole import
+// closure five times to ask the lexer five questions it can answer directly.
+suite function malformedCharLiteralsAreRefusedByName(): void {
+  let test theory: Case = t.asserts("an empty char literal is refused") {
+    theory.isSuccessful = lexRefusalMentions("''", "empty char literal");
+    theory.detail = `got: ${lexError("''")}`;
+  }
+  let test theory: Case = t.asserts("more than one character is refused") {
+    theory.isSuccessful = lexRefusalMentions("'ab'", "single character");
+    theory.detail = `got: ${lexError("'ab'")}`;
+  }
+  // Running out of source before the closing quote, which is the one that would
+  // otherwise read one byte past the end of the buffer.
+  let test theory: Case = t.asserts("a literal with no closing quote is refused") {
+    theory.isSuccessful = lexRefusalMentions("'a", "unterminated char literal");
+    theory.detail = `got: ${lexError("'a")}`;
+  }
+  let test theory: Case = t.asserts("an escape nothing decodes is refused") {
+    theory.isSuccessful = lexRefusalMentions("'\\q'", "unknown escape");
+    theory.detail = `got: ${lexError("'\\q'")}`;
+  }
+  let test theory: Case = t.asserts("a \\x escape without two hex digits is refused") {
+    theory.isSuccessful = lexRefusalMentions("'\\xZZ'", "invalid \\x escape");
+    theory.detail = `got: ${lexError("'\\xZZ'")}`;
+  }
+}
+
+// The first token's char value, lexed from raw bytes. A refusal or a first
+// token that is not a char literal gives 0, which no case above expects.
+function charValueOf(bytes: uint8[]): uint64 {
+  switch (lex.tokenize(bytes)) {
+    case Result.Ok { value: toks }: {
+      if (toks.len == 0 || toks[0].tag != TokenTags.CHARLITERAL) {
+        return 0;
+      }
+      return toks[0].intVal;
+    }
+    case Result.Err { error: e }: { return 0; }
+  }
+}

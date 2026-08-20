@@ -29,6 +29,38 @@ function checkBlock(ref cx: Cx, blockId: NodeId): void {
     i += 1;
   }
   scopePop(cx.scope);
+  reportUnreachableTail(ref cx, block.childA);
+}
+
+// The dead tail after a statement control never leaves.
+//
+// Every block in the language funnels through checkBlock - function and method
+// bodies, the two halves of an `if`, loop bodies, switch arms, the handler
+// block of `?`, and the trailing block of a block-owning kind binding - so this
+// one call site covers all of them, and a form added later gets it for free.
+//
+// A WARNING, never an error, and deliberately. Dead code is a smell rather than
+// a soundness problem, and hard-erroring is hostile in the middle of editing:
+// comment out a branch, or add a temporary early return to bisect something,
+// and the build would stop. Rust, Swift, C# and TypeScript all warn here.
+//
+// Reported AFTER the statements have been checked, and the statements are all
+// checked whether they are reachable or not - unreachable code that also does
+// not compile should say so, rather than hiding one mistake behind the other.
+function reportUnreachableTail(ref cx: Cx, listId: NodeId): void {
+  switch (firstUnreachableIndex(cx.ast, listId)) {
+    case Option.Some { value: at }: {
+      const list = nodeAt(cx.ast, listId);
+      const dead = nodeAt(cx.ast, childAt(cx.ast, list, at));
+      reportWarning(
+        cx.prog,
+        "unreachable code - control never reaches here",
+        dead.sourceLoc,
+        UNREACHABLE_CODE
+      );
+    }
+    case Option.None: { }
+  }
 }
 
 function checkStatement(ref cx: Cx, stmtId: NodeId): void {

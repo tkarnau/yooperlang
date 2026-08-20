@@ -22,7 +22,7 @@ module parse;
 import { Result } from "std/core/types.yoop";
 import { Vec }, * as vec from "std/core/vec.yoop";
 import { disposable } from "std/core/kinds.yoop";
-import { NodeId, ASTNodeKind } from "../ast";
+import { NodeId, ASTNodeKind, nodeAt } from "../ast";
 import { TokenTags, posToSourceLocation } from "../lex";
 import { ParsingError } from "../diagnostics";
 
@@ -51,9 +51,27 @@ export function parseVariantDecl(ref ps: ParserState): Result<NodeId, ParsingErr
       vec.vecPush(ref caseIds, parseMethodDecl(ref ps, node.name, node.childA)?);
       continue;
     }
-    vec.vecPush(ref caseIds, parseVariantCase(ref ps)?);
+    const caseId = parseVariantCase(ref ps)?;
+    vec.vecPush(ref caseIds, caseId);
     if (SelfLexing.peek(ref ps).tag == TokenTags.COMMA) {
       SelfLexing.advance(ref ps)?;
+      continue;
+    }
+    // A case with no `,` after it may only be the LAST member. Without this,
+    // `Special MyType,` reads as two payload-less cases - the comma between
+    // members is what tells them apart, and there is none - so the payload the
+    // writer meant is silently dropped and a case named after the payload TYPE
+    // appears in its place. Nothing downstream can see the mistake: the only
+    // symptom is a switch that is not exhaustive until an arm is added for a
+    // case nobody wrote. Refused by name, with the record spelling in the
+    // message, because that is the edit to make.
+    if (SelfLexing.peek(ref ps).tag != TokenTags.RCURLY) {
+      const caseName = nodeAt(ref ps.ast, caseId).name;
+      return Result.Err { error: SelfLexing.createParsingError(
+        ref ps,
+        `variant case "${caseName}" is followed by "${peekText(ref ps)}" with no separator - a case payload must be a record, e.g. "${caseName} { value: ${peekText(ref ps)} }"`,
+        peekLengthUsize(ref ps),
+      )};
     }
   }
   SelfLexing.expect(ref ps, TokenTags.RCURLY)?;

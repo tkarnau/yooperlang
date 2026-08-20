@@ -16,9 +16,18 @@ reader to the wrong file.
     unit/              a real directory module, imported the wrong way by
                        file_of_module.yoop (naming one of its source files)
     selfy/             a directory module whose file imports its own module
+    bare_specifier.yoop
+                       an import path that is neither relative, absolute, nor
+                       under one of the two roots
+    nearer/modules_decoy.yoop
+                       a name the NEARER modules root does not hold and the
+                       outer one does. The walk stops at the first root, so
+                       this is refused rather than answered from a directory
+                       the reader of that file never looks at
 
 The ACCEPTING cases live in [../slice/](../slice/), where they compile and run:
-`imports.yoop` is the diamond and `dir_modules.yoop` is the directory module.
+`imports.yoop` is the diamond, `dir_modules.yoop` is the directory module, and
+`modules_flat.yoop` is the `modules/` root with a subdependency under it.
 The graph test reads both back for its shape assertions, so the two levels check
 the same fixtures from different angles.
 

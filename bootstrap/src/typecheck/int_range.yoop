@@ -1,0 +1,95 @@
+module typecheck;
+
+/*
+  Does an integer literal FIT the type it was pinned to.
+
+  An int literal is untyped until a context pins it, and the pin is the whole
+  question here: `256` is a perfectly good literal and `let a: uint8 = 256` is
+  not a program, because the slot it was pinned to holds eight bits. Without
+  this check the value is TRUNCATED on the way into codegen and the program
+  prints 0 with nothing said - the same silent-wrong-answer shape
+  typecheck/enum_values.yoop refuses for a case value, and it is refused here in
+  the same words.
+
+  THE WIDTH IS THE DECLARED TYPE'S, never the literal's own. That is the hazard
+  comptime/arith.yoop's header describes from the other end: a value carried at
+  the wrong width is masked to something that is still a number, so every step
+  after it agrees and nothing looks wrong. So the check reads the type the
+  literal was PINNED to - `expected` at the moment checkExpr takes it - and
+  nothing else. A literal with no expectation is not checked at all: it defaults
+  to int32 like any other unconstrained literal, and pinning it to a width
+  nobody wrote would refuse programs on a type the author never named.
+
+  THE SIGN TRAVELS SEPARATELY. `-128` is a unary minus over the literal 128 in
+  this parser (the reference folds the two into one node; this one does not, and
+  `isIntLiteralNode` exists because of it). So the magnitude is a `uint64` here
+  and the sign arrives on `prog.negatedLiteral`, which checkUnary sets for
+  exactly one step. `int8` accepts a magnitude of 128 when it is negated and
+  refuses it when it is not, which is the asymmetry two's complement has.
+*/
+
+import { ASTNode } from "../ast";
+
+// Reports when the literal does not fit. `typeId` is the type the literal was
+// PINNED to, so the caller has already decided this is an integer slot.
+export function checkIntLiteralRange(
+  ref prog: Program,
+  expr: ASTNode,
+  typeId: TypeId,
+  negated: bool
+): void {
+  const bits = primBitWidth(ref prog, typeId);
+  // 0 is "not an integer width" and 1 is bool. Neither is a slot an int literal
+  // pins to, and the caller's own mismatch check is what reports those.
+  if (bits <= 1) {
+    return;
+  }
+  if (intLiteralFits(ref prog, typeId, expr.intVal, negated)) {
+    return;
+  }
+  let shown: string = `${expr.intVal}`;
+  if (negated) {
+    shown = `-${expr.intVal}`;
+  }
+  reportError(
+    ref prog,
+    `integer literal ${shown} does not fit in ${formatType(ref prog, typeId)}`,
+    expr.sourceLoc
+  );
+}
+
+// The magnitude is what the lexer read - always non-negative - and `negated`
+// says whether a unary minus stands in front of it.
+function intLiteralFits(
+  ref prog: Program,
+  typeId: TypeId,
+  magnitude: uint64,
+  negated: bool
+): bool {
+  const bits = primBitWidth(ref prog, typeId);
+  const one: uint64 = 1;
+
+  if (!primIsSigned(ref prog, typeId)) {
+    // Nothing negative fits an unsigned slot, and `-0` is the one spelling that
+    // is not negative. `uint16 = -1` is a mistake about the type, not a value
+    // that wraps to 65535.
+    if (negated) {
+      return magnitude == 0;
+    }
+    if (bits >= 64) {
+      return true;
+    }
+    return magnitude < (one << uint64(bits));
+  }
+
+  // Signed: the negative range reaches one further than the positive one, so
+  // int8 takes -128 and refuses 128.
+  let limit: uint64 = one << uint64(63);
+  if (bits < 64) {
+    limit = one << uint64(bits - 1);
+  }
+  if (negated) {
+    return magnitude <= limit;
+  }
+  return magnitude < limit;
+}

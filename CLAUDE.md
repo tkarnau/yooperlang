@@ -168,7 +168,9 @@ check on a change, and say so when you do.
 - `--warn-disposable` opts a BUILD into the `unhandled-disposable` warning
   (silent otherwise; the LSP shows it either way). It finds real leaks but has
   two known false positives - see
-  [docs/writing_yoop.md](docs/writing_yoop.md) section 4.
+  [docs/writing_yoop.md](docs/writing_yoop.md) section 4. `unreachable-code` is
+  ON by default and needs no flag: it inherits `alwaysDiverges`'s conservatism,
+  so it can only ever MISS dead code, never flag live code.
 - Bootstrap: `npm run test:slice` (end-to-end executables, ~18s),
   `npm run test:parity` (layer dumps vs the JS reference, ~3s),
   `npm run test:selfhost` (the three-stage build and its fixpoint, ~18s),

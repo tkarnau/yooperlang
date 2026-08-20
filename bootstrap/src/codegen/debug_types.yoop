@@ -286,7 +286,7 @@ function unionDebugType(ref cx: Cx, typeId: TypeId): DebugType {
     i += 1;
   }
 
-  finishComposite(ref cx, id, "DW_TAG_union_type", nominalNameOf(cx.prog, typeId),
+  finishComposite(ref cx, id, "DW_TAG_union_type", debugNominalName(ref cx, typeId),
     widest, maxAlign, ref members);
   return { id: id, found: true };
 }
@@ -323,15 +323,33 @@ function vtableDebugType(ref cx: Cx, typeId: TypeId): DebugType {
     i += 1;
   }
 
-  finishComposite(ref cx, id, "DW_TAG_structure_type", nominalNameOf(cx.prog, typeId),
+  finishComposite(ref cx, id, "DW_TAG_structure_type", debugNominalName(ref cx, typeId),
     members.len * 8, 8, ref members);
   return { id: id, found: true };
+}
+
+/*
+  The name to put on a composite.
+
+  `nominalNameOf` deliberately answers "" for a `union` and for a `vtable`: its
+  other callers use an empty answer as "this is not a type a method or a trait
+  bound could name", and both of those really are not. DWARF wants the name
+  anyway - an unnamed DW_TAG_union_type prints as an anonymous type, so a
+  `Color` local shows its fields with nothing saying what it is - so the two
+  cases are read off the declaration here instead of widening the shared helper.
+*/
+function debugNominalName(ref cx: Cx, typeId: TypeId): string {
+  switch (typeAt(cx.prog, typeId)) {
+    case Type.Union { decl: d, fields: f }: { return d.name; }
+    case Type.VTable { decl: d, forTrait: ft, fields: vf, methodOrder: mo }: { return d.name; }
+    default: { return nominalNameOf(cx.prog, typeId); }
+  }
 }
 
 // The name an element type contributes to `int32[]` or `Point[]`. A nominal
 // type has one; a primitive is spelled by its own name.
 function nominalOrPrimName(ref cx: Cx, typeId: TypeId): string {
-  const nominal = nominalNameOf(cx.prog, typeId);
+  const nominal = debugNominalName(ref cx, typeId);
   if (nominal.len > 0) {
     return nominal;
   }

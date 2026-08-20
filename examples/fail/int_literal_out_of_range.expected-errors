@@ -1,0 +1,9 @@
+# Illegal: each literal is wider than the slot it was pinned to. Without the
+# check these truncate silently - 256 stores 0, 300 stores 44 - in IR that is
+# perfectly valid, so nothing downstream could catch it.
+#
+# All four are reported: one bad literal should not hide the next.
+12:20: integer literal 256 does not fit in uint8
+13:20: integer literal 300 does not fit in uint8
+14:19: integer literal 128 does not fit in int8
+15:22: integer literal -1 does not fit in uint16

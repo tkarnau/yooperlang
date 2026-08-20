@@ -27,9 +27,21 @@ module typecheck;
   as short as it is: pass D has already refused a switch that is neither
   exhaustive nor defaulted, so a switch that got this far covers every value and
   "every arm diverges" is the whole question.
+
+  The SECOND caller is `firstUnreachableIndex` at the bottom of this file, and
+  it is the same question asked of a whole run of statements: everything after
+  the first one that diverges is dead. It gets the conservatism for free and in
+  the right direction - `alwaysDiverges` answers true only when divergence is
+  CERTAIN, so the warning never flags live code and only ever misses some dead
+  code, which costs nothing.
 */
 
+import { Option } from "std/core/types.yoop";
 import { AST, ASTNode, ASTNodeKind, NodeId, childAt, nodeAt } from "../ast";
+
+// The diagnostic code for the dead-tail warning. Read by the driver's warning
+// filter the same way UNHANDLED_DISPOSABLE is.
+export const UNREACHABLE_CODE: string = "unreachable-code";
 
 export function alwaysDiverges(ref ast: AST, stmtId: NodeId): bool {
   if (stmtId == 0) {
@@ -96,4 +108,32 @@ function everyArmDiverges(ref ast: AST, stmt: ASTNode): bool {
     i += 1;
   }
   return true;
+}
+
+// The index of the first statement in a BLOCK's list that control never
+// reaches, or None.
+//
+// The loop stops one short of the end on purpose: a block whose LAST statement
+// diverges is the ordinary shape of every function that ends in a `return`, and
+// there is nothing after it to be dead.
+//
+// Only the FIRST dead statement is reported, not every one after it. One
+// mistake is one diagnostic, and the tail is dead as a run rather than
+// statement by statement.
+export function firstUnreachableIndex(ref ast: AST, listId: NodeId): Option<usize> {
+  if (listId == 0) {
+    return Option.None;
+  }
+  const list = nodeAt(ref ast, listId);
+  if (list.childCount < 2) {
+    return Option.None;
+  }
+  let i: usize = 0;
+  while (i + 1 < list.childCount) {
+    if (alwaysDiverges(ref ast, childAt(ref ast, list, i))) {
+      return Option.Some { value: i + 1 };
+    }
+    i += 1;
+  }
+  return Option.None;
 }

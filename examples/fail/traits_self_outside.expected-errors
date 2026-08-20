@@ -1,0 +1,6 @@
+# Illegal: `self` is only bound as the receiver of a method body. In a free
+# function nothing declares it, so it is an ordinary unknown name - which is
+# the point: `self` is not a keyword with an ambient meaning, and a checker
+# that treated it as one would type it as something in a function that has no
+# receiver at all.
+2:12: unknown name "self"

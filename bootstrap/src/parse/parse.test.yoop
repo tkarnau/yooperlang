@@ -193,6 +193,54 @@ suite function variantDeclsCarryTheirCasesInOrder(): void {
   }
 }
 
+// A case and the member after it are told apart by the COMMA and by nothing
+// else, so a case written with a bare TYPE where its payload belongs -
+// `Special MyType,` - is two payload-less cases and not one case with a
+// payload. Refused by name, because accepting it is silent: the payload the
+// writer meant is dropped, a case named after the payload TYPE appears beside
+// it, and the only symptom anywhere downstream is a switch that will not go
+// exhaustive until an arm is added for a case nobody wrote. Verified end to
+// end before the check landed - the program compiled, ran, and printed from
+// the wrong shape.
+suite function aVariantCasePayloadMustBeARecord(): void {
+  const bare = "type MyType { q: int }\nvariant V { Normal { p: int }, Special MyType, }";
+  let test theory: Case = t.asserts("a bare-type payload is refused, and the message names both words") {
+    theory.isSuccessful = refusalMentions(bare, "\"Special\" is followed by \"MyType\" with no separator")
+      && refusalMentions(bare, "Special { value: MyType }");
+    theory.detail = `wanted the no-separator refusal with its fix-it, got: ${parseError(bare)}`;
+  }
+
+  // The record spelling is what the refusal points at, so it has to keep
+  // working - otherwise the check is just breaking payloads to catch one.
+  let record = parseOk("type MyType { q: int }\nvariant V { Normal { p: int }, Special { value: MyType }, }");
+  let test theory: Case = t.asserts("the record payload form still parses as ONE case with a field") {
+    const decl = topLevel(ref record, 1);
+    const special = nodeAt(ref record, childAt(ref record, decl, 1));
+    theory.isSuccessful = decl.childCount == 2
+      && special.kind == ASTNodeKind.VARIANT_CASE
+      && str.stringEq(special.name, "Special")
+      && special.childCount == 1;
+    theory.detail = `the variant has ${decl.childCount} member(s); "${special.name}" carries ${special.childCount} field(s)`;
+  }
+
+  // The last member may still omit its trailing comma, and a METHOD still
+  // follows a case with the ordinary comma in front of it - the two shapes the
+  // check has to leave alone.
+  let terse = parseOk("variant V { A, B { x: int } }");
+  let test theory: Case = t.asserts("the last case needs no trailing comma") {
+    theory.isSuccessful = topLevel(ref terse, 0).childCount == 2;
+    theory.detail = `the variant has ${topLevel(ref terse, 0).childCount} member(s), wanted 2`;
+  }
+
+  let withMethod = parseOk("variant V implements D { A, B { x: int }, function f(ref self): int { return 1; } }");
+  let test theory: Case = t.asserts("a method after a case is unaffected") {
+    const decl = topLevel(ref withMethod, 0);
+    theory.isSuccessful = decl.childCount == 3
+      && nodeAt(ref withMethod, childAt(ref withMethod, decl, 2)).kind == ASTNodeKind.METHOD_DECL;
+    theory.detail = `the variant has ${decl.childCount} member(s), wanted 3 ending in a METHOD_DECL`;
+  }
+}
+
 suite function variantConstructorsAndPatternsShareOneShape(): void {
   // The braces are what make a constructor unambiguous at parse time.
   let ast = parseOk("function f(): int { return Shape.Circle { r: 2 }; }");
@@ -2298,6 +2346,45 @@ suite function tryOpIsPostfixAndWrapsItsOperand(): void {
     const t0 = firstLetInitializer(ref plainQ);
     theory.isSuccessful = t0.kind == ASTNodeKind.TRY_OP && t0.childB == 0 && t0.childC == 0;
     theory.detail = `childB=${t0.childB} childC=${t0.childC}`;
+  }
+}
+
+// The two shapes that make `?`'s suffixes decidable at ONE token, asserted from
+// the other side: what a `?` must NOT swallow. Both are the reason for a rule
+// stated in expressions.yoop and neither had a test, because neither is written
+// anywhere in std, examples or this tree - so nothing that compiles today would
+// notice either rule being relaxed, and relaxing one is a SILENT wrong parse
+// rather than an error.
+suite function tryOpSuffixesDoNotSwallowWhatFollowsThem(): void {
+  // A general expression after the `?` would make this a context clause on a
+  // negated `x` instead of a subtraction - which is why the context is
+  // restricted to the two LITERAL token forms. A string can never continue an
+  // expression; a `-` always can.
+  let sub = parseOk("function f(): R { return g()? - x; }");
+  let test theory: Case = t.asserts("`g()? - x` is a subtraction, not a context clause") {
+    const outer = returnedExpression(ref sub);
+    const left = nodeAt(ref sub, outer.childA);
+    theory.isSuccessful = outer.kind == ASTNodeKind.BINARY_EXPRESSION
+      && outer.operator == TokenTags.MINUS
+      && left.kind == ASTNodeKind.TRY_OP
+      && left.childB == 0;
+    theory.detail = `the outer node is ${outer.kind} over ${left.kind}, whose context slot is ${left.childB}`;
+  }
+
+  // The handler form's BINDING is what keeps this a loop. A bare `? { ... }`
+  // would be these exact tokens, so an optional binding would take the loop
+  // BODY as the handler block and leave the loop with none - and the body is
+  // then simply gone, which no later pass can see.
+  let loop = parseOk("function f(): R { for x in items()? { g(x); } }");
+  let test theory: Case = t.asserts("`for x in items()? { ... }` keeps the brace as the loop body") {
+    const stmt = firstStatement(ref loop);
+    const iterable = nodeAt(ref loop, stmt.childA);
+    theory.isSuccessful = stmt.kind == ASTNodeKind.FOR_IN_LOOP
+      && iterable.kind == ASTNodeKind.TRY_OP
+      && iterable.childC == 0
+      && stmt.childB != 0
+      && nodeAt(ref loop, stmt.childB).kind == ASTNodeKind.BLOCK;
+    theory.detail = `the statement is ${stmt.kind} over ${iterable.kind}, whose handler slot is ${iterable.childC}`;
   }
 }
 

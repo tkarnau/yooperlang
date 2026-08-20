@@ -315,6 +315,179 @@ Three smaller findings, all worth fixing on their own:
   * INTERNAL MODULE IDS LEAK into user-facing messages: `module m_3 has no
     export "nope"`. The `_3` is a graph id, not anything the user wrote.
 
+### A9. Three programs the bootstrap accepted and the reference refuses - DONE
+
+A second audit in the same UNSAFE direction A8 opened, and this one was found by
+asking a different question: not "which negative FIXTURE compiles" but "which
+shapes does the reference's typechecker rule on that the bootstrap's has no rule
+for at all". Three came out, all three reproduced by hand, and all three produce
+IR that CLANG refuses - so the failure had the compiler's name nowhere on it.
+
+  1. AN INT LITERAL WIDER THAN THE SLOT IT PINS TO. `let a: uint8 = 256`.
+     Worse than the other two, because there is no clang refusal behind it: the
+     value is TRUNCATED into codegen and the program prints 0. Closed by
+     `typecheck/int_range.yoop`, asserted by
+     `typecheck.test.yoop:intLiteralsHaveToFitTheTypeTheyPinTo` and
+     `examples/fail/int_literal_out_of_range`.
+  2. NO OPERAND-CLASS CHECK ON A BINARY OPERATOR. Closed - below.
+  3. NO RECURSIVE-STRUCT DETECTION. Closed - below.
+
+#### A9.1 The operand-class table (`typecheck/operands.yoop`)
+
+Two operands sharing a TypeId was the whole test, so `a + b` on two strings
+emitted `add ptr %t1, %t2` and typecheck said ok. The same held for two structs,
+two arrays, two `ref`s, `true + false`, `true < false`, and `<` on two variants.
+Only floats (`checkFloatOperator`) and value enums (`checkEnumOperator`) had a
+row.
+
+The table now lives in one module and those two are dispatched to from it rather
+than being special cases in `check_expr.yoop`. It was established by PROBING the
+reference - 186 programs, one per (operand class, operator) pair, built with
+both compilers and diffed - rather than by reading `unifyArith`'s wording. Rows,
+where arith is `+ - * / %`, eq is `== !=`, ord is `< > <= >=`, bit is
+`& | ^ << >>` and logical is `&& ||`:
+
+    int (any width)            arith  eq  ord  bit  .
+    float32 / float64          arith  eq  ord  .    .
+    bool                       .      eq  .    .    logical
+    value enum, int-backed     .      eq  ord  bit  .
+    value enum, string-backed  .      eq  .    .    .
+    unsafe_ptr                 .      eq  .    .    .      (arith is its own path)
+    variant                    .      eq  .    .    .
+    string                     .      .   .    .    .
+    struct, array, ref, func,
+    vtable, task, void, ...    .      .   .    .    .
+
+The three rows worth naming, because each is a real answer rather than a gap:
+
+  * `==` ON TWO STRINGS IS NOT LEGAL. A `string` is a borrowed view, so it would
+    compare ADDRESSES and answer false for two equal spellings.
+    `examples/tour/strings.yoop` already says so in a comment and points at
+    `text.equals`; nothing was enforcing it.
+  * `<` on two BOOLS is not legal while `==` is. No useful ordering on a truth
+    value.
+  * `==` on two VARIANTS compares TAGS, which is why it is legal at all.
+
+ONE ROW IS LEFT UNGUARDED ON PURPOSE, and it is a decision rather than an
+oversight: a TYPE PARAMETER. `function addT<T>(a: T, b: T): T { return a + b; }`
+is legal here and is refused by the reference, and it is legal here on purpose -
+`comptime.test.yoop:aFoldInsideAGenericRunsAtTheConcreteWidth` asserts that
+exact function folds at the operand's concrete width (uint8 200 + 100 wrapping
+to 44). But monomorphization happens in CODEGEN, not in pass D: a generic body
+is checked ONCE with `T` standing, and no instantiation is ever re-checked. So
+`addT` instantiated at `string` still reaches codegen and still emits `add ptr`.
+Closing it means a pass D that runs per INSTANCE rather than per body, which is
+a different change; refusing `T` outright would refuse a program this compiler
+is tested on, which is the one direction that is not allowed. See the header of
+`typecheck/operands.yoop`.
+
+Tests: `typecheck.test.yoop:binaryOperatorsCheckTheirOperandCLASSNotJustAgreement`
+(19 assertions, and the LEGAL rows are asserted as hard as the refusals -
+integers keeping the whole set, floats keeping arithmetic and comparison, bools
+keeping `==` and `&&`, variants and pointers keeping `==`, pointer arithmetic
+untouched, and an already-failed operand not collecting a second diagnostic) plus
+`examples/fail/binary_operand_class`.
+
+One message changed: "logical operands must be bool" is gone, because `&&` on
+two non-bools is now the ordinary operand-class refusal and there is one
+sentence shape for all of them.
+
+#### A9.2 Recursive types (`typecheck/recursion.yoop`)
+
+`type Node { next: Node }` has no finite size, and LLVM is what said so:
+`identified structure type "%struct.m__Node" is recursive`. The mutual form and
+any longer cycle were the same, and so was a variant case carrying its own
+variant by value.
+
+The check runs at the END of `passCFillShells`, after `materializeInstances`,
+which is the earliest point where the fact is in hand: pass A stamps a shell
+with no fields, pass C fills them, and a field naming a generic
+(`b: Box<Node>`) needs its INSTANCE materialized before the cycle exists to be
+seen. The walk descends only through storage that is INLINE - a struct's fields,
+a variant case's payload, a union's fields - and stops at everything else, which
+is what keeps the four legal shapes legal:
+
+    next: ref Node          a borrow, one address
+    kids: Node[]            a { ptr, len } descriptor
+    kids: Vec<Node>         the same, one level down
+    next: unsafe_ptr<Node>
+
+Those four are the whole reason a self-referential type gets written at all, so
+each is asserted, and `codegen.test.yoop:dwarfTerminatesOnASelfReferentialType`
+(which uses the `ref` form) still passes untouched.
+
+A mutual cycle reports at BOTH ends rather than one. The reference reports one,
+but either field can be the one turned into a `ref` and the reader should see
+both.
+
+Tests: `typecheck.test.yoop:aTypeCannotContainItselfByValue` (13 assertions -
+direct, mutual, three-hop, variant, and through a generic instance, each beside
+its legal neighbour, plus plain composition and a forward reference, which is
+the shape that makes a naive walk crash on an unfilled shell) plus
+`examples/fail/recursive_type`.
+
+One existing test moved: `typeEqualityIsStructuralAndStopsAtNominals` used
+`type Node { next: Node }` to prove type EQUALITY terminates on a
+self-referential type. It now uses `next: ref Node`, which is the same nominal
+cycle in a spelling that is still a program.
+
+### A10. The `unreachable-code` warning - DONE
+
+The last capability the reference had and the bootstrap did not. 16 JS tests
+covered it (`jsyooptypecheck/diverge.test.js`), and
+
+    function main(): int32 { return 0; let x: int32 = 1; }
+
+compiled with nothing said.
+
+Almost all of it was already here. `typecheck/diverge.yoop` answered "does
+control always LEAVE this statement" for the handler form of `?`, and the
+diagnostic layer already carried a `code` and a `Severity.WARNING` for
+`unhandled-disposable`. What was missing was `firstUnreachableIndex` - the same
+question asked of a whole RUN of statements, since everything after the first one
+that diverges is dead - and one call site.
+
+That call site is `checkBlock` in `check_stmt.yoop`, which every block in the
+language funnels through: function and method bodies, both halves of an `if`,
+loop bodies, switch arms, the handler block of `?`, and the trailing block of a
+block-owning kind binding. Twelve callers, one check, and a block form added
+later gets it for free.
+
+A WARNING, never an error, matching the reference and every language that has
+this: dead code is a smell rather than a soundness problem, and hard-erroring is
+hostile in the middle of editing - comment out a branch, or add a temporary
+early return to bisect something, and the build would stop. It is ON by default,
+unlike `unhandled-disposable`, and the reason is the conservatism it inherits:
+`alwaysDiverges` answers true only when divergence is CERTAIN, so this can never
+flag live code and can only miss some dead code. A warning with no false
+positives does not need an opt-in.
+
+The statements in a dead tail are still CHECKED, and only the FIRST one is
+reported. Unreachable code that also does not compile should say so; and the
+tail is dead as a run, so naming every statement in it would bury the one line
+the reader has to act on.
+
+MEASURED over the tree, and it agrees with the reference program for program:
+15 sites in `std/` and 16 in `examples/pass/`, every one a `return` after a
+switch whose arms all return. They are genuinely removable - both compilers
+accept those functions with the trailing return deleted - so the warning is
+actionable rather than a trap, and it is not new noise: the reference has been
+reporting the same 31 all along. Left alone here; cleaning them is a tidy, not a
+fix.
+
+ONE DIVERGENCE, and the bootstrap is worse: the reference points at the dead
+statement's first token, the bootstrap one token in (`return -1` is reported at
+the `-1`). It is not this check - `buildSourcedNode` stamps the CURRENT token
+after the keyword has been consumed, so every statement node in the tree is
+stamped this way. Same family as the parse-error column item, and worth fixing
+in one place rather than here.
+
+Tests: `typecheck.test.yoop:deadCodeAfterADivergingStatementIsWarnedAbout`
+(9 assertions - after a return, after a break, after an if whose both arms
+return, after an exhaustive switch, each beside the shape that must stay
+SILENT, plus "it is a warning and not an error", "a dead run is one
+diagnostic", and "a dead statement is still typechecked").
+
 ### A7. A kind-propagation check the bootstrap does not make - DONE
 
 The reference refuses
