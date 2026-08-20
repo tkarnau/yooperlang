@@ -1,4 +1,4 @@
-// The std/ import root, which the bootstrap does not resolve yet.
+// A std/ import with no std root configured, so it cannot be resolved.
 import { Vec } from "std/core/vec.yoop";
 
 function main(): int {

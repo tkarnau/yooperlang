@@ -1,4 +1,4 @@
-// Phase 12: a value enum interpolated into a string-producing template
+// A value enum interpolated into a string-producing template
 // literal (one used as a `string`, not inside printf) routes through the
 // same `toString` shims as its underlying primitive. The `import` forces
 // the multi-module driver so std/core/format + strings autoload.

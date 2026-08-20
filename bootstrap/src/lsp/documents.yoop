@@ -1,0 +1,214 @@
+module lsp;
+
+/*
+  What the editor is holding, which is NOT what is on disk.
+
+  `didOpen` hands over the full text of a file and `didChange` hands over a new
+  full text (this server asks for full sync - see the capabilities in
+  server.yoop), so a document is exactly a URI, a path, and a byte buffer. The
+  buffer is the thing the compiler is pointed at; see diagnose.yoop for how it
+  gets there and for the one shape where it cannot.
+
+  Documents are never removed from the store. `didClose` empties the content
+  and marks the slot closed, and the next `didOpen` of the same URI refills it
+  - into the same buffer, since emptying a Vec keeps its capacity. An editing
+  session touches tens of files, so the Vec is a linear scan and that is the
+  right size of machinery for it.
+*/
+
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { Text }, * as text from "std/core/text.yoop";
+import { Disposable, disposable } from "std/core/kinds.yoop";
+import * as intr from "std/core/intrinsics.yoop";
+
+export type Document implements Disposable propagates<disposable> {
+  uri: Text,
+  // The filesystem path the URI names, which is what the compiler resolves
+  // imports against and what a Diagnostic's `filePath` is compared to.
+  path: Text,
+  content: Vec<uint8>,
+  version: int64,
+  // False once `didClose` arrived. The slot stays, so a reopen costs no
+  // allocation and the store never has to shuffle. The uri and path Texts stay
+  // with it, which is what makes the slot findable again.
+  isOpen: bool,
+  // True when the content changed and no diagnostics have been published for
+  // it since. See the debounce in server.yoop.
+  needsDiagnostics: bool,
+
+  function dispose(ref self): void {
+    Disposable.dispose(ref self.uri);
+    Disposable.dispose(ref self.path);
+    Disposable.dispose(ref self.content);
+  }
+}
+
+export type DocumentStore implements Disposable propagates<disposable> {
+  docs: Vec<Document>,
+
+  function dispose(ref self): void {
+    // `Vec<Document>` disposal frees the VECTOR, never the Documents in it.
+    let i: usize = 0;
+    while (i < self.docs.len) {
+      let d: Document = vec.vecGet(ref self.docs, i);
+      Disposable.dispose(ref d);
+      i += 1;
+    }
+    Disposable.dispose(ref self.docs);
+  }
+}
+
+export function storeNew(): DocumentStore propagates<disposable> {
+  return { docs: vec.vecNew(8) };
+}
+
+// The document's index PLUS ONE, so 0 can mean "no such URI".
+export function storeIndexOf(ref s: DocumentStore, uri: string): usize {
+  let i: usize = 0;
+  while (i < s.docs.len) {
+    let d: Document = vec.vecGet(ref s.docs, i);
+    if (text.equals(text.view(ref d.uri), uri)) {
+      return i + 1;
+    }
+    i += 1;
+  }
+  return 0;
+}
+
+// Record `content` as the current text of `uri`, opening the document if this
+// is the first time it has been seen. Returns the slot's index plus one.
+export function storeUpsert(
+  ref s: DocumentStore,
+  uri: string,
+  content: uint8[],
+  version: int64
+): usize {
+  const found = storeIndexOf(ref s, uri);
+  if (found > 0) {
+    let d: Document = vec.vecGet(ref s.docs, found - 1);
+    vec.vecClear(ref d.content);
+    vec.vecExtendFrom(ref d.content, content);
+    d.version = version;
+    d.isOpen = true;
+    d.needsDiagnostics = true;
+    // The copy `vecGet` handed back is what was mutated, so it goes back in.
+    // The Text and Vec buffers are shared with the stored struct, but `len`
+    // and the flags are not.
+    vec.vecSet(ref s.docs, found - 1, d);
+    return found;
+  }
+
+  let d: Document = {
+    uri: text.fromString(uri),
+    path: uriToPath(uri),
+    content: vec.vecNew(content.len + 1),
+    version: version,
+    isOpen: true,
+    needsDiagnostics: true,
+  };
+  vec.vecExtendFrom(ref d.content, content);
+  vec.vecPush(ref s.docs, d);
+  return s.docs.len;
+}
+
+// Mark a document as no longer held by the editor. The buffer is EMPTIED
+// rather than released: a file the user just closed is one they may reopen,
+// and the capacity is the only part worth keeping.
+export function storeClose(ref s: DocumentStore, uri: string): usize {
+  const found = storeIndexOf(ref s, uri);
+  if (found == 0) {
+    return 0;
+  }
+  let d: Document = vec.vecGet(ref s.docs, found - 1);
+  vec.vecClear(ref d.content);
+  d.isOpen = false;
+  d.needsDiagnostics = false;
+  vec.vecSet(ref s.docs, found - 1, d);
+  return found;
+}
+
+export function storeGet(ref s: DocumentStore, index1: usize): Document {
+  return vec.vecGet(ref s.docs, index1 - 1);
+}
+
+export function storeMarkPublished(ref s: DocumentStore, index1: usize): void {
+  setNeedsDiagnostics(ref s, index1, false);
+}
+
+// What `didSave` does: ask for a recompile even though the text is unchanged,
+// because a user who pressed save expects to be told again.
+export function storeMarkPending(ref s: DocumentStore, index1: usize): void {
+  setNeedsDiagnostics(ref s, index1, true);
+}
+
+function setNeedsDiagnostics(ref s: DocumentStore, index1: usize, v: bool): void {
+  let d: Document = vec.vecGet(ref s.docs, index1 - 1);
+  d.needsDiagnostics = v;
+  vec.vecSet(ref s.docs, index1 - 1, d);
+}
+
+// The index plus one of a document that has been edited and not diagnosed
+// since, or 0. The server's deferred compile reads this.
+export function storeNextPending(ref s: DocumentStore): usize {
+  let i: usize = 0;
+  while (i < s.docs.len) {
+    let d: Document = vec.vecGet(ref s.docs, i);
+    if (d.isOpen && d.needsDiagnostics) {
+      return i + 1;
+    }
+    i += 1;
+  }
+  return 0;
+}
+
+// ----- URIs ----------------------------------------------------------------
+
+/*
+  `file:///home/a/b%20c.yoop` -> `/home/a/b c.yoop`.
+
+  Only the `file:` scheme is understood, which is the only one this server can
+  compile anyway. An authority is skipped rather than refused: `file://` with
+  an empty host and `file://localhost/` both name the local filesystem.
+
+  Anything that is not a `file:` URI is handed back unchanged, so a client that
+  sends a bare path still works instead of silently getting an empty one.
+*/
+export function uriToPath(uri: string): Text propagates<disposable> {
+  const b = intr.stringAsBytes(uri);
+  let i: usize = 0;
+  if (text.startsWith(uri, "file://")) {
+    i = 7;
+    // Skip an authority, if one is there. The path starts at the next `/`.
+    while (i < b.len && b[i] != '/') {
+      i += 1;
+    }
+  }
+  let out: Text = text.make(b.len);
+  while (i < b.len) {
+    if (b[i] == '%' && i + 2 < b.len) {
+      const hi = hexNibble(b[i + 1]);
+      const lo = hexNibble(b[i + 2]);
+      if (hi < 16 && lo < 16) {
+        text.pushByte(ref out, uint8(hi * 16 + lo));
+        i += 3;
+      } else {
+        // A `%` that does not introduce two hex digits is a literal `%`, which
+        // is a legal character in a path.
+        text.pushByte(ref out, b[i]);
+        i += 1;
+      }
+    } else {
+      text.pushByte(ref out, b[i]);
+      i += 1;
+    }
+  }
+  return out;
+}
+
+// 16 or more means "not a hex digit".
+function hexNibble(b: uint8): uint32 {
+  if (b >= '0' && b <= '9') { return uint32(b - '0'); }
+  if (b >= 'a' && b <= 'f') { return uint32(b - 'a') + 10; }
+  if (b >= 'A' && b <= 'F') { return uint32(b - 'A') + 10; }
+  return 255;
+}

@@ -1,0 +1,5 @@
+# Illegal: main.yoop imports the name `x` from two different modules, so the
+# second binding has no name left to take.
+#
+# A DIRECTORY fixture: the harness builds `import_collision/main.yoop`.
+2:10: imported name "x" collides

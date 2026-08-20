@@ -1,7 +1,8 @@
-// Phase 9.C: `std/...` import root resolves against the std/ directory at
+// The `std/...` import root resolves against the std/ directory at
 // the repo root, instead of forcing a deep relative path like
-// `import { ... } from "../../../std/core/vec.yoop";`. SPEC §1's relative-only
-// rule still applies to every other import; `std/` is the only escape hatch.
+// `import { ... } from "../../../std/core/vec.yoop";`. SPEC section 1's
+// relative-only rule applies to every other import; `std/` is the only
+// escape hatch.
 
 import { Vec } from "std/core/vec.yoop";
 import * as vec from "std/core/vec.yoop";

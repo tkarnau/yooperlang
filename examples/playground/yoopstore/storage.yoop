@@ -1,10 +1,7 @@
 // yoopstore/storage.yoop - thin file-storage wrapper over std/fs.
 //
-// Originally this module hand-rolled fopen / fclose / fwrite / fread /
-// mkdir against libc; the std/fs module landed during this same change
-// (alongside the fix for the template-literal `"` codegen bug) so the
-// wrapper now collapses to a few one-line forwards plus the path
-// joining that std/fs deliberately keeps separate from validation.
+// It is a few one-line forwards onto std/fs plus the path joining that
+// std/fs deliberately keeps separate from validation.
 
 import { Vec } from "std/core/vec.yoop";
 import * as fs from "std/fs.yoop";

@@ -1,0 +1,259 @@
+module comptime;
+
+// `Name.member(...)` - the four things that wear that shape, and none of them
+// is a plain call.
+//
+//   Area.area(ref r)        a static TRAIT dispatch on a concrete receiver
+//   OpVT.from(ref d)        BUILDING a vtable over a concrete value
+//   Op.apply(ref vt, x)     dispatching THROUGH one
+//   mathx.add(1, 2)         a function in another module
+//
+// The first three are told apart by what the arguments turn out to BE, which is
+// the natural question for an evaluator: a receiver that evaluates to a vtable
+// dispatches through it, and one that evaluates to a struct dispatches on its
+// own type. Codegen has to ask pass D instead, because it has no values.
+
+import { Vec }, * as vec from "std/core/vec.yoop";
+import * as str from "std/core/strings.yoop";
+import * as map from "std/collections/map.yoop";
+import { Result, Option } from "std/core/types.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import { AST, ASTNode, ASTNodeKind, NodeId, childAt, declOf, nodeAt } from "../ast";
+import { Module, ModuleGraph } from "../source_graph";
+import { Program, TypedModule, Type, TypeId, TYPE_ERROR_ID, ModuleId, Symbol, SymbolId,
+  SYMBOL_NONE_ID, symbolAt, lookupOwnName, lookupMethod, typeAt, derefType, nominalModuleOf,
+  nominalNameOf, moduleIdOf } from "../typecheck";
+
+export function evalQualifiedCall(
+  ref cx: EvalCx,
+  expr: ASTNode,
+  exprId: NodeId
+): Result<ValueId, ComptimeError> {
+  const baseNode = nodeAt(cx.ast, expr.childB);
+
+  // The base is resolved by NAME rather than by its resolved type. A trait or a
+  // vtable in this position is a TYPE NAME, and pass D never checked it as a
+  // value - so it carries no resolved type at all, exactly as `Shape.Empty`'s
+  // base does. The symbol is what says which of the four shapes this is.
+  const symId = lookupOwnName(cx.tm, baseNode.name);
+  if (symId == SYMBOL_NONE_ID) {
+    return Result.Err { error: comptimeError(
+      `"${baseNode.name}" is not a name the comptime evaluator can reach`, expr.sourceLoc
+    )};
+  }
+
+  switch (symbolAt(cx.prog, symId)) {
+    // `OpVT.from(ref d)` - a vtable over a concrete value. The CONCRETE type is
+    // the argument's own, which is the thing dispatch will need later.
+    case Symbol.Vtable { typeId: vt }: {
+      if (str.stringEq(expr.name, "from")) {
+        return buildVtable(ref cx, expr, exprId, vt);
+      }
+      return unhandled(`"${expr.name}" on a vtable type`, expr.sourceLoc);
+    }
+    // `Area.area(ref r)` and `Op.apply(ref vt, x)` are the same syntax; which
+    // one it is depends on what the receiver evaluates to.
+    case Symbol.Trait { typeId: tt }: {
+      return dispatchTraitCall(ref cx, expr, exprId);
+    }
+    // `ns.fn(args)` - a function in the module the namespace names.
+    case Symbol.Namespace { module: mid }: {
+      return callNamespacedFunction(ref cx, mid, baseNode, expr, exprId);
+    }
+    default: {
+      return unhandled(
+        `a qualified call through "${baseNode.name}"`, expr.sourceLoc
+      );
+    }
+  }
+}
+
+// A vtable VALUE remembers two things and nothing else: which concrete type is
+// behind it, and where that value lives. That is exactly what the emitted
+// vtable holds - a set of method pointers plus a context pointer - with the
+// method lookup deferred to the dispatch instead of stored.
+function buildVtable(
+  ref cx: EvalCx,
+  expr: ASTNode,
+  exprId: NodeId,
+  vtableTy: TypeId
+): Result<ValueId, ComptimeError> {
+  disposable argIds: Vec<NodeId> = callArgIds(ref cx, expr);
+  if (argIds.len != 1) {
+    return unhandled("a vtable built from other than one value", expr.sourceLoc);
+  }
+  const receiver = openBorrow(ref cx, evalExpr(ref cx, vec.vecGet(ref argIds, 0))?);
+  const concrete = valueAt(cx.va, receiver).typeId;
+  if (nominalNameOf(cx.prog, derefType(cx.prog, concrete)).len == 0) {
+    return unhandled(
+      "a vtable built from something that is not a named type - the `fromFn` form is not folded yet",
+      expr.sourceLoc
+    );
+  }
+
+  let s = emptySlot();
+  s.kind = ValueKind.VTABLE;
+  s.typeId = vtableTy;
+  s.bits = uint64(derefType(cx.prog, concrete));
+  s.target = receiver;
+  return Result.Ok { value: pushValue(cx.va, s) };
+}
+
+// `Trait.method(receiver, args...)`. The receiver is argument ZERO, because the
+// source writes it there and `self` is an ordinary first parameter - so the
+// binding below is the same one an ordinary call does.
+function dispatchTraitCall(
+  ref cx: EvalCx,
+  expr: ASTNode,
+  exprId: NodeId
+): Result<ValueId, ComptimeError> {
+  disposable argIds: Vec<NodeId> = callArgIds(ref cx, expr);
+  if (argIds.len == 0) {
+    return unhandled("a trait method call with no receiver", expr.sourceLoc);
+  }
+
+  disposable bound: Vec<ValueId> = vec.vecNew(argIds.len);
+  let i: usize = 0;
+  while (i < argIds.len) {
+    const v = evalExpr(ref cx, vec.vecGet(ref argIds, i))?;
+    const opened = openBorrow(ref cx, v);
+    if (valueAt(cx.va, v).kind == ValueKind.REF) {
+      vec.vecPush(ref bound, opened);
+    } else {
+      vec.vecPush(ref bound, cloneValue(cx.va, opened));
+    }
+    i += 1;
+  }
+
+  // A vtable receiver dispatches to whatever it was built over, and hands the
+  // METHOD the value rather than the vtable - which is what the context pointer
+  // does at run time.
+  let receiver = vec.vecGet(ref bound, 0);
+  let concrete = derefType(cx.prog, valueAt(cx.va, receiver).typeId);
+  const receiverSlot = valueAt(cx.va, receiver);
+  if (receiverSlot.kind == ValueKind.VTABLE) {
+    concrete = usize(receiverSlot.bits);
+    receiver = receiverSlot.target;
+    vec.vecSet(ref bound, 0, receiver);
+  }
+
+  return callMethodOn(ref cx, concrete, expr.name, ref bound, expr, exprId);
+}
+
+// Run `type.method(...)` with the arguments already bound.
+//
+// The method's body may live in ANOTHER module - the type it belongs to is
+// wherever it was declared - so the frame is built against that module's arena
+// and name table rather than the caller's.
+export function callMethodOn(
+  ref cx: EvalCx,
+  concrete: TypeId,
+  methodName: string,
+  ref bound: Vec<ValueId>,
+  expr: ASTNode,
+  exprId: NodeId
+): Result<ValueId, ComptimeError> {
+  const owner = nominalNameOf(cx.prog, concrete);
+  if (owner.len == 0) {
+    return unhandled("a method call on something that is not a named type", expr.sourceLoc);
+  }
+  const home = moduleIdOf(cx.prog, nominalModuleOf(cx.prog, concrete));
+
+  let mods: Module[] = vec.vecAsArray(ref cx.graph.modules);
+  let tms: TypedModule[] = vec.vecAsArray(ref cx.prog.modules);
+  const at = moduleIndexOfId(cx.graph, home);
+  if (at >= cx.graph.modules.len) {
+    return unhandled(`the module declaring "${owner}"`, expr.sourceLoc);
+  }
+
+  const declId = findMethodDecl(ref mods[at].ast, owner, methodName);
+  if (declId == 0) {
+    return Result.Err { error: comptimeError(
+      `"${owner}" has no method "${methodName}" the comptime evaluator can walk`,
+      expr.sourceLoc
+    )};
+  }
+  return runFrame(ref cx, ref tms[at], ref mods[at], declId, ref bound, expr,
+    returnTypeOfFuncType(cx.prog, lookupMethod(cx.prog, concrete, methodName)));
+}
+
+// `ns.fn(args)`. The namespace binds a MODULE, and the function is an ordinary
+// one declared there.
+function callNamespacedFunction(
+  ref cx: EvalCx,
+  home: ModuleId,
+  baseNode: ASTNode,
+  expr: ASTNode,
+  exprId: NodeId
+): Result<ValueId, ComptimeError> {
+  let mods: Module[] = vec.vecAsArray(ref cx.graph.modules);
+  let tms: TypedModule[] = vec.vecAsArray(ref cx.prog.modules);
+  const at = moduleIndexOfId(cx.graph, moduleIdOf(cx.prog, home));
+  if (at >= cx.graph.modules.len) {
+    return unhandled(`the module "${baseNode.name}" names`, expr.sourceLoc);
+  }
+
+  const declId = findFunctionDeclIn(ref mods[at], expr.name);
+  if (declId == 0) {
+    return Result.Err { error: comptimeError(
+      `"${baseNode.name}.${expr.name}" is not a function the comptime evaluator can walk`,
+      expr.sourceLoc
+    )};
+  }
+
+  disposable bound: Vec<ValueId> = vec.vecNew(4);
+  disposable argIds: Vec<NodeId> = callArgIds(ref cx, expr);
+  let i: usize = 0;
+  while (i < argIds.len) {
+    const v = evalExpr(ref cx, vec.vecGet(ref argIds, i))?;
+    const opened = openBorrow(ref cx, v);
+    if (valueAt(cx.va, v).kind == ValueKind.REF) {
+      vec.vecPush(ref bound, opened);
+    } else {
+      vec.vecPush(ref bound, cloneValue(cx.va, opened));
+    }
+    i += 1;
+  }
+  return runFrame(ref cx, ref tms[at], ref mods[at], declId, ref bound, expr,
+    funcReturnTypeOf(cx.prog, ref tms[at], expr.name));
+}
+
+// Where a module with this id sits in the graph, or the length when there is
+// none. A scan: a graph is short, and the alternative is a table keyed by a
+// string that nothing else needs.
+export function moduleIndexOfId(ref graph: ModuleGraph, id: string): usize {
+  let i: usize = 0;
+  while (i < graph.modules.len) {
+    if (str.stringEq(vec.vecGet(ref graph.modules, i).id, id)) {
+      return i;
+    }
+    i += 1;
+  }
+  return graph.modules.len;
+}
+
+// The METHOD_DECL named `methodName` inside the type declaration `owner`.
+//
+// A method is a MEMBER of its type's decl rather than a module-level name, so
+// there is no symbol to look it up by - the walk goes through the decl.
+export function findMethodDecl(ref ast: AST, owner: string, methodName: string): NodeId {
+  let f: usize = 0;
+  while (f < ast.nodes.len) {
+    const node = nodeAt(ref ast, f);
+    if ((node.kind == ASTNodeKind.TYPE_DECL || node.kind == ASTNodeKind.VARIANT_DECL ||
+         node.kind == ASTNodeKind.ENUM_DECL) && str.stringEq(node.name, owner)) {
+      let i: usize = 0;
+      while (i < node.childCount) {
+        const memberId = childAt(ref ast, node, i);
+        const member = nodeAt(ref ast, memberId);
+        if (member.kind == ASTNodeKind.METHOD_DECL && str.stringEq(member.name, methodName) &&
+            member.childD != 0) {
+          return memberId;
+        }
+        i += 1;
+      }
+    }
+    f += 1;
+  }
+  return 0;
+}

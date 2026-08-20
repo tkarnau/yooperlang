@@ -1,10 +1,10 @@
-// Phase 11.D: pure externs run through the comptime interpreter via
+// Pure externs run through the comptime interpreter via
 // an explicit whitelist of JS implementations
 // (src/jsyoopinterp/externWhitelist.js). Anything outside the
 // whitelist surfaces as a ComptimeError; for `@precompile` decls
 // that becomes a hard build error naming the call site.
 //
-// Today's whitelist covers libc math (sqrt, pow, floor, ceil, fabs,
+// The whitelist covers libc math (sqrt, pow, floor, ceil, fabs,
 // abs, labs), string helpers (strlen, strcmp), and yoop runtime
 // intrinsics that are trivially comptime-safe (yoop_now_ns,
 // yoop_errno_get, yoop_runtime_init/shutdown as no-ops).
@@ -44,8 +44,8 @@ function main(): int32 {
 }
 
 // expected stdout:
-//   ROOT_2=1.414214
-//   HYPOT=5.000000
-//   FLOOR_PI=3.000000
+//   ROOT_2=1.41421
+//   HYPOT=5
+//   FLOOR_PI=3
 //   NAME_LEN=12
 //   CMP_EQ=0 CMP_LT=-1

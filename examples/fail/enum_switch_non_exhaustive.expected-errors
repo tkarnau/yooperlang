@@ -1,0 +1,3 @@
+# Illegal: the switch covers E.A and E.B, leaves E.C unhandled, and has no
+# default arm, so `pick` has a path with no value.
+4:12: does not cover "C"

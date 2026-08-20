@@ -1,0 +1,257 @@
+module codegen;
+
+// A module-level `let` whose value is not fixed at compile time.
+//
+//     let state: ServeState = http.serveStateNew(MAX_CONCURRENT);
+//     let counters: int32[] = [0, 0, 0, 0];
+//
+// An LLVM global's initializer is a CONSTANT, so neither of those can be one.
+// The answer, and it is the reference's: the global starts `zeroinitializer`
+// and its real value is STORED at run time, out of a function synthesized for
+// the source file that declared it.
+//
+//     define internal void @main_0__module_init0() {
+//     entry:
+//       %t1 = call %struct.http_2__ServeState @http_2__serveStateNew(i32 8)
+//       store %struct.http_2__ServeState %t1, ptr @main_0__state
+//       ret void
+//     }
+//
+// `main` calls every one of them, in the module graph's TOPOLOGICAL order,
+// before any user code. So this is not comptime - it is a run-time initializer
+// with a defined order, and the order is what makes an initializer that reads
+// another module's global mean something rather than merely differ.
+//
+// Which globals are baked and which are stored is ONE question, answered in
+// typecheck/pass_c.yoop by `moduleGlobalIsBaked`. Pass D reads it to decide
+// whether an initializer needs decorating; this file reads the same answer to
+// decide whether a store is owed, and the two cannot drift.
+
+import { Vec }, * as vec from "std/core/vec.yoop";
+import * as map from "std/collections/map.yoop";
+import { Option } from "std/core/types.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import { AST, ASTNode, ASTNodeKind, NodeId, childAt, declOf, nodeAt } from "../ast";
+import { Module } from "../source_graph";
+import { Program, TypedModule, Symbol, symbolAt, TypeId, TYPE_ERROR_ID, TYPE_VOID_ID, arrayElementOf, moduleGlobalIsBaked, declIsModuleGlobal } from "../typecheck";
+
+// The symbol one source file's init function is defined under. One per FILE
+// rather than per module, because a directory module's files are separate
+// compilation units and two of them would otherwise define the same symbol.
+//
+// A DIVERGENCE from the reference, which tags the name with the file's
+// BASENAME. The index is what this walk already has in hand, and the name is
+// only ever read back by the call `main` emits, so nothing outside the program
+// can tell the two apart.
+//
+// One malloc per file that has such a global, at plan time. That is not an emit
+// path - it is once per file, not once per instruction.
+export function moduleInitSymbol(moduleId: string, fileIndex: usize): string {
+  return `${moduleId}${SYMBOL_MODULE_SEPARATOR}module_init${fileIndex}`;
+}
+
+// Record that a file owes an init function, in the order `main` will call them.
+// Taken during the GLOBALS pre-pass, which walks the graph topologically, so
+// this list is in dependency order by construction rather than by sorting.
+export function noteModuleInit(ref e: Emitter, moduleId: string, fileIndex: usize): void {
+  vec.vecPush(ref e.moduleInits, moduleInitSymbol(moduleId, fileIndex));
+}
+
+// Whether this module-level `let` needs a run-time store. The complement of
+// `moduleGlobalIsBaked`, asked here so codegen names the question the way
+// codegen means it.
+export function moduleGlobalNeedsStore(
+  ref prog: Program,
+  ref ast: AST,
+  declNode: ASTNode,
+  declared: TypeId
+): bool {
+  return !moduleGlobalIsBaked(ref prog, ref ast, declNode.childB, declared);
+}
+
+// The TypeId a module-level `let` was given, or TYPE_ERROR_ID when the name is
+// not a global at all. The one lookup every reader here shares.
+export function moduleGlobalTypeId(ref prog: Program, ref tm: TypedModule, name: string): TypeId {
+  switch (map.mapGet(ref tm.names, name)) {
+    case Option.None: { return TYPE_ERROR_ID; }
+    case Option.Some { value: symId }: {
+      switch (symbolAt(ref prog, symId)) {
+        case Symbol.Global { typeId: t, intVal: v, mutable: mu }: { return t; }
+        default: { return TYPE_ERROR_ID; }
+      }
+    }
+  }
+}
+
+// One source file's init function, or nothing when it owes none. Returns "" on
+// Ok, else the internal error that stopped it.
+//
+// It gets its own Cx for the same reason a function body does: the stores are
+// ordinary instructions, so they need locals, a temp counter and the two
+// hoisting buffers. What it does NOT get is a return type or a scope stack with
+// anything in it - an initializer runs outside every scope there is.
+export function emitModuleInitFn(
+  ref e: Emitter,
+  ref prog: Program,
+  ref tm: TypedModule,
+  m: Module,
+  root: NodeId,
+  fileIndex: usize
+): EmitResult {
+  if (!fileHasModuleInit(ref prog, ref tm, ref m.ast, root)) {
+    return EmitResult.Ok;
+  }
+
+  disposable locals: FnLocals = localsNew();
+  disposable loops: LoopStack = loopStackNew();
+  disposable disposes: DisposeStack = disposeStackNew();
+  let cx: Cx = {
+    e: e, prog: prog, tm: tm, ast: ref m.ast, locals: ref locals, loops: ref loops,
+    disposes: ref disposes,
+    instance: NO_FUNC_INSTANCE,
+    typeInstance: NO_TYPE_INSTANCE,
+    fnRet: TYPE_VOID_ID,
+    coro: noCoroFrame(),
+    inMain: false,
+    voidMain: false,
+  };
+
+  beginFunctionBuffers(ref e);
+  emitInternalVoidFunctionOpen(ref cx, moduleInitSymbol(tm.moduleId, fileIndex));
+
+  const programNode = nodeAt(cx.ast, root);
+  let d: usize = 0;
+  while (d < programNode.childCount) {
+    const declNode = nodeAt(cx.ast, declOf(cx.ast, childAt(cx.ast, programNode, d)));
+    if (declIsModuleGlobal(cx.prog, cx.tm, declNode)) {
+      emitModuleGlobalStore(ref cx, declNode)?;
+    }
+    d += 1;
+  }
+
+  emitRetVoid(ref cx);
+  emitFunctionClose(ref cx);
+  return EmitResult.Ok;
+}
+
+// `call void @main_0__module_init0()`, once per init function the program owes,
+// in the order the globals pre-pass recorded them. Emitted at the top of `main`
+// and nowhere else, so a global is written before any code can read it.
+export function emitModuleInitCalls(ref cx: Cx): void {
+  disposable noArgs: Vec<CallArg> = vec.vecNew(0);
+  let i: usize = 0;
+  while (i < cx.e.moduleInits.len) {
+    emitCall(ref cx, 0, "void", "", vec.vecGet(ref cx.e.moduleInits, i), ref noArgs);
+    i += 1;
+  }
+}
+
+// Whether any module-level `let` in this file needs a run-time store. Asked
+// before the `define` line is written, because a file with none must emit no
+// function at all - `main` calls only the symbols the pre-pass recorded, and an
+// empty one it never recorded would be an undefined reference.
+function fileHasModuleInit(ref prog: Program, ref tm: TypedModule, ref ast: AST, root: NodeId): bool {
+  const programNode = nodeAt(ref ast, root);
+  let d: usize = 0;
+  while (d < programNode.childCount) {
+    const declNode = nodeAt(ref ast, declOf(ref ast, childAt(ref ast, programNode, d)));
+    if (declIsModuleGlobal(ref prog, ref tm, declNode)) {
+      const declared = moduleGlobalTypeId(ref prog, ref tm, declNode.name);
+      if (declared != TYPE_ERROR_ID && moduleGlobalNeedsStore(ref prog, ref ast, declNode, declared)) {
+        return true;
+      }
+    }
+    d += 1;
+  }
+  return false;
+}
+
+// One global's store: lower the initializer, then write it through the symbol.
+//
+//   %t1 = call %struct.m__Point @m__origin()
+//   store %struct.m__Point %t1, ptr @m__ORIGIN
+function emitModuleGlobalStore(ref cx: Cx, declNode: ASTNode): EmitResult {
+  const declared = moduleGlobalTypeId(cx.prog, cx.tm, declNode.name);
+  if (declared == TYPE_ERROR_ID) {
+    return EmitResult.Ok;
+  }
+  if (!moduleGlobalNeedsStore(cx.prog, cx.ast, declNode, declared)) {
+    return EmitResult.Ok;
+  }
+
+  let value: Operand = Operand.None;
+  moduleGlobalOperand(ref cx, declNode, declared, ref value)?;
+  emitStoreGlobal(ref cx, llvmType(cx.prog, declared), value, cx.tm.moduleId, declNode.name);
+  return EmitResult.Ok;
+}
+
+// What to store. Ordinarily this is the initializer lowered like any other
+// expression - a call, a struct literal, a template - but an ARRAY LITERAL is
+// the one shape whose ordinary lowering cannot be used here.
+//
+// An array literal's payload is an `alloca` in the enclosing function and the
+// descriptor points into it. In an init function that frame is gone the instant
+// the function returns, so the global would be left holding a pointer into a
+// dead stack. So the payload goes in a module DATUM instead - the same
+// `@.arr.N = internal global` a module-level array CONST already gets, and
+// mutable and unmergeable for the same reason - and what is stored is the
+// constant descriptor pointing at it.
+//
+// That needs every element to be a compile-time constant, and one that is not
+// is refused BY NAME rather than lowered into a dangling pointer.
+function moduleGlobalOperand(
+  ref cx: Cx,
+  declNode: ASTNode,
+  declared: TypeId,
+  ref out: Operand
+): EmitResult {
+  const elem = arrayElementOf(cx.prog, declared);
+  const init = nodeAt(cx.ast, declNode.childB);
+  if (elem != TYPE_ERROR_ID && init.kind == ASTNodeKind.ARRAY_LITERAL) {
+    if (!arrayLiteralIsAllLiterals(cx.ast, declNode.childB)) {
+      return unsupportedHere(
+        "a module-level array literal with a non-literal element - its payload is a module datum, and only a constant can go in one",
+        declNode.name
+      );
+    }
+    out = arrayConstOperand(cx.e, cx.prog, cx.ast, declNode.childB, elem);
+    return EmitResult.Ok;
+  }
+  return emitExpr(ref cx, declNode.childB, ref out);
+}
+
+// Every element of an array literal is a literal scalar. Syntactic on purpose:
+// it answers exactly the question `scalarConstOperand` answers, without the
+// side effect of interning a string constant for an array that is about to be
+// refused.
+function arrayLiteralIsAllLiterals(ref ast: AST, exprId: NodeId): bool {
+  const expr = nodeAt(ref ast, exprId);
+  if (expr.childA == 0) {
+    return true;
+  }
+  const list = nodeAt(ref ast, expr.childA);
+  let i: usize = 0;
+  while (i < list.childCount) {
+    if (!isLiteralScalar(ref ast, childAt(ref ast, list, i))) {
+      return false;
+    }
+    i += 1;
+  }
+  return true;
+}
+
+// One element. `-1` is a UNARY_EXPRESSION over a literal rather than a negative
+// literal, exactly as it is for a module const, so one level of minus unwraps.
+function isLiteralScalar(ref ast: AST, exprId: NodeId): bool {
+  if (exprId == 0) {
+    return false;
+  }
+  const expr = nodeAt(ref ast, exprId);
+  if (expr.kind == ASTNodeKind.UNARY_EXPRESSION) {
+    return isLiteralScalar(ref ast, expr.childA);
+  }
+  return expr.kind == ASTNodeKind.INT_LITERAL ||
+    expr.kind == ASTNodeKind.FLOAT_LITERAL ||
+    expr.kind == ASTNodeKind.BOOL_LITERAL ||
+    expr.kind == ASTNodeKind.STRING_LITERAL;
+}

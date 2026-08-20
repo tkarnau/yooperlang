@@ -11,8 +11,8 @@ module sqlite;
 //   1. `unsafe_ptr`. sqlite3's `sqlite3 *` and `sqlite3_stmt *` are opaque
 //      handles. They are wrapped in the one-field `RawDb` / `RawStmt`
 //      envelopes below so the public module can hold a handle without
-//      declaring `import.unsafe;` itself (library-design.md 2.1 - no pointer
-//      types in an exported safe signature).
+//      declaring `import.unsafe;` itself (no pointer types in an exported
+//      safe signature).
 //   2. C types. Every helper here takes and returns plain yoop types
 //      (int32 / int64 / float64 / bool / string), so `c_int` and friends stop
 //      at this file too.

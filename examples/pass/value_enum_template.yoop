@@ -1,4 +1,4 @@
-// Phase 12: a value enum is a nominal alias over a primitive, so it is
+// A value enum is a nominal alias over a primitive, so it is
 // interpolatable in a template literal exactly as that primitive - the
 // string value for `enum<string>`, the int for an int-backed enum.
 

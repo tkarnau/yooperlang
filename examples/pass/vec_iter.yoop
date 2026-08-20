@@ -1,5 +1,5 @@
 // `vecIter(ref v)` gives a Vec the same `for x in ...` walk arrays and maps
-// already had, so reading a Vec no longer needs an index at all:
+// have, so reading a Vec needs no index at all:
 //
 //     for x in vec.vecIter(ref v) { ... }
 //

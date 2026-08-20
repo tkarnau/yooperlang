@@ -1,0 +1,5 @@
+loop: shutdown requested
+loop: exited after 0 connections
+post: still cancelled
+ambient: cancelled
+exit=0

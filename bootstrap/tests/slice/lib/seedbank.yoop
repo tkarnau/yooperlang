@@ -1,0 +1,23 @@
+// A leaf module whose own module-level `let` has to RUN before anybody can
+// read it. The entry module's globals are initialized from this one's, so if
+// `main` ran the init functions in the wrong order the reader would see 0 and
+// the fixture would print different numbers rather than merely different IR.
+
+export function seed(): int32 {
+  return 40;
+}
+
+export function bump(n: int32): int32 {
+  return n + 1;
+}
+
+// Not a literal: the value is only known once `seed` has been called.
+export let seeded: int32 = seed();
+
+// A struct-typed global, so the store is a whole aggregate rather than a word.
+export type Pair {
+  lo: int32,
+  hi: int32,
+}
+
+export let span: Pair = { lo: seeded, hi: bump(seeded) };

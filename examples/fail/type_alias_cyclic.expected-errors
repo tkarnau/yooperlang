@@ -1,0 +1,8 @@
+# Illegal: `type A = B; type B = A;` is a cycle, so neither alias has a
+# concrete target. The point of the fixture is that the resolver TERMINATES and
+# names both aliases rather than recursing forever.
+#
+# Each error lands on the right-hand side that closes the cycle, which is why
+# "A" is reported on line 4 and "B" on line 3.
+4:10: type alias "A" is defined in terms of itself
+3:10: type alias "B" is defined in terms of itself

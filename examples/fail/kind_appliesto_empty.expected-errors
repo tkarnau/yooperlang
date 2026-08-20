@@ -1,0 +1,3 @@
+# Illegal: `appliesTo;` names no site, so the kind says nothing about where it
+# may be written and there is no place a use of it could be checked against.
+2:5: appliesTo on kind "k" names no site

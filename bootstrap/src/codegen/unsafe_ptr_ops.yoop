@@ -15,41 +15,37 @@ module codegen;
 // The instruction TEXT is in instr_ptr.yoop beside this, per the walk / emit /
 // append split the rest of codegen follows.
 
-import { ASTNode, NodeId, nodeAt } from "../ast";
+import { ASTNode, NodeId } from "../ast";
 import { TokenTags } from "../lex";
-import { UNSAFE_PTR_OP_CAST, UNSAFE_PTR_OP_TO_INT, UNSAFE_PTR_OP_FROM_INT,
-  UNSAFE_PTR_OP_TO_ARRAY } from "../parse";
-import { Text }, * as text from "std/core/text.yoop";
+import { UNSAFE_PTR_OP_CAST, UNSAFE_PTR_OP_TO_INT, UNSAFE_PTR_OP_FROM_INT, UNSAFE_PTR_OP_TO_ARRAY } from "../parse";
+import * as text from "std/core/text.yoop";
 
-export function emitUnsafePtrOp(ref cx: Cx, expr: ASTNode, exprId: NodeId, ref out: Operand): string {
+export function emitUnsafePtrOp(ref cx: Cx, expr: ASTNode, exprId: NodeId, ref out: Operand): EmitResult {
   if (text.equals(expr.name, UNSAFE_PTR_OP_TO_ARRAY)) {
     return emitPtrToArray(ref cx, expr, exprId, ref out);
   }
 
   let operand: Operand = Operand.None;
-  const oerr = emitExpr(ref cx, expr.childA, ref operand);
-  if (oerr.len > 0) {
-    return oerr;
-  }
+  emitExpr(ref cx, expr.childA, ref operand)?;
 
   // A reinterpret with opaque pointers is the operand, unchanged.
   if (text.equals(expr.name, UNSAFE_PTR_OP_CAST)) {
     out = operand;
-    return "";
+    return EmitResult.Ok;
   }
 
   const dest = freshTemp(cx.e);
   if (text.equals(expr.name, UNSAFE_PTR_OP_TO_INT)) {
     emitPtrToInt(ref cx, dest, PTR_INT_TYPE, operand);
     out = Operand.Temp { id: dest };
-    return "";
+    return EmitResult.Ok;
   }
   if (text.equals(expr.name, UNSAFE_PTR_OP_FROM_INT)) {
     // The operand was checked against `usize`, so it arrives at pointer width
     // and needs no widening of its own.
     emitIntToPtr(ref cx, dest, PTR_INT_TYPE, operand);
     out = Operand.Temp { id: dest };
-    return "";
+    return EmitResult.Ok;
   }
   return internalError("codegen cannot emit unsafe_ptr op", expr.name);
 }
@@ -61,24 +57,18 @@ export function emitUnsafePtrOp(ref cx: Cx, expr: ASTNode, exprId: NodeId, ref o
 //
 //   %t1 = insertvalue { ptr, i64 } undef, ptr %p, 0
 //   %t2 = insertvalue { ptr, i64 } %t1, i64 8, 1
-function emitPtrToArray(ref cx: Cx, expr: ASTNode, exprId: NodeId, ref out: Operand): string {
+function emitPtrToArray(ref cx: Cx, expr: ASTNode, exprId: NodeId, ref out: Operand): EmitResult {
   let base: Operand = Operand.None;
-  const berr = emitExpr(ref cx, expr.childA, ref base);
-  if (berr.len > 0) {
-    return berr;
-  }
+  emitExpr(ref cx, expr.childA, ref base)?;
   let length: Operand = Operand.None;
-  const lerr = emitExpr(ref cx, expr.childC, ref length);
-  if (lerr.len > 0) {
-    return lerr;
-  }
+  emitExpr(ref cx, expr.childC, ref length)?;
 
   const withData = freshTemp(cx.e);
   emitInsertValue(ref cx, withData, "undef", "ptr", base, 0);
   const withLen = freshTemp(cx.e);
   emitInsertValueTemp(ref cx, withLen, withData, ARRAY_LEN_TYPE, length, 1);
   out = Operand.Temp { id: withLen };
-  return "";
+  return EmitResult.Ok;
 }
 
 // The integer a pointer converts to and from. LP64 on both targets, which is
@@ -106,17 +96,11 @@ const ARRAY_LEN_TYPE: string = "i64";
 //
 // Pass D proved both pointees are the same and neither is opaque, so the
 // element type is readable off either side.
-export function emitPointerArith(ref cx: Cx, expr: ASTNode, exprId: NodeId, ref out: Operand): string {
+export function emitPointerArith(ref cx: Cx, expr: ASTNode, exprId: NodeId, ref out: Operand): EmitResult {
   let lhs: Operand = Operand.None;
-  const lerr = emitExpr(ref cx, expr.childA, ref lhs);
-  if (lerr.len > 0) {
-    return lerr;
-  }
+  emitExpr(ref cx, expr.childA, ref lhs)?;
   let rhs: Operand = Operand.None;
-  const rerr = emitExpr(ref cx, expr.childB, ref rhs);
-  if (rerr.len > 0) {
-    return rerr;
-  }
+  emitExpr(ref cx, expr.childB, ref rhs)?;
 
   if (isUnsafePtrAt(ref cx, expr.childA) && isUnsafePtrAt(ref cx, expr.childB)) {
     return emitPointerDifference(ref cx, expr, ref lhs, ref rhs, ref out);
@@ -143,7 +127,7 @@ export function emitPointerArith(ref cx: Cx, expr: ASTNode, exprId: NodeId, ref 
   const dest = freshTemp(cx.e);
   emitGepElem(ref cx, dest, pointeeLlvmType(ref cx, exprId), base, typeOf(ref cx, offsetId), offset);
   out = Operand.Temp { id: dest };
-  return "";
+  return EmitResult.Ok;
 }
 
 function emitPointerDifference(
@@ -152,7 +136,7 @@ function emitPointerDifference(
   ref lhs: Operand,
   ref rhs: Operand,
   ref out: Operand
-): string {
+): EmitResult {
   const leftInt = freshTemp(cx.e);
   emitPtrToInt(ref cx, leftInt, PTR_INT_TYPE, lhs);
   const rightInt = freshTemp(cx.e);
@@ -166,7 +150,7 @@ function emitPointerDifference(
   const width = pointeeSize(ref cx, expr.childA);
   if (width <= 1) {
     out = Operand.Temp { id: byteDiff };
-    return "";
+    return EmitResult.Ok;
   }
   const dest = freshTemp(cx.e);
   emitBinOp(
@@ -174,5 +158,5 @@ function emitPointerDifference(
     Operand.Temp { id: byteDiff }, Operand.Imm { value: uint64(width) }
   );
   out = Operand.Temp { id: dest };
-  return "";
+  return EmitResult.Ok;
 }

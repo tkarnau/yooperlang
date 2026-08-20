@@ -1,0 +1,5 @@
+# Illegal: `forged` is a struct literal claiming to be cleared, having been
+# through no `cleanse` at all. The sink lives in a SIBLING FILE of the same
+# directory module as the kind, which is the case a per-file callee index used
+# to lose.
+10:16: argument 1 of "sink" requires kind "cleared"

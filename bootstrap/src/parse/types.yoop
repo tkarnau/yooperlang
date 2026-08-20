@@ -257,15 +257,11 @@ export function parseTypeDecl(ref ps: ParserState): Result<NodeId, ParsingError>
   // indirection is only for a kind's SECOND list (see arena.yoop).
   SelfLexing.expect(ref ps, TokenTags.LCURLY)?;
   disposable fieldIds: Vec<NodeId> = vec.vecNew(4);
-  while (
-    SelfLexing.peek(ref ps).tag != TokenTags.RCURLY &&
-    SelfLexing.peek(ref ps).tag != TokenTags.EOF
-  ) {
+  while (untilClosing(ref ps, TokenTags.RCURLY)) {
     // Fields and METHODS share the run. Splitting them here would mean two
     // lists on a node that has one, and every later pass already switches on
     // the member's kind anyway.
-    if (SelfLexing.peek(ref ps).tag == TokenTags.FUNCTION ||
-        atKindPrefixedMethod(ref ps, false)) {
+    if (atStructMethod(ref ps)) {
       vec.vecPush(ref fieldIds, parseMethodDecl(ref ps, node.name, node.childA)?);
     } else {
       vec.vecPush(ref fieldIds, parseFieldDecl(ref ps)?);
@@ -278,19 +274,37 @@ export function parseTypeDecl(ref ps: ParserState): Result<NodeId, ParsingError>
   }
   SelfLexing.expect(ref ps, TokenTags.RCURLY)?;
 
-  const fieldStart: usize = ps.ast.childIds.len;
-  vec.vecExtendFrom(ref ps.ast.childIds, vec.vecAsArray(ref fieldIds));
-  node.childStart = fieldStart;
-  node.childCount = fieldIds.len;
+  spliceChildren(ref ps, ref node, ref fieldIds);
 
   return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
 }
 
-// One `name: Type` inside a struct body. A `function` here is a METHOD and was
-// dispatched by the caller before reaching this.
+// One `name: Type` inside a struct body, or inside a variant case's payload. A
+// Is the member at the cursor a METHOD rather than a field?
+//
+// A field name may be a reserved word, `function` included - C-shaped code
+// writes member names like that, and generated bindings would fail to parse on
+// the first collision - so the keyword heads both members and cannot tell them
+// apart on its own. The COLON does: a field is `function: T`, and a method is
+// `function name(...)`, which can never show one there. Same rule as the
+// reference, and a union body asks the same question.
+export function atStructMethod(ref ps: ParserState): bool {
+  if (atKindPrefixedMethod(ref ps, false)) {
+    return true;
+  }
+  return SelfLexing.peek(ref ps).tag == TokenTags.FUNCTION
+    && !followingTokenIs(ref ps, TokenTags.COLON);
+}
+
+// `function` here is a METHOD and was dispatched by the caller before reaching
+// this.
+//
+// The name may be a RESERVED WORD (`type: int32`). A field name is metadata - a
+// keyword's grammar role does not reach a position where the next token is
+// always a `:` - and a struct mirroring a C ABI has no say in its own spelling.
 function parseFieldDecl(ref ps: ParserState): Result<NodeId, ParsingError> {
   let node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.FIELD_DECL);
-  node.name = parseIdentAsName(ref ps)?;
+  node.name = parseIdentOrKeywordAsName(ref ps)?;
   SelfLexing.expect(ref ps, TokenTags.COLON)?;
   node.childA = parseTypeAnnotation(ref ps)?;
 
@@ -419,10 +433,7 @@ function parseFunctionTypeAnnotation(ref ps: ParserState): Result<NodeId, Parsin
   const loc = posToSourceLocation(ps.src, ps.pos, 1);
 
   disposable ids: Vec<NodeId> = vec.vecNew(2);
-  while (
-    SelfLexing.peek(ref ps).tag != TokenTags.RPAREN &&
-    SelfLexing.peek(ref ps).tag != TokenTags.EOF
-  ) {
+  while (untilClosing(ref ps, TokenTags.RPAREN)) {
     vec.vecPush(ref ids, parseFunctionParam(ref ps)?);
     if (SelfLexing.peek(ref ps).tag == TokenTags.COMMA) {
       SelfLexing.advance(ref ps)?;

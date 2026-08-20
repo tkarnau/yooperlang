@@ -1,0 +1,13 @@
+target /todos/7?done=true&note=a%20b+c&flag#frag -> path=/todos/7 pairs=3 done=[true] note=[a b c] flag=[]
+target /todos -> path=/todos pairs=0
+segments=2 [a] [b-c]
+encode=a%20b%2Fc%3Fd%3De
+match /todos vs /todos -> hit
+match /todos vs /todos/ -> hit
+match /todos/:id vs /todos/42 -> hit id=42
+match /todos/:id vs /todos -> miss
+match /todos/:id vs /todos/42/notes -> miss
+match /static/* vs /static/css/app.css -> hit rest=css/app.css
+match /static/* vs /static -> hit rest=
+decodePath rejected: 400 encoded path separator is not allowed
+exit=0

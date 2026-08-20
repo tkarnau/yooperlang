@@ -18,7 +18,54 @@ import * as str from "std/core/strings.yoop";
 import { Vec }, * as vec from "std/core/vec.yoop";
 import { Map }, * as map from "std/collections/map.yoop";
 import { disposable } from "std/core/kinds.yoop";
-import { LoadGraphResult, ModuleGraph, loadModuleGraph, moduleIdFor } from "../source_graph";
+import { LoadGraphResult, ModuleGraph, loadModuleGraph, moduleIdFor,
+         disposeModuleGraph } from "../source_graph";
+
+/*
+  A loaded graph OWNS every module's arena and every file's bytes, and
+  `disposable g: ModuleGraph` releases neither: propagated disposal frees the
+  outer Vec and Map and stops there, because neither `Module` nor `AST` carries
+  a `dispose` for it to chain into. `disposeModuleGraph` is the walk that does.
+
+  It matters to exactly one caller today and it matters a lot there: the
+  language server loads a graph per compile, so what a driver that exits can
+  ignore is the whole std closure per keystroke in an editor.
+
+  One assertion, because only one of the two halves is READABLE afterwards. The
+  graph's own vectors are, and `cap` going to zero is exactly what a released
+  Vec looks like - the same guard `Vec.dispose` uses to stay idempotent. What
+  the walk frees INSIDE each module is not: the walk works through the copy
+  `vecGet` hands back, so the buffers are freed while the stored struct's
+  bookkeeping is untouched, and the vector holding it is gone a moment later
+  anyway.
+
+  Nor is there anything useful this file can write about that inner half, which
+  is worth saying out loud: a test SUITE runs inside an arena scope, where
+  every free is a no-op, so a "release it a hundred times and see if the
+  allocator survives" test would exercise no frees at all. What does exercise
+  them is the language server, which loads and releases a graph per compile
+  against the ordinary malloc allocator.
+*/
+suite function aLoadedGraphCanBeReleased(): void {
+  switch (loadModuleGraph(fixture("slice", "dir_modules.yoop"), "")) {
+    case LoadGraphResult.Err { error: e }: {
+      let test theory: Case = t.asserts("the directory-module fixture loads") {
+        theory.isSuccessful = false;
+        theory.detail = `loading the slice directory module failed: ${e}`;
+      }
+    }
+    case LoadGraphResult.Ok { value: loaded }: {
+      let graph: ModuleGraph = loaded;
+      const hadModules = graph.modules.cap > 0;
+      disposeModuleGraph(ref graph);
+
+      let test theory: Case = t.asserts("disposal releases the graph's own vectors") {
+        theory.isSuccessful = hadModules && graph.modules.cap == 0;
+        theory.detail = `modules.cap started nonzero: ${hadModules}, is now ${graph.modules.cap}`;
+      }
+    }
+  }
+}
 
 suite function anImportCycleIsRefusedRatherThanFollowed(): void {
   let test theory: Case = t.asserts("a two-module cycle is detected") {
@@ -120,6 +167,110 @@ suite function aDirectoryModuleIsOneModuleOfSeveralFiles(): void {
         theory.detail = `the first file is ${first}, wanted area.yoop to sort ahead of point.yoop`;
       }
     }
+  }
+}
+
+// The `modules/` import root. The whole feature is WHICH `modules` directory
+// answers, so that is what these assert: the walk starts at the importing
+// file's own directory and the FIRST root it meets wins.
+//
+// Both fixtures import the same path, `modules/lib`, and the two libs differ
+// only in what `whichRoot` returns - so the resolved root is observable as an
+// exit code rather than as a path a test would have to spell out.
+suite function theModulesRootIsTheNearestOneAtOrAboveTheImporter(): void {
+  switch (loadModuleGraph(fixture("graph", "modules_far.yoop"), "")) {
+    case LoadGraphResult.Err { error: e }: {
+      let test theory: Case = t.asserts("an entry beside a modules root resolves against it") {
+        theory.isSuccessful = false;
+        theory.detail = `loading modules_far.yoop failed: ${e}`;
+      }
+    }
+    case LoadGraphResult.Ok { value: graph }: {
+      let test theory: Case = t.asserts("an entry beside a modules root resolves against it") {
+        theory.isSuccessful = graph.modules.len == 2;
+        theory.detail = `the graph holds ${graph.modules.len} modules, wanted 2 (lib and the entry)`;
+      }
+
+      // The walk STARTS at the importing file's own directory, which is what
+      // makes a program with `modules/` beside its entry file work at all.
+      let lib = vec.vecGet(ref graph.modules, 0);
+      let test theory: Case = t.asserts("the root beside the entry is the one that answered") {
+        const wanted = "tests/graph/modules/lib";
+        theory.isSuccessful = str.stringIndexOf(lib.dir, wanted) < lib.dir.len;
+        theory.detail = `resolved to "${lib.dir}", wanted a path through "${wanted}"`;
+      }
+    }
+  }
+
+  // Two levels below the nearer root and three below the outer one. Continuing
+  // the walk past the first hit would let an unrelated `modules/` further up
+  // answer, so the nearer one winning IS the safety property.
+  switch (loadModuleGraph(fixture("graph", "nearer/deep/modules_near.yoop"), "")) {
+    case LoadGraphResult.Err { error: e }: {
+      let test theory: Case = t.asserts("the NEAREST root wins over one further up") {
+        theory.isSuccessful = false;
+        theory.detail = `loading nearer/deep/modules_near.yoop failed: ${e}`;
+      }
+    }
+    case LoadGraphResult.Ok { value: graph }: {
+      let lib = vec.vecGet(ref graph.modules, 0);
+      let test theory: Case = t.asserts("the NEAREST root wins over one further up") {
+        const wanted = "tests/graph/nearer/modules/lib";
+        theory.isSuccessful = str.stringIndexOf(lib.dir, wanted) < lib.dir.len;
+        theory.detail = `resolved to "${lib.dir}", wanted the nearer root at "${wanted}"`;
+      }
+    }
+  }
+
+  // One copy of a name per program: a module under a modules root may not carry
+  // a root of its own. Two copies would link fine and then mismatch as
+  // "Value is not assignable to Value", which is why this is refused rather
+  // than left to convention.
+  let test theory: Case = t.asserts("a module carrying its OWN modules root is refused by name") {
+    theory.isSuccessful = loadFails("modules_nested.yoop", "carries its own");
+    theory.detail = `wanted a nested-root diagnostic, got: ${loadError("graph", "modules_nested.yoop")}`;
+  }
+
+  // A miss inside the root that answered is a better error than a hit outside
+  // it, so the message has to say WHICH root was searched - there may be
+  // several on the path and only one was consulted.
+  let test theory: Case = t.asserts("a miss names the modules root that was searched") {
+    theory.isSuccessful = loadFails("modules_missing.yoop", "searched the modules root");
+    theory.detail = `wanted a searched-root diagnostic, got: ${loadError("graph", "modules_missing.yoop")}`;
+  }
+
+  // The DECOY, and it is the only assertion here that can tell "stops at the
+  // first root" apart from "walks the whole way up". PORTED from
+  // src/jsyoopdriver/moduleGraph.test.js; nothing else in the tree poses it,
+  // because `modules_missing.yoop` has no second root above it to fall through
+  // TO, so the two behaviours produce the same refusal there.
+  //
+  // `nearer/modules_decoy.yoop` imports a name the NEARER root does not hold
+  // and the outer one does. Continuing the walk would resolve it, which is how
+  // a typo gets answered by a stray `modules/` in a home directory. So the
+  // refusal is the correct outcome, and it has to name the NEAR root.
+  let test theory: Case = t.asserts("the first root wins even when it does NOT hold the name") {
+    theory.isSuccessful = loadFails("nearer/modules_decoy.yoop", "graph/nearer/modules");
+    theory.detail = `wanted the NEAR root named, got: ${loadError("graph", "nearer/modules_decoy.yoop")}`;
+  }
+}
+
+// A path that is neither relative, absolute, nor under one of the two roots.
+// PORTED from src/jsyoopdriver/moduleGraph.test.js, which is where the claim
+// that the message names every WORKING form lived; nothing on this side
+// asserted the refusal at all, and the message had been listing three of the
+// four.
+suite function aBareImportSpecifierIsRefusedAndNamesTheFormsThatWork(): void {
+  let test theory: Case = t.asserts("a bare specifier is refused") {
+    theory.isSuccessful = loadFails("bare_specifier.yoop", "must be relative");
+    theory.detail = `wanted a bare-specifier diagnostic, got: ${loadError("graph", "bare_specifier.yoop")}`;
+  }
+
+  // `modules/` is the form the author of a bare specifier usually wanted, so
+  // leaving it out of the list is what makes the message actively unhelpful.
+  let test theory: Case = t.asserts("and names modules/ among the forms that work") {
+    theory.isSuccessful = loadFails("bare_specifier.yoop", "modules/");
+    theory.detail = `wanted modules/ named, got: ${loadError("graph", "bare_specifier.yoop")}`;
   }
 }
 

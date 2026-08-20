@@ -1,7 +1,7 @@
 // std/core/traits.yoop - foundational traits used across std modules.
 //
-// Library Phase A: the staple Readable / Writable / Display traits that
-// every downstream module either implements or takes as input. Disposable
+// The staple Readable / Writable / Display traits that every downstream
+// module either implements or takes as input. Disposable
 // is intentionally NOT defined here - it lives in std/core/kinds.yoop
 // alongside the disposable kind that requires it.
 
@@ -51,7 +51,7 @@ export trait Writable {
 
 // ----- Reader / Writer vtables ------------------------------------------
 //
-// Phase 10.I: type-erased views over Readable / Writable. Callers that
+// Type-erased views over Readable / Writable. Callers that
 // want to mix concrete impl types behind one parameter (e.g. an HTTP
 // parser that doesn't care whether it's reading from a TcpStream, a
 // TlsStream, or an in-memory buffer) take a `Reader` / `Writer` rather
@@ -92,7 +92,7 @@ export variant IterStep<T> {
 
 // Any type implementing `Iterable<T>` can be walked with `for x in ...`.
 // The `next` method advances internal state and returns the next step.
-// Phase 10.B: lowering for `for x in EXPR` desugars to:
+// Lowering for `for x in EXPR` desugars to:
 //   while (true) {
 //       switch (Iterable.next(ref iter)) {
 //           case IterStep.Yield { value: x }: { <body> }
@@ -105,7 +105,7 @@ export trait Iterable<T> {
 
 // ----- Into ------------------------------------------------------------
 
-// Cross-shape `?` conversion (Phase 10.E). When a `?`-propagated error's
+// Cross-shape `?` conversion. When a `?`-propagated error's
 // payload type differs from the enclosing function's Err payload type, the
 // typechecker looks for an `Into<TargetErr>` impl on the operand's error
 // type and rewrites the propagation to call `Into.into(ref operandErr)`
@@ -120,7 +120,7 @@ export trait Into<T> {
 
 // ----- WithContext -----------------------------------------------------
 
-// Context-attaching `?` (Phase 10.E.2). `expr? "loading config"` prepends a
+// Context-attaching `?`. `expr? "loading config"` prepends a
 // message to the propagated error. When both Err payloads are plain strings
 // the compiler concatenates `"<context>: <err>"` itself and no impl is
 // needed; for any other payload type the operand's Err type must implement

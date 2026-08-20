@@ -33,12 +33,19 @@ export variant Symbol {
   // at every use rather than emitted as a global - there is nothing to load
   // from, and an importer needs the value, not an address.
   Value       { typeId: TypeId, intVal: int64 },
-  // A module-level `let` - a MUTABLE global. Unlike a `const`, which is inlined
-  // at every use, this one is a real LLVM global: it has an address, reads load
-  // from it and writes store to it, so a write in one function is visible in
-  // another. `intVal` is its compile-time initializer, which is all the
-  // bootstrap accepts.
-  Global      { typeId: TypeId, intVal: int64 },
+  // A module-level name backed by a real LLVM global: it has an address, reads
+  // load from it and writes store to it, so a write in one function is visible
+  // in another. `intVal` is its compile-time initializer when it has one, and
+  // otherwise the global starts zeroed and the module's init function stores
+  // the real value before any user code runs.
+  //
+  // A `let` is always one of these. A `const` is one only when its value is not
+  // something there IS to inline - `const S: Vec<int32> = vec.vecNew(8)` is a
+  // heap allocation, and no amount of compile-time evaluation turns it into an
+  // immediate. `mutable` is what keeps the two apart after that point: the
+  // STORAGE is identical and only the assignability differs, which is what
+  // `const` should have meant all along.
+  Global      { typeId: TypeId, intVal: int64, mutable: bool },
   Trait       { typeId: TypeId },
   VariantT    { typeId: TypeId },         // tagged `variant` (enum-with-payload)
   Union       { typeId: TypeId },

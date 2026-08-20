@@ -1,0 +1,141 @@
+module codegen;
+
+// Unions: the literal, the field read, and the address every field shares.
+//
+// This is the one aggregate codegen cannot handle as an SSA value. A struct
+// READ is `extractvalue` on the loaded struct, which works because the loaded
+// value has the struct's shape and a field is a numbered slot in it. A union's
+// LLVM type is `{ [N x i8] }` - a byte buffer - so the loaded value has no
+// field to extract and nothing to reinterpret. What a union field access
+// really means is:
+//
+//   the union's own ADDRESS, read (or written) at the FIELD's type
+//
+// which is the same move the variant payload makes, and the reason this file
+// exists rather than a branch inside struct.yoop. Every field starts at byte 0,
+// so there is no offset to compute: locating a field is locating the union.
+//
+// Nothing tracks which field was last written. That is the construct, not a
+// gap - `c.channels.r` after `c = { rgba: ... }` is the point of a union.
+
+import { Option } from "std/core/types.yoop";
+import { ASTNode, ASTNodeKind, NodeId, childAt, nodeAt } from "../ast";
+
+// The whole union value: `%union.union_rgba_1__Color`. Its own namespace rather
+// than `%struct.` because it is not one - a `%struct.` in a dump has as many
+// members as the source declared, and this always has exactly one.
+export function unionLlvmName(moduleId: string, name: string): string {
+  return `%union.${moduleId}${SYMBOL_MODULE_SEPARATOR}${name}`;
+}
+
+// `{ rgba: 0xAABBCCDD }` - exactly one field, stored at the union's address as
+// that field's OWN llvm type, then the whole buffer loaded back out as a value.
+//
+// The alloca-fill-load shape is the struct literal's, and deliberately: a union
+// is a value like any other once it exists, and this is what makes assigning
+// one, returning one and passing one work with no further special cases. What
+// differs is the fill - one store at offset 0 instead of one gep per field.
+export function emitUnionLiteral(ref cx: Cx, expr: ASTNode, exprId: NodeId, ref out: Operand): EmitResult {
+  const unionTy = typeOf(ref cx, exprId);
+  const store = declareAnonSlot(ref cx, unionTy);
+
+  if (expr.childA != 0) {
+    const list = nodeAt(cx.ast, expr.childA);
+    let i: usize = 0;
+    while (i < list.childCount) {
+      const fieldId = childAt(cx.ast, list, i);
+      const fieldNode = nodeAt(cx.ast, fieldId);
+
+      let value: Operand = Operand.None;
+      emitExpr(ref cx, fieldNode.childA, ref value)?;
+      // Pass D decorated the field node with the FIELD's type, and that is the
+      // type the store is spelled at. The union's own type says nothing about
+      // how to write into it.
+      emitStore(ref cx, typeOf(ref cx, fieldId), value, TEMP_SLOT_NAME, store.id);
+      i += 1;
+    }
+  }
+
+  const dest = freshTemp(cx.e);
+  emitLoadFromSlot(ref cx, dest, unionTy, TEMP_SLOT_NAME, store.id);
+  out = Operand.Temp { id: dest };
+  return EmitResult.Ok;
+}
+
+// `c.rgba` - one load at the union's address, spelled at the field's type.
+//
+// No extractvalue and no gep past the first: the address IS the field's
+// address, so the only decision is which type to read it at.
+export function emitUnionFieldRead(ref cx: Cx, expr: ASTNode, exprId: NodeId, ref out: Operand): EmitResult {
+  let addr: usize = 0;
+  emitUnionAddress(ref cx, expr.childA, ref addr)?;
+  const dest = freshTemp(cx.e);
+  emitLoadFromPtr(ref cx, dest, typeOf(ref cx, exprId), addr);
+  out = Operand.Temp { id: dest };
+  return EmitResult.Ok;
+}
+
+// The address of `base.field` when `base` is a union - which is the address of
+// `base`, unchanged. Shared by a field WRITE and by `ref base.field`, exactly as
+// emitFieldAddress is for a struct, so a store and a borrow cannot disagree.
+export function emitUnionFieldAddress(ref cx: Cx, target: ASTNode, ref addr: usize): EmitResult {
+  return emitUnionAddress(ref cx, target.childA, ref addr);
+}
+
+// The address of a union EXPRESSION, as a temp.
+//
+// The five shapes below are the same five every addressable expression comes
+// in, and each is already answered somewhere else - all this adds is the last
+// step, which normalizes whatever came back into one temp holding a pointer.
+// The fallback SPILLS: a union that came out of a call has no address of its
+// own, so it gets a slot and the slot's address is the answer.
+function emitUnionAddress(ref cx: Cx, unionId: NodeId, ref addr: usize): EmitResult {
+  const unionTy = pointeeTypeOf(ref cx, unionId);
+  const node = nodeAt(cx.ast, unionId);
+
+  // A BORROWED union is already an address - that is what a `ref T` operand is.
+  // Checked first, for the same reason struct.yoop checks it first: a borrowed
+  // base is very often a field read as well, and the two answers differ.
+  if (isRefAt(ref cx, unionId)) {
+    let basePtr: Operand = Operand.None;
+    emitExpr(ref cx, unionId, ref basePtr)?;
+    const dest = freshTemp(cx.e);
+    emitGepUnionOfAddr(ref cx, dest, unionTy, basePtr);
+    addr = dest;
+    return EmitResult.Ok;
+  }
+
+  // A union reached THROUGH a field (`s.payload.rgba`) or an array element
+  // already has an address computed by the walk that owns that shape, and it is
+  // the union's own - so there is nothing further to add to it.
+  if (node.kind == ASTNodeKind.FIELD_ACCESS) {
+    return emitFieldAddress(ref cx, node, ref addr);
+  }
+  if (node.kind == ASTNodeKind.INDEX_EXPRESSION) {
+    return emitElementAddress(ref cx, node, unionId, ref addr);
+  }
+
+  if (node.kind == ASTNodeKind.IDENT) {
+    switch (lookupLocal(cx.locals, node.name)) {
+      case Option.Some { value: slotInfo }: {
+        const dest = freshTemp(cx.e);
+        emitGepUnionBase(ref cx, dest, unionTy, node.name, slotInfo.id);
+        addr = dest;
+        return EmitResult.Ok;
+      }
+      case Option.None: { }
+    }
+  }
+
+  // Anything else is a VALUE with no storage - a call result, most often. Give
+  // it a slot so it has one; the union is a plain LLVM value at this point, so
+  // the store is spelled at the union's own type.
+  let value: Operand = Operand.None;
+  emitExpr(ref cx, unionId, ref value)?;
+  const spill = declareAnonSlot(ref cx, unionTy);
+  emitStore(ref cx, unionTy, value, TEMP_SLOT_NAME, spill.id);
+  const dest = freshTemp(cx.e);
+  emitGepUnionBase(ref cx, dest, unionTy, TEMP_SLOT_NAME, spill.id);
+  addr = dest;
+  return EmitResult.Ok;
+}

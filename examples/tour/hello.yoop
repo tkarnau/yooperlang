@@ -1,0 +1,7 @@
+// Every program starts at main. The int32 it returns is the process exit
+// code, so `echo $?` after this prints 0. printf is always in scope.
+
+function main(): int32 {
+  printf("Hello, Yooper.\n");
+  return 0;
+}

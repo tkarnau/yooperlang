@@ -1,0 +1,3 @@
+module leaf;
+// The SUBDEPENDENCY. The entry program never names it; `dep` reaches it.
+export function leafValue(): int32 { return 3; }

@@ -17,16 +17,22 @@ module codegen;
   module. Everything below is the emission.
 */
 
-import { Vec }, * as vec from "std/core/vec.yoop";
+import * as vec from "std/core/vec.yoop";
 import { disposable } from "std/core/kinds.yoop";
 import { ASTNode, ASTNodeKind, NodeId, childAt, kindName, nodeAt } from "../ast";
 import { TaskBind } from "../typecheck";
 
 // The three forms, from the LET/CONST decl. Called by emitVarDecl when the
 // classifier says this binding is a spawn.
-export function emitTaskBinding(ref cx: Cx, stmt: ASTNode, stmtId: NodeId, bind: TaskBind): string {
+export function emitTaskBinding(ref cx: Cx, stmt: ASTNode, stmtId: NodeId, bind: TaskBind): EmitResult {
   const call = nodeAt(cx.ast, stmt.childB);
   if (call.kind != ASTNodeKind.CALL_EXPRESSION) {
+    // `pooled h2 = h1;` - a COPY of an existing handle rather than a spawn.
+    // Pass D allows it only for the refcounted form, which is the only one that
+    // has a count to take.
+    if (bind == TaskBind.POOLED) {
+      return emitPooledHandleCopy(ref cx, stmt, stmtId);
+    }
     return internalError("a task binding's initializer is not a call", kindName(call.kind));
   }
   // A cross-module spawn would need the DEFINING module's handle layout and
@@ -42,13 +48,13 @@ export function emitTaskBinding(ref cx: Cx, stmt: ASTNode, stmtId: NodeId, bind:
   }
 
   let handle: Operand = Operand.None;
-  let err = "";
+  let err: EmitResult = EmitResult.Ok;
   if (bind == TaskBind.POOLED) {
     err = emitPooledHandle(ref cx, call, ref meta, ref handle);
   } else {
     err = emitStackHandle(ref cx, call, ref meta, ref handle);
   }
-  if (err.len > 0) {
+  if (emitFailed(err)) {
     return err;
   }
   emitTaskSubmit(ref cx, handle, cx.tm.moduleId, taskThunkSymbolName(call.name));
@@ -63,7 +69,7 @@ export function emitTaskBinding(ref cx: Cx, stmt: ASTNode, stmtId: NodeId, bind:
 // the heap with a refcount. `yoop_task_alloc` is calloc plus a refcount of two:
 // one for this binding, one for the worker, and the worker drops its own when
 // the task completes.
-function emitPooledHandle(ref cx: Cx, call: ASTNode, ref meta: TaskMeta, ref handle: Operand): string {
+function emitPooledHandle(ref cx: Cx, call: ASTNode, ref meta: TaskMeta, ref handle: Operand): EmitResult {
   const gepTemp = freshTemp(cx.e);
   const sizeTemp = freshTemp(cx.e);
   emitSizeOfStruct(ref cx, sizeTemp, gepTemp, meta.structName);
@@ -77,7 +83,7 @@ function emitPooledHandle(ref cx: Cx, call: ASTNode, ref meta: TaskMeta, ref han
 // frame, so it is one alloca. Zeroed first, because the runtime reads its state
 // and refcount before anything here writes either, and a refcount of zero is
 // what says "this one is not on the heap".
-function emitStackHandle(ref cx: Cx, call: ASTNode, ref meta: TaskMeta, ref handle: Operand): string {
+function emitStackHandle(ref cx: Cx, call: ASTNode, ref meta: TaskMeta, ref handle: Operand): EmitResult {
   const slotInfo = declareAnonSlot(ref cx, meta.structName);
   emitStoreZeroInit(ref cx, meta.structName, TEMP_SLOT_NAME, slotInfo.id);
   handle = Operand.SlotAddr { name: TEMP_SLOT_NAME, id: slotInfo.id };
@@ -90,7 +96,7 @@ function emitStackHandle(ref cx: Cx, call: ASTNode, ref meta: TaskMeta, ref hand
 // Nothing else. State, the cancel byte and the mutex/cond pair are all zero
 // already - calloc did it for a pooled handle and the zeroinitializer store did
 // it for a stack one - and `yoop_task_submit` is what fills the pair in.
-function fillHandle(ref cx: Cx, call: ASTNode, ref meta: TaskMeta, handle: Operand): string {
+function fillHandle(ref cx: Cx, call: ASTNode, ref meta: TaskMeta, handle: Operand): EmitResult {
   const thunkAddr = freshTemp(cx.e);
   emitGepFieldOfAddr(ref cx, thunkAddr, meta.structName, handle, TASK_FIELD_THUNK);
   emitStoreToPtr(
@@ -100,30 +106,52 @@ function fillHandle(ref cx: Cx, call: ASTNode, ref meta: TaskMeta, handle: Opera
   );
 
   if (call.childA == 0) {
-    return "";
+    return EmitResult.Ok;
   }
   const list = nodeAt(cx.ast, call.childA);
   let i: usize = 0;
   while (i < list.childCount) {
     const argId = childAt(cx.ast, list, i);
     let value: Operand = Operand.None;
-    const err = emitExpr(ref cx, argId, ref value);
-    if (err.len > 0) {
-      return err;
-    }
+    emitExpr(ref cx, argId, ref value)?;
     const slotAddr = freshTemp(cx.e);
     emitGepFieldOfAddr(ref cx, slotAddr, meta.structName, handle, TASK_FIELD_ARG0 + i);
     emitStoreToPtr(ref cx, vec.vecGet(ref meta.argTys, i), value, slotAddr);
     i += 1;
   }
-  return "";
+  return EmitResult.Ok;
+}
+
+/*
+  `pooled h2 = h1;` - a second binding onto an existing handle.
+
+    %t12 = load ptr, ptr %h1.1.addr
+    store ptr %t12, ptr %h2.2.addr
+    call void @yoop_task_retain(ptr %t12)
+
+  The RETAIN is the whole of it, and leaving it out is a use-after-free rather
+  than a leak: both bindings release at their own scope end, so without a second
+  count the first release frees a handle the second one still names.
+
+  It is emitted AFTER the store for no reason but readability - the two are
+  independent, and the reference emits them in this order too.
+*/
+function emitPooledHandleCopy(ref cx: Cx, stmt: ASTNode, stmtId: NodeId): EmitResult {
+  let handle: Operand = Operand.None;
+  emitExpr(ref cx, stmt.childB, ref handle)?;
+
+  const slotInfo = declareLocal(ref cx, stmt.name, "ptr");
+  emitStore(ref cx, "ptr", handle, stmt.name, slotInfo.id);
+  emitTaskRetain(ref cx, handle);
+  recordTaskCleanup(cx.disposes, stmt.name, slotInfo.id, TASK_ACTION_RELEASE);
+  return EmitResult.Ok;
 }
 
 // `pooled h` / `joined d` - the NAME is bound to the handle pointer, and the
 // scope owes it a release or a join. Recorded on the same stack an ordinary
 // `disposable` uses, so a `return` or a `break` out of the middle unwinds it
 // exactly as it unwinds everything else.
-function bindHandle(ref cx: Cx, stmt: ASTNode, stmtId: NodeId, bind: TaskBind, handle: Operand): string {
+function bindHandle(ref cx: Cx, stmt: ASTNode, stmtId: NodeId, bind: TaskBind, handle: Operand): EmitResult {
   const slotInfo = declareLocal(ref cx, stmt.name, "ptr");
   emitStore(ref cx, "ptr", handle, stmt.name, slotInfo.id);
   let action = TASK_ACTION_JOIN;
@@ -131,7 +159,7 @@ function bindHandle(ref cx: Cx, stmt: ASTNode, stmtId: NodeId, bind: TaskBind, h
     action = TASK_ACTION_RELEASE;
   }
   recordTaskCleanup(cx.disposes, stmt.name, slotInfo.id, action);
-  return "";
+  return EmitResult.Ok;
 }
 
 // `const v: T = f(a)` - spawn and join in one statement, so the binding is the
@@ -145,7 +173,7 @@ function bindJoinedResult(
   stmtId: NodeId,
   ref meta: TaskMeta,
   handle: Operand
-): string {
+): EmitResult {
   emitTaskWaitCall(ref cx, handle);
   const resultAddr = freshTemp(cx.e);
   emitGepFieldOfAddr(ref cx, resultAddr, meta.structName, handle, TASK_FIELD_RESULT);
@@ -156,5 +184,5 @@ function bindJoinedResult(
   const ty = typeOf(ref cx, stmtId);
   const slotInfo = declareLocal(ref cx, stmt.name, ty);
   emitStore(ref cx, ty, Operand.Temp { id: value }, stmt.name, slotInfo.id);
-  return "";
+  return EmitResult.Ok;
 }

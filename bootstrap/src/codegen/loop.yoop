@@ -32,7 +32,7 @@ import { Option } from "std/core/types.yoop";
 // non-terminating makes a function whose every path returns from inside the
 // loop fail the "no return on some path" check, and emitting an exit block
 // nothing branches to and nothing terminates is invalid IR.
-export function emitWhile(ref cx: Cx, stmt: ASTNode, retTy: string, ref terminated: bool): string {
+export function emitWhile(ref cx: Cx, stmt: ASTNode, retTy: string, ref terminated: bool): EmitResult {
   terminated = false;
   const condLabel = freshLabel(cx.e);
   const bodyLabel = freshLabel(cx.e);
@@ -50,24 +50,21 @@ export function emitWhile(ref cx: Cx, stmt: ASTNode, retTy: string, ref terminat
     emitBr(ref cx, bodyLabel);
   } else {
     let cond: Operand = Operand.None;
-    const cerr = emitExpr(ref cx, stmt.childA, ref cond);
-    if (cerr.len > 0) {
-      return cerr;
-    }
+    emitExpr(ref cx, stmt.childA, ref cond)?;
     emitCondBr(ref cx, cond, bodyLabel, endLabel);
   }
 
   emitLabel(ref cx, bodyLabel);
   // `continue` re-tests the condition; `break` leaves.
   loopPush(ref cx, condLabel, endLabel);
-  let err = "";
+  let err: EmitResult = EmitResult.Ok;
   let bodyTerminated = false;
   emitBlock(ref cx, stmt.childB, retTy, ref bodyTerminated, ref err);
   // The frame's `sawBreak` is the whole test for whether the exit is
   // reachable, and it has to be read before the frame is popped.
   const brokeOut = innermostBreakable(ref cx).sawBreak;
   loopPop(ref cx);
-  if (err.len > 0) {
+  if (emitFailed(err)) {
     return err;
   }
   if (!bodyTerminated) {
@@ -78,10 +75,10 @@ export function emitWhile(ref cx: Cx, stmt: ASTNode, retTy: string, ref terminat
   // predecessor, so emitting it would leave a block with no terminator.
   if (alwaysTrue && !brokeOut) {
     terminated = true;
-    return "";
+    return EmitResult.Ok;
   }
   emitLabel(ref cx, endLabel);
-  return "";
+  return EmitResult.Ok;
 }
 
 // `while (true)` written out, and nothing else. A condition that is CONSTANTLY
@@ -109,7 +106,7 @@ function isLiteralTrue(ref ast: AST, condId: NodeId): bool {
 // The STEP gets its own block so `continue` can jump to it - skipping the rest
 // of the body while still advancing the counter. That is the one structural
 // difference from `while`, and the reason LoopLabels carries two labels.
-export function emitFor(ref cx: Cx, stmt: ASTNode, stmtId: NodeId, retTy: string): string {
+export function emitFor(ref cx: Cx, stmt: ASTNode, stmtId: NodeId, retTy: string): EmitResult {
   const ty = typeOf(ref cx, stmtId);
 
   // The counter: a fresh slot when the loop declares it, otherwise the existing
@@ -117,10 +114,7 @@ export function emitFor(ref cx: Cx, stmt: ASTNode, stmtId: NodeId, retTy: string
   const counterName = stmt.name;
   let counterId: usize = 0;
   let initValue: Operand = Operand.None;
-  const ierr = emitExpr(ref cx, stmt.childB, ref initValue);
-  if (ierr.len > 0) {
-    return ierr;
-  }
+  emitExpr(ref cx, stmt.childB, ref initValue)?;
   if (stmt.flagA) {
     const slotInfo = declareLocal(ref cx, counterName, ty);
     counterId = slotInfo.id;
@@ -142,19 +136,16 @@ export function emitFor(ref cx: Cx, stmt: ASTNode, stmtId: NodeId, retTy: string
   emitBr(ref cx, condLabel);
   emitLabel(ref cx, condLabel);
   let cond: Operand = Operand.None;
-  const cerr = emitExpr(ref cx, stmt.childC, ref cond);
-  if (cerr.len > 0) {
-    return cerr;
-  }
+  emitExpr(ref cx, stmt.childC, ref cond)?;
   emitCondBr(ref cx, cond, bodyLabel, endLabel);
 
   emitLabel(ref cx, bodyLabel);
   loopPush(ref cx, stepLabel, endLabel);
-  let err = "";
+  let err: EmitResult = EmitResult.Ok;
   let bodyTerminated = false;
   emitBlock(ref cx, stmt.childE, retTy, ref bodyTerminated, ref err);
   loopPop(ref cx);
-  if (err.len > 0) {
+  if (emitFailed(err)) {
     return err;
   }
   if (!bodyTerminated) {
@@ -163,15 +154,12 @@ export function emitFor(ref cx: Cx, stmt: ASTNode, stmtId: NodeId, retTy: string
 
   emitLabel(ref cx, stepLabel);
   let stepValue: Operand = Operand.None;
-  const serr = emitExpr(ref cx, stmt.childD, ref stepValue);
-  if (serr.len > 0) {
-    return serr;
-  }
+  emitExpr(ref cx, stmt.childD, ref stepValue)?;
   emitStore(ref cx, ty, stepValue, counterName, counterId);
   emitBr(ref cx, condLabel);
 
   emitLabel(ref cx, endLabel);
-  return "";
+  return EmitResult.Ok;
 }
 
 // `for x in xs { body }` - walk an array, element by element.
@@ -197,7 +185,7 @@ export function emitFor(ref cx: Cx, stmt: ASTNode, stmtId: NodeId, retTy: string
 // what makes `for x in xs { x = ... }` write to the copy rather than the array.
 // That matches the JS reference, and it is why the element is loaded and stored
 // rather than the slot being pointed at the array.
-export function emitForIn(ref cx: Cx, stmt: ASTNode, stmtId: NodeId, retTy: string): string {
+export function emitForIn(ref cx: Cx, stmt: ASTNode, stmtId: NodeId, retTy: string): EmitResult {
   // Two forms, and pass D already proved it is one of them. An ITERATOR walks
   // through its own `next` and has no length to count against, so that is a
   // different lowering rather than a variation - see loop_iter.yoop.
@@ -209,10 +197,7 @@ export function emitForIn(ref cx: Cx, stmt: ASTNode, stmtId: NodeId, retTy: stri
   const elemTy = typeOf(ref cx, stmtId);
 
   let iterable: Operand = Operand.None;
-  const ierr = emitExpr(ref cx, stmt.childA, ref iterable);
-  if (ierr.len > 0) {
-    return ierr;
-  }
+  emitExpr(ref cx, stmt.childA, ref iterable)?;
   const dataPtr = freshTemp(cx.e);
   emitExtractValue(ref cx, dataPtr, ARRAY_DESCRIPTOR, iterable, 0);
   const length = freshTemp(cx.e);
@@ -255,11 +240,11 @@ export function emitForIn(ref cx: Cx, stmt: ASTNode, stmtId: NodeId, retTy: stri
 
   // `continue` advances the counter first, exactly as in the counted form.
   loopPush(ref cx, stepLabel, endLabel);
-  let err = "";
+  let err: EmitResult = EmitResult.Ok;
   let bodyTerminated = false;
   emitBlock(ref cx, stmt.childB, retTy, ref bodyTerminated, ref err);
   loopPop(ref cx);
-  if (err.len > 0) {
+  if (emitFailed(err)) {
     return err;
   }
   if (!bodyTerminated) {
@@ -278,7 +263,7 @@ export function emitForIn(ref cx: Cx, stmt: ASTNode, stmtId: NodeId, retTy: stri
   emitBr(ref cx, condLabel);
 
   emitLabel(ref cx, endLabel);
-  return "";
+  return EmitResult.Ok;
 }
 
 // The counter is i64 because an array length is, so the compare needs no cast.

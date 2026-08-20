@@ -1,18 +1,17 @@
-// plans/yooperdoom-takeaways.md 1.2: every untyped literal EXPRESSION gets
-// pinned before codegen sees it.
+// Every untyped literal EXPRESSION gets pinned before codegen sees it.
 //
 // `untypedInt` / `untypedFloat` are placeholders the typechecker is supposed
 // to replace with a real type at whatever context consumes the value. Three
-// contexts had no rule and so leaked the placeholder into codegen, where
-// `llvmType` threw with no source location at all:
+// contexts are easy to leave without a rule, which leaks the placeholder into
+// codegen, where `llvmType` throws with no source location at all:
 //
 //     if (x == -24 + 176)   comparison with ONE typed side
 //     _ = 1 + 2;            discard statement
 //     1 + 2;                bare expression statement
 //
-// A BARE literal (`_ = 1;`) always worked - codegen defends itself at
+// A BARE literal (`_ = 1;`) is safe either way - codegen defends itself at
 // INT_LITERAL/FLOAT_LITERAL. It is only a COMPOUND expression, which has its
-// own resolvedType sitting on the intermediate node, that had no defence.
+// own resolvedType sitting on the intermediate node, that has no such defence.
 //
 // The comparison case pins to the TYPED SIDE's type rather than to the int32
 // default, which is what makes the `uint8` and `int64` cases below come out

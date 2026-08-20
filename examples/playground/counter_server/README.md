@@ -39,17 +39,20 @@ that never reached a handler.
 
 ## Run it
 
-Locally:
+Locally, from the repository root, where `node scripts/seed.mjs` prints the path
+of a compiler:
 
 ```sh
-node ./src/yoopiler.js examples/playground/counter_server/main.yoop -o counter_server
+YOOP_STD_ROOT=$PWD/std YOOP_RUNTIME_ROOT=$PWD/runtime \
+  $(node scripts/seed.mjs) examples/playground/counter_server/main.yoop -o counter_server
 ./counter_server                # 0.0.0.0:8080, one worker per core
 ./counter_server 9000           # port
 ./counter_server 9000 4         # port, worker count
 ```
 
-In Docker, from the repo root (the build context has to include `src/`,
-`std/` and `runtime/`):
+In Docker, from the repo root. [Dockerfile](Dockerfile) builds the program with
+a compiler that is not in this tree, so this path does not work as written; the
+local build above does:
 
 ```sh
 DF=examples/playground/counter_server/Dockerfile
@@ -306,60 +309,56 @@ async I/O path, so thousands of concurrent connections still work, and
 every shared counter stops needing synchronization. Try `./counter_server
 8080 1` against the stress script before assuming more threads is faster.
 
-## What this shook out
+## Compiler and stdlib notes
 
-Building this surfaced six things. Three compiler bugs are fixed, two
-stdlib gaps are closed, and one papercut is recorded but not fixed.
+Six things this program leans on, and what goes wrong without them.
 
-**Three compiler bugs, all fixed, all with regression fixtures under
+**Three codegen properties, each with a regression fixture under
 `examples/pass/`:**
 
-1. A mutable module-level array literal got a read-only backing buffer. The
-   fat pointer behind `let xs: int32[] = [0, 0, 0];` pointed at a
-   `private unnamed_addr constant`, so the first `xs[i] = v` segfaulted with
-   no diagnostic. `emitRawArrayGlobal` now emits `private global` for a
-   `LET_DECL` and keeps the merged read-only form for `CONST_DECL`, where it
-   is correct. (`unnamed_addr` was the second half of the bug: it lets the
+1. A mutable module-level array literal must not get a read-only backing
+   buffer. With the fat pointer behind `let xs: int32[] = [0, 0, 0];`
+   pointing at a `private unnamed_addr constant`, the first `xs[i] = v`
+   segfaults with no diagnostic. `emitRawArrayGlobal` emits `private global`
+   for a `LET_DECL` and keeps the merged read-only form for `CONST_DECL`,
+   where it is correct. (`unnamed_addr` is the second half: it lets the
    linker merge two same-valued buffers, so two independent mutable arrays
-   would have aliased.)
-2. A module-level binding initialized by a generic intrinsic call crashed
-   the compiler. `let xs: T[] = intr.heapAlloc(n);` at module scope reached
-   `lowerFunction` with a null AST and took down the whole compile with a
-   `TypeError`. A compiler intrinsic has no yoop body to fold, so
-   `genericInstanceResolver` now declines and the decl falls back to the
-   runtime-init path.
+   would alias.)
+2. A module-level binding initialized by a generic intrinsic call.
+   `let xs: T[] = intr.heapAlloc(n);` at module scope reaches
+   `lowerFunction` with a null AST and takes down the whole compile with a
+   `TypeError` unless the folder declines. A compiler intrinsic has no yoop
+   body to fold, so `genericInstanceResolver` declines and the decl falls
+   back to the runtime-init path.
    (`module_level_mutable_array.yoop` covers both.)
-3. A `ref T` binding passed BARE to a `ref T` parameter passed the pointee
-   by value instead of forwarding the pointer. The callee then read the
+3. A `ref T` binding passed BARE to a `ref T` parameter has to forward the
+   pointer, not pass the pointee by value. Otherwise the callee reads the
    struct's first field as an address: a silent segfault with no diagnostic.
    The typechecker allows the bare spelling on purpose (an FFI handle in
    `let w: ref Window` reaches the next call without a redundant `ref w`)
-   and marks the argument `passRefBinding` - but nothing in codegen ever
-   read that flag, so the IDENT fell through to the ordinary auto-deref
-   path. Both expression emitters now check it first. This one mattered
-   here: `acceptLoop` hands a `ref Metrics` to a task, and writing that the
-   obvious way segfaulted. (`ref_forwarding.yoop`.)
+   and marks the argument `passRefBinding`; both expression emitters in
+   codegen check that flag before the ordinary auto-deref path. It matters
+   here: `acceptLoop` hands a `ref Metrics` to a task.
+   (`ref_forwarding.yoop`.)
 
-**One papercut, recorded and not fixed:** a local named `t0` collides with
+**One papercut, called out and not fixed:** a local named `t0` collides with
 codegen's `%tN` temporary namespace and fails at the LLVM level with
 "multiple definition of local value named 't0'". It is a compile-time error
 rather than a miscompile, and the fix is a mangling change with a wide blast
 radius, so it is called out in `runtime_introspect.yoop` and left alone.
 
 **One `std/http` limitation, documented and worked around:** `serve` is
-serial, as described above. `serveConnection` is now exported so a caller
-can write its own concurrent accept loop. Making `serve` itself spawn tasks
-is the real fix and is a larger change than this program justified.
+serial, as described above. `serveConnection` is exported so a caller can
+write its own concurrent accept loop. Making `serve` itself spawn tasks
+would be the real fix, and it is a much larger change.
 
-**One dead runtime helper, now reachable:** `yoop_stdout_linebuf` existed in
-`runtime/yoop_args.c` and nothing called it. Without it stdout is fully
-buffered when it is a pipe, which is what it is under `docker logs`, so a
-server's startup banner sat in a 4KB buffer and the container looked hung.
-Exposed as `rt.lineBufferStdout()`.
+**One runtime helper that is easy to miss:** `yoop_stdout_linebuf` in
+`runtime/yoop_args.c`. Without it stdout is fully buffered when it is a
+pipe, which is what it is under `docker logs`, so a server's startup banner
+sits in a 4KB buffer and the container looks hung. Exposed as
+`rt.lineBufferStdout()`.
 
-## New in `std/runtime.yoop`
-
-Added for this program, useful beyond it:
+## What this uses from `std/runtime.yoop`
 
 - `cpuCount()`, `workerCount()`, `setWorkerCount(n)` - pool sizing from
   source rather than only from `YOOP_NUM_WORKERS`

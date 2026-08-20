@@ -1,0 +1,2 @@
+fd=-1 saw_failure=1 code=2 saw_enoent=1 msg=No such file or directory
+exit=0

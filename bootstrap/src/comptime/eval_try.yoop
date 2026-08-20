@@ -1,0 +1,177 @@
+module comptime;
+
+// `expr?` - error propagation at compile time.
+//
+// Three shapes, and they differ only in what happens on the FAILURE side:
+//
+//   f()?                 return the Err from the enclosing function
+//   f()? "context"       the same, with a note prefixed onto the error
+//   f()? e { ... }       run the block INSTEAD of returning
+//
+// The success side is the same in all three: the expression's value is the
+// operand's `Ok` payload.
+//
+// The propagating forms leave through a marked ComptimeError - see error.yoop
+// for why that is the channel rather than a third Result case.
+
+import { Vec }, * as vec from "std/core/vec.yoop";
+import * as str from "std/core/strings.yoop";
+import * as map from "std/collections/map.yoop";
+import { Result, Option } from "std/core/types.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import { ASTNode, ASTNodeKind, NodeId, nodeAt } from "../ast";
+import { Program, TypeId, TYPE_ERROR_ID, TYPE_VOID_ID, fallibleShapeOf,
+  isStringPrimType, derefType } from "../typecheck";
+
+export function evalTryOp(ref cx: EvalCx, expr: ASTNode, exprId: NodeId): Result<ValueId, ComptimeError> {
+  const operandTy = typeOfNode(ref cx, expr.childA);
+  const got = fallibleShapeOf(cx.prog, operandTy);
+  if (!got.isFallible) {
+    return unhandled("`?` on a type that is not Ok/Err shaped", expr.sourceLoc);
+  }
+
+  const value = openBorrow(ref cx, evalExpr(ref cx, expr.childA)?);
+  const slot = valueAt(cx.va, value);
+  if (slot.kind != ValueKind.VARIANT) {
+    return unhandled("`?` on something that did not evaluate to a variant", expr.sourceLoc);
+  }
+
+  // The SUCCESS side. `Ok` carrying nothing yields nothing, which falls out of
+  // the same code rather than needing a branch.
+  if (slot.bits == uint64(got.okOrdinal)) {
+    if (slot.childCount == 0) {
+      return Result.Ok { value: voidValue(cx.va) };
+    }
+    return Result.Ok { value: childValueAt(cx.va, slot, 0) };
+  }
+
+  // The FAILURE side.
+  let payload: ValueId = VALUE_NONE;
+  if (slot.childCount > 0) {
+    payload = childValueAt(cx.va, slot, 0);
+  }
+
+  // `f()? e { ... }` HANDLES the failure instead of returning it, so the
+  // enclosing function need not be fallible at all - which is the whole point
+  // of the form. The block must LEAVE on every path, so whatever flow it ends
+  // with is the answer.
+  if (expr.childC != 0) {
+    return runTryHandler(ref cx, expr, payload)?;
+  }
+
+  const want = fallibleShapeOf(cx.prog, cx.fnRet);
+  if (!want.isFallible) {
+    return unhandled(
+      "`?` in a function whose return type is not Ok/Err shaped", expr.sourceLoc
+    );
+  }
+
+  const outPayload = convertErrPayload(ref cx, expr, exprId, payload, got.errType, want.errType)?;
+  disposable parts: Vec<ValueId> = vec.vecNew(1);
+  if (want.errType != TYPE_VOID_ID) {
+    vec.vecPush(ref parts, outPayload);
+  }
+  const errValue = aggregateValue(
+    cx.va, ValueKind.VARIANT, cx.fnRet, uint64(want.errOrdinal), ref parts);
+
+  return Result.Err { error: comptimePropagation(errValue, expr.sourceLoc) };
+}
+
+// The Err payload the ENCLOSING function's Err case wants, from the one the
+// operand carried.
+//
+// Three ways it can differ, and pass D already decided which applies:
+//
+//   the same type            hand it straight over
+//   a context string         "note: " prefixed onto the error
+//   a different type         the operand's error implements `Into<Target>`
+//
+// A context SUBSUMES the conversion rather than composing with it, which is the
+// reference's rule: `WithContext` produces the outer payload itself.
+function convertErrPayload(
+  ref cx: EvalCx,
+  expr: ASTNode,
+  exprId: NodeId,
+  payload: ValueId,
+  fromTy: TypeId,
+  toTy: TypeId
+): Result<ValueId, ComptimeError> {
+  if (toTy == TYPE_VOID_ID || payload == VALUE_NONE) {
+    return Result.Ok { value: payload };
+  }
+
+  // `f()? "loading config"`. Both payloads `string` is the concatenating form,
+  // which pass D marked; anything else hands the note to a `WithContext` impl.
+  if (expr.childB != 0) {
+    const note = valueAt(cx.va, evalExprValue(ref cx, expr.childB)?);
+    if (isConcatContext(ref cx, exprId)) {
+      const inner = valueAt(cx.va, payload);
+      // `stringConcatAll` rather than a `Text`, because the result has to
+      // OUTLIVE this scope: a value slot holds the string for as long as the
+      // fold does, and `text.view` into a disposed Text is a dangling pointer.
+      // One heap string per folded context, held for the compiler's lifetime,
+      // which is what every other string in the arena costs too.
+      disposable parts: Vec<string> = vec.vecNew(3);
+      vec.vecPush(ref parts, note.text);
+      vec.vecPush(ref parts, ": ");
+      vec.vecPush(ref parts, inner.text);
+      return Result.Ok { value: strValue(
+        cx.va, toTy, str.stringConcatAll(vec.vecAsArray(ref parts))) };
+    }
+    disposable args: Vec<ValueId> = vec.vecNew(2);
+    vec.vecPush(ref args, payload);
+    vec.vecPush(ref args, strValue(cx.va, note.typeId, note.text));
+    return callMethodOn(ref cx, derefType(cx.prog, fromTy), "withContext", ref args, expr, exprId);
+  }
+
+  if (fromTy == toTy) {
+    return Result.Ok { value: payload };
+  }
+
+  // A cross-shape `?`: the operand's error promises `Into<Target>`, and the
+  // conversion runs in the FAILURE branch, so the success path costs nothing.
+  disposable args: Vec<ValueId> = vec.vecNew(1);
+  vec.vecPush(ref args, payload);
+  return callMethodOn(ref cx, derefType(cx.prog, fromTy), "into", ref args, expr, exprId);
+}
+
+// Which of the two context shapes pass D picked.
+function isConcatContext(ref cx: EvalCx, exprId: NodeId): bool {
+  switch (map.mapGet(ref cx.tm.tryContextConcat, uint64(exprId))) {
+    case Option.Some { value: v }: { return v; }
+    case Option.None: { return false; }
+  }
+}
+
+// `f()? e { ... }` - the block runs INSTEAD of producing a value, so it has to
+// leave on every path. `e` names the Err payload for its extent.
+//
+// Whatever the block does is the enclosing statement's business, so the flow it
+// produces is passed straight out: a `return` propagates, and a `break` or a
+// `continue` leaves the loop the handler sits in.
+function runTryHandler(
+  ref cx: EvalCx,
+  expr: ASTNode,
+  payload: ValueId
+): Result<Result<ValueId, ComptimeError>, ComptimeError> {
+  scopeEnter(cx.scope);
+  if (payload != VALUE_NONE) {
+    bindLocal(cx.scope, expr.name, payload);
+  }
+  const flow = execBlock(ref cx, expr.childC)?;
+  scopeLeave(cx.scope);
+
+  switch (flow) {
+    // The handler returned, so the enclosing function is done - which travels
+    // the same way a `?` propagation does.
+    case Flow.Returned { value: v }: {
+      return Result.Ok { value: Result.Err { error: comptimePropagation(v, expr.sourceLoc) } };
+    }
+    default: {
+      return Result.Ok { value: Result.Err { error: comptimeError(
+        "a `?` handler block fell out of its bottom instead of leaving - `break` and `continue` in one are not folded yet",
+        expr.sourceLoc
+      )} };
+    }
+  }
+}

@@ -1,0 +1,4 @@
+# Illegal: the trait method writes `self` without `ref`. A by-value receiver is
+# a COPY, so every write the body makes would land on the copy, and the
+# bootstrap has no by-value receiver to lower it to.
+2:22: takes "self" by value

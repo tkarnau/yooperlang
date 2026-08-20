@@ -1,28 +1,28 @@
-// The pieces that got the std closure typechecking: generic methods, a generic
+// The pieces the std closure needs to typecheck: generic methods, a generic
 // body's type parameters, string `.len`, and untyped literals in mixed
 // arithmetic.
 //
-// Each of these was invisible until real std code hit it, and each is the kind
-// of gap that produces a confusing message far from its cause:
+// Each is the kind of gap that produces a confusing message far from its
+// cause:
 //
 //   `ref self` in `type Vec<T>` annotated as bare `Vec`, which reports
 //   "Vec is generic, so it needs type arguments" pointing at the method
 //
-//   a generic function's BODY had no type parameters in scope, so
-//   `let xs: T[] = ...` inside it reported "unknown type T"
+//   a generic function's BODY with no type parameters in scope, so
+//   `let xs: T[] = ...` inside it reports "unknown type T"
 //
-//   instantiating `Vec<T>` dropped its METHODS, so `Vec<string>` stopped
-//   implementing the traits `Vec<T>` was declared to implement
+//   instantiating `Vec<T>` dropping its METHODS, so `Vec<string>` stops
+//   implementing the traits `Vec<T>` is declared to implement
 //
-//   trait satisfaction was checked during the fill, but the GENERIC sweep runs
-//   before traits are filled - so a generic type reported "no implemented
-//   trait requires it" about a trait that simply was not populated yet
+//   trait satisfaction checked during the fill, when the GENERIC sweep runs
+//   before traits are filled - so a generic type reports "no implemented
+//   trait requires it" about a trait that is simply not populated yet
 //
-//   a cast pinned its operand, so `uint8(48 + big)` refused to add an
+//   a cast pinning its operand, so `uint8(48 + big)` refuses to add an
 //   int to a uint64 - a difference the writer never wrote
 
 // A generic type. Its methods TYPECHECK - `ref self` is `Box<T>` and not bare
-// `Box`, which is what unblocked std - but emitting one needs a copy per
+// `Box`, which is what std needs - but emitting one needs a copy per
 // instantiation, so this one has none. See bootstrap/README.md.
 type Box<T> {
   value: T,

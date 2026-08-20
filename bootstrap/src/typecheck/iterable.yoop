@@ -17,8 +17,9 @@ module typecheck;
 //
 // The receiver is CONCRETE at every one of these call sites, so `next` is an
 // ordinary static trait dispatch - the same one `Display.toString(ref p)` and
-// `?`'s `Into` conversion already use. Nothing here instantiates a trait as a
-// value and nothing here is a vtable; that is still item 3.4.
+// `?`'s `Into` conversion also use. Nothing here instantiates a trait as a
+// value and nothing here is a vtable - a trait as a RUNTIME value is what a
+// vtable decl is for.
 
 import { Vec }, * as vec from "std/core/vec.yoop";
 import * as str from "std/core/strings.yoop";

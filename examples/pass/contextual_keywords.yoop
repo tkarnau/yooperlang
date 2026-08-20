@@ -1,14 +1,13 @@
-// plans/yooperdoom-takeaways.md 2.2: words that used to be reserved and are
-// now contextual keywords.
+// Contextual keywords: words that read like keywords but are not reserved.
 //
-// `kind` was the expensive one. It was legal as a struct FIELD and illegal as
-// a local or parameter, so `Room.kind` compiled and `specialFor(kind: uint8)`
-// did not - and because the rejection lands at the declaration, the collision
-// surfaced nowhere near where the name was chosen. `field`, `scope`, `io`,
-// `align`, `layout`, `requires` and `library` are the same trap with a lower
-// hit rate.
+// `kind` is the expensive one to get wrong. Reserved, it would be legal as a
+// struct FIELD and illegal as a local or parameter, so `Room.kind` compiles
+// and `specialFor(kind: uint8)` does not - and because the rejection lands at
+// the declaration, the collision surfaces nowhere near where the name was
+// chosen. `field`, `scope`, `io`, `align`, `layout`, `requires` and `library`
+// are the same trap with a lower hit rate.
 //
-// Each is unambiguous from its position, so none of them needed reserving.
+// Each is unambiguous from its position, so none of them needs reserving.
 // This fixture uses every one as a field, a parameter, and a local, in a file
 // that ALSO declares a real `kind` - which is what proves the contextual
 // recognizer keys on shape rather than on the file not mentioning the word.

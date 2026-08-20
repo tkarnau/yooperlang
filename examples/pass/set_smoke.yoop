@@ -1,4 +1,4 @@
-// Phase 10.C.3: Set<K> is a thin wrapper over Map<K, bool>. Same
+// Set<K> is a thin wrapper over Map<K, bool>. Same
 // open-addressing storage; methods forward to the underlying map.
 // Smoke-tests the string-keyed shape including duplicate-insert,
 // contains, remove, and Disposable auto-cleanup.

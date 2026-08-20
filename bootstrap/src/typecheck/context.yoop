@@ -1,0 +1,44 @@
+module typecheck;
+
+import { AST } from "../ast";
+
+// What every body-checking function needs, in one value.
+//
+// Pass D walks a function BODY, and four things travel together the whole way
+// down: the interned tables, this module's decoration, the arena the nodes live
+// in, and the names currently in scope. Passing them separately meant six- and
+// seven-parameter signatures where the one argument that actually varied - the
+// node being checked - sat fifth.
+//
+// `ref` fields make the bundle a VIEW, not a copy: `scopePush` through `cx.scope`
+// lands on the scope `checkBodyAgainst` owns, exactly as threading `ref scope`
+// did. Nothing here is ever passed by value, for that reason.
+//
+// The same shape, and the same reasoning, as codegen's Cx - see
+// codegen/context.yoop. The two layers do the same job on the same walk, so a
+// reader who has seen one has seen both.
+//
+// WHERE THE LINE IS. A Cx means "a body is being checked". Passes A, B and C
+// walk DECLARATIONS, and there is no scope during any of them, so they keep
+// their own `ref prog, ref tm, ref ast` signatures rather than carrying a field
+// they must never read. The four driver functions at the top of pass_d.yoop
+// straddle the boundary and keep the old shape too: they are what CONSTRUCTS
+// a Cx, and cannot take one.
+//
+// WHAT IS NOT HERE, deliberately: the ambient `current*` fields stay on Program.
+// They are set once per body by `beginFunction` and read by two or three call
+// sites at arbitrary depth; that is what ambient state is for, and moving them
+// would put them behind one more hop for no reader's benefit. See the fields on
+// Program for the case.
+
+export type Cx {
+  prog: ref Program,
+  tm: ref TypedModule,
+  // The arena the body's nodes live in. Always the OWNING module's - a body is
+  // checked in the module that declared it - so this is `m.ast` and never a
+  // second module's.
+  ast: ref AST,
+  // The names visible at the point of the walk, as a stack of blocks. Owned by
+  // whoever built this Cx; see the two `scopeNew` sites in pass_d.yoop.
+  scope: ref LocalScope,
+}

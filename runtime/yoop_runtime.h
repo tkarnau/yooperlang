@@ -1,5 +1,4 @@
 // Yooperlang runtime - C ABI exposed to LLVM IR emitted by jsyoopcodegen.
-// See plans/phase-6-3-prelude.md and plans/runtime-design.md.
 #ifndef YOOP_RUNTIME_H
 #define YOOP_RUNTIME_H
 
@@ -15,6 +14,14 @@ typedef struct yoop_mutex  yoop_mutex_t;
 typedef struct yoop_cond   yoop_cond_t;
 typedef struct yoop_thread yoop_thread_t;
 
+// Return values of yoop_runtime_platform (yoop_runtime.c), mirrored by
+// `Platform` in std/runtime.yoop. Numbered explicitly and never reordered:
+// these cross the C ABI into yoop, so the VALUES are the contract.
+#define YOOP_PLATFORM_UNKNOWN 0
+#define YOOP_PLATFORM_LINUX   1
+#define YOOP_PLATFORM_MACOS   2
+#define YOOP_PLATFORM_WINDOWS 3
+
 // init / shutdown - both idempotent.
 void yoop_runtime_init(void);
 void yoop_runtime_shutdown(void);
@@ -23,7 +30,7 @@ void yoop_runtime_shutdown(void);
 void yoop_task_submit(void* handle, void (*thunk)(void*));
 void yoop_task_wait(void* handle);
 
-// Phase 10.F: bounded wait. Returns 0 when the handle's state flipped to
+// Bounded wait. Returns 0 when the handle's state flipped to
 // "done" before `deadline_ns` (a monotonic-clock nanosecond reading from
 // yoop_now_ns), 1 when the deadline elapsed first, 2 when an external
 // `yoop_task_cancel` was observed before either. Does not dispatch
@@ -31,7 +38,7 @@ void yoop_task_wait(void* handle);
 // the rationale.
 int yoop_task_wait_until_ns(void* handle, uint64_t deadline_ns);
 
-// Phase 10.F.2: external cancellation. Atomically sets the cancel byte
+// External cancellation. Atomically sets the cancel byte
 // in the handle's prefix (offset 9 - reuses one of the existing pad
 // bytes between `state` and `refcount`, so no ABI/layout change) and
 // broadcasts queue_cv so any wait_until parked on the handle wakes
@@ -41,19 +48,19 @@ int yoop_task_wait_until_ns(void* handle, uint64_t deadline_ns);
 // still runs the body to natural completion. The semantics this
 // primitive provides is "abandon-the-wait": the caller can stop
 // waiting for the result and treat the handle as done-from-its-side.
-// In-body polling (Phase 10.F.2.b) will give task bodies a way to
-// observe the same flag and exit early.
+// There is no in-body polling, so a task body has no way to observe the
+// same flag and exit early.
 void yoop_task_cancel(void* handle);
 
-// Phase 10.F: monotonic clock reading in nanoseconds, suitable for
-// computing wait_until deadlines (`now_ns() + duration_ns`).
+// Monotonic clock reading in nanoseconds, suitable for computing
+// wait_until deadlines (`now_ns() + duration_ns`).
 //
-// This is genuinely monotonic on every platform now (CLOCK_MONOTONIC on
-// Linux and macOS, QueryPerformanceCounter on Windows). It used to read
-// CLOCK_REALTIME, which meant an NTP step moved every in-flight
-// deadline; every timed wait in the runtime shares this clock via
-// yoop_cv_wait_until, so the two can't drift apart. Use yoop_wall_ns if
-// you actually want a timestamp rather than a deadline base.
+// This is genuinely monotonic on every platform (CLOCK_MONOTONIC on Linux
+// and macOS, QueryPerformanceCounter on Windows), so an NTP step cannot
+// move an in-flight deadline; every timed wait in the runtime shares this
+// clock via yoop_cv_wait_until, so the two can't drift apart. Use
+// yoop_wall_ns if you actually want a timestamp rather than a deadline
+// base.
 uint64_t yoop_now_ns(void);
 
 // Wall-clock reading in nanoseconds since the Unix epoch. NOT usable as
@@ -140,7 +147,7 @@ void* yoop_current_task(void);
 // at scope exit to release the mutex/cond pair allocated by yoop_task_submit.
 void yoop_task_free_sync_pair(void* handle);
 
-// Phase 8.D - errno bridge. Thread-local read/write of the platform's errno
+// errno bridge. Thread-local read/write of the platform's errno
 // lvalue (macOS __error(), glibc/musl __errno_location(), Windows _errno),
 // plus a thin strerror wrapper. Kept in the runtime so yoop codegen does
 // not have to know the platform-specific symbol for errno's TLS slot.
@@ -148,7 +155,7 @@ int yoop_errno_get(void);
 void yoop_errno_set(int v);
 const char* yoop_errno_message(int c);
 
-// ----- Phase 8.F.1 - Concurrency primitives -------------------------------
+// ----- Concurrency primitives ---------------------------------------------
 //
 // A park token is a single-thread synchronization primitive. The owning
 // thread (the "parker") calls yoop_park() to block; another thread
@@ -299,7 +306,7 @@ void yoop_cancel_remove_waiter(yoop_cancel_t* t, yoop_cancel_waiter_t* w);
 // whichever comes first (0 from either side means "no deadline").
 uint64_t yoop_cancel_effective_deadline(yoop_cancel_t* t, uint64_t deadline_ns);
 
-// ----- Phase 8.F.3 - Timers ------------------------------------------------
+// ----- Timers --------------------------------------------------------------
 //
 // Block the calling thread for `ns` nanoseconds (or `ms` milliseconds).
 // Returns 0 on the timer firing, -1 on error with errno set. The clock
@@ -320,7 +327,7 @@ void yoop_diag_record_alloc(uint64_t bytes);
 void yoop_diag_record_free(uint64_t bytes);
 void yoop_diag_dump(void);
 
-// ----- Phase 8.F.2 - I/O multiplexer (forward declarations) ----------------
+// ----- I/O multiplexer (forward declarations) ------------------------------
 // Implemented in runtime/yoop_io.c. Declared here so callers don't need
 // a second header. Lazy init on first call; shutdown is hooked into
 // yoop_runtime_shutdown if init ran.
@@ -338,7 +345,7 @@ int yoop_io_wait_writable(int fd);
 // Only ONE waiter per (fd, direction) is permitted. A second concurrent
 // registration fails with -1 / EAGAIN rather than silently displacing
 // the first - epoll's MOD and kqueue's EV_SET both overwrite the stored
-// user pointer, which used to strand the original waiter forever.
+// user pointer, which would strand the original waiter forever.
 int yoop_io_wait_readable_ex(int fd, yoop_cancel_t* ct, uint64_t deadline_ns);
 int yoop_io_wait_writable_ex(int fd, yoop_cancel_t* ct, uint64_t deadline_ns);
 

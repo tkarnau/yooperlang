@@ -1,7 +1,7 @@
-// Phase 11.D.7: generic function instantiations fold through the
+// Generic function instantiations fold through the
 // comptime interpreter. When a CALL_EXPRESSION carries a
-// `genericInstantiation` (stamped by the Phase 7.1 instantiation
-// registry), the lowerer clones the original generic AST with the
+// `genericInstantiation` (stamped by the instantiation registry),
+// the lowerer clones the original generic AST with the
 // concrete type-arg substitution applied (same `cloneAstWithSubstitution`
 // codegen uses for IR emission), lowers the substituted body into
 // bytecode, and dispatches CALL_DIRECT against it. Each (declId,

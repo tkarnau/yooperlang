@@ -1,7 +1,7 @@
-// DWARF composite-type coverage. Every local here is a shape that used to be
-// invisible in a debugger (only prims and opaque pointers got a
-// llvm.dbg.declare); the e2e test drives lldb over this binary and asserts the
-// values are actually readable.
+// DWARF composite-type coverage. Every local here is a composite shape that
+// needs its own llvm.dbg.declare to be visible in a debugger; an emitter that
+// covers only prims and opaque pointers loses all of them. The e2e test drives
+// lldb over this binary and asserts the values are actually readable.
 
 type Point {
     x: int32,

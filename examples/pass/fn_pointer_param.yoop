@@ -1,4 +1,4 @@
-// Phase 10.K: a function-pointer parameter can be called directly by name,
+// A function-pointer parameter can be called directly by name,
 // and a bare top-level function name materializes as the argument. This is
 // the lightest-weight higher-order form - no vtable, no struct, no ctx: a
 // plain non-capturing code pointer passed and called. The same `count_where`

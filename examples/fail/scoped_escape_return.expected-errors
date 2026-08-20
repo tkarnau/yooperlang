@@ -1,0 +1,3 @@
+# Illegal: `scoped` states `mustNotEscape scope`, and returning the binding
+# hands it out of the frame the bound was about.
+26:13: cannot be returned out of one

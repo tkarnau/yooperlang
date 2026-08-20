@@ -50,10 +50,7 @@ export function parseAttribute(ref ps: ParserState): Result<NodeId, ParsingError
   disposable argIds: Vec<NodeId> = vec.vecNew(1);
   if (SelfLexing.peek(ref ps).tag == TokenTags.LPAREN) {
     SelfLexing.advance(ref ps)?;
-    while (
-      SelfLexing.peek(ref ps).tag != TokenTags.RPAREN &&
-      SelfLexing.peek(ref ps).tag != TokenTags.EOF
-    ) {
+    while (untilClosing(ref ps, TokenTags.RPAREN)) {
       vec.vecPush(ref argIds, parseExpression(ref ps, 0)?);
       if (SelfLexing.peek(ref ps).tag != TokenTags.COMMA) {
         break;
@@ -65,10 +62,7 @@ export function parseAttribute(ref ps: ParserState): Result<NodeId, ParsingError
 
   node.childA = parseAttributeTarget(ref ps, node.name)?;
 
-  const start: usize = ps.ast.childIds.len;
-  vec.vecExtendFrom(ref ps.ast.childIds, vec.vecAsArray(ref argIds));
-  node.childStart = start;
-  node.childCount = argIds.len;
+  spliceChildren(ref ps, ref node, ref argIds);
 
   const id = SelfLexing.pushNode(ref ps, node);
   checkAttribute(ref ps, id, nameLoc)?;
@@ -120,20 +114,49 @@ function checkAttribute(ref ps: ParserState, id: NodeId, nameLoc: SourceLocation
     return checkDerive(ref ps, node, id, nameLoc);
   }
   if (str.stringEq(node.name, ATTR_PRECOMPILE)) {
-    // Parsed, and refused BY NAME. `@precompile` folds its initializer at
-    // compile time, which needs the comptime interpreter the bootstrap has no
-    // equivalent of - emitting the decl unfolded would compile and silently do
-    // the work at run time instead, which is the whole thing it exists to avoid.
-    return Result.Err { error: attributeError(
-      ref ps,
-      `@precompile is not supported by the bootstrap yet - it folds its initializer at compile time, and there is no comptime interpreter here`,
-      nameLoc,
-    )};
+    return checkPrecompile(ref ps, node, id, nameLoc);
   }
 
   return Result.Err { error: attributeError(
     ref ps,
     `unknown attribute @${node.name}. Known attributes: @precompile, @derive.`,
+    nameLoc,
+  )};
+}
+
+// `@precompile` takes no arguments, and decorates a `const` whose initializer
+// is folded at compile time.
+//
+// The BLOCK form - `@precompile { ... }`, which runs statements and keeps what
+// they wrote to module-level bindings - is refused by name. It is a different
+// mechanism rather than the same one with a different target: the initializer
+// form produces ONE value for ONE binding, and the block form is a program
+// whose effects on several module globals have to be captured after it ends.
+function checkPrecompile(ref ps: ParserState, node: ASTNode, id: NodeId, nameLoc: SourceLocation): Result<NodeId, ParsingError> {
+  if (node.childCount != 0) {
+    return Result.Err { error: attributeError(
+      ref ps,
+      `@precompile takes no arguments`,
+      nameLoc,
+    )};
+  }
+  if (node.childA == 0) {
+    return Result.Err { error: attributeError(
+      ref ps,
+      `@precompile decorates a const declaration, and this one decorates nothing`,
+      nameLoc,
+    )};
+  }
+  const target = nodeAt(ref ps.ast, declOf(ref ps.ast, id));
+  if (target.kind == ASTNodeKind.CONST_DECL) {
+    return Result.Ok { value: id };
+  }
+  if (target.kind == ASTNodeKind.BLOCK) {
+    return Result.Ok { value: id };
+  }
+  return Result.Err { error: attributeError(
+    ref ps,
+    `@precompile decorates a const declaration, not ${kindName(target.kind)}`,
     nameLoc,
   )};
 }

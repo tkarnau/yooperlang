@@ -2,16 +2,16 @@
 // from the source line that caused them.
 //
 // 1. An untyped-literal EXPRESSION in a template interpolation (`${-7 / 2}`)
-//    reached codegen with its type still unpinned and threw
+//    reaches codegen with its type still unpinned and throws
 //    `llvmType: unhandled yooper type kind "untypedInt"`. A BARE literal
-//    (`${7}`) always worked, because codegen defends itself at INT_LITERAL /
-//    FLOAT_LITERAL - nothing defended the compound node above them. The
-//    interpolation is a value context with no target type, so it now defaults
+//    (`${7}`) is safe, because codegen defends itself at INT_LITERAL /
+//    FLOAT_LITERAL - nothing defends the compound node above them. The
+//    interpolation is a value context with no target type, so it defaults
 //    the same way an un-annotated `let` does (int32 / float64).
 //
 // 2. LLVM puts local values and basic-block labels in ONE namespace, so a user
-//    binding named like one of the emitter's own generated names collided and
-//    failed LLVM verification ("multiple definition of local value named
+//    binding named like one of the emitter's own generated names collides and
+//    fails LLVM verification ("multiple definition of local value named
 //    't0'"). `t0`/`t1` are the ones that actually bite - they are the natural
 //    names for timing code.
 

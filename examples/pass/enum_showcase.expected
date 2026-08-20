@@ -1,0 +1,5 @@
+circle r=2
+rect 3x4
+square s=5
+empty
+exit=0

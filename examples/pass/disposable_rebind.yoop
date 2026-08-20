@@ -1,5 +1,5 @@
-// plans/yooperdoom-takeaways.md 2.4: a bare `disposable` binding is const,
-// and `let disposable` is the mutable opt-in.
+// A bare `disposable` binding is const, and `let disposable` is the mutable
+// opt-in.
 //
 // This reads as a papercut until you see what the const is protecting. The
 // auto-cleanup a `disposable` binding gets fires ONCE, at scope end, on
@@ -12,8 +12,8 @@
 // exactly what a "transform this buffer in a loop" shape needs.
 //
 // Scopes here are functions rather than bare `{ ... }` blocks, because a bare
-// block is not a statement form in Yoop today - see the note in the takeaways
-// plan. Nothing about this fixture depends on that.
+// block is not a statement form in Yoop. Nothing about this fixture depends
+// on that.
 
 import { Disposable, disposable } from "std/core/kinds.yoop";
 

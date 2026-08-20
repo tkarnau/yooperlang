@@ -16,9 +16,9 @@
 //     let stamp: string = time.iso8601(time.utcNow());   // 2026-08-11T19:04:07Z
 //     printf(`${time.localNow()}\n`);                    // DateTime is Display
 //
-// plans/yooperdoom-takeaways.md 4.2: a project numbered its history files
-// `run-0007-*` rather than timestamping them, explicitly because "a timestamp
-// needs a clock this program has no other reason to read".
+// Reaching for this module is a decision, not a default: a timestamp needs a
+// clock, and a program that only wants its artifacts ordered can number them
+// `run-0007-*` and read no clock at all.
 
 // The out-parameters of yoop_time_parts are `unsafe_ptr<int32>` - the same
 // shape std/fs.yoop's stat bridge uses, and the reason this pragma is here.
@@ -157,8 +157,7 @@ export function localNow(): DateTime {
 
 // Zero-padded decimal, which is most of what a timestamp is. Uses
 // `strings.padStart` over `format.intToString` rather than a hand-rolled
-// digit loop - the exact pairing the takeaways found four copies of in a
-// project that had both modules available and never found them (4.1).
+// digit loop, which is the pairing std already provides for this.
 function pad2(v: int32): string {
     return str.padStart(fmt.intToString(int64(v)), 2, "0");
 }

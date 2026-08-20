@@ -1,0 +1,4 @@
+# Illegal: a composition carries all of its operands' obligations, so it may
+# only be written where every operand may be. `only_binding` and `only_type`
+# share no site, which leaves nowhere at all.
+3:6: share no application site

@@ -6,7 +6,7 @@ extern "C" from "fcntl.h" {
 function main(): int32 {
     // Open a guaranteed-nonexistent path. open returns -1, errno = ENOENT (2).
     errno.set(0);
-    let fd: c_int = open("/no/such/file/yoop-phase-8-d", 0);
+    let fd: c_int = open("/no/such/file/yoop-errno-probe", 0);
     let code: c_int = errno.get();
     let msg: string = errno.message(code);
 

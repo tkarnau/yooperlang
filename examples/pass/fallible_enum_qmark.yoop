@@ -1,6 +1,6 @@
-// Phase 9.H: `?` propagation works on any enum with two variants named
-// `Ok` and `Err`. The same convention drives propagation that struct-fallibles
-// have used since Phase 2; the typechecker recognizes the shape structurally,
+// `?` propagation works on any enum with two variants named
+// `Ok` and `Err`. The same convention drives propagation for struct-fallibles;
+// the typechecker recognizes the shape structurally,
 // no marker trait required.
 
 extern "C" from "stdio.h" {

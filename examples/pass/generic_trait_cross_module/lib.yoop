@@ -1,7 +1,7 @@
 // A generic trait declared and implemented in one module, called via the
 // trait-qualified form from another. Regression for the imported-generic-trait
-// resolution gap: `ImportedGenericTrait.method(...)` used to fail with
-// "undefined variable" because lookupTraitByName checked the wrong import kind.
+// resolution gap: if lookupTraitByName checks the wrong import kind,
+// `ImportedGenericTrait.method(...)` fails with "undefined variable".
 
 export trait Box<T> {
     function unwrap(ref self): T;

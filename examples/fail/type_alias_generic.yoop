@@ -1,4 +1,4 @@
-// Generic type aliases are not yet supported - the deferred-feature diagnostic
+// Generic type aliases are not supported - the deferred-feature diagnostic
 // fires and no spurious follow-on error is emitted.
 type Pair<T> = T;
 

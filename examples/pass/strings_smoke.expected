@@ -1,0 +1,8 @@
+eq_match=1 eq_diff=0
+starts_with_Hello=1
+idx_of_World=7
+slice=World err=
+cat=foobar
+all=a-b-c
+fb=Hi err=
+exit=0

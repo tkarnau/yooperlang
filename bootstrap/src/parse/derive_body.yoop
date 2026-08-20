@@ -6,10 +6,9 @@ module parse;
 // fragments together - a struct is one template over all of them, a variant is
 // an arm per case - and wraps the result in the host type the parser needs.
 
-import { Vec }, * as vec from "std/core/vec.yoop";
 import { Text }, * as txt from "std/core/text.yoop";
 import { disposable } from "std/core/kinds.yoop";
-import { AST, ASTNode, ASTNodeKind, NodeId, childAt, nodeAt } from "../ast";
+import { AST, ASTNode, ASTNodeKind, childAt, nodeAt } from "../ast";
 
 // The struct body: setup for every container field, then one template naming
 // them all.

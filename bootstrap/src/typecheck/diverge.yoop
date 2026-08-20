@@ -3,7 +3,7 @@ module typecheck;
 /*
   "Does control flow always LEAVE this statement?"
 
-  One caller: the handler form of `?`, `expr? e { ... }`, whose block runs
+  The first caller: the handler form of `?`, `expr? e { ... }`, whose block runs
   INSTEAD of the expression producing a value. Falling out of the bottom would
   leave the binding the `?` feeds holding nothing, and the Ok payload read that
   follows would read it out of a value that holds an Err. So the block has to
@@ -27,9 +27,38 @@ module typecheck;
   as short as it is: pass D has already refused a switch that is neither
   exhaustive nor defaulted, so a switch that got this far covers every value and
   "every arm diverges" is the whole question.
+
+  The SECOND caller is `firstUnreachableIndex` at the bottom of this file, and
+  it is the same question asked of a whole run of statements: everything after
+  the first one that diverges is dead. It gets the conservatism for free and in
+  the right direction - `alwaysDiverges` answers true only when divergence is
+  CERTAIN, so the warning never flags live code and only ever misses some dead
+  code, which costs nothing.
+
+  The THIRD caller is `checkAllPathsReturn` in pass_d.yoop: a function that
+  declares a return type and whose BODY does not diverge is exactly a function
+  with a path that falls off the end. There the conservatism runs the OTHER way
+  - a false positive is silently accepting a missing return, a false negative
+  refuses a legal program - so every case below has to be one codegen agrees
+  with. It is, case for case: `emitIf` reports terminated only when both halves
+  did, `emitSwitch` only when every arm did, `emitScopedBinding` and
+  `emitKindRegion` hand their block's answer straight back, and `emitWhile`
+  leaves the exit label out for exactly the `while (true)` this file counts.
+
+  ONE known gap, and it is the harmless direction: a `break` written inside the
+  handler block of a `?` in a loop's body is not found by `hasEscapingBreak`,
+  which walks statements and does not descend into expressions. Such a
+  `while (true)` reads as diverging when it does not, so a missing return under
+  it reaches codegen's assertion instead of a diagnostic - which is what
+  happened before this check existed, rather than a new refusal.
 */
 
+import { Option } from "std/core/types.yoop";
 import { AST, ASTNode, ASTNodeKind, NodeId, childAt, nodeAt } from "../ast";
+
+// The diagnostic code for the dead-tail warning. Read by the driver's warning
+// filter the same way UNHANDLED_DISPOSABLE is.
+export const UNREACHABLE_CODE: string = "unreachable-code";
 
 export function alwaysDiverges(ref ast: AST, stmtId: NodeId): bool {
   if (stmtId == 0) {
@@ -59,10 +88,118 @@ export function alwaysDiverges(ref ast: AST, stmtId: NodeId): bool {
     case ASTNodeKind.SWITCH_STATEMENT: {
       return everyArmDiverges(ref ast, stmt);
     }
+    // A kind-prefixed binding that OWNS a block -
+    // `disposable reg: T = open() { ... }` - hangs the block off the DECL
+    // rather than leaving it a BLOCK statement of its own, so it is reached
+    // through childD instead of by the case above. The block runs
+    // unconditionally, so the binding leaves exactly when the block does.
+    // childD is 0 for the ordinary form, and 0 answers false.
+    case ASTNodeKind.LET_DECL,
+         ASTNodeKind.CONST_DECL: {
+      return alwaysDiverges(ref ast, stmt.childD);
+    }
+    // `ephemeral arenaScope(N) { ... }` - the anonymous twin of that, with its
+    // block in childB. The `;` spelling owns the rest of the enclosing scope
+    // and has no block here, which reads as 0 and answers false.
+    case ASTNodeKind.KIND_REGION: {
+      return alwaysDiverges(ref ast, stmt.childB);
+    }
+    // `while (true) { ... }` that nothing breaks out of never reaches the
+    // statement after it, so control leaves it exactly the way the body leaves.
+    // Every accept loop and event loop is written this way, and without this
+    // case a function whose only `return` sits inside one reads as falling off
+    // the end.
+    //
+    // No other loop counts, and that is the whole difference between
+    // `while (true) { work(); }` and `while (i < n) { return i; }`: the second
+    // one's condition may be false on the very first test, so control reaches
+    // the statement after the loop with nothing returned. Neither `for` form
+    // counts either, for the same reason.
+    case ASTNodeKind.WHILE_STATEMENT: {
+      return conditionIsLiteralTrue(ref ast, stmt.childA) &&
+        !hasEscapingBreak(ref ast, stmt.childB);
+    }
     default: {
       return false;
     }
   }
+}
+
+// `while (true)` written out, and nothing else. A condition that is constantly
+// true by some other route (`1 == 1`, a `const`) is not folded: there is no
+// comptime interpreter, and the literal is the one spelling that needs none.
+// codegen/loop.yoop asks the same question the same way, which is what keeps
+// the two from disagreeing about whether a loop has an exit block.
+function conditionIsLiteralTrue(ref ast: AST, condId: NodeId): bool {
+  if (condId == 0) {
+    return false;
+  }
+  const node = nodeAt(ref ast, condId);
+  return node.kind == ASTNodeKind.BOOL_LITERAL && node.intVal != 0;
+}
+
+// Does this statement hold a `break` that leaves the loop being asked about?
+//
+// Descent stops at anything that CAPTURES a break of its own - a nested loop,
+// and a `switch`, whose arms point their `break` at the switch's join rather
+// than at the enclosing loop. A `break` found anywhere else belongs to the loop
+// in question, which makes its exit reachable and the loop non-diverging.
+//
+// Over-reporting here would refuse a legal program, so nothing is guessed at:
+// only the forms whose block certainly runs inside this loop are descended
+// into. Under-reporting costs nothing new - see the gap noted in the header.
+function hasEscapingBreak(ref ast: AST, stmtId: NodeId): bool {
+  if (stmtId == 0) {
+    return false;
+  }
+  const stmt = nodeAt(ref ast, stmtId);
+  switch (stmt.kind) {
+    case ASTNodeKind.BREAK_STATEMENT: {
+      return true;
+    }
+    // Each of these owns the `break`s inside it, so none of them is ours.
+    case ASTNodeKind.WHILE_STATEMENT,
+         ASTNodeKind.FOR_LOOP,
+         ASTNodeKind.FOR_IN_LOOP,
+         ASTNodeKind.SWITCH_STATEMENT: {
+      return false;
+    }
+    case ASTNodeKind.BLOCK: {
+      return anyStatementHasEscapingBreak(ref ast, stmt.childA);
+    }
+    case ASTNodeKind.IF_STATEMENT: {
+      return hasEscapingBreak(ref ast, stmt.childB) ||
+        hasEscapingBreak(ref ast, stmt.childC);
+    }
+    // The two block-owning forms again. Neither is breakable, so a `break`
+    // written in one leaves the loop around it.
+    case ASTNodeKind.LET_DECL,
+         ASTNodeKind.CONST_DECL: {
+      return hasEscapingBreak(ref ast, stmt.childD);
+    }
+    case ASTNodeKind.KIND_REGION: {
+      return hasEscapingBreak(ref ast, stmt.childB);
+    }
+    default: {
+      return false;
+    }
+  }
+}
+
+// True when any statement of a BLOCK's list holds an escaping `break`.
+function anyStatementHasEscapingBreak(ref ast: AST, listId: NodeId): bool {
+  if (listId == 0) {
+    return false;
+  }
+  const list = nodeAt(ref ast, listId);
+  let i: usize = 0;
+  while (i < list.childCount) {
+    if (hasEscapingBreak(ref ast, childAt(ref ast, list, i))) {
+      return true;
+    }
+    i += 1;
+  }
+  return false;
 }
 
 // True when any statement of a BLOCK's list diverges.
@@ -91,6 +228,129 @@ function everyArmDiverges(ref ast: AST, stmt: ASTNode): bool {
   while (i < stmt.childCount) {
     const arm = nodeAt(ref ast, childAt(ref ast, stmt, i));
     if (!alwaysDiverges(ref ast, arm.childB)) {
+      return false;
+    }
+    i += 1;
+  }
+  return true;
+}
+
+// The index of the first statement in a BLOCK's list that control never
+// reaches, or None.
+//
+// The loop stops one short of the end on purpose: a block whose LAST statement
+// diverges is the ordinary shape of every function that ends in a `return`, and
+// there is nothing after it to be dead.
+//
+// Only the FIRST dead statement is reported, not every one after it. One
+// mistake is one diagnostic, and the tail is dead as a run rather than
+// statement by statement.
+export function firstUnreachableIndex(ref ast: AST, listId: NodeId): Option<usize> {
+  if (listId == 0) {
+    return Option.None;
+  }
+  const list = nodeAt(ref ast, listId);
+  if (list.childCount < 2) {
+    return Option.None;
+  }
+  let i: usize = 0;
+  while (i + 1 < list.childCount) {
+    if (alwaysDiverges(ref ast, childAt(ref ast, list, i))) {
+      return Option.Some { value: i + 1 };
+    }
+    i += 1;
+  }
+  return Option.None;
+}
+
+/*
+  "Does control always leave the FUNCTION here?"
+
+  The near twin of `alwaysDiverges`, and the difference is the whole reason it
+  is a second function rather than a flag: a `break` or a `continue` LEAVES THE
+  STATEMENT but stays inside the function. For the `?` handler rule that is
+  enough - the block is left, and the binding the `?` feeds is never read. For
+  "did every path return a value" it is not: the break lands at the loop or
+  switch join, which is still inside a function that owes a value.
+
+  Conflating the two accepted this, which reaches the closing brace with nothing
+  to return and used to reach codegen as an internal error:
+
+      function f(n: int32): int32 {
+        switch (n) { case 1: { break; } default: { break; } }
+      }
+
+  So: RETURN diverges, break and continue do not, and the compound forms recur
+  with this question rather than the other one. `while (true)` with no escaping
+  break still counts, because nothing after it is reachable either way.
+
+  Conservative in the same direction as its twin: anything not listed answers
+  false, which costs a user an explicit `return` rather than admitting a body
+  that falls off the end.
+*/
+export function alwaysReturns(ref ast: AST, stmtId: NodeId): bool {
+  if (stmtId == 0) {
+    return false;
+  }
+  const stmt = nodeAt(ref ast, stmtId);
+  switch (stmt.kind) {
+    case ASTNodeKind.RETURN_STATEMENT: {
+      return true;
+    }
+    case ASTNodeKind.BLOCK: {
+      return anyStatementReturns(ref ast, stmt.childA);
+    }
+    case ASTNodeKind.IF_STATEMENT: {
+      return stmt.childC != 0 &&
+        alwaysReturns(ref ast, stmt.childB) &&
+        alwaysReturns(ref ast, stmt.childC);
+    }
+    case ASTNodeKind.SWITCH_STATEMENT: {
+      return everyArmReturns(ref ast, stmt);
+    }
+    // An infinite loop never reaches what follows it, so a function whose body
+    // ends in one owes nothing further. Read off the same two helpers the
+    // statement-level question uses.
+    case ASTNodeKind.WHILE_STATEMENT: {
+      return conditionIsLiteralTrue(ref ast, stmt.childA) &&
+        !hasEscapingBreak(ref ast, stmt.childB);
+    }
+    // The block a kind-prefixed binding owns, and its anonymous twin.
+    case ASTNodeKind.LET_DECL, ASTNodeKind.CONST_DECL: {
+      return alwaysReturns(ref ast, stmt.childD);
+    }
+    case ASTNodeKind.KIND_REGION: {
+      return alwaysReturns(ref ast, stmt.childB);
+    }
+    default: {
+      return false;
+    }
+  }
+}
+
+function anyStatementReturns(ref ast: AST, listId: NodeId): bool {
+  if (listId == 0) {
+    return false;
+  }
+  const list = nodeAt(ref ast, listId);
+  let i: usize = 0;
+  while (i < list.childCount) {
+    if (alwaysReturns(ref ast, childAt(ref ast, list, i))) {
+      return true;
+    }
+    i += 1;
+  }
+  return false;
+}
+
+function everyArmReturns(ref ast: AST, stmt: ASTNode): bool {
+  if (stmt.childCount == 0) {
+    return false;
+  }
+  let i: usize = 0;
+  while (i < stmt.childCount) {
+    const arm = nodeAt(ref ast, childAt(ref ast, stmt, i));
+    if (!alwaysReturns(ref ast, arm.childB)) {
       return false;
     }
     i += 1;

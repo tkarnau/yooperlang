@@ -1,0 +1,4 @@
+before 0
+[arena-backed text, grown past its initial capacity]
+after nonzero
+exit=0

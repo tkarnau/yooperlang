@@ -44,8 +44,8 @@ function main(): int32 {
         }
         printf(`yoopstore listening on ${HOST}:${PORT}, data root: ${DATA_ROOT}\n`);
 
-        // The handler owns nothing to dispose now that Response bodies are
-        // owned (papercut #6) - a plain `let` is enough.
+        // The handler owns nothing to dispose - Response bodies are owned,
+        // so a plain `let` is enough.
         let h: StorageHandler = handler.storageHandlerNew(DATA_ROOT);
         let d: Dispatcher = Dispatcher.from(ref h);
         // n=0 -> serve forever.

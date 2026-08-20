@@ -14,6 +14,6 @@ function main(): int32 {
     return 0;
 }
 
-// Phase 7.4: trait methods can no longer be called via the bare-form
+// Trait methods cannot be called via the bare-form
 // `dispose(ref h)`. The typechecker rejects the call with a hint pointing at
 // the qualified form `Disposable.dispose(ref h)`.

@@ -1,0 +1,406 @@
+module typecheck;
+
+// The calls written with a DOT on the left, and how each resolves its callee.
+//
+// Four things wear that shape and they resolve four different ways, which is why
+// they are one file rather than one function:
+//
+//   mathx.scale(2)      a NAMESPACE import - resolved against that module's exports
+//   Shape.area(ref r)   a TRAIT method - resolved by the receiver's concrete type
+//   errno.get()         an ambient BRIDGE - resolved by spelling, nothing declares it
+//   VT.method(ref v)    a vtable dispatch - in vtable_use.yoop, not here
+//
+// Once the callee is a `Type.Func`, all of them hand off to check_call.yoop.
+// What is in this file is only the resolution, plus the module-level lookups a
+// namespaced name needs (a const, a global, a function).
+
+import * as vec from "std/core/vec.yoop";
+import * as map from "std/collections/map.yoop";
+import { ASTNode, ASTNodeKind, NodeId, childAt, nodeAt } from "../ast";
+import * as str from "std/core/strings.yoop";
+import { Option } from "std/core/types.yoop";
+// `ns.fn(...)` - a call reached through an `import * as ns`.
+//
+// The lookup goes to the source module's EXPORTS rather than its names, which
+// is what keeps a namespace from being a way around `export`: `ns.hidden()`
+// fails for the same reason `import { hidden }` does.
+function checkQualifiedCall(
+  ref cx: Cx,
+  expr: ASTNode,
+  exprId: NodeId,
+  expected: TypeId
+): TypeId {
+  const base = nodeAt(cx.ast, expr.childB);
+
+  // `errno.get()` / `errno.set(v)` / `errno.message(c)` - the libc errno
+  // bridge, through the yoop runtime. An ambient namespace resolved by
+  // SPELLING rather than by import, the same way the reference's
+  // ERRNO_INTRINSIC is: there is nothing to import it from.
+  if (base.kind == ASTNodeKind.IDENT && str.stringEq(base.name, ERRNO_NAMESPACE)) {
+    return checkErrnoCall(ref cx, expr);
+  }
+
+  // `m.ops.hash(key)` - an INDIRECT call through a function-typed field. The
+  // base is a value rather than a name, and the thing being called is the
+  // field's contents, so this is checked before anything looks for a module.
+  //
+  // Tried first because a base that resolves to a struct cannot be a namespace:
+  // a namespace only ever lives at module level, and a local always shadows.
+  const throughField = fieldFuncTypeOf(ref cx, expr, base);
+  if (throughField != TYPE_ERROR_ID) {
+    return checkIndirectCall(ref cx, expr, exprId, throughField, expected);
+  }
+
+  if (base.kind != ASTNodeKind.IDENT) {
+    checkCallArgs(ref cx, expr);
+    reportError(
+      cx.prog,
+      "only an imported namespace may qualify a call so far - methods are not supported by the bootstrap typechecker yet",
+      base.sourceLoc
+    );
+    return TYPE_ERROR_ID;
+  }
+
+  // `Display.toString(ref p)` - the base is a TRAIT, not a namespace, and the
+  // method is found on the RECEIVER's concrete type rather than in a module.
+  const traitType = traitTypeNamed(cx.prog, cx.tm, base.name);
+  if (traitType != TYPE_ERROR_ID) {
+    return checkTraitCall(ref cx, expr, exprId, base, traitType);
+  }
+
+  // `Reader.from(ref s)`, `PredVT.fromFn(f)`, `Reader.read(ref r, buf)` - the
+  // base is a VTABLE. All three are `Name.member(...)` and none of them is a
+  // module lookup, so they fork here. See typecheck/vtable.yoop.
+  const vtableType = vtableTypeNamed(cx.prog, cx.tm, base.name);
+  if (vtableType != TYPE_ERROR_ID) {
+    return checkVtableCall(
+      ref cx,
+      expr,
+      exprId,
+      base,
+      vtableType
+    );
+  }
+
+  let sourceIndex: ModuleId = 0;
+  switch (namespaceModuleOf(ref cx, base)) {
+    case Option.Some { value: mi }: { sourceIndex = mi; }
+    case Option.None: {
+      checkCallArgs(ref cx, expr);
+      return TYPE_ERROR_ID;   // namespaceModuleOf reported why
+    }
+  }
+  let source = vec.vecGet(ref cx.prog.modules, sourceIndex);
+
+  switch (map.mapGet(ref source.exports, expr.name)) {
+    case Option.Some { value: symId }: {
+      // The signature is the SOURCE module's, but the arguments are checked in
+      // THIS module's scope - the types on both sides are program-wide TypeIds,
+      // so nothing has to be translated between them.
+      return checkAgainstSignature(ref cx, expr, exprId, symId, expr.name, expected);
+    }
+    case Option.None: {
+      checkCallArgs(ref cx, expr);
+      if (lookupOwnName(ref source, expr.name) != SYMBOL_NONE_ID) {
+        reportError(
+          cx.prog,
+          `"${expr.name}" is declared in module ${source.moduleId} but not exported - add \`export\` to its declaration`,
+          expr.sourceLoc
+        );
+      } else {
+        reportError(
+          cx.prog,
+          `"${base.name}" has no export "${expr.name}"`,
+          expr.sourceLoc
+        );
+      }
+      return TYPE_ERROR_ID;
+    }
+  }
+}
+
+// The module an IDENT names as a namespace. `None` with the reason already
+// reported - an Option rather than a sentinel, because ModuleId 0 is the first
+// module loaded and so is never spare.
+function namespaceModuleOf(ref cx: Cx, base: ASTNode): Option<ModuleId> {
+  // A LOCAL first, because `p.x()` on a struct value reaches this path too -
+  // the parser cannot tell it from `ns.fn()`. Without this it would be reported
+  // as an unknown name, since a namespace only ever lives at module level, and
+  // the reader would go hunting for a typo in a name that is right there.
+  switch (scopeLookup(cx.scope, base.name)) {
+    case Option.Some { value: localType }: {
+      reportError(
+        cx.prog,
+        `"${base.name}" is a local of type ${formatType(cx.prog, localType)}, not an imported namespace - calling a method on a value is not supported by the bootstrap typechecker yet`,
+        base.sourceLoc
+      );
+      return Option.None;
+    }
+    case Option.None: { }
+  }
+
+  const symId = lookupOwnName(cx.tm, base.name);
+  if (symId == SYMBOL_NONE_ID) {
+    reportError(cx.prog, `unknown name "${base.name}"`, base.sourceLoc);
+    return Option.None;
+  }
+  switch (symbolAt(cx.prog, symId)) {
+    case Symbol.Namespace { module: mi }: { return Option.Some { value: mi }; }
+    default: {
+      reportError(
+        cx.prog,
+        `"${base.name}" is not an imported namespace, so it has no members to call`,
+        base.sourceLoc
+      );
+      return Option.None;
+    }
+  }
+}
+
+// The type of a module-level `const` by name, or TYPE_ERROR_ID when the name is
+// not one. Silent: the caller has the location and the better message.
+function moduleConstType(ref prog: Program, ref tm: TypedModule, name: string): TypeId {
+  const symId = lookupOwnName(ref tm, name);
+  if (symId == SYMBOL_NONE_ID) {
+    return TYPE_ERROR_ID;
+  }
+  switch (symbolAt(ref prog, symId)) {
+    case Symbol.Value { typeId: t, intVal: v }: { return t; }
+    // A mutable global reads the same way; what differs is that it can be
+    // WRITTEN, which checkAssignment asks about separately.
+    case Symbol.Global { typeId: t, intVal: v, mutable: mu }: { return t; }
+    default: { return TYPE_ERROR_ID; }
+  }
+}
+
+// The type of a module-level name that may be ASSIGNED to. TYPE_ERROR_ID for a
+// const, which is what makes writing one an error rather than a silent no-op -
+// and a const backed by a global is still a const, so the answer is about
+// `mutable` rather than about which symbol shape it landed in.
+function moduleGlobalType(ref prog: Program, ref tm: TypedModule, name: string): TypeId {
+  const symId = lookupOwnName(ref tm, name);
+  if (symId == SYMBOL_NONE_ID) {
+    return TYPE_ERROR_ID;
+  }
+  switch (symbolAt(ref prog, symId)) {
+    case Symbol.Global { typeId: t, intVal: v, mutable: mu }: {
+      if (mu) { return t; }
+      return TYPE_ERROR_ID;
+    }
+    default: { return TYPE_ERROR_ID; }
+  }
+}
+
+// The type of a module-level name backed by a global, ASSIGNABLE OR NOT.
+//
+// The twin of `moduleGlobalType` and deliberately a second function: one asks
+// "may this be written", which a const-backed global answers no to, and this
+// one asks "does this have storage whose initializer runs at run time", which
+// it answers yes to. Collapsing them made pass D skip decorating a const's
+// initializer, and the store codegen then emitted was typed `ptr` throughout.
+export function moduleGlobalStorageType(ref prog: Program, ref tm: TypedModule, name: string): TypeId {
+  const symId = lookupOwnName(ref tm, name);
+  if (symId == SYMBOL_NONE_ID) {
+    return TYPE_ERROR_ID;
+  }
+  switch (symbolAt(ref prog, symId)) {
+    case Symbol.Global { typeId: t, intVal: v, mutable: mu }: { return t; }
+    default: { return TYPE_ERROR_ID; }
+  }
+}
+
+// The type of ANY module-level value name - a const, inlined or not, and a
+// `let`. The union of the two lookups above, and the one the initializer WALK
+// wants: an initializer is an expression whichever storage its decl ended up
+// with, and it has to be typed before anything can read it.
+export function moduleLevelValueType(ref prog: Program, ref tm: TypedModule, name: string): TypeId {
+  const symId = lookupOwnName(ref tm, name);
+  if (symId == SYMBOL_NONE_ID) {
+    return TYPE_ERROR_ID;
+  }
+  switch (symbolAt(ref prog, symId)) {
+    case Symbol.Value { typeId: t, intVal: v }: { return t; }
+    case Symbol.Global { typeId: t, intVal: v, mutable: mu }: { return t; }
+    default: { return TYPE_ERROR_ID; }
+  }
+}
+
+// Whether this module-level decl is backed by a real LLVM global - every `let`,
+// and a `const` whose value was not inlinable.
+//
+// Exported because four walks have to agree on it and none of them can tell
+// from the DECL: a `const` is a global or an immediate depending on what its
+// initializer turned out to be, which is a fact about the symbol.
+export function declIsModuleGlobal(
+  ref prog: Program,
+  ref tm: TypedModule,
+  declNode: ASTNode
+): bool {
+  if (declNode.kind != ASTNodeKind.LET_DECL && declNode.kind != ASTNodeKind.CONST_DECL) {
+    return false;
+  }
+  const symId = lookupOwnName(ref tm, declNode.name);
+  if (symId == SYMBOL_NONE_ID) {
+    return false;
+  }
+  switch (symbolAt(ref prog, symId)) {
+    case Symbol.Global { typeId: t, intVal: v, mutable: mu }: { return true; }
+    default: { return false; }
+  }
+}
+
+// The Func type of a module-level function NAME, or TYPE_ERROR_ID.
+function moduleFuncType(ref prog: Program, ref tm: TypedModule, name: string): TypeId {
+  switch (map.mapGet(ref tm.names, name)) {
+    case Option.None: { return TYPE_ERROR_ID; }
+    case Option.Some { value: symId }: {
+      // No import to follow: an import binds the SOURCE module's SymbolId, the
+      // same integer, so an imported function is already a Symbol.Func here.
+      switch (symbolAt(ref prog, symId)) {
+        case Symbol.Func { typeId: t }: { return t; }
+        default: { return TYPE_ERROR_ID; }
+      }
+    }
+  }
+}
+
+// `Trait.method(ref receiver, ...)` - resolved STATICALLY by the receiver.
+//
+// The trait's own signature is only used to check the method EXISTS on it. What
+// the call actually reaches is the receiver's own method, because that is the
+// one with a body; two types implementing one trait are two symbols, and which
+// of them this call means is decided here rather than at run time.
+function checkTraitCall(
+  ref cx: Cx,
+  expr: ASTNode,
+  exprId: NodeId,
+  base: ASTNode,
+  traitType: TypeId
+): TypeId {
+  if (lookupMethod(cx.prog, traitType, expr.name) == TYPE_ERROR_ID) {
+    checkCallArgs(ref cx, expr);
+    reportError(
+      cx.prog,
+      `trait "${base.name}" has no method "${expr.name}"`,
+      expr.sourceLoc
+    );
+    return TYPE_ERROR_ID;
+  }
+
+  // The RECEIVER is the first argument, and it is what picks the impl - so it
+  // is checked before the rest, with no expectation, and its type read back.
+  if (expr.childA == 0 || nodeAt(cx.ast, expr.childA).childCount == 0) {
+    reportError(
+      cx.prog,
+      `"${base.name}.${expr.name}" needs a receiver - write \`${base.name}.${expr.name}(ref x, ...)\``,
+      expr.sourceLoc
+    );
+    return TYPE_ERROR_ID;
+  }
+  const args = nodeAt(cx.ast, expr.childA);
+  const receiverId = childAt(cx.ast, args, 0);
+  const receiverType = receiverTypeOf(cx.prog,
+    checkExpr(ref cx, receiverId, TYPE_ERROR_ID));
+
+  // An OPAQUE receiver - a type parameter inside a generic body. It has no
+  // methods of its own and never will; what it has is BOUNDS, and a bound is
+  // the promise that every type substituted for it does implement this. So the
+  // signature comes from the bound, the call is checked against it once here,
+  // and codegen picks the real symbol per instantiation.
+  if (isTypeParam(cx.prog, receiverType)) {
+    const bound = boundMethodOn(cx.prog, receiverType, traitType, expr.name);
+    if (bound == TYPE_ERROR_ID) {
+      reportError(
+        cx.prog,
+        `type parameter "${typeParamNameOf(cx.prog, receiverType)}" is not bound to trait "${base.name}" - add \`implements ${base.name}\` to its declaration`,
+        expr.sourceLoc
+      );
+      return TYPE_ERROR_ID;
+    }
+    map.mapInsert(ref cx.tm.calleeReceiver, uint64(exprId), receiverType);
+    return checkArgsAgainstFunc(ref cx, expr, exprId, bound, expr.name);
+  }
+
+  // A VTABLE receiver erasing THIS trait: `Readable.read(ref r, buf)` where
+  // `r` is a `Reader`. The call is an indirect one through the slot, which is
+  // exactly what `Reader.read(ref r, buf)` means - so it goes to the same
+  // checker rather than looking for a method the erased type does not have.
+  // The reference accepts both spellings, and a caller handed a `Reader` and
+  // nothing else has only the trait's name to write.
+  if (vtableTraitOf(cx.prog, receiverType) == traitType) {
+    return checkVtableDispatch(
+      ref cx,
+      expr,
+      exprId,
+      base,
+      receiverType
+    );
+  }
+
+  const method = lookupMethod(cx.prog, receiverType, expr.name);
+  if (method == TYPE_ERROR_ID) {
+    reportError(
+      cx.prog,
+      `${formatType(cx.prog, receiverType)} does not implement "${base.name}.${expr.name}"`,
+      expr.sourceLoc
+    );
+    return TYPE_ERROR_ID;
+  }
+
+  // Which impl this call landed on, for codegen. The receiver's TYPE is the
+  // answer, and the symbol name follows from it plus the method name.
+  map.mapInsert(ref cx.tm.calleeReceiver, uint64(exprId), receiverType);
+
+  return checkArgsAgainstFunc(ref cx, expr, exprId, method, expr.name);
+}
+
+// `errno.get(): c_int`, `errno.set(v: c_int): void`, `errno.message(c: c_int):
+// string`. Three fixed signatures, checked here rather than registered as
+// symbols because there is no module to register them in.
+function checkErrnoCall(ref cx: Cx, expr: ASTNode): TypeId {
+  const intType = primTypeId(PrimKind.INT32);
+  let args: usize = 0;
+  if (expr.childA != 0) {
+    args = nodeAt(cx.ast, expr.childA).childCount;
+  }
+
+  if (str.stringEq(expr.name, "get")) {
+    if (args != 0) {
+      reportError(cx.prog, `errno.get() takes no arguments`, expr.sourceLoc);
+    }
+    return intType;
+  }
+  if (str.stringEq(expr.name, "set")) {
+    checkErrnoArg(ref cx, expr, intType);
+    return TYPE_VOID_ID;
+  }
+  if (str.stringEq(expr.name, "message")) {
+    checkErrnoArg(ref cx, expr, intType);
+    return primTypeId(PrimKind.STRING);
+  }
+
+  checkCallArgs(ref cx, expr);
+  reportError(
+    cx.prog,
+    `"errno" has no member "${expr.name}" - the ones that exist are get, set and message`,
+    expr.sourceLoc
+  );
+  return TYPE_ERROR_ID;
+}
+
+function checkErrnoArg(ref cx: Cx, expr: ASTNode, want: TypeId): void {
+  if (expr.childA == 0) {
+    reportError(cx.prog, `errno.${expr.name}() takes one argument`, expr.sourceLoc);
+    return;
+  }
+  const list = nodeAt(cx.ast, expr.childA);
+  if (list.childCount != 1) {
+    reportError(cx.prog, `errno.${expr.name}() takes one argument`, expr.sourceLoc);
+    return;
+  }
+  checkExpr(ref cx, childAt(cx.ast, list, 0), want);
+}
+
+// The ambient namespace of the libc errno bridge. Not an import: `errno.get()`
+// resolves by spelling, the same way the reference's ERRNO_INTRINSIC does.
+const ERRNO_NAMESPACE: string = "errno";

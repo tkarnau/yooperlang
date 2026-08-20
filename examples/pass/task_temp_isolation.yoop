@@ -12,8 +12,7 @@
 // would see main's arena (already carrying 64 bytes, so it would report 576)
 // and its `resetTemp()` would leave main reading 0.
 //
-// Stage 4 of plans/async-allocator-context.md - it rides the same per-task
-// record the ambient allocator got in stage 1.
+// It rides the same per-task record the ambient allocator context does.
 
 import.unsafe;
 import * as mem from "std/core/alloc.yoop";

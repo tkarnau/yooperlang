@@ -1,0 +1,432 @@
+module typecheck;
+
+// A call checked against a signature, and the generic inference that needs.
+//
+// The shared middle of every call form: given a callee's `Type.Func` and a list
+// of argument nodes, check the arity, check each argument against its own
+// parameter (which is what pins an untyped literal to it), and hand back the
+// return type. A GENERIC callee goes one step further - its type arguments are
+// inferred from the arguments first and from the expectation second, and the
+// instantiation is recorded for codegen to monomorphize.
+//
+// A call written with a dot on the left resolves its callee elsewhere (see
+// check_qualified.yoop) and then arrives here like any other.
+
+import { Vec }, * as vec from "std/core/vec.yoop";
+import * as map from "std/collections/map.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import { ASTNode, ASTNodeKind, NodeId, childAt, nodeAt } from "../ast";
+import * as str from "std/core/strings.yoop";
+import { Option } from "std/core/types.yoop";
+function checkCall(ref cx: Cx, expr: ASTNode, exprId: NodeId, expected: TypeId): TypeId {
+  // `ns.fn(...)`. The parser could not tell a namespace from a value, so the
+  // fork is here, before the cast and printf carve-outs - neither of which a
+  // qualified name can mean.
+  if (expr.childB != 0) {
+    return checkQualifiedCall(ref cx, expr, exprId, expected);
+  }
+
+  // `runSuite()` where `runSuite` is a LOCAL holding a function value. A local
+  // shadows a module function of the same name, so this is checked first - and
+  // it is the same indirect call a function-typed FIELD produces, just reached
+  // through a name.
+  switch (scopeLookup(cx.scope, expr.name)) {
+    case Option.Some { value: localType }: {
+      switch (typeAt(cx.prog, localType)) {
+        case Type.Func { params: p, ret: r, variadic: v, isAsync: fnAsync }: {
+          map.mapInsert(ref cx.tm.indirectCalls, uint64(exprId), true);
+          checkArgsAgainstFunc(ref cx, expr, exprId, localType, expr.name);
+          return r;
+        }
+        default: { }
+      }
+    }
+    case Option.None: { }
+  }
+
+  // A cast is handled before the arguments, because its single operand wants to
+  // be checked AGAINST the target type (so `int64(1)` pins the literal) rather
+  // than with no expectation like a call argument.
+  const earlyCast = primTypeIdOfName(expr.name);
+  if (earlyCast != TYPE_ERROR_ID) {
+    return checkCast(ref cx, expr, earlyCast);
+  }
+
+  const symId = lookupOwnName(cx.tm, expr.name);
+  if (symId == SYMBOL_NONE_ID) {
+    // printf stays magic when NOTHING declared it, exactly as it is in the JS
+    // reference: it is variadic C and almost every program uses it, so a call
+    // with no signature in sight still works. A module that writes its own
+    // `extern "C" { function printf(fmt: string, ...): int32; }` - which 158
+    // files in this tree do - resolves above and gets its arguments checked
+    // against that declaration instead. Probing the reference is what settled
+    // the precedence: declaring a NON-variadic printf there makes
+    // `printf("a %d\n", 3)` an arity error, so the declaration wins.
+    if (isPrintfName(expr.name)) {
+      checkCallArgs(ref cx, expr);
+      return primTypeId(PrimKind.INT32);
+    }
+    // Still check the arguments, so a mistake inside one is reported alongside
+    // the unknown name rather than hidden behind it.
+    checkCallArgs(ref cx, expr);
+    reportError(cx.prog, `unknown function "${expr.name}"`, expr.sourceLoc);
+    return TYPE_ERROR_ID;
+  }
+  return checkAgainstSignature(ref cx, expr, exprId, symId, expr.name, expected);
+}
+
+// Arguments checked with NO expectation. Only for a callee with no signature to
+// check against: printf, and a name that did not resolve.
+function checkCallArgs(ref cx: Cx, expr: ASTNode): void {
+  if (expr.childA == 0) {
+    return;
+  }
+  const args = nodeAt(cx.ast, expr.childA);
+  let a: usize = 0;
+  while (a < args.childCount) {
+    checkExpr(ref cx, childAt(cx.ast, args, a), TYPE_ERROR_ID);
+    a += 1;
+  }
+}
+
+// Infer a generic callee's type arguments, monomorphize it, and record which
+// instance this call site landed on. Returns the SUBSTITUTED Func type.
+//
+// Two sources of information, in this order:
+//
+//   the ARGUMENTS   `identity(3)` matches the declared `T` against int32
+//   the EXPECTED    `let v: Box<int> = boxOf(3)` matches `Box<T>` against
+//                   `Box<int>`, which is the only signal when nothing but the
+//                   RETURN type mentions T
+//
+// Arguments go first because they are what the reader is looking at. The
+// expected type fills in whatever they left unknown.
+function instantiateCallee(
+  ref cx: Cx,
+  expr: ASTNode,
+  exprId: NodeId,
+  declId: DeclId,
+  calleeName: string,
+  expected: TypeId
+): TypeId {
+  let info = genericAt(cx.prog, declId);
+
+  // One slot per parameter, TYPE_ERROR_ID meaning "still unknown".
+  disposable bound: Vec<TypeId> = vec.vecNew(info.params.len);
+  let b: usize = 0;
+  while (b < info.params.len) {
+    vec.vecPush(ref bound, TYPE_ERROR_ID);
+    b += 1;
+  }
+
+  // The arguments are checked with NO expectation here, because the parameter
+  // types are exactly what is not known yet. checkAgainstSignature re-checks
+  // them against the substituted signature once it is built, which is where an
+  // untyped literal finally pins.
+  switch (typeAt(cx.prog, info.template)) {
+    case Type.Func { params: p, ret: r, variadic: v, isAsync: fnAsync }: {
+      if (expr.childA != 0) {
+        const args = nodeAt(cx.ast, expr.childA);
+        let a: usize = 0;
+        while (a < args.childCount && a < p.len) {
+          const argId = childAt(cx.ast, args, a);
+          // A STRUCT LITERAL is skipped here rather than checked. It has no type
+          // of its own - which struct it is comes from context - so with no
+          // expectation to give it, checking it can only report "cannot tell
+          // which struct this literal is" about a call that is perfectly well
+          // formed. It contributes nothing to inference either, so nothing is
+          // lost: `vec.vecPush(ref out, { str: "(", tag: ... })` infers T from
+          // the vector and the re-check in checkArgsAgainstFunc pins the
+          // literal to it. If NOTHING else pins the parameter, the "cannot
+          // infer T" message below is the right one and this is what lets it be
+          // reached.
+          if (nodeAt(cx.ast, argId).kind == ASTNodeKind.STRUCT_LITERAL) {
+            a += 1;
+            continue;
+          }
+          const got = checkExpr(ref cx, argId, TYPE_ERROR_ID);
+          inferTypeArgs(cx.prog, vec.vecGet(ref p, a), got, ref info.params, ref bound);
+          a += 1;
+        }
+      }
+      inferTypeArgs(cx.prog, r, expected, ref info.params, ref bound);
+    }
+    default: { return TYPE_ERROR_ID; }
+  }
+
+  // A parameter nothing mentioned is not an error the CALL can fix by trying
+  // harder - it needs an annotation somewhere, and saying which one is missing
+  // is the whole message.
+  let u: usize = 0;
+  while (u < bound.len) {
+    if (vec.vecGet(ref bound, u) == TYPE_ERROR_ID) {
+      reportError(
+        cx.prog,
+        `cannot infer "${typeParamNameAt(cx.prog, ref info.params, u)}" for "${calleeName}" - annotate the binding it goes to`,
+        expr.sourceLoc
+      );
+      return TYPE_ERROR_ID;
+    }
+    u += 1;
+  }
+
+  // The bounds are the promise the DECL made; this is where an argument keeps
+  // it. Checked before the instance is registered, so a refused call leaves no
+  // monomorphization behind for codegen to emit against a type that cannot
+  // supply the methods its body calls.
+  if (!checkBoundsSatisfied(cx.prog, ref info.params, ref bound,
+                            `call to "${calleeName}"`, expr.sourceLoc)) {
+    return TYPE_ERROR_ID;
+  }
+
+  const instance = instantiateFunction(cx.prog, declId, ref bound);
+  map.mapInsert(ref cx.tm.calleeInstance, uint64(exprId), instance);
+  return funcInstanceAt(cx.prog, instance).funcType;
+}
+
+// The NAME of the i'th type parameter, for the message above.
+function typeParamNameAt(ref prog: Program, ref params: Vec<TypeId>, i: usize): string {
+  if (i >= params.len) {
+    return "?";
+  }
+  switch (typeAt(ref prog, vec.vecGet(ref params, i))) {
+    case Type.TypeParam { name: n, originDecl: o, bounds: bs }: { return n; }
+    default: { return "?"; }
+  }
+}
+
+// A call checked against the callee's declared parameters: the right NUMBER of
+// arguments, each of the right type. Returns the callee's return type.
+//
+// Each argument is checked AGAINST its parameter, which is what pins an untyped
+// literal to it - `takesLong(1)` gives the 1 an int64 rather than defaulting it
+// to int32 and then complaining they differ.
+function checkAgainstSignature(
+  ref cx: Cx,
+  expr: ASTNode,
+  exprId: NodeId,
+  symId: SymbolId,
+  calleeName: string,
+  expected: TypeId
+): TypeId {
+  let funcType: TypeId = TYPE_ERROR_ID;
+  switch (symbolAt(cx.prog, symId)) {
+    case Symbol.Func { typeId: t }: { funcType = t; }
+    case Symbol.GenericDecl { decl: d, sort: s }: {
+      if (s != GenericSort.FUNC) {
+        checkCallArgs(ref cx, expr);
+        reportError(cx.prog, `"${calleeName}" is a type, not a function`, expr.sourceLoc);
+        return TYPE_ERROR_ID;
+      }
+      // Nothing wrote the type arguments down, so they are INFERRED from the
+      // arguments and the expected type, and the call is monomorphized against
+      // whatever comes out.
+      funcType = instantiateCallee(
+        ref cx,
+        expr,
+        exprId,
+        d,
+        calleeName,
+        expected
+      );
+      if (funcType == TYPE_ERROR_ID) {
+        return TYPE_ERROR_ID;   // instantiateCallee reported why
+      }
+    }
+    default: {
+      checkCallArgs(ref cx, expr);
+      reportError(cx.prog, `"${calleeName}" is not callable`, expr.sourceLoc);
+      return TYPE_ERROR_ID;
+    }
+  }
+
+  // THE TASK-SPAWN CARVE-OUT. A `task` body is pausable, so its signature is a
+  // coroutine's and rule 3 would demand an `await` - but a task's call site is
+  // a SPAWN onto the scheduler, not an inline drive, and `pooled h = worker(1)`
+  // is how every one of them is written. The reference makes the same carve-out
+  // and keys it on the callee's declared return being `Task<T>`; the bootstrap
+  // keys it on the KIND clause that produces that return, which is the same
+  // fact one step earlier.
+  const spawns = map.mapContainsKey(ref cx.prog.taskSymbols, uint64(symId));
+  if (spawns) {
+    cx.prog.callWasAwaited = true;
+  }
+  const ret = checkArgsAgainstFunc(
+    ref cx,
+    expr,
+    exprId,
+    funcType,
+    calleeName
+  );
+  // The CLEARANCE half of the same arguments, and the stamp saying what this
+  // call's own value carries. After the type check, because it reads the marker
+  // decoration that checking a nested call leaves behind. This is the one
+  // funnel every call with a SYMBOL reaches - a plain name and `ns.f(...)` both
+  // arrive here - which is what makes a cross-module sink enforceable at all.
+  // See typecheck/markers.yoop.
+  checkCallMarkers(ref cx, expr, exprId, symId, calleeName);
+  // ...and the OTHER half of `provides Task`: the call evaluates to `Task<T>`
+  // while the body still returns T. Wrapped here rather than stored on the
+  // signature (which is what the reference does) because the body's check reads
+  // that same signature - see the note at the top of task.yoop.
+  if (spawns && ret != TYPE_ERROR_ID) {
+    return internTask(cx.prog, ret);
+  }
+  return ret;
+}
+
+// The arity and type check, against a Func type that is already resolved.
+// Shared by an ordinary call and a trait-method call, which differ only in how
+// they FIND the Func.
+function checkArgsAgainstFunc(
+  ref cx: Cx,
+  expr: ASTNode,
+  exprId: NodeId,
+  funcType: TypeId,
+  calleeName: string
+): TypeId {
+  let params: Vec<TypeId> = vec.vecNew(0);
+  let ret: TypeId = TYPE_ERROR_ID;
+  let variadic = false;
+  switch (typeAt(cx.prog, funcType)) {
+    case Type.Func { params: p, ret: r, variadic: v, isAsync: fnAsync }: {
+      params = p;
+      ret = r;
+      variadic = v;
+    }
+    default: {
+      checkCallArgs(ref cx, expr);
+      return TYPE_ERROR_ID;
+    }
+  }
+
+  // ASYNC COLORING, asked here because this is the one funnel every call shape
+  // reaches - a plain name, `ns.f(...)`, `Trait.method(...)`, a bound method on
+  // an opaque receiver, and a call through a function VALUE. Asked BEFORE the
+  // arguments are checked, so `cx.prog.callWasAwaited` still describes this call
+  // rather than one nested in an argument.
+  checkCallColoring(
+    cx.prog, cx.tm, expr, exprId, funcType, calleeName, cx.prog.callWasAwaited
+  );
+
+  let given: usize = 0;
+  if (expr.childA != 0) {
+    const args = nodeAt(cx.ast, expr.childA);
+    given = args.childCount;
+    let a: usize = 0;
+    while (a < args.childCount) {
+      const argId = childAt(cx.ast, args, a);
+      // Past the declared parameters there is nothing to check against; the
+      // arity error below says so once, rather than once per extra argument.
+      let want: TypeId = TYPE_ERROR_ID;
+      if (a < params.len) {
+        want = vec.vecGet(ref params, a);
+      }
+      const got = checkExpr(ref cx, argId, want);
+      if (want != TYPE_ERROR_ID && got != TYPE_ERROR_ID && !typeAccepts(cx.prog, want, got)) {
+        reportError(
+          cx.prog,
+          `argument ${a + 1} of "${calleeName}" is ${formatType(cx.prog, want)}, not ${formatType(cx.prog, got)}`,
+          nodeAt(cx.ast, argId).sourceLoc
+        );
+      }
+      a += 1;
+    }
+  }
+
+  // A variadic callee takes AT LEAST its declared parameters, and the extras
+  // are unchecked - there is no parameter for them to be checked against. The
+  // FIXED ones are checked exactly as any other call's are, which is the half
+  // the JS reference gets wrong: it lets `myvar()` through typecheck and emits
+  // a call with no format argument, which clang then rejects as "not enough
+  // parameters specified for call". Refusing it here points at the call site.
+  const wrongCount = given < params.len || (given > params.len && !variadic);
+  if (wrongCount) {
+    if (variadic) {
+      reportError(
+        cx.prog,
+        `"${calleeName}" takes at least ${params.len} argument(s), got ${given}`,
+        expr.sourceLoc
+      );
+    } else {
+      reportError(
+        cx.prog,
+        `"${calleeName}" takes ${params.len} argument(s), got ${given}`,
+        expr.sourceLoc
+      );
+    }
+  }
+  return ret;
+}
+
+// A call whose callee is a VALUE rather than a name. The arguments are checked
+// against the signature exactly as a direct call's are - the only difference is
+// where the signature came from.
+function checkIndirectCall(
+  ref cx: Cx,
+  expr: ASTNode,
+  exprId: NodeId,
+  funcType: TypeId,
+  expected: TypeId
+): TypeId {
+  // Recorded for codegen: the callee is the FIELD's contents, so there is no
+  // symbol to look up and nothing else can tell it that.
+  map.mapInsert(ref cx.tm.indirectCalls, uint64(exprId), true);
+  checkArgsAgainstFunc(ref cx, expr, exprId, funcType, expr.name);
+  switch (typeAt(cx.prog, funcType)) {
+    case Type.Func { params: p, ret: r, variadic: v, isAsync: fnAsync }: { return r; }
+    default: { return TYPE_ERROR_ID; }
+  }
+}
+
+// The Func type of `base.name` when `base` is a value with a function-typed
+// field of that name, or TYPE_ERROR_ID when it is anything else.
+//
+// Deliberately silent: "not a function-typed field" is the ordinary case (every
+// `ns.fn()` in the program reaches here first), so a diagnostic belongs to
+// whoever fails AFTER this returns nothing.
+function fieldFuncTypeOf(ref cx: Cx, expr: ASTNode, base: ASTNode): TypeId {
+  // A bare IDENT base is only a value if it is a LOCAL - a module-level name
+  // there is a namespace or a type, and neither has fields.
+  if (base.kind == ASTNodeKind.IDENT) {
+    switch (scopeLookup(cx.scope, base.name)) {
+      case Option.None: { return TYPE_ERROR_ID; }
+      case Option.Some { value: t }: {
+        const field = funcFieldOf(cx.prog, t, expr.name);
+        if (field != TYPE_ERROR_ID) {
+          // DECORATE the base. Codegen reads the field out of this value, and
+          // it needs both the aggregate's LLVM type and the field's position -
+          // neither of which it can get without the base's resolved type.
+          vec.vecSet(ref cx.tm.resolvedTypes, expr.childB, t);
+        }
+        return field;
+      }
+    }
+  }
+  if (base.kind != ASTNodeKind.FIELD_ACCESS) {
+    return TYPE_ERROR_ID;
+  }
+  // `m.ops.hash(...)`: the base is itself a field read, so check it to learn
+  // its type. Checking it here also DECORATES it, which codegen needs.
+  const baseType = checkExpr(ref cx, expr.childB, TYPE_ERROR_ID);
+  return funcFieldOf(cx.prog, baseType, expr.name);
+}
+
+// The type of a struct's field, when that type is a Func. TYPE_ERROR_ID
+// otherwise, including when the base is not a struct at all.
+function funcFieldOf(ref prog: Program, ownerType: TypeId, fieldName: string): TypeId {
+  const found = lookupField(ref prog, derefType(ref prog, ownerType), fieldName);
+  if (!found.found) {
+    return TYPE_ERROR_ID;
+  }
+  switch (typeAt(ref prog, found.typeId)) {
+    case Type.Func { params: p, ret: r, variadic: v, isAsync: fnAsync }: { return found.typeId; }
+    default: { return TYPE_ERROR_ID; }
+  }
+}
+
+// `printf` is a compiler builtin on both sides rather than an extern anyone has
+// to declare - see the same carve-out in src/jsyooptypecheck/typecheck.js.
+function isPrintfName(name: string): bool {
+  return str.stringEq(name, "printf");
+}

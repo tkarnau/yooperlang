@@ -1,0 +1,3 @@
+# Illegal: a module-level `const` is immutable, so `PI = 4;` has no storage to
+# write to.
+4:8: cannot assign to const "PI"

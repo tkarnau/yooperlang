@@ -1,0 +1,56 @@
+// `@precompile const NAME: T = <expr>;` - the initializer is evaluated at BUILD
+// time and a literal is put back in its place.
+//
+// What the attribute promises is not just the right number: it is that the
+// program never does the work. `steps` counts nothing at run time here because
+// nothing calls it - the values below are immediates and a baked array payload
+// by the time clang sees them. The IR-shape half of that is asserted in
+// bootstrap/src/comptime/comptime.test.yoop; this fixture is the behaviour.
+
+function square(x: int32): int32 {
+  return x * x;
+}
+
+function fact(n: int32): int32 {
+  let r: int32 = 1;
+  let i: int32 = 1;
+  while (i <= n) {
+    r = r * i;
+    i = i + 1;
+  }
+  return r;
+}
+
+// A loop, a branch and a recursive call, all run by the evaluator.
+function collatzSteps(n: int32): int32 {
+  let steps: int32 = 0;
+  let cur: int32 = n;
+  while (cur != 1) {
+    if (cur % 2 == 0) { cur = cur / 2; } else { cur = 3 * cur + 1; }
+    steps = steps + 1;
+  }
+  return steps;
+}
+
+@precompile const SQR_7: int32 = square(7);
+@precompile const FACT_6: int32 = fact(6);
+@precompile const STEPS_27: int32 = collatzSteps(27);
+
+// An array whose ELEMENTS are calls. The whole literal folds into one module
+// datum whose bytes are already right.
+@precompile const TBL: int32[] = [square(1), square(2), square(3), square(4)];
+
+// A negative result, which is spelled as a magnitude plus a flag on the way
+// back into the arena.
+@precompile const NEG: int32 = 0 - fact(5);
+
+// A const folded from an EARLIER folded const.
+@precompile const DOUBLED: int32 = square(SQR_7);
+
+function main(): int {
+  printf(`SQR_7=${SQR_7} FACT_6=${FACT_6} STEPS_27=${STEPS_27}\n`);
+  let t: int32[] = TBL;
+  printf(`TBL=${t[0]},${t[1]},${t[2]},${t[3]} len=${t.len}\n`);
+  printf(`NEG=${NEG} DOUBLED=${DOUBLED}\n`);
+  return 0;
+}

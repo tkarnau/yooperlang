@@ -1,7 +1,6 @@
-// Phase 13.B: variants can now `implements Trait propagates<K>` and carry
-// trait methods inside the variant body. Before, the disposal walk had
-// to live in a free function called from a wrapper struct's `dispose` -
-// the variant couldn't directly own the Disposable contract.
+// A variant can `implements Trait propagates<K>` and carry trait methods
+// inside the variant body, so the disposal walk lives on the variant itself
+// rather than in a free function called from a wrapper struct's `dispose`.
 //
 // This fixture exercises every wired surface:
 //   * Parser - `implements`, `propagates`, and a `function dispose(...)`

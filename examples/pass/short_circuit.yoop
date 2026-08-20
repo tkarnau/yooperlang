@@ -1,8 +1,8 @@
 // `&&` and `||` evaluate the right side only when the left has not already
 // decided the answer.
 //
-// They used to lower through INT_OP_MAP - `andand` onto the bitwise `and`,
-// `oror` onto `or` - so BOTH sides always ran. That is wrong in the one way
+// Lowering them through INT_OP_MAP - `andand` onto the bitwise `and`,
+// `oror` onto `or` - runs BOTH sides always. That is wrong in the one way
 // that matters: every guard idiom in every language is written on the
 // assumption that it is not. The failure is invisible until the right side is
 // unsafe, and then it is a segfault several frames from the source.

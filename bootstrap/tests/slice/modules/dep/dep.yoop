@@ -1,0 +1,8 @@
+module dep;
+// Dependencies are FLAT, so `leaf` sits beside this module rather than inside
+// it, and this line resolves by walking up from THIS file - not from the entry.
+// That is the property that makes one source file work unchanged both in its
+// author's repository and once installed under a consumer's modules root.
+import * as leaf from "modules/leaf";
+
+export function depTimesLeaf(n: int32): int32 { return n * leaf.leafValue(); }

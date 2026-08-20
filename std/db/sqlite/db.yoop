@@ -41,9 +41,9 @@ module sqlite;
 //     let _n: int32 = sqlite.exec(ref db, "...")?;   // a `?` here rolls back
 //     let _c: int32 = sqlite.commit(ref tx)?;
 //
-// Deliberately absent from this first cut:
-//   * Blobs. sqlite3_bind_blob / column_blob want a length pair; the shape
-//     wants `uint8[]` plumbing that is worth its own pass.
+// Deliberately absent:
+//   * Blobs. sqlite3_bind_blob / column_blob want a length pair, which needs
+//     `uint8[]` plumbing this does not have.
 //   * Connection pooling, and any notion of a query builder.
 
 import { Disposable, disposable } from "../../core/kinds.yoop";

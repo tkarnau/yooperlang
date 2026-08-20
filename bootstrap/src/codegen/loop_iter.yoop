@@ -45,8 +45,7 @@ module codegen;
 import { Vec }, * as vec from "std/core/vec.yoop";
 import { disposable } from "std/core/kinds.yoop";
 import { ASTNode, NodeId } from "../ast";
-import { TypeId, IterableWalk, ITERABLE_NEXT_METHOD, derefType, moduleIdOf,
-  nominalModuleOf, methodSymbolName } from "../typecheck";
+import { TypeId, IterableWalk, ITERABLE_NEXT_METHOD, derefType, moduleIdOf, nominalModuleOf, methodSymbolName } from "../typecheck";
 
 export function emitForInIterable(
   ref cx: Cx,
@@ -54,17 +53,14 @@ export function emitForInIterable(
   stmtId: NodeId,
   retTy: string,
   ref walk: IterableWalk
-): string {
+): EmitResult {
   const iterType = derefType(cx.prog, resolvedTypeAt(ref cx, stmt.childA));
   const iterTy = llvmType(cx.prog, iterType);
   const stepTy = llvmType(cx.prog, walk.stepType);
   const elemTy = typeOf(ref cx, stmtId);
 
   let iterable: Operand = Operand.None;
-  const ierr = emitExpr(ref cx, stmt.childA, ref iterable);
-  if (ierr.len > 0) {
-    return ierr;
-  }
+  emitExpr(ref cx, stmt.childA, ref iterable)?;
   const iterSlot = declareAnonSlot(ref cx, iterTy);
   emitStore(ref cx, iterTy, iterable, TEMP_SLOT_NAME, iterSlot.id);
   const stepSlot = declareAnonSlot(ref cx, stepTy);
@@ -91,11 +87,11 @@ export function emitForInIterable(
   emitStore(ref cx, elemTy, Operand.Temp { id: elemValue }, stmt.name, loopVar.id);
 
   loopPush(ref cx, stepLabel, endLabel);
-  let err = "";
+  let err: EmitResult = EmitResult.Ok;
   let bodyTerminated = false;
   emitBlock(ref cx, stmt.childB, retTy, ref bodyTerminated, ref err);
   loopPop(ref cx);
-  if (err.len > 0) {
+  if (emitFailed(err)) {
     return err;
   }
   if (!bodyTerminated) {
@@ -106,7 +102,7 @@ export function emitForInIterable(
   emitBr(ref cx, topLabel);
 
   emitLabel(ref cx, endLabel);
-  return "";
+  return EmitResult.Ok;
 }
 
 //   %t1 = call %variant.t__IterStep_string @fs__DirIter__next(ptr %sc.1.addr)

@@ -7,8 +7,6 @@
 // that hands them to `runAll`. Everything you can see from here down - ordering,
 // isolation, filtering, reporting, the exit code - is plain yoop.
 //
-// See plans/testing-via-kinds.md for the design and its tradeoffs.
-//
 //     // strange_add.test.yoop
 //     import.test;
 //     import { suite, test, Case, asserts } from "std/test.yoop";
@@ -50,11 +48,11 @@ let FAILED: int32 = 0;
 // flushes stdout first and every suite prints its `# <name>` TAP line before
 // the arena scope opens.
 //
-// That flush is the whole fix. Before it, an over-budget suite was a null
-// deref inside vecPush, the process died with `signal: 'SIGSEGV'` and
-// `output: [null, null, null]`, and every line the run had already printed
-// went with it - so the last thing visible was a PASSING case from an earlier
-// suite. See plans/yooperdoom-takeaways.md 1.2.
+// That flush is the whole fix. Without it, an over-budget suite is a null
+// deref inside vecPush, the process dies with `signal: 'SIGSEGV'` and
+// `output: [null, null, null]`, and every line the run has already printed
+// goes with it - so the last thing visible is a PASSING case from an earlier
+// suite.
 //
 // If a test genuinely needs more than a megabyte, the honest answer is
 // usually that it should not be reading that much (yooperdoom hit this trying
@@ -112,7 +110,7 @@ export function asserts(name: string): Case {
 
 // A function-position kind. `enumerable as "suites"` is what authorizes the
 // compiler to collect every function carrying this kind into a table, and
-// names the table so a second enumerable kind (a future `bench`) stays
+// names the table so a second enumerable kind (a `bench`, say) stays
 // distinct. `signature` pins the shape, so a suite with the wrong arity is an
 // error at the suite rather than inside generated code.
 export kind suite {

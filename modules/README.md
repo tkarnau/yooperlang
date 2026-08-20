@@ -16,6 +16,14 @@ accept. That makes this the right home for
 - anything useful enough to maintain but too opinionated or too heavy to force
   on every program that imports `std/core`.
 
+## What is here
+
+- **`json/`** - a JSON value model, parser and serializer. It is here rather
+  than in `std/` because not every program needs one, and the compiler itself
+  is its first consumer: `yoopiler_boot --lsp` reads and writes the Language
+  Server Protocol through it. That is the standing decision in practice - the
+  compiler may depend on a module outside `std/`.
+
 ## Layout
 
 Each subdirectory is one module, and is exactly what a user installs:
@@ -36,8 +44,7 @@ The repo root is itself a modules root, so these modules resolve for each other
 and for anything else in the tree by the ordinary rule: `import * as m from
 "modules/mongo"` walks up from the importing file to the nearest `modules`
 directory. Modules here depend on each other **flat**, never by nesting - a
-module carrying its own `modules/` directory is a hard error at import time. See
-[plans/modules-folder.md](../plans/archive/modules-folder.md).
+module carrying its own `modules/` directory is a hard error at import time.
 
 Note that `examples/modules_demo/` has a `modules/` folder of its own and is
 therefore unaffected by this one: the nearest root wins.

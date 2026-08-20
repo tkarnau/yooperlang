@@ -1,9 +1,10 @@
 // Cross-module clearance failure: the consumer forgets to launder the value
 // and passes raw, un-cleared data straight into the library sink called
-// through its namespace (`db.runQuery`). Before namespaced-callee resolution
-// in kindFlow this compiled clean (the guarantee evaporated at the module
-// boundary); now the conferred-capability check follows across it and rejects
-// the call.
+// through its namespace (`db.runQuery`). Namespaced-callee resolution in
+// kindFlow is what makes this fail: without it the call compiles clean and
+// the guarantee evaporates at the module boundary. With it, the
+// conferred-capability check follows across the boundary and rejects the
+// call.
 
 import { Body, cleared } from "./lib.yoop";
 import * as db from "./lib.yoop";

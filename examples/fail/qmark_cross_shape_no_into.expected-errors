@@ -1,0 +1,4 @@
+# Illegal: `?` on a Result<int32, IoError> inside a function returning
+# Result<int32, AppError> has to convert the error, and IoError implements no
+# Into<AppError>.
+20:26: has to implement Into<AppError>

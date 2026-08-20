@@ -1,0 +1,6 @@
+This program never terminates on its own. It binds 127.0.0.1:18081 and blocks
+in accept waiting for a client that the suite does not supply, so it has no
+stdout and no exit code to assert - it is a demo you drive with curl. Its
+outcome also depends on whether port 18081 happens to be free on the machine.
+The router's path matching and capture rules are asserted without a socket by
+examples/pass/http_url_smoke.

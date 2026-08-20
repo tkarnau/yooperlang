@@ -11,11 +11,6 @@ import { TokenTags, tagName, getTokenPrecedence, posToSourceLocation } from "../
 import { ParsingError } from "../diagnostics";
 import * as str from "std/core/strings.yoop";
 
-// `Reader.from(ref s)` names its member with a KEYWORD token, so the postfix
-// loop has to spell the name itself. Named rather than written inline because
-// pass D matches on the same string - see the vtable builder there.
-const VTABLE_FROM_MEMBER: string = "from";
-
 export function parseExpressionStatement(ref ps: ParserState): ParsingResult {
   let node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.EXPRESSION_STATEMENT);
   node.childA = parseExpression(ref ps, 0)?;
@@ -290,10 +285,9 @@ export function parseExpression(ref ps: ParserState, minPrecedence: int): Parsin
     // in the prefix switch, a field in the DOT branch below. So reaching this
     // means the callee is an arbitrary expression, which nothing lowers.
     //
-    // Refused rather than left alone, because leaving it produced a SILENT
-    // miscompile: the arguments were dropped and the function pointer itself
-    // was the value. It only became reachable when function-type annotations
-    // landed and `((k: K) => V)[]` started parsing.
+    // Refused rather than left alone, because leaving it is a SILENT
+    // miscompile: the arguments are dropped and the function pointer itself
+    // becomes the value.
     if (postfixTag == TokenTags.LPAREN) {
       return Result.Err { error: SelfLexing.createParsingError(
         ref ps,
@@ -305,24 +299,15 @@ export function parseExpression(ref ps: ParserState, minPrecedence: int): Parsin
       SelfLexing.advance(ref ps)?;
       const baseId = SelfLexing.pushNode(ref ps, node);
 
-      // `Reader.from(ref s)` - ERASING a concrete type into a vtable value.
+      // The right of a `.` is a pure NAME LOOKUP, so a reserved word is
+      // unambiguous there and is read as the member it spells: `r.type` on a
+      // struct with a `type` field, and `Reader.from(ref s)` - the vtable
+      // erasure, whose member really is spelled with the `from` keyword.
       //
-      // `from` is a KEYWORD token (it is how an import and an extern name their
-      // source), so `parseIdentAsName` would report "expected IDENT, got FROM"
-      // about a line that is perfectly well formed. Read as a member name here
-      // instead, gated on the `(` that makes it a call - which is what keeps
-      // `l.from.x` on a struct with a field called `from` a separate question,
-      // since the field DECLARATION does not parse either.
-      //
-      // Whether the base really is a vtable is pass D's to answer; the parser
-      // cannot tell one from a namespace, exactly as it cannot for `ns.fn()`.
-      let member: string = "";
-      if (SelfLexing.peek(ref ps).tag == TokenTags.FROM && peekAheadIsLParen(ref ps)) {
-        SelfLexing.advance(ref ps)?;
-        member = VTABLE_FROM_MEMBER;
-      } else {
-        member = parseIdentAsName(ref ps)?;
-      }
+      // Whether the base is a vtable, a namespace or a struct is pass D's to
+      // answer; the parser cannot tell them apart, exactly as it cannot for
+      // `ns.fn()`.
+      const member = parseIdentOrKeywordAsName(ref ps)?;
 
       // `ns.fn(...)` is a QUALIFIED CALL, not a field read of a function value.
       // The parser cannot tell a namespace from a struct local - that needs name
@@ -557,10 +542,7 @@ function parseCallArgs(ref ps: ParserState): Result<NodeId, ParsingError> {
   SelfLexing.expect(ref ps, TokenTags.LPAREN)?;
 
   disposable ids: Vec<NodeId> = vec.vecNew(4);
-  while (
-    SelfLexing.peek(ref ps).tag != TokenTags.RPAREN &&
-    SelfLexing.peek(ref ps).tag != TokenTags.EOF
-  ) {
+  while (untilClosing(ref ps, TokenTags.RPAREN)) {
     vec.vecPush(ref ids, parseExpression(ref ps, 0)?);
     if (SelfLexing.peek(ref ps).tag == TokenTags.COMMA) {
       SelfLexing.advance(ref ps)?;
@@ -591,10 +573,7 @@ function parseArrayElements(ref ps: ParserState): Result<NodeId, ParsingError> {
   SelfLexing.expect(ref ps, TokenTags.LBRACKET)?;
 
   disposable ids: Vec<NodeId> = vec.vecNew(4);
-  while (
-    SelfLexing.peek(ref ps).tag != TokenTags.RBRACKET &&
-    SelfLexing.peek(ref ps).tag != TokenTags.EOF
-  ) {
+  while (untilClosing(ref ps, TokenTags.RBRACKET)) {
     vec.vecPush(ref ids, parseExpression(ref ps, 0)?);
     if (SelfLexing.peek(ref ps).tag == TokenTags.COMMA) {
       SelfLexing.advance(ref ps)?;
@@ -608,18 +587,18 @@ function parseArrayElements(ref ps: ParserState): Result<NodeId, ParsingError> {
 // `{ x: 1, y: 2 }` - the fields, as a NODE_LIST of STRUCT_LITERAL_FIELD.
 //
 // Each field node carries its NAME and its value in childA. Which struct this
-// is comes from context, so the parser never has to know.
+// is comes from context, so the parser never has to know - which is also why a
+// RESERVED WORD is legal as a field name here: the name mirrors a declaration
+// that was free to spell it that way, and the `:` after it leaves nothing
+// ambiguous.
 function parseStructLiteralFields(ref ps: ParserState): Result<NodeId, ParsingError> {
   const loc = posToSourceLocation(ps.src, ps.pos, 1);
   SelfLexing.expect(ref ps, TokenTags.LCURLY)?;
 
   disposable ids: Vec<NodeId> = vec.vecNew(4);
-  while (
-    SelfLexing.peek(ref ps).tag != TokenTags.RCURLY &&
-    SelfLexing.peek(ref ps).tag != TokenTags.EOF
-  ) {
+  while (untilClosing(ref ps, TokenTags.RCURLY)) {
     let field = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.STRUCT_LITERAL_FIELD);
-    field.name = parseIdentAsName(ref ps)?;
+    field.name = parseIdentOrKeywordAsName(ref ps)?;
     SelfLexing.expect(ref ps, TokenTags.COLON)?;
     field.childA = parseExpression(ref ps, 0)?;
     vec.vecPush(ref ids, SelfLexing.pushNode(ref ps, field));
@@ -675,17 +654,6 @@ function looksLikeVariantPayload(ref ps: ParserState): bool {
   switch (SelfLexing.peekAhead(ref ps, 2)) {
     case Result.Err { error: e2 }: { return false; }
     case Result.Ok { value: second }: { return second.tag == TokenTags.COLON; }
-  }
-}
-
-// Whether the token AFTER the current one is a `(`. One token past the cursor
-// is the whole lookahead ParserState offers, and it is enough here: it is what
-// separates `X.from(ref v)` - a CALL, and the vtable erasure the bootstrap
-// refuses by name - from a field access on a member spelled `from`.
-function peekAheadIsLParen(ref ps: ParserState): bool {
-  switch (SelfLexing.peekAhead(ref ps, 1)) {
-    case Result.Ok { value: next }: { return next.tag == TokenTags.LPAREN; }
-    case Result.Err { error: e }: { return false; }
   }
 }
 

@@ -22,18 +22,18 @@ module parse;
   follows the second identifier: `{` or `=` for a declaration, `(` for a
   function carrying the kind.
 
-  NOTHING ENFORCES KINDS. Clauses are recorded by their leading word rather than
-  interpreted, exactly as kind prefixes have been since they landed. That keeps
-  the limitation "not enforced" instead of "not parsed", which is the difference
-  between a program that compiles with its annotations intact and one that does
-  not compile at all.
+  The parser INTERPRETS none of this. A clause is recorded by its leading word
+  and by the run of words after it, exactly as kind prefixes are recorded by
+  name; what a clause MEANS, and which combinations of them are legal, is
+  typecheck/kinds.yoop's. That keeps a limitation here "not enforced" instead of
+  "not parsed", which is the difference between a program that compiles with its
+  annotations intact and one that does not compile at all.
 */
 
 import { Result } from "std/core/types.yoop";
 import { Vec }, * as vec from "std/core/vec.yoop";
 import { disposable } from "std/core/kinds.yoop";
-import * as str from "std/core/strings.yoop";
-import { AST, ASTNode, NodeId, ASTNodeKind, childAt, nodeAt } from "../ast";
+import { ASTNode, NodeId, ASTNodeKind } from "../ast";
 import { TokenTags, tagName, posToSourceLocation } from "../lex";
 import { ParsingError } from "../diagnostics";
 
@@ -50,6 +50,7 @@ export function atKindDecl(ref ps: ParserState): bool {
 //
 //   name              the kind's name
 //   childA            parameter list-node (0 = none), for `kind aligned(n: usize)`
+//   flagA             true for the `= a & b` COMPOSITION form
 //   own childIds run  the KIND_CLAUSE nodes
 export function parseKindDecl(ref ps: ParserState): Result<NodeId, ParsingError> {
   SelfLexing.advance(ref ps)?;                    // the contextual `kind`
@@ -66,18 +67,12 @@ export function parseKindDecl(ref ps: ParserState): Result<NodeId, ParsingError>
 
   SelfLexing.expect(ref ps, TokenTags.LCURLY)?;
   disposable ids: Vec<NodeId> = vec.vecNew(4);
-  while (
-    SelfLexing.peek(ref ps).tag != TokenTags.RCURLY &&
-    SelfLexing.peek(ref ps).tag != TokenTags.EOF
-  ) {
+  while (untilClosing(ref ps, TokenTags.RCURLY)) {
     vec.vecPush(ref ids, parseKindClause(ref ps)?);
   }
   SelfLexing.expect(ref ps, TokenTags.RCURLY)?;
 
-  const start: usize = ps.ast.childIds.len;
-  vec.vecExtendFrom(ref ps.ast.childIds, vec.vecAsArray(ref ids));
-  node.childStart = start;
-  node.childCount = ids.len;
+  spliceChildren(ref ps, ref node, ref ids);
   return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
 }
 
@@ -91,10 +86,7 @@ function parseKindParams(ref ps: ParserState): Result<NodeId, ParsingError> {
   const loc = posToSourceLocation(ps.src, ps.pos, 1);
 
   disposable ids: Vec<NodeId> = vec.vecNew(2);
-  while (
-    SelfLexing.peek(ref ps).tag != TokenTags.RPAREN &&
-    SelfLexing.peek(ref ps).tag != TokenTags.EOF
-  ) {
+  while (untilClosing(ref ps, TokenTags.RPAREN)) {
     vec.vecPush(ref ids, parseFunctionParam(ref ps)?);
     if (SelfLexing.peek(ref ps).tag == TokenTags.COMMA) {
       SelfLexing.advance(ref ps)?;
@@ -118,23 +110,22 @@ function parseKindParams(ref ps: ParserState): Result<NodeId, ParsingError> {
 //                   no `appliesTo` is exactly a clause list, so there is
 //                   nothing to name and nothing to look up.
 //
-// This used to consume the operands and record NOTHING, which compiled a
+// Consuming the operands and recording NOTHING would compile a
 // `scoped_alt h: Vec3 = ...` binding to no scope-end call at all - a promise
 // dropped rather than refused.
 function parseKindComposition(ref ps: ParserState, node: ASTNode): Result<NodeId, ParsingError> {
   let guard = node;
+  // The one thing a later pass cannot recover from the clause run: a
+  // composition with only inline operands holds exactly the clauses a
+  // written-out kind would, and the rules differ - `appliesTo` in an inline
+  // body is refused, and a composition takes its sites from its named operands.
+  guard.flagA = true;
   disposable ids: Vec<NodeId> = vec.vecNew(2);
-  while (
-    SelfLexing.peek(ref ps).tag != TokenTags.SEMICOLON &&
-    SelfLexing.peek(ref ps).tag != TokenTags.EOF
-  ) {
+  while (untilClosing(ref ps, TokenTags.SEMICOLON)) {
     const tag = SelfLexing.peek(ref ps).tag;
     if (tag == TokenTags.LCURLY) {
       SelfLexing.advance(ref ps)?;
-      while (
-        SelfLexing.peek(ref ps).tag != TokenTags.RCURLY &&
-        SelfLexing.peek(ref ps).tag != TokenTags.EOF
-      ) {
+      while (untilClosing(ref ps, TokenTags.RCURLY)) {
         vec.vecPush(ref ids, parseKindClause(ref ps)?);
       }
       SelfLexing.expect(ref ps, TokenTags.RCURLY)?;
@@ -147,16 +138,24 @@ function parseKindComposition(ref ps: ParserState, node: ASTNode): Result<NodeId
       vec.vecPush(ref ids, SelfLexing.pushNode(ref ps, operand));
       continue;
     }
+    // `(b & c) & d` - a GROUPING, and the language has no such thing. There is
+    // one operator and it is a flat intersection, so a parenthesis can only
+    // mean a precedence the reader supplied and the grammar does not have.
+    // Consuming it silently is what made this parse as `b & c & d`.
+    if (tag == TokenTags.LPAREN || tag == TokenTags.RPAREN) {
+      return Result.Err { error: SelfLexing.createParsingError(
+        ref ps,
+        `kind "${guard.name}" parenthesizes its composition operands - a composition is a flat intersection, so there is no grouping for "(" to express`,
+        peekLengthUsize(ref ps),
+      )};
+    }
     // `&` and anything else joining the operands. There is one operator, so
     // there is nothing to record about which was written.
     SelfLexing.advance(ref ps)?;
   }
   SelfLexing.expect(ref ps, TokenTags.SEMICOLON)?;
 
-  const start: usize = ps.ast.childIds.len;
-  vec.vecExtendFrom(ref ps.ast.childIds, vec.vecAsArray(ref ids));
-  guard.childStart = start;
-  guard.childCount = ids.len;
+  spliceChildren(ref ps, ref guard, ref ids);
   return Result.Ok { value: SelfLexing.pushNode(ref ps, guard) };
 }
 
@@ -164,12 +163,12 @@ function parseKindComposition(ref ps: ParserState, node: ASTNode): Result<NodeId
 // source writes - the `&` is - so it can never collide with a real clause word.
 export const COMPOSE_CLAUSE: string = "compose";
 
-// One clause, recorded by its LEADING WORD and otherwise consumed.
+// One clause, recorded by its LEADING WORD and by the WORDS after it.
 //
-//   appliesTo binding;      ->  KIND_CLAUSE "appliesTo"
+//   appliesTo binding;      ->  KIND_CLAUSE "appliesTo", one word child
 //   mustCall dispose beforeScopeEnd;
-//                           ->  KIND_CLAUSE "mustCall"
-//   ownsBlock;              ->  KIND_CLAUSE "ownsBlock"
+//                           ->  KIND_CLAUSE "mustCall", two word children
+//   ownsBlock;              ->  KIND_CLAUSE "ownsBlock", no word children
 //
 // A clause is a run of tokens ending in `;`, and its recorded name is the
 // SOURCE SPELLING of the first one. Some of these words are keywords in this
@@ -178,9 +177,9 @@ export const COMPOSE_CLAUSE: string = "compose";
 // the JS lexer happened to promote - so reading the text rather than the tag is
 // what keeps the two spellings from being recorded differently.
 //
-// Recording the first word is what makes a kind decl carry its shape rather
-// than being skipped wholesale, and it is honest about how much of the meaning
-// is understood, which is none of it.
+// Recording the words is what makes a kind decl carry its shape rather than
+// being skipped wholesale: a site rule cannot be checked against a clause that
+// was consumed and forgotten.
 function parseKindClause(ref ps: ParserState): Result<NodeId, ParsingError> {
   if (SelfLexing.peek(ref ps).tag == TokenTags.SEMICOLON) {
     return Result.Err { error: SelfLexing.createParsingError(
@@ -208,26 +207,80 @@ function parseKindClause(ref ps: ParserState): Result<NodeId, ParsingError> {
   }
   node.strId = internString(ref ps, argument);
 
-  // A clause body can be a BRACED BLOCK - `layout { abi "C"; };` - so the scan
-  // tracks nesting rather than stopping at the first `;` it sees. Without that
-  // the inner `;` ends the clause and the leftover `}` surfaces as a confusing
-  // "unexpected token at top level".
-  let depth: usize = 0;
+  // Every word the scan passes at depth 0 is RECORDED, as a KIND_CLAUSE_WORD
+  // child of the clause. `appliesTo binding parameter field;` is one clause
+  // naming three sites, and one interned `strId` can only answer the first of
+  // them - so the run is what a site rule reads, and each word carries its own
+  // location because the diagnostic points at a word.
+  //
+  // A clause body can be a BRACED BLOCK - `layout { abi "C"; };` - and it holds
+  // SUB-CLAUSES rather than words: `abi "C"` and `align 32` are each a leading
+  // word plus its own arguments, exactly the shape this function reads at the
+  // outer level. So the body is parsed into its own NODE_LIST of KIND_CLAUSE
+  // nodes and hung off childA, and the word run stays what it was - the depth-0
+  // words. A body recorded as loose words could not say which argument belonged
+  // to which sub-clause, which is the whole question a layout rule asks.
+  disposable words: Vec<NodeId> = vec.vecNew(2);
   while (true) {
     const tag = SelfLexing.peek(ref ps).tag;
-    if (tag == TokenTags.EOF) {
-      break;
-    }
-    if (depth == 0 && (tag == TokenTags.SEMICOLON || tag == TokenTags.RCURLY)) {
+    if (tag == TokenTags.EOF || tag == TokenTags.SEMICOLON || tag == TokenTags.RCURLY) {
       break;
     }
     if (tag == TokenTags.LCURLY) {
-      depth += 1;
-    } else if (tag == TokenTags.RCURLY) {
-      depth -= 1;
+      node.childA = parseKindClauseBody(ref ps)?;
+      continue;
+    }
+    if (tag != TokenTags.COMMA) {
+      let word = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.KIND_CLAUSE_WORD);
+      word.name = peekText(ref ps);
+      vec.vecPush(ref words, SelfLexing.pushNode(ref ps, word));
     }
     SelfLexing.advance(ref ps)?;
   }
   SelfLexing.expect(ref ps, TokenTags.SEMICOLON)?;
+  spliceChildren(ref ps, ref node, ref words);
+  return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
+}
+
+// `{ abi "C"; align 32; }` - a clause's braced body, as a NODE_LIST of the
+// KIND_CLAUSE nodes inside it.
+function parseKindClauseBody(ref ps: ParserState): Result<NodeId, ParsingError> {
+  const loc = posToSourceLocation(ps.src, ps.pos, 1);
+  SelfLexing.expect(ref ps, TokenTags.LCURLY)?;
+  disposable ids: Vec<NodeId> = vec.vecNew(2);
+  while (untilClosing(ref ps, TokenTags.RCURLY)) {
+    vec.vecPush(ref ids, parseKindSubClause(ref ps)?);
+  }
+  SelfLexing.expect(ref ps, TokenTags.RCURLY)?;
+  return Result.Ok { value: SelfLexing.buildListNode(ref ps, ref ids, loc) };
+}
+
+// One `abi "C";` inside a body. Same shape as the outer clause and read the
+// same way - a leading word, then its arguments as KIND_CLAUSE_WORD children -
+// so a rule over either reads one structure.
+//
+// An argument's recorded name is its SOURCE SPELLING, quotes included: `abi "C"`
+// records `"C"` rather than `C`, which is what lets a diagnostic quote back what
+// was written.
+function parseKindSubClause(ref ps: ParserState): Result<NodeId, ParsingError> {
+  let node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.KIND_CLAUSE);
+  node.name = peekText(ref ps);
+  SelfLexing.advance(ref ps)?;
+
+  disposable words: Vec<NodeId> = vec.vecNew(2);
+  while (true) {
+    const tag = SelfLexing.peek(ref ps).tag;
+    if (tag == TokenTags.EOF || tag == TokenTags.SEMICOLON || tag == TokenTags.RCURLY) {
+      break;
+    }
+    if (tag != TokenTags.COMMA) {
+      let word = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.KIND_CLAUSE_WORD);
+      word.name = peekText(ref ps);
+      vec.vecPush(ref words, SelfLexing.pushNode(ref ps, word));
+    }
+    SelfLexing.advance(ref ps)?;
+  }
+  SelfLexing.expect(ref ps, TokenTags.SEMICOLON)?;
+  spliceChildren(ref ps, ref node, ref words);
   return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
 }

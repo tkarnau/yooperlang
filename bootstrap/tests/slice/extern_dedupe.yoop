@@ -5,12 +5,11 @@
 // them can see the others: this file's `extern` blocks, the template-literal
 // lowering (which is libc rather than std - `strlen` / `malloc` / `free` /
 // `memcpy` / `sprintf`), and the runtime bridge. A file declaring `malloc` and
-// then building a string used to emit two `declare ptr @malloc(i64)` lines and
-// clang rejected the second as "invalid redefinition of function 'malloc'",
-// naming neither of them. That was 2.1 in plans/bootstrap-completion.md and 44
-// of the 420 files in the surface probe - the largest single bucket in it, and
-// every one of them was `malloc`, because std/core/alloc.yoop writes exactly
-// the block below.
+// then building a string must not emit two `declare ptr @malloc(i64)` lines:
+// clang rejects the second as "invalid redefinition of function 'malloc'",
+// naming neither of them. It is the commonest shape in the corpus, and it is
+// almost always `malloc`, because std/core/alloc.yoop writes exactly the block
+// below.
 //
 // The signatures here MATCH the lowering's, which is what makes them reusable:
 // `usize` is `i64` and `unsafe_ptr<void>` is `ptr`, so `declare ptr

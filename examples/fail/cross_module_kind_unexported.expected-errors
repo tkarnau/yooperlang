@@ -1,0 +1,7 @@
+# Illegal: io.yoop declares the kind `disposable` but does not export it. A
+# kind is exported like any other declaration, and an unexported one is not
+# importable just because it is a kind.
+#
+# A DIRECTORY fixture: the harness builds
+# `cross_module_kind_unexported/main.yoop`.
+1:9: "disposable" is declared in module

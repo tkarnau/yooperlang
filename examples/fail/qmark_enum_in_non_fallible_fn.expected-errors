@@ -1,0 +1,3 @@
+# Illegal: `?` propagates an Err out of the ENCLOSING function, and `main`
+# returns int32, which has no Err arm to propagate into.
+14:26: only legal inside a function that returns a fallible variant

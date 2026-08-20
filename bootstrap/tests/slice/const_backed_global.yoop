@@ -1,0 +1,47 @@
+// A module-level `const` whose value is not something there IS to inline.
+//
+// The fast path is unchanged: a number, a bool, a string or an array of those
+// inlines at every use and costs no storage. Anything else - a call result, a
+// struct literal - is backed by a real global whose value the module's init
+// function stores before `main` runs a line of user code.
+//
+// `const` therefore means IMMUTABLE rather than "inlined". That is the whole
+// point of the fixture: the two kinds of const have to be indistinguishable
+// from a body, and the run-time one has to be initialized before anything can
+// read it.
+
+type Point { x: int32, y: int32 }
+
+function five(): int32 { return 5; }
+function scale(p: Point, by: int32): Point {
+  return { x: p.x * by, y: p.y * by };
+}
+
+// Inlined: an immediate, a string and an array descriptor, no storage at all.
+const LIT: int32 = 7;
+const NAME: string = "yoop";
+const TABLE: int32[] = [1, 2, 3];
+
+// Backed by a global: a call result, and a struct literal.
+const CALLED: int32 = five();
+const ORIGIN: Point = { x: 3, y: 4 };
+// One initialized FROM another, which is what makes the init order load
+// bearing rather than incidental.
+const SCALED: Point = scale(ORIGIN, 10);
+
+// Read from a function other than the one that would have inlined it, so the
+// read really is a load of the global rather than a constant folded in place.
+function originX(): int32 {
+  let p: Point = ORIGIN;
+  return p.x;
+}
+
+function main(): int {
+  printf(`LIT=${LIT} NAME=${NAME} TABLE=${TABLE[0]},${TABLE[1]},${TABLE[2]}\n`);
+  printf(`CALLED=${CALLED}\n`);
+  let o: Point = ORIGIN;
+  printf(`ORIGIN=(${o.x},${o.y}) originX=${originX()}\n`);
+  let s: Point = SCALED;
+  printf(`SCALED=(${s.x},${s.y})\n`);
+  return 0;
+}

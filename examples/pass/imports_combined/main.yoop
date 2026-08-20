@@ -1,4 +1,4 @@
-// Yoopstore-papercut #9: one import line binds both the namespace (for the
+// One import line binds both the namespace (for the
 // value-level functions) and a named type, instead of two separate lines.
 import * as shape, { Shape } from "./shape.yoop";
 

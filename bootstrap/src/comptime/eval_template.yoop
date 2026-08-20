@@ -1,0 +1,81 @@
+module comptime;
+
+// `` `step ${n}` `` - a template literal, rendered at compile time.
+//
+// The rendering has to be the one the RUNTIME would produce, or a folded string
+// says something the same program would not. So the rules here mirror what
+// codegen emits: an integer in decimal at its own signedness, a bool as `true`
+// or `false`, a string as itself.
+//
+// A FLOAT is refused by name. The runtime renders one through `%g`, and
+// reproducing a libc's `%g` exactly - its precision, its exponent threshold,
+// its trailing-zero trimming - is a second answer to the same question. No
+// program in the corpus folds one, and a wrong string is worse than a refusal.
+
+import { Vec }, * as vec from "std/core/vec.yoop";
+import * as str from "std/core/strings.yoop";
+import * as fmt from "std/core/format.yoop";
+import { Result } from "std/core/types.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import { ASTNode, ASTNodeKind, NodeId, childAt, nodeAt } from "../ast";
+import { SourceLocation } from "../diagnostics";
+import { TypeId, primIsSigned } from "../typecheck";
+
+export function evalTemplateLiteral(
+  ref cx: EvalCx,
+  expr: ASTNode,
+  exprId: NodeId
+): Result<ValueId, ComptimeError> {
+  const ty = typeOfNode(ref cx, exprId);
+  disposable parts: Vec<string> = vec.vecNew(expr.childCount);
+
+  let i: usize = 0;
+  while (i < expr.childCount) {
+    const partId = childAt(cx.ast, expr, i);
+    const part = nodeAt(cx.ast, partId);
+    if (part.kind == ASTNodeKind.STRING_PART) {
+      vec.vecPush(ref parts, vec.vecGet(ref cx.ast.strings, part.strId));
+    } else {
+      // An interpolation is an EXPR_PART wrapping the expression, so the value
+      // is one slot in rather than the part itself.
+      const value = evalExprValue(ref cx, part.childA)?;
+      vec.vecPush(ref parts, renderValue(ref cx, value, part.sourceLoc)?);
+    }
+    i += 1;
+  }
+
+  if (parts.len == 0) {
+    return Result.Ok { value: strValue(cx.va, ty, "") };
+  }
+  // One heap string for the whole literal, held for as long as the fold's value
+  // is - the same cost every other string in the arena has.
+  return Result.Ok { value: strValue(cx.va, ty, str.stringConcatAll(vec.vecAsArray(ref parts))) };
+}
+
+// One interpolated value as the text the runtime would have printed.
+export function renderValue(ref cx: EvalCx, value: ValueId, loc: SourceLocation): Result<string, ComptimeError> {
+  const slot = valueAt(cx.va, value);
+  switch (slot.kind) {
+    case ValueKind.STR: { return Result.Ok { value: slot.text }; }
+    case ValueKind.BOOL: {
+      if (slot.bits == 0) {
+        return Result.Ok { value: "false" };
+      }
+      return Result.Ok { value: "true" };
+    }
+    case ValueKind.INT: {
+      // The signedness decides what the stored bits MEAN, so a uint64 past
+      // 2^63 renders as itself rather than as a negative number.
+      if (primIsSigned(cx.prog, slot.typeId)) {
+        return Result.Ok { value: fmt.intToString(asSigned(cx.prog, slot.typeId, slot.bits)) };
+      }
+      return Result.Ok { value: fmt.uintToString(slot.bits) };
+    }
+    default: {
+      return Result.Err { error: comptimeError(
+        "the comptime evaluator renders only an integer, a bool or a string into a template - a float would need this to reproduce a libc's `%g` exactly",
+        loc
+      )};
+    }
+  }
+}

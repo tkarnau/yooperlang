@@ -1,4 +1,4 @@
-// Phase 8.F.2 - I/O multiplexer core for the Yooperlang runtime.
+// yoop_io.c - I/O multiplexer core for the Yooperlang runtime.
 //
 // This file owns everything that does NOT vary by platform: the registration
 // table, the sequence-numbered identity scheme, the fired-under-io_mu abandon
@@ -16,11 +16,11 @@
 //   returns immediately, so the caller can suspend its coroutine and hand the
 //   worker thread back. Delivery pushes the task onto the run queue instead.
 //
-// See plans/phase-8-f-2-multiplexer.md, and yoop_io_internal.h for why the
-// backends are split rather than abstracted together.
+// See yoop_io_internal.h for why the backends are split rather than
+// abstracted together.
 //
-// The filesystem and directory helpers that used to share this file now live
-// in yoop_fs.c - they had nothing to do with polling beyond the filename.
+// The filesystem and directory helpers live in yoop_fs.c - they have nothing
+// to do with polling beyond the filename.
 
 #include "yoop_io_internal.h"
 
@@ -144,9 +144,9 @@ int64_t yoop_socketpair_write(int fd, const void* buf, size_t n) {
 // ----- lifecycle state -----------------------------------------------------
 //
 // io_init_mu guards startup/shutdown; io_mu guards the registration table and
-// the fired/unpark handshake. The pair used to be a pthread_once_t, which
-// could not be reset - so an init after a shutdown left the multiplexer
-// permanently dead. A plain flag under a mutex restarts cleanly.
+// the fired/unpark handshake. A plain flag under a mutex rather than a
+// pthread_once_t, which cannot be reset - an init after a shutdown would
+// leave the multiplexer permanently dead. A flag restarts cleanly.
 //
 // io_init_mu has to exist before any thread can call in, and a Win32
 // CRITICAL_SECTION cannot be initialized statically the way a pthread mutex
@@ -409,7 +409,7 @@ static int io_wait_common(int fd, int want_write,
 
     // Claim the (fd, direction) slot before touching the kernel. Only one
     // waiter per pair: epoll's MOD and kqueue's EV_SET both overwrite the
-    // stored payload, so a second concurrent registration used to strand the
+    // stored payload, so a second concurrent registration would strand the
     // first waiter forever with no wakeup coming.
     yoop_mutex_lock(&io_mu);
     if (reg_fd_taken_locked(fd, want_write)) {
@@ -496,7 +496,7 @@ static int io_wait_common(int fd, int want_write,
 
 int yoop_io_wait_readable(int fd) {
     int rc = io_wait_common(fd, 0, NULL, 0);
-    // The legacy two-arg form has no deadline and no token, so READY and error
+    // The plain form has no deadline and no token, so READY and error
     // are the only reachable outcomes.
     return rc == YOOP_WAIT_READY ? 0 : -1;
 }
@@ -708,11 +708,11 @@ int64_t yoop_iop_accept_begin(int fd) {
 // The blocking, cancel- and deadline-aware flavor: parks the CALLING THREAD
 // rather than suspending a task.
 //
-// This exists for the same reason the async form does. std/net's blocking and
-// cancel-aware helpers used to wait for readiness and then call the syscall,
-// which cannot work for accept on a completion port - there is no way to ask
-// whether a LISTENING socket is readable. Issuing the operation and waiting
-// for it is the formulation both platforms can express.
+// This exists for the same reason the async form does. Waiting for readiness
+// and then calling the syscall cannot work for accept on a completion port -
+// there is no way to ask whether a LISTENING socket is readable. Issuing the
+// operation and waiting for it is the formulation both platforms can
+// express.
 //
 // `*out_code` receives YOOP_WAIT_READY / TIMEDOUT / CANCELLED. The return is
 // the byte count (or accepted descriptor) when READY, else -1; errno is set

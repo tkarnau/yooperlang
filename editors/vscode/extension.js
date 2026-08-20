@@ -1,8 +1,8 @@
 // Yooperlang VS Code extension entry point.
 //
 // Two things wired up here:
-// 1. LSP client - launches src/lsp/server.js as a Node child process over
-//    stdio for diagnostics, hover, etc.
+// 1. LSP client - launches `yoopiler_boot --lsp` over stdio. The server is the
+//    COMPILER, so what it reports is what a build reports.
 // 2. Debug adapter - registers the `yoop` debug type and delegates to the
 //    system `lldb-dap` binary. The configuration provider compiles the .yoop
 //    entry file with yoopiler before launch, then rewrites `program` from
@@ -43,10 +43,11 @@ function activate(context) {
 //
 //   1. The `yoopiler.binaryPath` setting, if the user set one.
 //   2. A sibling binary, for the copy of this extension shipped inside a
-//      distribution: <dist>/editor/vscode/ next to <dist>/bin/yoopiler_alpha.
+//      distribution: <dist>/editor/vscode/ next to <dist>/bin/yoopiler_boot.
 //
-// Returns null when neither is found, in which case we fall back to driving
-// the repo's JS directly through Node (the checkout workflow).
+// Returns null when neither is found. The compiler is a native binary now, so
+// there is no in-repo fallback to drive: without one of these two the language
+// features are unavailable and only the syntax highlighting works.
 function findStandaloneBinary(extDir) {
   const configured = vscode.workspace
     .getConfiguration("yoopiler")
@@ -57,45 +58,33 @@ function findStandaloneBinary(extDir) {
       `yoopiler.binaryPath is set to "${configured}" but nothing is there. Falling back to the repo checkout.`,
     );
   }
-  const exe = process.platform === "win32" ? "yoopiler_alpha.exe" : "yoopiler_alpha";
+  const exe = process.platform === "win32" ? "yoopiler_boot.exe" : "yoopiler_boot";
   const sibling = path.resolve(extDir, "..", "..", "bin", exe);
   return fs.existsSync(sibling) ? sibling : null;
 }
 
-function startLspClient(context, repoRoot, standaloneBin) {
+// The language server IS the compiler: `yoopiler_boot --lsp`. There is no
+// separate server process to find and nothing to run under Node, so this is one
+// spawn or an error - see `findStandaloneBinary` for the two places the binary
+// is looked for.
+function startLspClient(context, _repoRoot, standaloneBin) {
   try {
-    const serverModule = path.join(repoRoot, "src", "lsp", "server.js");
-
-    // Prefer the repo's server.js when it exists (edits to the compiler show
-    // up without a rebuild); otherwise drive the packaged binary's `--lsp`
-    // mode, which serves the identical protocol from the bundled compiler.
-    let serverOptions;
-    if (fs.existsSync(serverModule)) {
-      log("lsp serverModule =", serverModule);
-      serverOptions = {
-        run: { module: serverModule, transport: TransportKind.stdio },
-        debug: {
-          module: serverModule,
-          transport: TransportKind.stdio,
-          options: { execArgv: ["--inspect=6009"] },
-        },
-      };
-    } else if (standaloneBin) {
-      log("lsp via standalone binary =", standaloneBin, "--lsp");
-      const spawn = {
-        command: standaloneBin,
-        args: ["--lsp"],
-        transport: TransportKind.stdio,
-      };
-      serverOptions = { run: spawn, debug: spawn };
-    } else {
+    if (!standaloneBin) {
       const msg =
-        `Yoopiler LSP: no language server found. Looked for ${serverModule} ` +
-        `and a packaged binary. Set "yoopiler.binaryPath" to your yoopiler_alpha binary.`;
+        "Yoopiler LSP: no compiler found. Set \"yoopiler.binaryPath\" to your " +
+        "yoopiler_boot binary (a repo checkout builds one with " +
+        "`$(node scripts/seed.mjs) bootstrap/src/main.yoop -o /tmp/yoopiler_boot`).";
       log(msg);
       vscode.window.showErrorMessage(msg);
       return;
     }
+    log("lsp via", standaloneBin, "--lsp");
+    const spawn = {
+      command: standaloneBin,
+      args: ["--lsp"],
+      transport: TransportKind.stdio,
+    };
+    const serverOptions = { run: spawn, debug: spawn };
 
     const clientOptions = {
       documentSelector: [{ scheme: "file", language: "yoop" }],

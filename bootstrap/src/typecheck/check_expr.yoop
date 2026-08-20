@@ -1,0 +1,481 @@
+module typecheck;
+
+// The expression dispatch, and the operators that are pure VALUE questions.
+//
+// `checkExpr` answers "what type does this expression produce", records it in
+// the decoration, and is the one function every other check in pass D calls to
+// evaluate a sub-expression. `expected` travels with it: an untyped literal has
+// no type of its own, so the context is what pins it.
+//
+// What lives here beside the dispatch is what needs nothing but the operand's
+// own type - unary operators, casts, and the two BORROW conversions. Anything
+// that has to walk a path to storage is in check_access.yoop, anything with a
+// callee is in check_call.yoop, and anything with a field list to match against
+// a declaration is in check_literal.yoop.
+
+import * as vec from "std/core/vec.yoop";
+import * as map from "std/collections/map.yoop";
+import { AST, ASTNode, ASTNodeKind, NodeId, childAt, nodeAt, kindName } from "../ast";
+import { TokenTags, tagSpelling } from "../lex";
+import { Option } from "std/core/types.yoop";
+// Returns the node's type AND records it. `expected` is the type an untyped
+// literal should pin to, or TYPE_ERROR_ID when there is no expectation.
+function checkExpr(ref cx: Cx, exprId: NodeId, expected: TypeId): TypeId {
+  const expr = nodeAt(cx.ast, exprId);
+  let resolved: TypeId = TYPE_ERROR_ID;
+
+  switch (expr.kind) {
+    case ASTNodeKind.INT_LITERAL: {
+      // An int literal is untyped until context pins it, and it may only pin to
+      // an INTEGER type - the JS reference rejects untyped-int-to-float too.
+      // With no expectation, or an expectation it cannot satisfy, it falls back
+      // to int32 and the caller's own check reports the mismatch.
+      // Taken here whatever happens next, so a flag set for this literal can
+      // never be read by a later one. Same one-step discipline as awaitPending.
+      const negated = cx.prog.negatedLiteral;
+      cx.prog.negatedLiteral = false;
+      if (expected != TYPE_ERROR_ID && isIntPrimType(cx.prog, expected)) {
+        resolved = expected;
+        // The pin is what makes the range question answerable: an unpinned
+        // literal defaults to int32 and refusing it against a width nobody
+        // wrote would refuse programs on a type the author never named.
+        checkIntLiteralRange(cx.prog, expr, resolved, negated);
+      } else {
+        if (expected == TYPE_ERROR_ID) {
+          resolved = primTypeId(PrimKind.INT32);
+        } else {
+          reportError(
+            cx.prog,
+            `cannot assign untyped int to ${formatType(cx.prog, expected)}`,
+            expr.sourceLoc
+          );
+          // Stay TYPE_ERROR_ID so the caller's own mismatch check stays quiet:
+          // one problem should produce one diagnostic.
+        }
+      }
+    }
+    // A float literal is untyped until context pins it, and it may only pin to
+    // a FLOAT type - not to an integer, which is the mirror of the rule above.
+    // Unconstrained it defaults to float64, which is what the reference infers
+    // for `const a = 1.5` before its codegen refuses to lower the literal.
+    case ASTNodeKind.FLOAT_LITERAL: {
+      if (expected != TYPE_ERROR_ID && isFloatPrimType(cx.prog, expected)) {
+        resolved = expected;
+      } else {
+        if (expected == TYPE_ERROR_ID) {
+          resolved = primTypeId(PrimKind.FLOAT64);
+        } else {
+          reportError(
+            cx.prog,
+            `cannot assign untyped float to ${formatType(cx.prog, expected)}`,
+            expr.sourceLoc
+          );
+        }
+      }
+    }
+    case ASTNodeKind.STRING_LITERAL: {
+      resolved = primTypeId(PrimKind.STRING);
+    }
+    case ASTNodeKind.TEMPLATE_LITERAL: {
+      checkTemplateParts(ref cx, expr);
+      resolved = primTypeId(PrimKind.STRING);
+    }
+    case ASTNodeKind.BOOL_LITERAL: {
+      resolved = primTypeId(PrimKind.BOOL);
+    }
+    case ASTNodeKind.DEREF_EXPRESSION: {
+      resolved = checkDeref(ref cx, expr);
+    }
+    case ASTNodeKind.ADDRESS_OF_EXPRESSION: {
+      resolved = checkAddressOf(ref cx, expr);
+    }
+    case ASTNodeKind.UNSAFE_PTR_CAST: {
+      resolved = checkUnsafePtrOp(ref cx, expr);
+    }
+    case ASTNodeKind.SLICE_EXPRESSION: {
+      resolved = checkSlice(ref cx, expr);
+    }
+    case ASTNodeKind.NULL_LITERAL: {
+      // Pins to the expected pointer type when there is one, exactly as an
+      // untyped int literal pins to an integer. Without an expectation it stays
+      // untyped, and typeAccepts lets it into any `unsafe_ptr` later.
+      if (isUnsafePtrType(cx.prog, expected)) {
+        resolved = expected;
+      } else {
+        resolved = TYPE_UNTYPED_NULL_ID;
+      }
+    }
+    case ASTNodeKind.UNARY_EXPRESSION: {
+      resolved = checkUnary(ref cx, expr, expected);
+    }
+    case ASTNodeKind.ARRAY_LITERAL: {
+      resolved = checkArrayLiteral(ref cx, expr, expected);
+    }
+    case ASTNodeKind.STRUCT_LITERAL: {
+      resolved = checkStructLiteral(ref cx, expr, expected);
+    }
+    case ASTNodeKind.INDEX_EXPRESSION: {
+      resolved = checkIndex(ref cx, expr);
+    }
+    case ASTNodeKind.FIELD_ACCESS: {
+      resolved = checkFieldAccess(ref cx, expr, expected);
+    }
+    case ASTNodeKind.BINARY_EXPRESSION: {
+      // A comparison's operands constrain each other but NOT the result, so an
+      // untyped literal in `n < 10` pins to `n`, never to the bool the whole
+      // expression produces.
+      const compares = isComparison(expr.operator);
+      const logical = isLogical(expr.operator);
+      let operandExpected = expected;
+      if (compares) {
+        operandExpected = TYPE_ERROR_ID;
+      } else if (logical) {
+        // `&&` / `||` take bools and produce one.
+        operandExpected = primTypeId(PrimKind.BOOL);
+      }
+      let left = checkExpr(ref cx, expr.childA, operandExpected);
+      // POINTER ARITHMETIC is the one shape where the two operands are not
+      // meant to agree - `p + 2` is a pointer and an integer - so the right
+      // side gets NO expectation there. Handing it `left` would pin the literal
+      // to a pointer and report "cannot assign untyped int to unsafe_ptr<T>"
+      // about a line that is perfectly well formed.
+      let rightExpected = left;
+      if (isUnsafePtrType(cx.prog, left) &&
+          (expr.operator == TokenTags.PLUS || expr.operator == TokenTags.MINUS)) {
+        rightExpected = TYPE_ERROR_ID;
+      }
+      const right = checkExpr(ref cx, expr.childB, rightExpected);
+
+      // An untyped int literal takes the OTHER operand's type. The right side
+      // gets that for free - it is checked WITH `left` as its expectation - but
+      // a LEADING literal has already defaulted to int32 by the time the right
+      // side is known. So re-check it, which also re-decorates the node.
+      //
+      // `48 + (rest % 10)` with a uint64 `rest` is the case: without this the
+      // 48 is an int32 and the addition is refused for a difference the writer
+      // never wrote.
+      if (left != right &&
+          isIntLiteralNode(cx.ast, expr.childA) &&
+          isIntPrimType(cx.prog, right)) {
+        left = checkExpr(ref cx, expr.childA, right);
+      }
+
+      // The same re-pin for a LEADING float literal. `1.5 * scale` with a
+      // float32 `scale` is the case: without this the 1.5 has already defaulted
+      // to float64 and the two widths refuse to mix.
+      if (left != right &&
+          isFloatLiteralNode(cx.ast, expr.childA) &&
+          isFloatPrimType(cx.prog, right)) {
+        left = checkExpr(ref cx, expr.childA, right);
+      }
+
+      if (isPointerArith(cx.prog, expr.operator, left, right)) {
+        // C's rules: a pointer steps by ELEMENTS, and two pointers subtract to
+        // a count of them. See typecheck/unsafe_ptr_ops.yoop.
+        resolved = checkPointerArith(cx.prog, expr, left, right);
+      } else if (left != right) {
+        reportError(
+          cx.prog,
+          `operator "${tagSpelling(expr.operator)}" cannot be applied to ${formatType(cx.prog, left)} and ${formatType(cx.prog, right)}`,
+          expr.sourceLoc
+        );
+      } else if (!checkOperandClass(cx.prog, expr, left)) {
+        // AGREEING is not enough: two strings agree and `a + b` on them emits
+        // `add ptr`, which is not an instruction. checkOperandClass owns the
+        // whole table of which class keeps which operator - including the float
+        // and value-enum rows, which it forwards to their own modules - and it
+        // reported this one.
+      } else if (compares) {
+        resolved = primTypeId(PrimKind.BOOL);
+      } else if (logical) {
+        // Both operands are bool by now; nothing else survives `&&` above.
+        resolved = primTypeId(PrimKind.BOOL);
+      } else {
+        resolved = left;
+      }
+    }
+    case ASTNodeKind.CALL_EXPRESSION: {
+      // The `await` handoff is taken HERE, before the callee is resolved and
+      // long before the arguments are checked - which is what makes the flag a
+      // one-step signal rather than an ambient mode. `await f(g())` awaits f;
+      // by the time `g()` reaches this line the flag is already false.
+      const awaited = cx.prog.awaitPending;
+      cx.prog.awaitPending = false;
+      const prevAwaited = cx.prog.callWasAwaited;
+      cx.prog.callWasAwaited = awaited;
+      resolved = checkCall(ref cx, expr, exprId, expected);
+      cx.prog.callWasAwaited = prevAwaited;
+    }
+    case ASTNodeKind.AWAIT_EXPRESSION: {
+      resolved = checkAwait(ref cx, expr);
+    }
+    case ASTNodeKind.WAIT_EXPRESSION: {
+      resolved = checkWait(ref cx, expr);
+    }
+    case ASTNodeKind.REF_EXPRESSION: {
+      resolved = checkRefExpr(ref cx, expr);
+    }
+    case ASTNodeKind.VARIANT_CONSTRUCTOR: {
+      resolved = checkVariantConstructor(
+        ref cx,
+        expr,
+        expr.childB,
+        expr.childA,
+        expected
+      );
+    }
+    case ASTNodeKind.ASSIGNMENT: {
+      resolved = checkAssignment(ref cx, expr);
+    }
+    case ASTNodeKind.TRY_OP: {
+      resolved = checkTryOp(ref cx, exprId);
+    }
+    case ASTNodeKind.IDENT: {
+      switch (scopeBinding(cx.scope, expr.name)) {
+        case Option.Some { value: b }: {
+          resolved = reborrowIfWanted(ref cx, b, exprId, expected);
+        }
+        case Option.None: {
+          // Not a local, so it may be a module-level `const`. Locals win, which
+          // is the same precedence every other language gives them.
+          resolved = moduleConstType(cx.prog, cx.tm, expr.name);
+          if (resolved == TYPE_ERROR_ID) {
+            // Or a FUNCTION named without being called: `{ hash: stringHash }`
+            // puts one in a function-typed field. Its type is its signature -
+            // a yoop function value IS its address, so there is nothing to
+            // convert and nothing to wrap.
+            resolved = moduleFuncType(cx.prog, cx.tm, expr.name);
+          }
+          if (resolved == TYPE_ERROR_ID) {
+            reportError(cx.prog, `unknown name "${expr.name}"`, expr.sourceLoc);
+          }
+        }
+      }
+    }
+    default: {
+      reportError(cx.prog, `pass D does not handle ${kindName(expr.kind)} yet`, expr.sourceLoc);
+    }
+  }
+
+  resolved = openBorrowIfWanted(ref cx, expr, exprId, expected, resolved);
+  vec.vecSet(ref cx.tm.resolvedTypes, exprId, resolved);
+  return resolved;
+}
+
+// A `ref T` value in a position that wants a plain `T` is OPENED: the borrow
+// derefs and the node's type becomes `T`.
+//
+// This is the same rule `bindParams` applies to a `ref` parameter, moved one
+// layer out so it covers a borrow that arrived any other way - out of a `ref T`
+// struct field, or through a local bound to one. A borrow IS the thing it
+// borrows at every use except one: handing it on AS a borrow, which is what a
+// `ref T` expectation means and is why this is keyed on `expected`.
+//
+// It is recorded rather than just returned, because codegen has to emit the
+// load and cannot re-derive the question - by then the node's type says `T` and
+// the operand is still a pointer.
+function openBorrowIfWanted(
+  ref cx: Cx,
+  expr: ASTNode,
+  exprId: NodeId,
+  expected: TypeId,
+  resolved: TypeId
+): TypeId {
+  // No expectation is no conversion. A vararg past the fixed parameters and a
+  // field/index base both land here, and both keep the borrow.
+  if (expected == TYPE_ERROR_ID || resolved == TYPE_ERROR_ID || expected == resolved) {
+    return resolved;
+  }
+  // `ref x` WRITTEN OUT never opens. The whole reason writing it is required is
+  // that the reader can see at the call which arguments the callee may write
+  // through, and silently undoing it would make `f(ref n)` and `f(n)` the same
+  // call. The reference draws the line in the same place, established by
+  // probing: it accepts a borrow that ARRIVED as a value in a by-value slot and
+  // refuses `takes(ref n)` against `takes(n: int32)`.
+  if (expr.kind == ASTNodeKind.REF_EXPRESSION) {
+    return resolved;
+  }
+  const inner = derefType(cx.prog, resolved);
+  if (inner == resolved) {
+    return resolved;
+  }
+  if (!typeAccepts(cx.prog, expected, inner)) {
+    return resolved;
+  }
+  map.mapInsert(ref cx.tm.derefUses, uint64(exprId), true);
+  return inner;
+}
+
+// The MIRROR of `openBorrowIfWanted`: a name that is already a borrow, in a
+// position that wants a borrow, is FORWARDED rather than opened.
+//
+// `bindParams` unwraps a `ref T` parameter to `T` so the body never has to know
+// about references, and that is right for every use but one -
+// `lexNext(ref tables, src, pos)`, where `src` is itself a `ref uint8[]`
+// parameter going straight into another `ref uint8[]` slot. Writing `ref src`
+// would ask for `ref ref T`, which is not a thing; writing nothing is what the
+// reference accepts (probed: `inner(v)`, `inner(ref v)` and `byVal(v)` all
+// compile on a `ref` parameter).
+//
+// The rule is narrow ON PURPOSE, and the narrowness is the whole point: it
+// applies only to a name that ARRIVED as a borrow, so no new aliasing is
+// created that the caller's own signature did not already declare. A plain
+// local still has to write `ref` at the call - the reference refuses `inner(x)`
+// there with "parameter \"v\" expects a ref argument", and so does this.
+//
+// Recorded rather than just returned, for the same reason derefUses is: by the
+// time codegen sees the node its type says `ref T` while the slot still holds a
+// plain parameter, and only pass D knows the position asked for the pointer.
+function reborrowIfWanted(ref cx: Cx, b: Binding, exprId: NodeId, expected: TypeId): TypeId {
+  if (!b.refParam || expected == TYPE_ERROR_ID || expected == b.typeId) {
+    return b.typeId;
+  }
+  if (derefType(cx.prog, expected) != b.typeId) {
+    return b.typeId;
+  }
+  map.mapInsert(ref cx.tm.reborrowUses, uint64(exprId), true);
+  return expected;
+}
+
+// `-x` keeps the operand's numeric type; `!x` takes a bool and gives a bool;
+// `~x` keeps the operand's INTEGER type.
+function checkUnary(ref cx: Cx, expr: ASTNode, expected: TypeId): TypeId {
+  // Bitwise NOT. The expectation flows through exactly as unary minus's does,
+  // so `let w: uint8 = ~0` pins the 0 to uint8 and answers 255 rather than
+  // defaulting to int32 and answering -1. An int-backed value ENUM is allowed
+  // and keeps its own type (`~Flags.A` is a Flags), which is the same rule the
+  // binary bitwise family follows; a string-backed one is not, and neither is
+  // a bool, a float or anything else. All of that is the reference's behaviour,
+  // established by probing it.
+  if (expr.operator == TokenTags.TILDE) {
+    const got = checkExpr(ref cx, expr.childA, expected);
+    if (got == TYPE_ERROR_ID) {
+      return TYPE_ERROR_ID;
+    }
+    if (!isIntPrimType(cx.prog, enumUnderlyingOf(cx.prog, got))) {
+      reportError(
+        cx.prog,
+        `bitwise NOT operator requires an integer operand, found ${formatType(cx.prog, got)}`,
+        expr.sourceLoc
+      );
+      return TYPE_ERROR_ID;
+    }
+    return got;
+  }
+
+  if (expr.operator == TokenTags.BANG) {
+    const got = checkExpr(ref cx, expr.childA, primTypeId(PrimKind.BOOL));
+    if (got != TYPE_ERROR_ID && got != primTypeId(PrimKind.BOOL)) {
+      reportError(cx.prog, "operand of ! must be bool", expr.sourceLoc);
+      return TYPE_ERROR_ID;
+    }
+    return primTypeId(PrimKind.BOOL);
+  }
+
+  // Unary minus. The expectation flows through so `-1` in an int64 slot pins to
+  // int64 rather than defaulting to int32, and `-1.5` in a float32 slot pins to
+  // float32 the same way.
+  //
+  // The sign also has to reach the RANGE check, and it cannot travel as a value
+  // because the magnitude is on a different node: `-128` is this node over the
+  // literal 128. Set only when the operand IS a bare literal, so `-(a + 1)`
+  // leaves the 1 positive, which is what it is. See typecheck/int_range.yoop.
+  if (nodeAt(cx.ast, expr.childA).kind == ASTNodeKind.INT_LITERAL) {
+    cx.prog.negatedLiteral = true;
+  }
+  const got = checkExpr(ref cx, expr.childA, expected);
+  if (got != TYPE_ERROR_ID &&
+      !isIntPrimType(cx.prog, got) &&
+      !isFloatPrimType(cx.prog, got)) {
+    reportError(cx.prog, "operand of unary - must be a number", expr.sourceLoc);
+    return TYPE_ERROR_ID;
+  }
+  return got;
+}
+
+// `&&` / `||` - bool in, bool out, and short-circuiting in codegen.
+function isLogical(tag: TokenTags): bool {
+  switch (tag) {
+    case TokenTags.ANDAND, TokenTags.OROR: { return true; }
+    default: { return false; }
+  }
+}
+
+// Operators whose RESULT is a bool regardless of what they compare.
+function isComparison(tag: TokenTags): bool {
+  switch (tag) {
+    case TokenTags.EQEQ, TokenTags.NEQ, TokenTags.LT,
+         TokenTags.GT, TokenTags.LTE, TokenTags.GTE: {
+      return true;
+    }
+    default: { return false; }
+  }
+}
+
+// `usize(n)` / `int32(x)` - a numeric primitive conversion.
+//
+// Exactly one operand, and it is checked against the target so an untyped
+// literal pins straight to it (`int64(1)` needs no widening at all). Only
+// numeric-to-numeric is allowed, which is the same restriction the JS reference
+// states in its own message.
+function checkCast(ref cx: Cx, expr: ASTNode, target: TypeId): TypeId {
+  let argCount: usize = 0;
+  if (expr.childA != 0) {
+    argCount = nodeAt(cx.ast, expr.childA).childCount;
+  }
+  if (argCount != 1) {
+    reportError(cx.prog, `cast "${expr.name}(...)" takes exactly one argument`, expr.sourceLoc);
+    return target;
+  }
+
+  const list = nodeAt(cx.ast, expr.childA);
+  const argId = childAt(cx.ast, list, 0);
+  // NO expectation: a cast CONVERTS whatever it is given, so the target must
+  // not reach in and pin the operand. Passing `target` here makes
+  // `uint8(48 + (rest % 10))` pin the 48 to uint8 and then refuse to add it to
+  // a uint64 - the cast's own job, done to its input before it runs.
+  const argType = checkExpr(ref cx, argId, TYPE_ERROR_ID);
+  if (argType != TYPE_ERROR_ID && !isCastable(cx.prog, argType, target)) {
+    reportError(
+      cx.prog,
+      `cannot cast ${formatType(cx.prog, argType)} to ${formatType(cx.prog, target)} - only numeric primitive casts are supported`,
+      expr.sourceLoc
+    );
+  }
+  return target;
+}
+
+// Number to number, in every combination: int to int, int to float, float to
+// int, and float to float. A bool is not a number on either side, which is what
+// `bool(x)` and `int32(b)` are refused for.
+//
+// The SOURCE looks through a value enum and the target does not, which is the
+// asymmetry the reference has: `int32(c)` is the way to get an enum's number
+// out, while there is no cast INTO one - an arbitrary integer names no case, and
+// a cast name is a primitive spelling anyway, so `Color(i)` never reaches here.
+// A string-backed enum falls out of the same rule: its underlying is not a
+// number, so `string(dir)` is refused with the ordinary numeric-casts message.
+//
+// A float SOURCE is not unwrapped through `enumUnderlyingOf` because an enum can
+// never be float-backed - the backing may only be an int width or `string`.
+function isCastable(ref prog: Program, source: TypeId, target: TypeId): bool {
+  return isNumericPrim(ref prog, enumUnderlyingOf(ref prog, source)) &&
+    isNumericPrim(ref prog, target);
+}
+
+function isNumericPrim(ref prog: Program, id: TypeId): bool {
+  return isIntPrimType(ref prog, id) || isFloatPrimType(ref prog, id);
+}
+
+// A bare integer literal, which is what may still be re-pinned after it has
+// been checked once. `-1` counts: the negation of a literal is still one.
+function isIntLiteralNode(ref ast: AST, exprId: NodeId): bool {
+  const node = nodeAt(ref ast, exprId);
+  if (node.kind == ASTNodeKind.INT_LITERAL) {
+    return true;
+  }
+  if (node.kind == ASTNodeKind.UNARY_EXPRESSION && node.operator == TokenTags.MINUS) {
+    return nodeAt(ref ast, node.childA).kind == ASTNodeKind.INT_LITERAL;
+  }
+  return false;
+}

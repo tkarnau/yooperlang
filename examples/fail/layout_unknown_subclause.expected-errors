@@ -1,0 +1,3 @@
+# Illegal: a layout body states `abi` or `align`. `packing` is neither, so
+# nothing would read it and the layout it promises is emitted by nobody.
+3:14: layout sub-clause "packing"

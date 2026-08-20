@@ -1,0 +1,92 @@
+module source_graph;
+
+// `modules/<name>` - the program-owned import root.
+//
+// Two roots, two owners, and that is the whole distinction: `std/` belongs to
+// the COMPILER and is found beside the executable, while `modules/` belongs to
+// whoever is being compiled and is found beside their source. So this one is
+// not discovered once at startup the way std_root.yoop discovers its own - it
+// is answered per IMPORT, from the importing file's own directory upward.
+//
+// The point is RELOCATABILITY. A library at `json-repo/json/` with its
+// dependencies at `json-repo/modules/` writes `import ... from "modules/http"`;
+// the same file, copied into a consumer at `app/modules/json/`, resolves that
+// same line against `app/modules/`. Neither copy names a path that only works
+// in one of the two trees.
+
+import * as fs from "std/fs.yoop";
+import * as str from "std/core/strings.yoop";
+
+export const MODULES_DIR_NAME: string = "modules";
+export const MODULES_PATH_PREFIX: string = "modules/";
+
+// The nearest `modules` directory at or above `startDir`, or "" when there is
+// none.
+//
+// The FIRST hit wins whether or not it holds the requested name, and that is
+// the safety property rather than an optimization: continuing the walk past it
+// would let a stray `modules/` in a home directory answer for a program's own,
+// turning a typo into a resolution from somewhere the reader never looks. A
+// miss inside the found root is a better error than a hit outside it, which is
+// why `modulesNotFoundMessage` names the root it searched.
+//
+// The walk starts at `startDir` ITSELF, so a program with `modules/` beside its
+// entry file works. It ends when `dirName` runs out of path, which means a
+// `modules` directory at the filesystem root is not consulted - the reference
+// does consult one. Nothing can be there in practice and the case is noted
+// rather than built.
+export function findModulesRoot(startDir: string): string {
+  let dir = startDir;
+  while (dir.len > 0) {
+    const candidate = fs.pathJoin([dir, MODULES_DIR_NAME]);
+    if (fs.statPath(candidate).isDir) {
+      return candidate;
+    }
+    dir = fs.dirName(dir);
+  }
+  return "";
+}
+
+// Why a resolved `modules/` target is illegal, or "" when it is fine.
+//
+// One copy of a name per program is the policy, so a module living under a
+// modules root must not carry a modules root of its own. This is ENFORCED
+// rather than left to convention because the failure mode is otherwise
+// invisible until it is baffling: a module id is derived from the resolved
+// PATH, so two copies of one module at two paths get distinct mangled symbols
+// and LINK FINE. They are two distinct nominal types, though, so the first
+// value passed between them fails with "Value is not assignable to Value".
+//
+// Walks UP from the target to the root rather than down from the root to the
+// target. Same set of intermediate directories, and it needs no path split.
+export function nestedModulesRootProblem(
+  resolvedPath: string,
+  modulesRoot: string
+): string {
+  // Start at the TARGET when the target is itself a directory. `modules/math`
+  // resolves to the directory `<root>/math`, and `<root>/math/modules` is the
+  // exact case this exists to catch - starting one level up would walk from the
+  // root and check nothing at all.
+  let dir = resolvedPath;
+  if (!fs.statPath(resolvedPath).isDir) {
+    dir = fs.dirName(resolvedPath);
+  }
+  while (dir.len > modulesRoot.len && str.stringStartsWith(dir, modulesRoot)) {
+    const nested = fs.pathJoin([dir, MODULES_DIR_NAME]);
+    if (fs.statPath(nested).isDir) {
+      return `reaches through "${dir}", which carries its own "${MODULES_DIR_NAME}" directory (${nested}). A program holds ONE copy of each module, so dependencies are flat: move the contents of ${nested} up into ${modulesRoot}. A module's own "${MODULES_DIR_NAME}" directory is for developing it and does not ship`;
+    }
+    dir = fs.dirName(dir);
+  }
+  return "";
+}
+
+// "not found" for a modules import names the root that ANSWERED, since there
+// may be several on the path and only one was consulted. Without that, a miss
+// caused by the walk stopping at the wrong root reads exactly like a typo.
+export function modulesNotFoundMessage(sourcePath: string, modulesRoot: string): string {
+  if (modulesRoot.len == 0) {
+    return `cannot resolve import "${sourcePath}": no "${MODULES_DIR_NAME}" directory at or above the importing file`;
+  }
+  return `cannot resolve import "${sourcePath}": not found - searched the modules root ${modulesRoot}`;
+}

@@ -1,6 +1,6 @@
 // std/core/concurrency.yoop - bounded-wait surface for Task<T>.
 //
-// Phase 10.F: `waitUntil(h, deadline_ns)` is a builtin call form (same
+// `waitUntil(h, deadline_ns)` is a builtin call form (same
 // shape as the `wait` keyword) recognized by the typechecker; users
 // import only `WaitResult<T>` here to destructure the outcome. The two
 // matching variants - `Done { value: T }` and `Timeout` - let the caller
@@ -88,7 +88,7 @@ function disarm(): void {
 // Suspend the calling task until `fd` is ready, handing the worker
 // thread back to the pool while parked. This is the bridge between the
 // coroutine machinery and the I/O reactor, and the reason `async` exists
-// in the language at all - see plans/async-coroutines.md.
+// in the language at all.
 //
 // Returns 0 when the fd is ready. A non-zero result means the wait could
 // not be set up:
@@ -161,7 +161,7 @@ export function sleepMs(ms: uint64): int32 {
 // join, so the joiner must not participate in its refcount. (A `pooled`
 // parameter would also trip a live compiler bug - the call site does not
 // retain while the callee releases at scope exit, which double-frees the
-// handle. See plans/task-combinators.md.)
+// handle.)
 export async awaitTask<T>(h: Task<T>): T {
     // A loop, not a single suspend: a wake only proves that SOMETHING made
     // this task runnable. Re-checking is what makes a spurious wake harmless.
@@ -189,9 +189,8 @@ export async awaitTask<T>(h: Task<T>): T {
 // "all": completion order does not change the answer.
 //
 // A `TaskGroup<T>` holding `Task<T>[]`, with `awaitAll` / `awaitRace` over it,
-// is DEFERRED - not for want of a design (the runtime side is built and the
+// does NOT exist - not for want of a design (the runtime side is built and the
 // first-of-N wake works) but because a generic struct with a `Task<T>` field
 // does not survive codegen: emitting one reaches arrayElemLlvmName with an
 // unsubstituted type parameter. `race` is the combinator that genuinely needs
 // the group, since it has to arm on several handles and then report which won.
-// See plans/task-combinators.md for the diagnosis and what is left to fix.

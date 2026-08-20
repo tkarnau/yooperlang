@@ -2,10 +2,10 @@ module codegen;
 
 // What an expression evaluates to, as a VALUE rather than a built string.
 //
-// Codegen used to pass operands around as `string`, which meant a malloc for
-// every `%t12` and every immediate. An operand is really one of four small
-// things, so this says that out loud and lets the emitter write the text
-// straight into its buffer with no allocation at all.
+// Passing operands around as `string` costs a malloc for every `%t12` and every
+// immediate. An operand is really one of four small things, so this says that
+// out loud and lets the emitter write the text straight into its buffer with no
+// allocation at all.
 
 import { Text }, * as text from "std/core/text.yoop";
 import { pushFloatBitsHex } from "../utils";
@@ -31,6 +31,14 @@ export variant Operand {
   // `@mathx_1__add` - a FUNCTION's address, which is what a function value is.
   // There is nothing to load: a symbol IS a constant pointer in LLVM.
   FuncRef { home: string, name: string },
+  // `@main_0__counter` - a module-level `let`'s address. What `ref counter`
+  // evaluates to, and the global's answer to SlotAddr: a global already IS
+  // storage, so a borrow of one costs no instruction either.
+  //
+  // Rendered exactly like a FuncRef and deliberately not the same case. One is
+  // storage and the other is code, and `ref` may name only the first - reading
+  // that back off the operand is worth six lines of duplication.
+  GlobalAddr { home: string, name: string },
   // `%v.3.addr` - a local's slot ADDRESS rather than its value. What `ref x`
   // evaluates to: a borrow is the address, and the slot already is one.
   SlotAddr { name: string, id: usize },
@@ -42,6 +50,17 @@ export variant Operand {
   // `null` - LLVM spells a null pointer constant exactly that way.
   Null,
   None,                       // a void call's non-result
+}
+
+// `@mathx_1__add` - a module-qualified symbol as an operand. A bare `home` means
+// an unqualified one, which is what an extern's exact spelling needs.
+function pushSymbolRef(ref out: Text, home: string, name: string): void {
+  text.pushByte(ref out, '@');
+  if (home.len > 0) {
+    text.push(ref out, home);
+    text.push(ref out, SYMBOL_MODULE_SEPARATOR);
+  }
+  text.push(ref out, name);
 }
 
 // Writes into the per-function instruction buffer (`fn`), not the module buffer.
@@ -73,14 +92,8 @@ export function pushOperand(ref out: Text, op: Operand): void {
       text.push(ref out, "%t");
       text.pushUint(ref out, uint64(n));
     }
-    case Operand.FuncRef { home: h, name: n }: {
-      text.pushByte(ref out, '@');
-      if (h.len > 0) {
-        text.push(ref out, h);
-        text.push(ref out, SYMBOL_MODULE_SEPARATOR);
-      }
-      text.push(ref out, n);
-    }
+    case Operand.FuncRef { home: h, name: n }: { pushSymbolRef(ref out, h, n); }
+    case Operand.GlobalAddr { home: h, name: n }: { pushSymbolRef(ref out, h, n); }
     case Operand.Null: { text.push(ref out, "null"); }
     case Operand.StrRef { id: n }: {
       text.push(ref out, "@.str.");

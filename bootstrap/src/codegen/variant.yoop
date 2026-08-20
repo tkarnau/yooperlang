@@ -10,10 +10,8 @@ module codegen;
 // That is the same reason a struct field WRITE geps while a read extracts: the
 // asymmetry is about addresses, not about aggregates.
 
-import { Vec }, * as vec from "std/core/vec.yoop";
-import { disposable } from "std/core/kinds.yoop";
 import { ASTNode, NodeId, childAt, nodeAt } from "../ast";
-import { Text }, * as text from "std/core/text.yoop";
+import * as text from "std/core/text.yoop";
 import { DISCARD_BINDING } from "../parse";
 import { TypeId, variantCaseNameAt, variantModuleIdOf, variantDeclNameOf } from "../typecheck";
 
@@ -26,7 +24,7 @@ import { TypeId, variantCaseNameAt, variantModuleIdOf, variantDeclNameOf } from 
 //   %t3 = getelementptr inbounds %variantc.m__Shape__Circle, ptr %t2, i32 0, i32 0
 //   store i32 2, ptr %t3
 //   %t4 = load %variant.m__Shape, ptr %sc.1.addr
-export function emitVariantConstructor(ref cx: Cx, expr: ASTNode, exprId: NodeId, ref out: Operand): string {
+export function emitVariantConstructor(ref cx: Cx, expr: ASTNode, exprId: NodeId, ref out: Operand): EmitResult {
   const variantTy = typeOf(ref cx, exprId);
   const slot = declareAnonSlot(ref cx, variantTy);
 
@@ -36,15 +34,12 @@ export function emitVariantConstructor(ref cx: Cx, expr: ASTNode, exprId: NodeId
   emitGepField(ref cx, tagAddr, variantTy, TEMP_SLOT_NAME, slot.id, 0);
   emitStoreToPtr(ref cx, VARIANT_TAG_TYPE, Operand.Imm { value: variantOrdinalOf(ref cx, exprId) }, tagAddr);
 
-  const err = emitPayloadStores(ref cx, expr, exprId, variantTy, slot.id);
-  if (err.len > 0) {
-    return err;
-  }
+  emitPayloadStores(ref cx, expr, exprId, variantTy, slot.id)?;
 
   const dest = freshTemp(cx.e);
   emitLoadFromSlot(ref cx, dest, variantTy, TEMP_SLOT_NAME, slot.id);
   out = Operand.Temp { id: dest };
-  return "";
+  return EmitResult.Ok;
 }
 
 // Each `field: value` stored at its POSITION in the case's payload struct, so a
@@ -56,9 +51,9 @@ function emitPayloadStores(
   exprId: NodeId,
   variantTy: string,
   slotId: usize
-): string {
+): EmitResult {
   if (expr.childA == 0) {
-    return "";
+    return EmitResult.Ok;
   }
   const caseTy = variantCaseTypeOf(ref cx, exprId, expr.name);
   const list = nodeAt(cx.ast, expr.childA);
@@ -68,10 +63,7 @@ function emitPayloadStores(
     const fieldNode = nodeAt(cx.ast, fieldId);
 
     let value: Operand = Operand.None;
-    const err = emitExpr(ref cx, fieldNode.childA, ref value);
-    if (err.len > 0) {
-      return err;
-    }
+    emitExpr(ref cx, fieldNode.childA, ref value)?;
 
     const payloadAddr = freshTemp(cx.e);
     emitGepField(ref cx, payloadAddr, variantTy, TEMP_SLOT_NAME, slotId, 1);
@@ -81,7 +73,7 @@ function emitPayloadStores(
     emitStoreToPtr(ref cx, typeOf(ref cx, fieldId), value, fieldAddr);
     i += 1;
   }
-  return "";
+  return EmitResult.Ok;
 }
 
 //   %t5 = extractvalue %variant.m__Shape %t4, 0
@@ -107,9 +99,9 @@ export function emitPatternBindings(
   pattern: ASTNode,
   patternId: NodeId,
   scrutSlotId: usize
-): string {
+): EmitResult {
   if (pattern.childA == 0) {
-    return "";
+    return EmitResult.Ok;
   }
   const variantTy = typeOf(ref cx, patternId);
   const caseTy = variantCaseTypeOf(ref cx, patternId, pattern.name);
@@ -145,7 +137,7 @@ export function emitPatternBindings(
     emitStore(ref cx, fieldTy, Operand.Temp { id: loaded }, binding.name, slotInfo.id);
     i += 1;
   }
-  return "";
+  return EmitResult.Ok;
 }
 
 // ----- addressing a case by ORDINAL ------------------------------------------

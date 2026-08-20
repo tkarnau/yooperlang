@@ -22,12 +22,14 @@
 // nothing to do with the compiler. The emitted `.ll` is compared too, and it is
 // the stronger assertion of the two: that IS the compiler's output, and clang
 // is downstream of it.
-import { describe, it, before } from "node:test";
+import { describe, it, before, after } from "node:test";
 import assert from "node:assert";
 import fs from "fs";
 import path from "path";
 import os from "os";
-import { execFileSync } from "child_process";
+
+import { runProcOrThrow } from "./testProc.js";
+import { seedCompiler } from "../scripts/seed.mjs";
 
 const REPO = path.resolve(import.meta.dirname, "..");
 const BOOT_SRC = path.join(REPO, "bootstrap/src/main.yoop");
@@ -44,23 +46,40 @@ describe("self-hosting: the bootstrap compiles itself to a fixpoint", () => {
     YOOP_RUNTIME_ROOT: path.join(REPO, "runtime"),
   };
 
-  before(() => {
+  // Each stage builds the whole compiler and shells out to clang to link it, so
+  // every one of these is a two-deep process tree. They run through
+  // src/testProc.js for the deadline and for the process-TREE kill: killing a
+  // stage that wedged mid-build would otherwise leave its clang behind.
+  const BUILD_TIMEOUT_MS = Number(process.env.YOOP_SELFHOST_TIMEOUT_MS) || 300000;
+
+  before(async () => {
     work = fs.mkdtempSync(path.join(os.tmpdir(), "yoop-selfhost-"));
     for (const d of ["s1", "s2", "s3"]) fs.mkdirSync(path.join(work, d));
     stage1 = path.join(work, "s1/yoopiler");
     stage2 = path.join(work, "s2/yoopiler");
     stage3 = path.join(work, "s3/yoopiler");
 
-    execFileSync("node", [path.join(REPO, "src/yoopiler.js"), BOOT_SRC, "-o", stage1], {
-      cwd: REPO,
-      env,
-      stdio: "pipe",
-    });
-    execFileSync(stage1, [BOOT_SRC, "-o", stage2], { cwd: REPO, env, stdio: "pipe" });
-    execFileSync(stage2, [BOOT_SRC, "-o", stage3], { cwd: REPO, env, stdio: "pipe" });
+    const opts = { cwd: REPO, env, timeout: BUILD_TIMEOUT_MS };
+    // stage1 comes from the SEED - a previously released yoopiler_boot. That is
+    // the whole point of the fixpoint below: the seed is an OLD compiler, so if
+    // stage2 and stage3 agree, the tree's own source is what decided the output
+    // and the seed only got the chain started.
+    await runProcOrThrow(seedCompiler(), [BOOT_SRC, "-o", stage1], opts);
+    await runProcOrThrow(stage1, [BOOT_SRC, "-o", stage2], opts);
+    await runProcOrThrow(stage2, [BOOT_SRC, "-o", stage3], opts);
   });
 
-  it("stage1 - the JS reference builds the bootstrap", () => {
+  // Every run of this suite used to leave its temp dir behind - `mkdtempSync`
+  // makes a new one each time and nothing removed it. One session of iterating
+  // left 9,882 of them and filled a 16G tmpfs, which surfaces as a LINK failure
+  // in whatever runs next ("No space left on device") rather than as anything
+  // pointing here.
+  after(() => {
+    if (work) fs.rmSync(work, { recursive: true, force: true });
+  });
+
+
+  it("stage1 - the released seed builds the bootstrap", () => {
     assert.ok(fs.existsSync(stage1), "stage1 was not produced");
   });
 
@@ -87,10 +106,10 @@ describe("self-hosting: the bootstrap compiles itself to a fixpoint", () => {
     assert.ok(a.equals(b), "stage2 and stage3 differ as binaries");
   });
 
-  it("stage3 is a working compiler", () => {
+  it("stage3 is a working compiler", async () => {
     const exe = path.join(work, "hello");
-    execFileSync(stage3, [HELLO, "-o", exe], { cwd: REPO, env, stdio: "pipe" });
-    const out = execFileSync(exe, { encoding: "utf8" });
+    await runProcOrThrow(stage3, [HELLO, "-o", exe], { cwd: REPO, env, timeout: BUILD_TIMEOUT_MS });
+    const { stdout: out } = await runProcOrThrow(exe, [], { timeout: 10000 });
     const expected = fs.readFileSync(
       path.join(REPO, "bootstrap/tests/slice/hello.expected"),
       "utf8",

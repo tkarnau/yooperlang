@@ -1,11 +1,9 @@
 // yoop_alloc.h - the allocator context and arena entry points.
 //
 // std/core/alloc.yoop's extern block already names this header as the source
-// of these symbols; until the per-task context landed there was nothing for
-// C to include, because nothing in the runtime called into yoop_alloc.c. The
-// scheduler does now (run_task_step swaps the allocator context around every
-// task step), so the declarations have to exist somewhere both translation
-// units can see.
+// of these symbols. The scheduler also calls into yoop_alloc.c (run_task_step
+// swaps the allocator context around every task step), so the declarations
+// have to exist somewhere both translation units can see.
 #ifndef YOOP_ALLOC_H
 #define YOOP_ALLOC_H
 
@@ -42,7 +40,7 @@ void  yoop_set_allocator(void* src);
 
 // Allocate through the current allocator. NEVER returns NULL: an exhausted
 // allocator prints what it wanted and what was available, flushes stdout so
-// the program's own output survives, and exits(1). A silent null here used to
+// the program's own output survives, and exits(1). A silent null here would
 // surface as a SIGSEGV several frames later with no output at all.
 void* yoop_ctx_alloc(size_t size, size_t align);
 
@@ -68,7 +66,7 @@ void  yoop_ctx_free(void* ptr);
 // `slot` is always a pointer to the task handle's context slot (offset 40).
 // Passing the slot rather than the handle keeps the handle layout knowledge
 // in yoop_runtime.c, where it belongs. The slot's contents are owned here and
-// opaque there. See plans/async-allocator-context.md.
+// opaque there.
 
 // Save / restore the CALLING THREAD's own context around a step.
 void yoop_ctx_save(YoopCtxSave* out);

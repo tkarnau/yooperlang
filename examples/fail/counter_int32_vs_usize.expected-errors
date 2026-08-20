@@ -1,0 +1,3 @@
+# Illegal: `xs.len` is a usize and `k` is an int32. There is no implicit
+# widening between named numeric types, so `<` has no operand pair to apply to.
+4:22: cannot be applied to int32 and usize

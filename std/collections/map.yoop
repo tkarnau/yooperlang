@@ -4,10 +4,9 @@
 // hash + equality function pointers - the caller supplies the
 // behavior at construction time. This pattern is the language's
 // stand-in for a `Hashable` trait with `Self`-typed `eq`, which yoop
-// doesn't have yet (Phase 5 deferred). Phase 10.X.2 landed the two
-// function-pointer-field lifts (func-decl → FPT coercion at
-// assignment, indirect call through `ops.hash(k)` / `ops.eq(a, b)`)
-// that make this work end-to-end.
+// does not have. Two function-pointer-field lifts make it work
+// end-to-end: func-decl to FPT coercion at assignment, and indirect
+// call through `ops.hash(k)` / `ops.eq(a, b)`.
 //
 // Implementation: open-addressing with linear probing.
 //   * Backing arrays: `keys: K[]`, `values: V[]`, `states: uint8[]`.
@@ -302,7 +301,7 @@ export type MapIter<K, V> implements Iterable<MapEntry<K, V>> {
 
 // Build a `MapIter<K, V>` snapshot for `for ... in` iteration over a
 // map. The iterator yields `MapEntry<K, V>` values via the
-// `Iterable<T>` trait (Phase 10.B).
+// `Iterable<T>` trait.
 export function mapIter<K, V>(ref m: Map<K, V>): MapIter<K, V> {
     return {
         keys: m.keys,
@@ -317,7 +316,7 @@ export function mapIter<K, V>(ref m: Map<K, V>): MapIter<K, V> {
 
 // FNV-1a string hashing is in `std/core/strings.yoop`; reuse it +
 // `stringEq` directly. The two function decls coerce into the FPT
-// fields by the Phase 10.X.2 assignability lift.
+// fields by the assignability lift.
 export function stringKeyOps(): KeyOps<string> {
     return { hash: stringHash, eq: stringEq };
 }

@@ -12,11 +12,11 @@ import { wantsOpenGL, wantsTls } from "./toolchain.js";
 // (e.g. older e2e helpers that pass a single -c arg).
 export const RUNTIME_C = path.resolve(runtimeDir, "yoop_runtime.c");
 
-// Phase 8.F.2: the I/O multiplexer lives in its own translation unit so
+// The I/O multiplexer lives in its own translation unit so
 // programs that don't use it still link cleanly. Callers that need full
 // runtime functionality should compile every entry in this list.
-// yoop_net.c (Library Phase B): a couple of platform-dependent socket
-// helpers (SOL_SOCKET / SO_REUSEADDR constants differ Linux vs macOS).
+// yoop_net.c: a couple of platform-dependent socket helpers (SOL_SOCKET /
+// SO_REUSEADDR constants differ Linux vs macOS).
 export const RUNTIME_SOURCES = [
   RUNTIME_C,
   // The I/O multiplexer: a platform-neutral core plus one event engine per
@@ -28,11 +28,11 @@ export const RUNTIME_SOURCES = [
   path.resolve(runtimeDir, "yoop_io_kqueue.c"),
   path.resolve(runtimeDir, "yoop_io_epoll.c"),
   path.resolve(runtimeDir, "yoop_io_windows.c"),
-  // Filesystem + directory helpers (mkdir/stat/realpath/dirent). Split out of
-  // yoop_io.c, which was carrying two unrelated concerns.
+  // Filesystem + directory helpers (mkdir/stat/realpath/dirent). Separate
+  // from yoop_io.c, which is a different concern.
   path.resolve(runtimeDir, "yoop_fs.c"),
   path.resolve(runtimeDir, "yoop_net.c"),
-  // Phase 10.D: panic/unreachable + log_info/warn/error helpers.
+  // Panic/unreachable + log_info/warn/error helpers.
   path.resolve(runtimeDir, "yoop_debug.c"),
   // yoop_float_to_string - backs std/core/format.yoop's float shim.
   path.resolve(runtimeDir, "yoop_format.c"),
@@ -55,8 +55,19 @@ export const RUNTIME_SOURCES = [
   path.resolve(runtimeDir, "yoop_atomic.c"),
 ];
 
+// Libraries EVERY program links, independent of what its source names.
+//
+// `m` is Linux-only on purpose, and it is not an optimization to leave it off
+// elsewhere - it is the only platform where libm is a separate library at all.
+// glibc keeps the math functions in libm.so, so codegen lowering a float `%` to
+// a `fmod` call produces "undefined reference to fmod" without it. macOS and
+// Windows both fold the math functions into the one C library every link
+// already gets (libSystem / the MSVC CRT), and Windows has no `m` to name -
+// naming it there is a hard "cannot open input file 'm.lib'", which is why
+// lowerLinkFlag drops the name when a program asks for it by hand.
 export function runtimeLinkFlags() {
-  return process.platform === "win32" ? [] : ["pthread"];
+  if (process.platform === "win32") return [];
+  return process.platform === "linux" ? ["pthread", "m"] : ["pthread"];
 }
 
 // Extra C translation units a program needs because of the libraries IT names
@@ -81,7 +92,7 @@ export function glueSourcesForLinkFlags(linkFlagNames) {
   // This is also why std/tls is its own module rather than a file inside
   // std/net: link flags are collected PROGRAM-WIDE, so an `extern from library
   // "ssl"` inside std/net would make every program that opens a socket link
-  // OpenSSL. See plans/tls.md D4.
+  // OpenSSL.
   if (wantsTls(linkFlagNames)) {
     out.push(path.resolve(runtimeDir, "yoop_tls.c"));
   }

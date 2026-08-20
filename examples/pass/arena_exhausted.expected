@@ -1,0 +1,2 @@
+this line must survive the abort
+exit=1

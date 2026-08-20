@@ -43,7 +43,7 @@ import { ASTNode } from "../ast";
 export const THUNK_HANDLE_PARAM: string = "ts";
 
 // One thunk, emitted straight after the task body it adapts.
-export function emitTaskThunk(ref cx: Cx, declNode: ASTNode): string {
+export function emitTaskThunk(ref cx: Cx, declNode: ASTNode): EmitResult {
   disposable meta: TaskMeta = taskMetaOf(ref cx, declNode.name);
   if (!meta.found) {
     return internalError("no task layout for", declNode.name);
@@ -82,7 +82,7 @@ export function emitTaskThunk(ref cx: Cx, declNode: ASTNode): string {
   emitTaskSettle(ref cx, Operand.Named { name: THUNK_HANDLE_PARAM });
   emitRetVoid(ref cx);
   emitFunctionClose(ref cx);
-  return "";
+  return EmitResult.Ok;
 }
 
 // The three ordinary functions the C scheduler drives a coroutine through.
@@ -100,11 +100,8 @@ export const CORO_RESUME_TRAMPOLINE: string = "yoop_coro_resume";
 export const CORO_DESTROY_TRAMPOLINE: string = "yoop_coro_destroy";
 export const CORO_DONE_TRAMPOLINE: string = "yoop_coro_done";
 
-export function emitCoroTrampolines(ref e: Emitter): string {
-  const err = declareCoroIntrinsics(ref e);
-  if (err.len > 0) {
-    return err;
-  }
+export function emitCoroTrampolines(ref e: Emitter): EmitResult {
+  declareCoroIntrinsics(ref e)?;
   emitGlobal(ref e, "define void @yoop_coro_resume(ptr %h) {");
   emitGlobal(ref e, "  call void @llvm.coro.resume(ptr %h)");
   emitGlobal(ref e, "  ret void");
@@ -118,28 +115,21 @@ export function emitCoroTrampolines(ref e: Emitter): string {
   emitGlobal(ref e, "  %z = zext i1 %d to i32");
   emitGlobal(ref e, "  ret i32 %z");
   emitGlobal(ref e, "}");
-  return "";
+  return EmitResult.Ok;
 }
 
 // The `declare` lines the spawn calls into. Emitted once per program, and only
 // for a program that has a task - see Emitter.hasTasks.
-export function emitTaskRuntimeDeclarations(ref e: Emitter): string {
-  let err = externDeclare(ref e, "yoop_runtime_init", "void", [], false);
-  if (err.len > 0) { return err; }
-  err = externDeclare(ref e, "yoop_runtime_shutdown", "void", [], false);
-  if (err.len > 0) { return err; }
-  err = externDeclare(ref e, "yoop_runtime_set_coro_ops", "void", ["ptr", "ptr", "ptr"], false);
-  if (err.len > 0) { return err; }
-  err = externDeclare(ref e, "yoop_task_submit", "void", ["ptr", "ptr"], false);
-  if (err.len > 0) { return err; }
-  err = externDeclare(ref e, "yoop_task_wait", "void", ["ptr"], false);
-  if (err.len > 0) { return err; }
-  err = externDeclare(ref e, "yoop_task_settle", "void", ["ptr"], false);
-  if (err.len > 0) { return err; }
-  err = externDeclare(ref e, "yoop_task_alloc", "ptr", ["i64"], false);
-  if (err.len > 0) { return err; }
-  err = externDeclare(ref e, "yoop_task_release", "void", ["ptr"], false);
-  if (err.len > 0) { return err; }
+export function emitTaskRuntimeDeclarations(ref e: Emitter): EmitResult {
+  externDeclare(ref e, "yoop_runtime_init", "void", [], false)?;
+  externDeclare(ref e, "yoop_runtime_shutdown", "void", [], false)?;
+  externDeclare(ref e, "yoop_runtime_set_coro_ops", "void", ["ptr", "ptr", "ptr"], false)?;
+  externDeclare(ref e, "yoop_task_submit", "void", ["ptr", "ptr"], false)?;
+  externDeclare(ref e, "yoop_task_wait", "void", ["ptr"], false)?;
+  externDeclare(ref e, "yoop_task_settle", "void", ["ptr"], false)?;
+  externDeclare(ref e, "yoop_task_alloc", "ptr", ["i64"], false)?;
+  externDeclare(ref e, "yoop_task_retain", "void", ["ptr"], false)?;
+  externDeclare(ref e, "yoop_task_release", "void", ["ptr"], false)?;
   return externDeclare(ref e, "yoop_task_free_sync_pair", "void", ["ptr"], false);
 }
 
@@ -152,12 +142,9 @@ export function emitTaskRuntimeDeclarations(ref e: Emitter): string {
 //   declare i32 @yoop_task_is_done(ptr)
 //   declare i32 @yoop_task_arm_complete(ptr)
 //   declare i32 @yoop_task_wait_until_ns(ptr, i64)
-export function emitTaskIntrinsicDeclarations(ref e: Emitter): string {
-  let err = externDeclare(ref e, "yoop_task_cancel", "void", ["ptr"], false);
-  if (err.len > 0) { return err; }
-  err = externDeclare(ref e, "yoop_task_is_done", "i32", ["ptr"], false);
-  if (err.len > 0) { return err; }
-  err = externDeclare(ref e, "yoop_task_arm_complete", "i32", ["ptr"], false);
-  if (err.len > 0) { return err; }
+export function emitTaskIntrinsicDeclarations(ref e: Emitter): EmitResult {
+  externDeclare(ref e, "yoop_task_cancel", "void", ["ptr"], false)?;
+  externDeclare(ref e, "yoop_task_is_done", "i32", ["ptr"], false)?;
+  externDeclare(ref e, "yoop_task_arm_complete", "i32", ["ptr"], false)?;
   return externDeclare(ref e, "yoop_task_wait_until_ns", "i32", ["ptr", "i64"], false);
 }

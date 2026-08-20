@@ -1,8 +1,9 @@
-// plans/yooperdoom-takeaways.md 4.2: reading environment variables.
+// Reading environment variables.
 //
-// `std/env.yoop` had argCount/argAt and nothing else, so a program that wanted
-// configuration took flags instead. The three exports here are the whole
-// surface, and the interesting one is the distinction `get` alone cannot make:
+// Without them a program that wants configuration has to take flags instead
+// (`std/env.yoop` also carries argCount/argAt). The three exports here are the
+// whole surface, and the interesting one is the distinction `get` alone cannot
+// make:
 // an unset variable and one explicitly set to "" both read as "", so `has` is
 // what tells them apart and `getOr` only substitutes for the unset case.
 

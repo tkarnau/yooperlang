@@ -1,4 +1,4 @@
-// Yoopstore-papercut #5: a canonical owned byte buffer (`Bytes`) so APIs can
+// A canonical owned byte buffer (`Bytes`) so APIs can
 // return heap-owned bytes without forcing every caller to thread a Vec.
 // Exercises bytesFromArray (copy), bytesFromVec (zero-copy seal), and
 // transfer-up of the disposable obligation through a propagating return.

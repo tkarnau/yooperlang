@@ -1,6 +1,6 @@
-// plans/yoopbinder-papercuts.md Issue 2: struct literals in generic-call
-// argument position get their target type from the inferred type param.
-// Used to require binding the literal to a typed local first.
+// Struct literals in generic-call argument position get their target type
+// from the inferred type param, with no need to bind the literal to a typed
+// local first.
 
 import * as vec from "std/core/vec.yoop";
 import { Vec } from "std/core/vec.yoop";
@@ -21,7 +21,7 @@ function record<T>(ref bucket: Vec<T>, item: T, tag: int32): void {
 
 function main(): int32 {
     let disposable v: Vec<Pair> = vec.vecNew(4);
-    // Used to fail with "struct literal has no target type".
+    // Without the inferred target type: "struct literal has no target type".
     vec.vecPush(ref v, { a: 1, b: 2 });
     vec.vecPush(ref v, { a: 3, b: 4 });
     record(ref v, { a: 5, b: 6 }, 100);

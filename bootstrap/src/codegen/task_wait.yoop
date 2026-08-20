@@ -23,12 +23,9 @@ module codegen;
 import { ASTNode, NodeId } from "../ast";
 import { TYPE_ERROR_ID } from "../typecheck";
 
-export function emitWait(ref cx: Cx, expr: ASTNode, exprId: NodeId, ref out: Operand): string {
+export function emitWait(ref cx: Cx, expr: ASTNode, exprId: NodeId, ref out: Operand): EmitResult {
   let handle: Operand = Operand.None;
-  const err = emitExpr(ref cx, expr.childA, ref handle);
-  if (err.len > 0) {
-    return err;
-  }
+  emitExpr(ref cx, expr.childA, ref handle)?;
   emitTaskWaitCall(ref cx, handle);
 
   const resultTy = typeOf(ref cx, exprId);
@@ -37,7 +34,7 @@ export function emitWait(ref cx: Cx, expr: ASTNode, exprId: NodeId, ref out: Ope
   const value = freshTemp(cx.e);
   emitLoadFromPtr(ref cx, value, resultTy, resultAddr);
   out = Operand.Temp { id: value };
-  return "";
+  return EmitResult.Ok;
 }
 
 // What a handle binding owes at the end of its scope, as a PendingDispose the
@@ -56,6 +53,9 @@ export function recordTaskCleanup(ref d: DisposeStack, name: string, slot: usize
   disposeRecord(ref d, {
     name: name,
     slot: slot,
+    // 0: there is no method a hand-written call could make, so nothing can
+    // discharge a handle's obligation early.
+    declNode: 0,
     ownerType: TYPE_ERROR_ID,
     method: "",
     viaField: false,

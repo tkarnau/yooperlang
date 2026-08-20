@@ -1,0 +1,4 @@
+from the declaring file
+from a sibling file
+from a C-exported function
+exit=0

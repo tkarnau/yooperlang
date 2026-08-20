@@ -1,0 +1,336 @@
+module typecheck;
+
+/*
+  The WALK half of the discharge analysis: how a function body is traversed, and
+  where the satisfied set is snapshotted, restored and intersected.
+
+  What an obligation IS, how the satisfied set is stored, and what counts as a
+  manual call are all in discharge.yoop, which is also where the header
+  explaining the whole feature lives. This file is the control-flow half and
+  nothing else: every function here answers "which paths reach this point".
+
+  The merge rules, in one place:
+
+    a block      its statements in order, stopping at the first that diverges
+    an `if`      both arms from the same start, intersected at the join, with a
+                 diverging arm left out of the intersection entirely
+    no `else`    never discharges - the path that skipped the arm ran nothing
+    a loop       the body may run zero times, so nothing it did survives it
+    a switch     every arm that reaches the statement after it, intersected,
+                 plus the fall-through path when there is no `default`
+
+  `alwaysDiverges` (diverge.yoop) is what decides "reaches" in all of those.
+*/
+
+import { ASTNode, ASTNodeKind, NodeId, childAt, declOf, nodeAt } from "../ast";
+
+function walkFileBodies(ref w: DischargeWalk, root: NodeId): void {
+  const programNode = nodeAt(w.ast, root);
+  let i: usize = 0;
+  while (i < programNode.childCount) {
+    const declId = declOf(w.ast, childAt(w.ast, programNode, i));
+    const declNode = nodeAt(w.ast, declId);
+    if (declNode.kind == ASTNodeKind.FUNCTION_DECL) {
+      walkBody(ref w, declNode.childD);
+    }
+    if (declNode.kind == ASTNodeKind.TYPE_DECL ||
+        declNode.kind == ASTNodeKind.VARIANT_DECL ||
+        declNode.kind == ASTNodeKind.ENUM_DECL) {
+      let j: usize = 0;
+      while (j < declNode.childCount) {
+        const member = nodeAt(w.ast, childAt(w.ast, declNode, j));
+        if (member.kind == ASTNodeKind.METHOD_DECL) {
+          walkBody(ref w, member.childD);
+        }
+        j += 1;
+      }
+    }
+    i += 1;
+  }
+}
+
+// One body, from a clean state - obligations do not cross a function boundary.
+function walkBody(ref w: DischargeWalk, bodyId: NodeId): void {
+  w.live.len = 0;
+  w.frames.len = 0;
+  w.sat = 0;
+  walkBlock(ref w, bodyId);
+}
+
+// A BLOCK, which is one dispose scope. Codegen emits this scope's disposals at
+// the closing brace and only when the block did not already leave by a
+// terminator, so that is exactly when the exit is recorded.
+function walkBlock(ref w: DischargeWalk, blockId: NodeId): void {
+  if (blockId == 0) {
+    return;
+  }
+  const block = nodeAt(w.ast, blockId);
+  pushFrame(ref w);
+  let diverged: bool = false;
+  if (block.childA != 0) {
+    const list = nodeAt(w.ast, block.childA);
+    let i: usize = 0;
+    while (i < list.childCount) {
+      const stmtId = childAt(w.ast, list, i);
+      walkStatement(ref w, stmtId);
+      // Anything after a terminator is unreachable, and a manual dispose there
+      // must not be read as answering anything.
+      if (alwaysDiverges(w.ast, stmtId)) {
+        diverged = true;
+        break;
+      }
+      i += 1;
+    }
+  }
+  if (!diverged) {
+    recordExit(ref w, blockId);
+  }
+  popFrame(ref w);
+}
+
+// An `if` arm or a switch arm: a BLOCK, or a bare statement (`else if` is a
+// nested IF_STATEMENT).
+function walkBranch(ref w: DischargeWalk, nodeId: NodeId): void {
+  if (nodeId == 0) {
+    return;
+  }
+  if (nodeAt(w.ast, nodeId).kind == ASTNodeKind.BLOCK) {
+    walkBlock(ref w, nodeId);
+    return;
+  }
+  walkStatement(ref w, nodeId);
+}
+
+function walkStatement(ref w: DischargeWalk, stmtId: NodeId): void {
+  const stmt = nodeAt(w.ast, stmtId);
+  switch (stmt.kind) {
+    case ASTNodeKind.LET_DECL, ASTNodeKind.CONST_DECL: {
+      walkDecl(ref w, stmt, stmtId);
+      return;
+    }
+    case ASTNodeKind.EXPRESSION_STATEMENT, ASTNodeKind.DISCARD_STATEMENT: {
+      walkExpr(ref w, stmt.childA);
+      return;
+    }
+    case ASTNodeKind.RETURN_STATEMENT: {
+      // The returned value is computed before anything is disposed, so a manual
+      // call inside it counts.
+      walkExpr(ref w, stmt.childA);
+      recordExit(ref w, stmtId);
+      return;
+    }
+    case ASTNodeKind.BREAK_STATEMENT, ASTNodeKind.CONTINUE_STATEMENT: {
+      recordExit(ref w, stmtId);
+      return;
+    }
+    case ASTNodeKind.BLOCK: {
+      walkBlock(ref w, stmtId);
+      return;
+    }
+    case ASTNodeKind.IF_STATEMENT: {
+      walkIf(ref w, stmt);
+      return;
+    }
+    case ASTNodeKind.WHILE_STATEMENT: {
+      walkExpr(ref w, stmt.childA);
+      walkLoopBody(ref w, stmt.childB);
+      return;
+    }
+    case ASTNodeKind.FOR_LOOP: {
+      walkExpr(ref w, stmt.childB);
+      walkExpr(ref w, stmt.childC);
+      walkExpr(ref w, stmt.childD);
+      walkLoopBody(ref w, stmt.childE);
+      return;
+    }
+    case ASTNodeKind.FOR_IN_LOOP: {
+      walkExpr(ref w, stmt.childA);
+      walkLoopBody(ref w, stmt.childB);
+      return;
+    }
+    case ASTNodeKind.SWITCH_STATEMENT: {
+      walkSwitch(ref w, stmt);
+      return;
+    }
+    // `ephemeral arenaScope(N) { ... }` - the subject is anonymous, so there is
+    // no name a manual call could reach it by and nothing to track. The block
+    // still holds statements.
+    case ASTNodeKind.KIND_REGION: {
+      walkExpr(ref w, stmt.childA);
+      walkBlock(ref w, stmt.childB);
+      return;
+    }
+    default: {
+      return;
+    }
+  }
+}
+
+// `let` / `const`, with or without a kind prefix, and with or without a block
+// of its own.
+function walkDecl(ref w: DischargeWalk, stmt: ASTNode, stmtId: NodeId): void {
+  walkExpr(ref w, stmt.childB);
+  const method = mustCallMethodOf(ref w, stmt);
+
+  // `disposable reg: T = expr { ... }` - the binding OWNS the block, so its
+  // obligation goes in a frame of its own and the block's closing brace is
+  // where codegen answers it.
+  if (stmt.childD != 0) {
+    pushFrame(ref w);
+    if (method.len > 0) {
+      addObligation(ref w, stmtId, stmt.name, method);
+    }
+    walkBlock(ref w, stmt.childD);
+    recordExit(ref w, stmtId);
+    popFrame(ref w);
+    return;
+  }
+
+  if (method.len > 0) {
+    addObligation(ref w, stmtId, stmt.name, method);
+  }
+}
+
+// Both arms from a shared starting state, then the intersection at the join.
+// A branch that DIVERGES never reaches the join, so it is left out of it.
+function walkIf(ref w: DischargeWalk, stmt: ASTNode): void {
+  walkExpr(ref w, stmt.childA);
+  const base: uint64 = w.sat;
+
+  walkBranch(ref w, stmt.childB);
+  const thenSat: uint64 = w.sat;
+  const thenDiverged: bool = alwaysDiverges(w.ast, stmt.childB);
+  w.sat = base;
+
+  // No `else`: the condition may be false, and that path ran nothing. So an
+  // `if` with no else can never discharge, whatever its arm did.
+  if (stmt.childC == 0) {
+    return;
+  }
+
+  walkBranch(ref w, stmt.childC);
+  const elseSat: uint64 = w.sat;
+  const elseDiverged: bool = alwaysDiverges(w.ast, stmt.childC);
+
+  if (thenDiverged && elseDiverged) {
+    w.sat = base;
+    return;
+  }
+  if (thenDiverged) {
+    w.sat = elseSat;
+    return;
+  }
+  if (elseDiverged) {
+    w.sat = thenSat;
+    return;
+  }
+  w.sat = thenSat & elseSat;
+}
+
+// A loop body may run ZERO times, so nothing it satisfies can be relied on
+// after it. The body is still walked - an exit site inside it is real.
+function walkLoopBody(ref w: DischargeWalk, bodyId: NodeId): void {
+  const base: uint64 = w.sat;
+  walkBlock(ref w, bodyId);
+  w.sat = base;
+}
+
+// Every arm from the shared starting state, intersected over the arms that
+// REACH the statement after the switch. With no `default`, a scrutinee matching
+// nothing falls straight through, and that is a reaching path too.
+function walkSwitch(ref w: DischargeWalk, stmt: ASTNode): void {
+  walkExpr(ref w, stmt.childA);
+  const base: uint64 = w.sat;
+  let merged: uint64 = 0;
+  let reaching: usize = 0;
+  let hasDefault: bool = false;
+
+  let i: usize = 0;
+  while (i < stmt.childCount) {
+    const arm = nodeAt(w.ast, childAt(w.ast, stmt, i));
+    if (arm.flagA) {
+      hasDefault = true;
+    }
+    w.sat = base;
+    walkBranch(ref w, arm.childB);
+    if (!alwaysDiverges(w.ast, arm.childB)) {
+      if (reaching == 0) {
+        merged = w.sat;
+      } else {
+        merged = merged & w.sat;
+      }
+      reaching += 1;
+    }
+    i += 1;
+  }
+
+  if (!hasDefault) {
+    if (reaching == 0) {
+      merged = base;
+    } else {
+      merged = merged & base;
+    }
+    reaching += 1;
+  }
+
+  if (reaching == 0) {
+    w.sat = base;
+    return;
+  }
+  w.sat = merged;
+}
+
+// ----- expressions --------------------------------------------------------
+
+// A manual call can sit at any depth of an expression, so this is a generic
+// recursion over the node's slots rather than a case per expression kind.
+function walkExpr(ref w: DischargeWalk, exprId: NodeId): void {
+  if (exprId == 0) {
+    return;
+  }
+  const node = nodeAt(w.ast, exprId);
+
+  // `f()?` IS a return: codegen unwinds every open scope at it. Its handler
+  // form (`f()? e { ... }`) fires nothing and its block is deliberately not
+  // walked - a dispose inside a handler answers nothing on the path that
+  // did not fail.
+  if (node.kind == ASTNodeKind.TRY_OP) {
+    walkExpr(ref w, node.childA);
+    recordExit(ref w, exprId);
+    return;
+  }
+
+  // `s = next;` REARMS the obligation. Whatever was disposed by hand was the
+  // OUTGOING value; the binding now holds something nobody has disposed, and
+  // the scope-end call is owed again. The value is walked FIRST, because that
+  // is the order it runs in.
+  //
+  // ONE DIVERGENCE FROM THE REFERENCE, deliberate, and the same shape as the
+  // one dispose_stack.yoop records. The JS compiler never clears its satisfied
+  // flag, so the pattern std/core/kinds.yoop documents as the informed opt-in
+  // for a mutable kinded binding - dispose the old value by hand, then
+  // overwrite it - leaks the NEW value there. Reproducing a leak to match is
+  // not parity worth having.
+  if (node.kind == ASTNodeKind.ASSIGNMENT) {
+    walkExpr(ref w, node.childA);
+    walkExpr(ref w, node.childB);
+    rearmAssigned(ref w, node.childA);
+    return;
+  }
+
+  if (node.kind == ASTNodeKind.CALL_EXPRESSION) {
+    noteManualCall(ref w, node);
+  }
+
+  walkExpr(ref w, node.childA);
+  walkExpr(ref w, node.childB);
+  walkExpr(ref w, node.childC);
+  walkExpr(ref w, node.childD);
+  walkExpr(ref w, node.childE);
+  walkExpr(ref w, node.childF);
+  let i: usize = 0;
+  while (i < node.childCount) {
+    walkExpr(ref w, childAt(w.ast, node, i));
+    i += 1;
+  }
+}

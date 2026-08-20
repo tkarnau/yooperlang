@@ -1,0 +1,49 @@
+module codegen;
+
+// The instruction catalogue for UNIONS. Three lines of IR, and every one of
+// them addresses byte 0 of a `{ [N x i8] }`.
+//
+// Same house rules as instr.yoop: named for the instruction it produces,
+// carrying a sample of its output, and making no decisions - the caller has
+// already worked out that a union's field index is always zero.
+
+import * as text from "std/core/text.yoop";
+
+// The one member of a union's LLVM type: the byte buffer everything overlays.
+// Index 0, always, which is what makes the two geps below constants.
+const UNION_PAYLOAD_INDEX: usize = 0;
+
+//   %union.union_rgba_1__Color = type { [4 x i8] }
+//
+// A byte BUFFER rather than a field list, because LLVM has no union type. `size`
+// is the largest field's, and the alignment falls out of how the value is
+// stored - every access is spelled at the FIELD's type, not at this one.
+export function emitUnionTypeDef(ref e: Emitter, moduleId: string, name: string, size: usize): void {
+  text.push(ref e.globals, unionLlvmName(moduleId, name));
+  text.push(ref e.globals, " = type { [");
+  text.pushUint(ref e.globals, uint64(size));
+  text.push(ref e.globals, " x i8] }\n");
+}
+
+//   %t2 = getelementptr inbounds %union.union_rgba_1__Color, ptr %c.1.addr, i32 0, i32 0
+//
+// The address of a union held in a SLOT. Stepping to member 0 of a one-member
+// type adds nothing to the pointer, which is the point: it hands back the
+// union's own address as a temp the load and store paths can both take.
+export function emitGepUnionBase(
+  ref cx: Cx,
+  dest: usize,
+  unionTy: string,
+  slotName: string,
+  slotId: usize
+): void {
+  emitGepField(ref cx, dest, unionTy, slotName, slotId, UNION_PAYLOAD_INDEX);
+}
+
+//   %t5 = getelementptr inbounds %union.union_rgba_1__Color, ptr %u.arg, i32 0, i32 0
+//
+// The same, through an address already in hand rather than through a slot -
+// what a `ref Color` parameter reaches its fields by.
+export function emitGepUnionOfAddr(ref cx: Cx, dest: usize, unionTy: string, basePtr: Operand): void {
+  emitGepFieldOfAddr(ref cx, dest, unionTy, basePtr, UNION_PAYLOAD_INDEX);
+}

@@ -1,0 +1,67 @@
+// Reserved words in NAME-ONLY positions.
+//
+// A field name, a variant case name and an enum case name are metadata: the
+// keyword's grammar role does not reach them, and C-shaped code writes them all
+// the time (`int type`, `int kind`). Generated bindings would otherwise fail to
+// parse on the first collision.
+//
+// The interesting one is `function` at the head of a variant member, because
+// there it is also how a METHOD starts. A case name cannot be told from a
+// method by the keyword alone - what tells them apart is the token AFTER it: a
+// method's name follows, and a case is followed by its payload `{`, the `,`
+// before the next case, or the `}` that ends the body.
+
+// A field name is told from a method by the COLON, so `function` may be one.
+type Packet {
+  type: int32,
+  kind: int32,
+  function: int32,
+}
+
+union Value {
+  type: int32,
+  function: int32,
+}
+
+enum Tag { type, kind, enum }
+
+trait Tagged {
+  function tagOf(ref self): int32;
+}
+
+variant Shape implements Tagged {
+  // A bare case wearing the keyword, ...
+  function,
+  // ... one carrying a payload, whose FIELD is a keyword too, ...
+  type { kind: int32 },
+  // ... and a real method beside them, which still reads as a method.
+  function tagOf(ref self): int32 {
+    switch (self) {
+      case Shape.function: { return 1; }
+      case Shape.type { kind: k }: { return k; }
+    }
+  }
+}
+
+function main(): int {
+  let p: Packet = { type: 7, kind: 3, function: 5 };
+  printf(`p.type=${p.type} p.kind=${p.kind} p.function=${p.function}\n`);
+
+  let v: Value = { function: 9 };
+  printf(`v.function=${v.function}\n`);
+
+  // Spelled as a branch rather than an interpolation so the JS reference can
+  // check this fixture too - it renders an interpolated bool as `1`.
+  let t: Tag = Tag.kind;
+  if (t == Tag.kind) { printf("t==Tag.kind\n"); }
+
+  let bare: Shape = Shape.function;
+  let payload: Shape = Shape.type { kind: 42 };
+  printf(`bare=${Tagged.tagOf(ref bare)} payload=${Tagged.tagOf(ref payload)}\n`);
+
+  switch (payload) {
+    case Shape.function: { printf("function case\n"); }
+    case Shape.type { kind: k }: { printf(`type case, kind=${k}\n`); }
+  }
+  return 0;
+}

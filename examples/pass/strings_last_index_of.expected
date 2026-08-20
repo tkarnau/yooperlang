@@ -1,0 +1,7 @@
+last=5 first=0
+atZero=0
+multi=5 tail=5
+absent=9 tooLong=2
+dir=/a/bb parent=/a
+noParent=[plain]
+exit=0

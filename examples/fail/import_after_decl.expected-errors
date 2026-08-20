@@ -1,0 +1,3 @@
+# Illegal: every `import` belongs above the first declaration in the file, and
+# this one stands after `main`.
+2:7: imports must come first

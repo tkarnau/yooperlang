@@ -27,21 +27,17 @@ module codegen;
 // payload struct both belong to the return type, not to the operand.
 
 import { Vec }, * as vec from "std/core/vec.yoop";
-import { Map }, * as map from "std/collections/map.yoop";
+import * as map from "std/collections/map.yoop";
 import { disposable } from "std/core/kinds.yoop";
-import { ASTNode, NodeId, nodeAt } from "../ast";
-import { TypeId, TYPE_VOID_ID, FallibleShape, fallibleShapeOf, moduleIdOf,
-  nominalModuleOf, methodSymbolName } from "../typecheck";
+import { ASTNode, NodeId } from "../ast";
+import { TypeId, TYPE_VOID_ID, FallibleShape, fallibleShapeOf, moduleIdOf, nominalModuleOf, methodSymbolName } from "../typecheck";
 
 // The result of `?` in an expression, plus the branch and early return that
 // make it one. `out` is left as Operand.None for a payload-less `Ok`, which is
 // exactly what a statement-position `inner(n)?;` wants.
-export function emitTryOp(ref cx: Cx, expr: ASTNode, exprId: NodeId, ref out: Operand): string {
+export function emitTryOp(ref cx: Cx, expr: ASTNode, exprId: NodeId, ref out: Operand): EmitResult {
   let value: Operand = Operand.None;
-  const err = emitExpr(ref cx, expr.childA, ref value);
-  if (err.len > 0) {
-    return err;
-  }
+  emitExpr(ref cx, expr.childA, ref value)?;
 
   const operandType = resolvedTypeAt(ref cx, expr.childA);
   const operandTy = llvmType(cx.prog, operandType);
@@ -75,15 +71,9 @@ export function emitTryOp(ref cx: Cx, expr: ASTNode, exprId: NodeId, ref out: Op
   // fires the disposals appropriate to ITS exit. Firing them here as well would
   // be a double free.
   if (expr.childC != 0) {
-    const herr = emitTryHandler(ref cx, expr, operandType, operandTy, slot.id, ref got);
-    if (herr.len > 0) {
-      return herr;
-    }
+    emitTryHandler(ref cx, expr, operandType, operandTy, slot.id, ref got)?;
   } else {
-    const eerr = emitErrReturn(ref cx, exprId, operandType, operandTy, slot.id, ref got, ref want);
-    if (eerr.len > 0) {
-      return eerr;
-    }
+    emitErrReturn(ref cx, exprId, operandType, operandTy, slot.id, ref got, ref want)?;
   }
 
   emitLabel(ref cx, okLabel);
@@ -95,7 +85,7 @@ export function emitTryOp(ref cx: Cx, expr: ASTNode, exprId: NodeId, ref out: Op
   // instantiation too.
   out = emitOkPayload(ref cx, operandType, operandTy, slot.id,
     resolvedTypeAt(ref cx, exprId), got.okOrdinal);
-  return "";
+  return EmitResult.Ok;
 }
 
 //   %t1 = extractvalue %variant.m__Result %v, 0
@@ -130,7 +120,7 @@ function emitErrReturn(
   slotId: usize,
   ref got: FallibleShape,
   ref want: FallibleShape
-): string {
+): EmitResult {
   const retTy = llvmType(cx.prog, cx.fnRet);
   const outSlot = declareAnonSlot(ref cx, retTy);
 
@@ -176,10 +166,7 @@ function emitErrReturn(
   // disposals - innermost first, exactly as `return` does. The value is built
   // BEFORE the unwind for the same reason `return`'s is: it may read a binding
   // that is about to go.
-  const uerr = emitUnwindTo(ref cx, 0);
-  if (uerr.len > 0) {
-    return uerr;
-  }
+  emitUnwindTo(ref cx, 0, exprId)?;
   // In a COROUTINE there is no `ret <value>`: the Err goes to the caller-owned
   // slot and control falls into the shared final-suspend trailer, exactly as a
   // written `return` does. Emitting a bare `ret` here would hand the caller a
@@ -187,10 +174,10 @@ function emitErrReturn(
   // The reference hit the same thing and fixed it the same way.
   if (cx.coro.active) {
     emitCoroReturn(ref cx, retTy, Operand.Temp { id: built }, true);
-    return "";
+    return EmitResult.Ok;
   }
   emitRet(ref cx, retTy, Operand.Temp { id: built });
-  return "";
+  return EmitResult.Ok;
 }
 
 //   %t5 = call %struct.d__ParsingError @lex__LexedError__into(ptr %t4)

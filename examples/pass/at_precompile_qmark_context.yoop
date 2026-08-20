@@ -1,4 +1,4 @@
-// Phase 10.E.2 at comptime: a `?` context string folds inside
+// A `?` context string folds inside
 // `@precompile`. The bytecode lowerer emits the context expression in
 // the err branch of the TRY_OP, then either builds "<context>: <err>"
 // with the same OP.TEMPLATE_FORMAT template literals use (string

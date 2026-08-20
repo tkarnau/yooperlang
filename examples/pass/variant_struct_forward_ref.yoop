@@ -1,8 +1,7 @@
-// Phase 13.A: variant decls now mutate their pass-A shell in place
-// (instead of swapping a fresh VariantType into the table at pass C
-// end). Without that fix, a struct declared BEFORE the variant - and
-// referencing the variant from one of its fields - captures the empty
-// shell. `sizeOfType(Struct)` then computes a too-small layout (the
+// Variant decls mutate their pass-A shell in place, instead of swapping
+// a fresh VariantType into the table at pass C end. Otherwise a struct
+// declared BEFORE the variant - and referencing the variant from one of
+// its fields - captures the empty shell. `sizeOfType(Struct)` then computes a too-small layout (the
 // captured variant looks payload-less), and `heapAlloc<Struct>(n)`
 // undersizes the buffer by the missing-payload bytes per element.
 // Subsequent writes scribble past the end of the allocation and

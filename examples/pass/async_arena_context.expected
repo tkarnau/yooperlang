@@ -1,0 +1,5 @@
+parked
+neighbor: arena used=0
+resumed: arena used=64
+a=1 b=0
+exit=0

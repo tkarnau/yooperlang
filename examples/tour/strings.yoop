@@ -1,0 +1,37 @@
+// Two string types, split by ownership.
+//
+//   string - a borrowed view. Literals are strings. Nothing frees it.
+//   Text   - an owned, growable buffer. Use it whenever you BUILD text.
+
+import * as log from "std/log.yoop";
+import * as text from "std/core/text.yoop";
+import { Text } from "std/core/text.yoop";
+import { disposable } from "std/core/kinds.yoop";
+
+function main(): int32 {
+  const town: string = "Marquette";
+
+  // Backtick strings interpolate, the same as JavaScript.
+  printf(`hello from ${town}\n`);
+
+  // A Text owns its buffer and grows. `pushInt` formats digits straight into
+  // it, so the number costs no allocation. `disposable` frees it at the
+  // closing brace (that keyword is the next file).
+  disposable line: Text = text.make(32);
+  text.push(ref line, town);
+  text.push(ref line, ", founded ");
+  text.pushInt(ref line, 1849);
+  printf(`${text.view(ref line)}\n`);
+
+  // Logging goes to stderr with a level prefix.
+  log.info("greeted a town");
+  log.warn("nothing else to do");
+
+  // `town == "Marquette"` does not compile: that would compare two pointers.
+  // Ask for the comparison you meant.
+  if (text.equals(town, "Marquette")) {
+    printf("names match\n");
+  }
+
+  return 0;
+}

@@ -1,0 +1,6 @@
+# Illegal: m.yoop exports nothing called `nope`.
+#
+# A DIRECTORY fixture: the harness builds `import_unknown_export/main.yoop`.
+# The substring stops before the module NAME on purpose - the bootstrap renders
+# it as `m_3`, an internal graph id that a reordering would change.
+1:9: has no export "nope"

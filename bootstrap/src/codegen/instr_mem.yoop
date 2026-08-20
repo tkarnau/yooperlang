@@ -7,7 +7,6 @@ module codegen;
 // Same house rules: named for the instruction, a sample of its output, and no
 // decisions - see the header of instr.yoop.
 
-import { Text }, * as text from "std/core/text.yoop";
 
 // ----- arrays --------------------------------------------------------------
 //
@@ -216,12 +215,42 @@ export function emitInsertValueTemp(
   endInstr(ref cx);
 }
 
+// ----- the struct-field gep, in its four base spellings --------------------
+//
+//   getelementptr inbounds <struct ty>, ptr <BASE>, i32 0, i32 <index>
+//
+// Four functions emit exactly that instruction and differ in ONE line: how the
+// base pointer is written. A temp, an arbitrary operand, a named slot, or a bare
+// LLVM name. The spine is factored out below so each emitter is that one
+// difference and nothing else, rather than four nine-line copies with the line
+// that matters buried in them.
+//
+// They stay four functions rather than becoming one with a tagged base, because
+// the caller always knows statically which spelling it has, and a tag would move
+// that knowledge to run time to save nothing.
+//
+// emitGepTaskField in instr_task.yoop is the fourth, and lives there because it
+// addresses the task HANDLE rather than any struct this file knows about.
+
+function gepFieldHead(ref cx: Cx, dest: usize, structTy: string): void {
+  startInstr(ref cx);
+  temp(ref cx, dest);
+  part(ref cx, " = getelementptr inbounds ");
+  part(ref cx, structTy);
+  part(ref cx, ", ptr ");
+}
+
+function gepFieldTail(ref cx: Cx, index: usize): void {
+  part(ref cx, ", i32 0, i32 ");
+  num(ref cx, index);
+  endInstr(ref cx);
+}
+
 //   %t8 = getelementptr inbounds %variantc.m__Shape__Circle, ptr %t7, i32 0, i32 0
 //
-// The same addressing as emitGepField, but through a POINTER already in a temp
-// rather than through a named slot. That is what lets a variant's payload bytes
-// be addressed as whichever case struct the tag says they hold: the pointer
-// comes from a gep, not from an alloca.
+// Through a POINTER already in a temp rather than through a named slot. That is
+// what lets a variant's payload bytes be addressed as whichever case struct the
+// tag says they hold: the pointer comes from a gep, not from an alloca.
 export function emitGepFieldOfPtr(
   ref cx: Cx,
   dest: usize,
@@ -229,23 +258,16 @@ export function emitGepFieldOfPtr(
   basePtr: usize,
   index: usize
 ): void {
-  startInstr(ref cx);
-  temp(ref cx, dest);
-  part(ref cx, " = getelementptr inbounds ");
-  part(ref cx, structTy);
-  part(ref cx, ", ptr ");
+  gepFieldHead(ref cx, dest, structTy);
   temp(ref cx, basePtr);
-  part(ref cx, ", i32 0, i32 ");
-  num(ref cx, index);
-  endInstr(ref cx);
+  gepFieldTail(ref cx, index);
 }
 
 //   %t3 = getelementptr inbounds %struct.Emitter, ptr %t2, i32 0, i32 4
 //
-// The same addressing again, through an arbitrary pointer OPERAND rather than a
-// temp. A borrow reaching one of its fields is why it exists: `cx.e` may lower
-// to a temp, but it may equally be a slot address, and only the operand form
-// takes both.
+// Through an arbitrary pointer OPERAND rather than a temp. A borrow reaching one
+// of its fields is why it exists: `cx.e` may lower to a temp, but it may equally
+// be a slot address, and only the operand form takes both.
 export function emitGepFieldOfAddr(
   ref cx: Cx,
   dest: usize,
@@ -253,22 +275,16 @@ export function emitGepFieldOfAddr(
   basePtr: Operand,
   index: usize
 ): void {
-  startInstr(ref cx);
-  temp(ref cx, dest);
-  part(ref cx, " = getelementptr inbounds ");
-  part(ref cx, structTy);
-  part(ref cx, ", ptr ");
+  gepFieldHead(ref cx, dest, structTy);
   operand(ref cx, basePtr);
-  part(ref cx, ", i32 0, i32 ");
-  num(ref cx, index);
-  endInstr(ref cx);
+  gepFieldTail(ref cx, index);
 }
 
 //   %t3 = getelementptr inbounds %struct.Point, ptr %p.1.addr, i32 0, i32 1
 //
-// The address of a struct field by POSITION. Used to fill a literal and to
-// assign to a field; reading one goes through extractvalue on the loaded value
-// instead, which needs no address at all.
+// The address of a struct field by POSITION, through a named slot. Used to fill
+// a literal and to assign to a field; reading one goes through extractvalue on
+// the loaded value instead, which needs no address at all.
 export function emitGepField(
   ref cx: Cx,
   dest: usize,
@@ -277,13 +293,7 @@ export function emitGepField(
   slotId: usize,
   index: usize
 ): void {
-  startInstr(ref cx);
-  temp(ref cx, dest);
-  part(ref cx, " = getelementptr inbounds ");
-  part(ref cx, structTy);
-  part(ref cx, ", ptr ");
+  gepFieldHead(ref cx, dest, structTy);
   slot(ref cx, slotName, slotId);
-  part(ref cx, ", i32 0, i32 ");
-  num(ref cx, index);
-  endInstr(ref cx);
+  gepFieldTail(ref cx, index);
 }

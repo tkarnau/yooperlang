@@ -17,8 +17,6 @@
 //   client       the same thing through the whole std/http client, by URL
 //
 //     https_client <port> <ca.pem path>
-//
-// See plans/tls.md phase 1.
 
 import { Result } from "std/core/types.yoop";
 import { disposable, Disposable } from "std/core/kinds.yoop";
@@ -140,7 +138,7 @@ task run(): int32 {
     //    sight at the call site - the scheme picks the transport.
     //
     //    This works because std/http takes Reader/Writer rather than a socket
-    //    (phase 0) and TlsStream implements Readable/Writable (phase 1), so
+    //    and TlsStream implements Readable/Writable, so
     //    std/https is only the place the two meet.
     let c: Client = http.clientNew();
     let viaUrl: TlsConfig = tls.tlsConfigWithCaFile(ca);

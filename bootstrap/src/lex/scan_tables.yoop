@@ -16,19 +16,18 @@ module lex;
 //     `const KEYWORD_LIST: KeywordDefinition[] = [ ... ]` is refused; and the
 //     punctuation table additionally went through a CALL
 //     (`sortedDefs([ ... ])`), which the JS reference FOLDS with its comptime
-//     interpreter. Comptime is deliberately out of scope for the bootstrap
-//     right now (plans/bootstrap-completion.md), and these two declarations
-//     between them gated 99 of the 420 files in the surface probe - the whole
-//     compiler's own import closure runs through `lex`.
+//     interpreter. Comptime is deliberately out of scope for the bootstrap, and
+//     these two declarations between them gate every file whose import closure
+//     runs through `lex` - which is the whole compiler's own.
 //   * the longest-first ORDER is a correctness requirement rather than a
 //     formatting preference, and `quickSort` is what enforces it. Hand-sorting
 //     the literal would trade a check for a comment, and the comment already
 //     says what breaks.
 //
-// So the order is established at RUNTIME, once per `LexTables`, by the same
-// sort that used to run at compile time. This is REVERSIBLE: a self-hosted
-// comptime interpreter would let `lexTablesNew` move back to a module const
-// with no change to anything that reads it.
+// So the order is established at RUNTIME, once per `LexTables`, by a sort the
+// reference runs at compile time. This is REVERSIBLE: a self-hosted comptime
+// interpreter would let `lexTablesNew` become a module const with no change to
+// anything that reads it.
 
 import { Vec }, * as vec from "std/core/vec.yoop";
 import { Disposable, disposable } from "std/core/kinds.yoop";
@@ -121,13 +120,13 @@ function fillTokenScanList(ref out: Vec<SortedTokenDefinition>): void {
   vec.vecPush(ref out, { str: "*", tag: TokenTags.MULT });
   vec.vecPush(ref out, { str: "/", tag: TokenTags.DIVIDE });
   vec.vecPush(ref out, { str: "%", tag: TokenTags.MODULUS });
-  // Phase 9: compound-assignment two-char operators.
+  // Compound-assignment two-char operators.
   vec.vecPush(ref out, { str: "+=", tag: TokenTags.PLUSEQ });
   vec.vecPush(ref out, { str: "-=", tag: TokenTags.MINUSEQ });
   vec.vecPush(ref out, { str: "*=", tag: TokenTags.MULTEQ });
   vec.vecPush(ref out, { str: "/=", tag: TokenTags.DIVIDEEQ });
   vec.vecPush(ref out, { str: "%=", tag: TokenTags.MODULUSEQ });
-  // Phase 9.G: function value type separator. The sort puts this before `=`
+  // Function value type separator. The sort puts this before `=`
   // and before `>=` / `>`; the lexer's existing logic handles the
   // disambiguation against `==`.
   vec.vecPush(ref out, { str: "=>", tag: TokenTags.FATARROW });
@@ -136,7 +135,7 @@ function fillTokenScanList(ref out: Vec<SortedTokenDefinition>): void {
   vec.vecPush(ref out, { str: "...", tag: TokenTags.DOTDOTDOT });
   vec.vecPush(ref out, { str: "[", tag: TokenTags.LBRACKET });
   vec.vecPush(ref out, { str: "]", tag: TokenTags.RBRACKET });
-  // Phase 11.A: attribute prefix `@`.
+  // Attribute prefix `@`.
   vec.vecPush(ref out, { str: "@", tag: TokenTags.AT });
 }
 

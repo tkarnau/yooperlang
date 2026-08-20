@@ -7,7 +7,7 @@ module typecheck;
 // widths. The arena never holds a raw name.
 
 import * as str from "std/core/strings.yoop";
-import { Map }, * as map from "std/collections/map.yoop";
+import * as map from "std/collections/map.yoop";
 import { Vec }, * as vec from "std/core/vec.yoop";
 import { Text }, * as text from "std/core/text.yoop";
 import { Option } from "std/core/types.yoop";
@@ -511,9 +511,9 @@ export function formatType(ref prog: Program, id: TypeId): string {
     case Type.Trait { decl: d, methods: mm, typeParams: tp, extendsTraits: et }: {
       return d.name;
     }
-    // The pointer family. Every one of these used to fall through to "<type>",
-    // which turns a pointer mismatch into "<type>, not <type>" - the same "X is
-    // not X" a reader cannot act on that the Func rendering had.
+    // The pointer family. Falling through to "<type>" here turns a pointer
+    // mismatch into "<type>, not <type>" - the same "X is not X" a reader
+    // cannot act on that a missing Func rendering produces.
     case Type.UnsafePtr { pointee: p }: {
       if (p == TYPE_ERROR_ID) {
         return "unsafe_ptr";       // the OPAQUE one: pointee 0, the reserved none
@@ -657,6 +657,43 @@ export function lookupField(ref prog: Program, structType: TypeId, name: string)
     default: {
       return { index: 0, typeId: TYPE_ERROR_ID, found: false };
     }
+  }
+}
+
+// The i'th field of a struct, by POSITION. `lookupField` answers by name; a
+// value read back out of an aggregate is known only by where it sat.
+export type PositionalField {
+  name: string,
+  typeId: TypeId,
+  found: bool,
+}
+
+export function structFieldAt(ref prog: Program, structType: TypeId, i: usize): PositionalField {
+  switch (typeAt(ref prog, structType)) {
+    case Type.Struct { decl: d, fields: f, methods: mm, implementsTraits: it, generic: g }: {
+      if (i >= f.len) {
+        return { name: "", typeId: TYPE_ERROR_ID, found: false };
+      }
+      const field = vec.vecGet(ref f, i);
+      return { name: field.name, typeId: field.typeId, found: true };
+    }
+    default: { return { name: "", typeId: TYPE_ERROR_ID, found: false }; }
+  }
+}
+
+// The i'th field of a UNION, by position. The union twin of `structFieldAt`,
+// and separate for the same reason the two types are: a union's fields all sit
+// at offset zero.
+export function unionFieldAt(ref prog: Program, unionType: TypeId, i: usize): PositionalField {
+  switch (typeAt(ref prog, unionType)) {
+    case Type.Union { decl: d, fields: f }: {
+      if (i >= f.len) {
+        return { name: "", typeId: TYPE_ERROR_ID, found: false };
+      }
+      const field = vec.vecGet(ref f, i);
+      return { name: field.name, typeId: field.typeId, found: true };
+    }
+    default: { return { name: "", typeId: TYPE_ERROR_ID, found: false }; }
   }
 }
 

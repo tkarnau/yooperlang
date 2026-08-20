@@ -1,4 +1,4 @@
-// Phase 10.E: cross-shape `?` propagation via the `Into<T>` trait.
+// Cross-shape `?` propagation via the `Into<T>` trait.
 //
 // `parse_positive` returns `Result<int32, IoError>`; `add_two_positives`
 // returns `Result<int32, AppError>`. The `?` operator inside the outer

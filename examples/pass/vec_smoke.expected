@@ -1,0 +1,5 @@
+len=4 cap=4
+v[2]=30
+v[0]=99
+after_clear len=0 cap=4
+exit=0

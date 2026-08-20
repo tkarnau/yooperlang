@@ -4,11 +4,16 @@
   The self-hosted yooperlang compiler.
 
     yoopiler_boot <entry.yoop> [-o <out>] [--emit-ir]
+    yoopiler_boot --test <dir-or-file> [filter...]
 
   Runs the whole pipeline - module graph, lex, parse, typecheck, codegen, link -
-  and produces an executable. The language subset it accepts is small and grows
-  from the bottom up; anything outside it is refused BY NAME rather than
-  mis-compiled. bootstrap/README.md has the current subset.
+  and produces an executable. The language subset it accepts is small; anything
+  outside it is refused BY NAME rather than mis-compiled. bootstrap/README.md
+  has the subset.
+
+  `--test` is the same pipeline with a generated entry module in front of it:
+  find the test files, collect their suites, write a `main` that hands the table
+  to std/test.yoop, and RUN what comes out. See test_mode/.
 */
 
 import * as log from "std/log.yoop";
@@ -19,27 +24,167 @@ import { disposable } from "std/core/kinds.yoop";
 import { Result } from "std/core/types.yoop";
 import { Text }, * as text from "std/core/text.yoop";
 
-import { loadModuleGraph, LoadGraphResult, discoverStdRoot } from "./source_graph";
-import { typecheckProgram, Program } from "./typecheck";
-import { Severity, formatLocation } from "./diagnostics";
-import { codegenProgram } from "./codegen";
+import * as fs from "std/fs.yoop";
+import { AST, dumpAstJson } from "./ast";
+import { parse } from "./parse";
+import { loadModuleGraph, loadModuleGraphFromSource, LoadGraphResult, discoverStdRoot } from "./source_graph";
+import { typecheckProgram, Program, UNHANDLED_DISPOSABLE } from "./typecheck";
+import { Diagnostic, Severity, formatLocation } from "./diagnostics";
+import { codegenProgram, CodegenOptions, defaultCodegenOptions } from "./codegen";
+import { runPrecompilePass } from "./comptime";
 import { linkExecutable, writeIrFile } from "./link";
+import { TestPlan, planTestRun, testBinaryPath, runTestBinary, removeTestArtifacts } from "./test_mode";
+import { runLanguageServer } from "./lsp";
 
-const USAGE: string = "usage: yoopiler_boot <entry.yoop> [-o <out>] [--emit-ir]";
+const USAGE: string = "usage: yoopiler_boot <entry.yoop> [-o <out>] [--emit-ir] [--track-heap]\n       yoopiler_boot --test <dir-or-file> [filter...]\n       yoopiler_boot --lsp\n       yoopiler_boot --list-attributes";
 
 function main(): int {
-  const cli = parseCommandLine();
+  // Extra positionals are suite-name FILTERS in a test run and an error in an
+  // ordinary one, so they are collected either way and judged after the scan.
+  disposable extras: Vec<string> = vec.vecNew(2);
+  const cli = parseCommandLine(ref extras);
   if (cli.error.len > 0) {
     log.error(cli.error);
     log.error(USAGE);
     return 2;
   }
 
+  // `--list-attributes` answers about the COMPILER rather than about a program,
+  // so it runs before anything looks for an input file. Editor tooling and
+  // documentation read it; so does whoever just typed an `@` by mistake.
+  if (cli.listAttributes) {
+    return listAttributes();
+  }
+
   // Where `std/...` resolves. Discovered once here and handed to the graph, so
   // the layer that RESOLVES paths never has to probe for a directory.
   const stdRoot = discoverStdRoot(env.argAt(0));
 
-  switch (loadModuleGraph(cli.entry, stdRoot)) {
+  // `--lsp` takes over the process: stdin and stdout become the protocol's
+  // transport rather than a terminal, so it is answered here, before anything
+  // else in the driver runs. Nothing below this point would write to stdout
+  // either (every note the compiler makes goes through std/log, which is
+  // stderr), but the flag being handled first is what keeps that true when
+  // something later grows a `printf`.
+  if (cli.lsp) {
+    return runLanguageServer(stdRoot);
+  }
+
+  // Not `disposable`: on a test run the plan's source bytes are MOVED into the
+  // graph, which keeps them for as long as the AST's spans point into them.
+  let plan: TestPlan = planTestRun(cli.test, cli.entry);
+  if (plan.isTestRun) {
+    if (plan.error.len > 0) {
+      log.error(plan.error);
+      return 1;
+    }
+    return runTests(ref plan, stdRoot, ref extras);
+  }
+
+  // `--dump-ast-json` stops after PARSE. It describes the tree the parser
+  // built, so typechecking it would only add ways to fail at something the
+  // caller did not ask about.
+  if (cli.astJsonOut.len > 0) {
+    return dumpAstJsonTo(cli.entry, cli.astJsonOut);
+  }
+
+  return compileGraph(loadModuleGraph(cli.entry, stdRoot), cli.out, cli.emitIr,
+    { trackHeap: cli.trackHeap },
+    { disposable: cli.warnDisposable, std: cli.warnStd, stdRoot: stdRoot });
+}
+
+// Discover, generate, compile, run. The compile is the ORDINARY one - there is
+// no test-mode typechecker and no second codegen path, only an entry module
+// nobody wrote.
+//
+// The binary is an artifact of the run rather than of the project, so `-o` does
+// not name it: it goes to the temp directory and is removed on the way out.
+// Its EXIT CODE is the failure count std/test.yoop returned, and it becomes
+// ours, which is what lets CI gate on the command directly.
+function runTests(ref plan: TestPlan, stdRoot: string, ref filters: Vec<string>): int {
+  log.info(`test: ${plan.suiteCount} suite(s) in ${plan.fileCount} file(s)`);
+  const exePath = testBinaryPath();
+  const built = compileGraph(
+    loadModuleGraphFromSource(plan.entrySource, plan.entryPath, stdRoot),
+    exePath,
+    false,
+    defaultCodegenOptions(),
+    { disposable: false, std: false, stdRoot: stdRoot }
+  );
+  if (built != 0) {
+    // A build that got as far as clang and stopped there still left a `.ll`
+    // behind. Nobody is going to go looking for it under a pid-named path in
+    // the temp directory, so it goes the same way a successful run's does.
+    removeTestArtifacts(exePath);
+    return built;
+  }
+  const code = runTestBinary(exePath, ref filters);
+  removeTestArtifacts(exePath);
+  return code;
+}
+
+// Everything above layer 0: typecheck a loaded graph, emit its IR, and link it.
+// Returns the process exit code.
+//
+// Split out of `main` so an ordinary compile and a test run share it rather
+// than each carrying a copy of the same five failure paths.
+/*
+  `--dump-ast-json <out> <file.yoop>` - the parsed tree, as JSON.
+
+  One FILE rather than a module graph: the payload describes what the parser
+  made of this source, and pulling in its imports would describe several trees
+  under one filename.
+
+  The shape is documented in ast/dump_json.yoop. It is not the JS reference's
+  payload - the two ASTs differ - but it is the shape the viewer reads.
+*/
+function dumpAstJsonTo(entry: string, outPath: string): int {
+  disposable src: Vec<uint8> = vec.vecNew(4096);
+  const readErr = fs.readFileInto(ref src, entry);
+  if (readErr.len > 0) {
+    log.error(`error reading ${entry}: ${readErr}`);
+    return 1;
+  }
+
+  switch (parse(vec.vecAsArray(ref src))) {
+    case Result.Err { error: e }: {
+      log.error(`${entry}:${e.sourceLoc.line + 1}:${e.sourceLoc.column}: ${e.rawMessage}`);
+      return 1;
+    }
+    case Result.Ok { value: parsed }: {
+      disposable ast: AST = parsed;
+      disposable payload: Text = dumpAstJson(ref ast, ast.root, entry, vec.vecAsArray(ref src));
+      const writeErr = fs.writeFile(outPath, text.bytes(ref payload));
+      if (writeErr.len > 0) {
+        log.error(writeErr);
+        return 1;
+      }
+      log.info(`AST JSON written to ${outPath}`);
+      return 0;
+    }
+  }
+}
+
+// The attributes this compiler knows, one per line.
+//
+// Read by editor tooling and by documentation, and by whoever typed an `@` and
+// wants to know what may follow it. The list is the parser's - see
+// parse/attributes.yoop, which is the one place that decides.
+function listAttributes(): int {
+  log.info("known attributes (2):");
+  log.info("  @derive");
+  log.info("  @precompile");
+  return 0;
+}
+
+function compileGraph(
+  loaded: LoadGraphResult,
+  outPath: string,
+  emitIr: bool,
+  opts: CodegenOptions,
+  warn: WarnOptions
+): int {
+  switch (loaded) {
     case LoadGraphResult.Err { error: e }: {
       log.error(`${e}`);
       return 1;
@@ -48,12 +193,20 @@ function main(): int {
       // `disposable` here because the unhandled-disposable warning caught it:
       // Program owns the type/symbol arenas and every TypedModule's maps.
       disposable prog: Program = typecheckProgram(ref moduleGraph);
-      if (reportDiagnostics(ref prog) > 0) {
+
+      // `@precompile` runs between the two layers rather than inside either. It
+      // needs pass D's resolved types, so it cannot run before typecheck ends;
+      // and its failures are diagnostics with source locations, which codegen
+      // has no channel for. It folds each decorated const and puts the LITERAL
+      // it produced back in the AST, so codegen reads an ordinary constant.
+      runPrecompilePass(ref prog, ref moduleGraph);
+
+      if (reportDiagnostics(ref prog, warn) > 0) {
         return 1;
       }
       log.info("typecheck: ok");
 
-      switch (codegenProgram(ref prog, ref moduleGraph)) {
+      switch (codegenProgram(ref prog, ref moduleGraph, opts)) {
         case Result.Err { error: e }: {
           log.error(`codegen: ${e}`);
           return 1;
@@ -61,14 +214,14 @@ function main(): int {
         case Result.Ok { value: out }: {
           log.info("llvm IR: ok");
           disposable irText: Text = out.ir;
-          disposable irPath: Text = text.fromString(cli.out);
+          disposable irPath: Text = text.fromString(outPath);
           text.push(ref irPath, ".ll");
           disposable libs: Vec<string> = out.linkLibraries;
 
           // --emit-ir stops HERE, one step short of clang. The `.ll` is written
           // where a linking run would have written it, so the two modes leave
           // the same artifact behind and only the executable is missing.
-          if (cli.emitIr) {
+          if (emitIr) {
             const writeErr = writeIrFile(ref irText, text.view(ref irPath));
             if (writeErr.len > 0) {
               log.error(writeErr);
@@ -79,19 +232,28 @@ function main(): int {
           }
 
           const linkErr = linkExecutable(
-            ref irText, text.view(ref irPath), cli.out, out.needsRuntime,
+            ref irText, text.view(ref irPath), outPath, out.needsRuntime,
             ref libs, env.argAt(0)
           );
           if (linkErr.len > 0) {
             log.error(linkErr);
             return 1;
           }
-          log.info(`compiled: ${cli.out}`);
+          log.info(`compiled: ${outPath}`);
           return 0;
         }
       }
     }
   }
+}
+
+// How a build was asked to report. Bundled for the reason CodegenOptions is:
+// two flags today, and the call site should not grow a parameter per flag.
+@derive(display)
+type WarnOptions {
+  disposable: bool,
+  std: bool,
+  stdRoot: string,
 }
 
 // A parsed command line. `error` is "" when the line is usable, and otherwise
@@ -100,23 +262,41 @@ type CliArgs {
   entry: string,
   out: string,
   emitIr: bool,
+  test: bool,
+  trackHeap: bool,
+  listAttributes: bool,
+  // `--dump-ast-json <path>` - where the AST payload goes, or "" when the flag
+  // was not given. A PATH rather than stdout, matching the reference, because
+  // the caller is a generator that wants a file to read back.
+  astJsonOut: string,
+  lsp: bool,
+  warnDisposable: bool,
+  warnStd: bool,
   error: string,
 }
 
 /*
-  The command line, as a real scan rather than the fixed positions this used to
-  read (`argAt(1)` was the entry and `argAt(3)` was the output, whatever stood
-  at `argAt(2)`). `<entry> -o <out>` still means exactly what it did; what is
-  new is that a flag may stand anywhere in the line and an unrecognized one is
-  refused BY NAME instead of being taken for an input file.
+  The command line, as a real scan rather than fixed positions. A flag may
+  stand anywhere in the line, and an unrecognized one is refused BY NAME instead
+  of being taken for an input file.
 
   `--emit-ir` is the bootstrap's own spelling - the reference has no equivalent
   (its `--keep-ir` keeps a temp copy of the IR and still links). It exists
   because most of what compiles a corpus file only wants to know whether
   codegen succeeded, and the link is the expensive half.
+
+  `--test` takes at most ONE positional, the path to search, and everything
+  after it is a suite-name filter rather than a second input file. So the extra
+  positionals are collected unconditionally and what they MEAN is decided once
+  the whole line has been read - a `--test` written after its path would
+  otherwise be refused by the flag that has not been seen yet.
 */
-function parseCommandLine(): CliArgs {
-  let args: CliArgs = { entry: "", out: "a.out", emitIr: false, error: "" };
+function parseCommandLine(ref extras: Vec<string>): CliArgs {
+  let args: CliArgs = {
+    entry: "", out: "a.out", emitIr: false, test: false,
+    trackHeap: false, listAttributes: false, astJsonOut: "", lsp: false,
+    warnDisposable: false, warnStd: false, error: ""
+  };
   const argc = env.argCount();
   let i: int32 = 1;
   while (i < argc) {
@@ -131,27 +311,73 @@ function parseCommandLine(): CliArgs {
     } else if (str.stringEq(a, "--emit-ir")) {
       args.emitIr = true;
       i += 1;
+    } else if (str.stringEq(a, "--test")) {
+      args.test = true;
+      i += 1;
+    } else if (str.stringEq(a, "--dump-ast-json")) {
+      if (i + 1 >= argc) {
+        args.error = "--dump-ast-json needs an output path";
+        return args;
+      }
+      args.astJsonOut = env.argAt(i + 1);
+      i += 2;
+    } else if (str.stringEq(a, "--lsp")) {
+      args.lsp = true;
+      i += 1;
+    } else if (str.stringEq(a, "--warn-disposable")) {
+      args.warnDisposable = true;
+      i += 1;
+    } else if (str.stringEq(a, "--warn-std")) {
+      args.warnStd = true;
+      i += 1;
+    } else if (str.stringEq(a, "--track-heap")) {
+      args.trackHeap = true;
+      i += 1;
+    } else if (str.stringEq(a, "--list-attributes")) {
+      args.listAttributes = true;
+      i += 1;
     } else if (str.stringStartsWith(a, "-")) {
       args.error = `unknown option ${a}`;
       return args;
     } else {
-      if (args.entry.len > 0) {
-        args.error = `more than one input file: ${a}`;
-        return args;
+      if (args.entry.len == 0) {
+        args.entry = a;
+      } else {
+        vec.vecPush(ref extras, a);
       }
-      args.entry = a;
       i += 1;
     }
   }
-  if (args.entry.len == 0) {
+  if (!args.test && extras.len > 0) {
+    args.error = `more than one input file: ${vec.vecGet(ref extras, 0)}`;
+    return args;
+  }
+  // `--test` with no path means the current directory, so only an ordinary
+  // compile needs one named - and `--list-attributes` and `--lsp` need none at
+  // all: one answers about the compiler and the other is handed its files by
+  // an editor.
+  if (!args.test && !args.listAttributes && !args.lsp && args.entry.len == 0) {
     args.error = "no input file";
   }
   return args;
 }
 
-// Prints every accumulated diagnostic and returns the error count. Warnings do
-// not stop the compile.
-function reportDiagnostics(ref prog: Program): usize {
+/*
+  Prints every accumulated diagnostic and returns the ERROR count. Warnings
+  never stop a compile: a program that only warns is a legal program.
+
+  Two are filtered out by default, for different reasons.
+
+  A warning in STD attaches itself to every compile in the world - std is
+  autoloaded into every graph - and is unfixable by whoever is reading it. So it
+  is silenced unless `--warn-std` says the reader is working on std itself.
+
+  `unhandled-disposable` is silenced unless `--warn-disposable`, because the
+  ownership model is ADVISORY: the warning finds real leaks and has two known
+  false-positive classes it cannot tell from one. On by default it would teach
+  people to stop reading warnings, which costs more than it finds.
+*/
+function reportDiagnostics(ref prog: Program, warn: WarnOptions): usize {
   let errors: usize = 0;
   let i: usize = 0;
   while (i < prog.diagnostics.len) {
@@ -162,10 +388,31 @@ function reportDiagnostics(ref prog: Program): usize {
         log.error(`${formatLocation(ref d)}: ${d.message}`);
       }
       case Severity.WARNING: {
-        log.info(`${formatLocation(ref d)}: warning: ${d.message}`);
+        if (warningIsWanted(ref d, warn)) {
+          log.info(`${formatLocation(ref d)}: warning: ${d.message} [${d.code}]`);
+        }
       }
     }
     i += 1;
   }
   return errors;
+}
+
+function warningIsWanted(ref d: Diagnostic, warn: WarnOptions): bool {
+  if (!warn.std && isUnderStdRoot(d.filePath, warn.stdRoot)) {
+    return false;
+  }
+  if (str.stringEq(d.code, UNHANDLED_DISPOSABLE) && !warn.disposable) {
+    return false;
+  }
+  return true;
+}
+
+// Compared against the RESOLVED std root rather than by looking for "std" in
+// the path, so a user directory that happens to be named std is not silenced.
+function isUnderStdRoot(filePath: string, stdRoot: string): bool {
+  if (stdRoot.len == 0 || filePath.len < stdRoot.len) {
+    return false;
+  }
+  return str.stringStartsWith(filePath, stdRoot);
 }

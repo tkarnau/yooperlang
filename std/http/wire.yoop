@@ -2,8 +2,7 @@ module http;
 
 // std/http/wire.yoop - the byte level shared by the server and the client.
 //
-// Two jobs, both of which used to be copy-pasted between server.yoop and
-// client.yoop:
+// Two jobs, both shared by server.yoop and client.yoop:
 //
 //   1. Building a message into a `Vec<uint8>` (`pushStr`, `pushHeaderLine`).
 //   2. Reading the head of one (`findHeadEnd`, `readHeaderLines`).
@@ -11,11 +10,9 @@ module http;
 // A request head and a response head differ only in their first line, so the
 // header-field loop below is written once and both parsers call it.
 //
-// Nothing here is exported, FULL STOP - it used to say "by convention", because
-// under file-as-module every one of these had to be `export`ed just so its three
-// consumers could import it. Now that the seven files of std/http are one
-// module, parser.yoop / server.yoop / client.yoop reach these as siblings and
-// none of it is public API. This is the clearest single win of the merge.
+// Nothing here is exported, FULL STOP. The seven files of std/http are one
+// module, so parser.yoop / server.yoop / client.yoop reach these as siblings
+// and none of it is public API.
 //
 // It has no dependency on sockets, which is what lets the parsers be tested
 // against a byte literal - and that invariant is why `readRequestBytes` /
@@ -118,8 +115,8 @@ function asString(raw: uint8[]): string {
 // The scan runs to `headEnd + 2`, not to `headEnd`: `findHeadEnd` points at
 // the CR that *terminates the last header line*, so a region ending there
 // holds a final line with no CRLF of its own. Stopping at `headEnd` silently
-// drops that last field - which is exactly what the pre-rewrite parser did,
-// and why a malformed Content-Length in last position used to sail through.
+// drops that last field, which is how a malformed Content-Length in last
+// position sails through.
 //
 // Lines are `name: value`, one per CRLF; a line with no colon is malformed
 // and rejected rather than skipped, because a header this server silently

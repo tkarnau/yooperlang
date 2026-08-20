@@ -1,0 +1,434 @@
+module typecheck;
+
+// Statements, and the bindings they introduce.
+//
+// `checkStatement` is the dispatch every body walk passes through, and the
+// statement forms that are only ABOUT declaring a name live with it: a `let` or
+// `const`, the three task handle bindings, and the kind-carrying forms whose
+// whole job is to promise something at scope end.
+//
+// The loop and switch forms are dispatched from here but checked in
+// check_loop.yoop and check_switch.yoop - each is big enough to read on its own,
+// and each asks a question no other statement does (a counter's type, an arm's
+// exhaustiveness).
+
+import * as vec from "std/core/vec.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import { ASTNode, ASTNodeKind, NodeId, childAt, nodeAt, kindName } from "../ast";
+import { Option } from "std/core/types.yoop";
+function checkBlock(ref cx: Cx, blockId: NodeId): void {
+  const block = nodeAt(cx.ast, blockId);
+  if (block.childA == 0) {
+    return;
+  }
+  const list = nodeAt(cx.ast, block.childA);
+  scopePush(cx.scope);
+  let i: usize = 0;
+  while (i < list.childCount) {
+    checkStatement(ref cx, childAt(cx.ast, list, i));
+    i += 1;
+  }
+  scopePop(cx.scope);
+  reportUnreachableTail(ref cx, block.childA);
+}
+
+// The dead tail after a statement control never leaves.
+//
+// Every block in the language funnels through checkBlock - function and method
+// bodies, the two halves of an `if`, loop bodies, switch arms, the handler
+// block of `?`, and the trailing block of a block-owning kind binding - so this
+// one call site covers all of them, and a form added later gets it for free.
+//
+// A WARNING, never an error, and deliberately. Dead code is a smell rather than
+// a soundness problem, and hard-erroring is hostile in the middle of editing:
+// comment out a branch, or add a temporary early return to bisect something,
+// and the build would stop. Rust, Swift, C# and TypeScript all warn here.
+//
+// Reported AFTER the statements have been checked, and the statements are all
+// checked whether they are reachable or not - unreachable code that also does
+// not compile should say so, rather than hiding one mistake behind the other.
+function reportUnreachableTail(ref cx: Cx, listId: NodeId): void {
+  switch (firstUnreachableIndex(cx.ast, listId)) {
+    case Option.Some { value: at }: {
+      const list = nodeAt(cx.ast, listId);
+      const dead = nodeAt(cx.ast, childAt(cx.ast, list, at));
+      reportWarning(
+        cx.prog,
+        "unreachable code - control never reaches here",
+        dead.sourceLoc,
+        UNREACHABLE_CODE
+      );
+    }
+    case Option.None: { }
+  }
+}
+
+function checkStatement(ref cx: Cx, stmtId: NodeId): void {
+  const stmt = nodeAt(cx.ast, stmtId);
+  switch (stmt.kind) {
+    case ASTNodeKind.RETURN_STATEMENT: {
+      if (stmt.childA == 0) {
+        return;   // bare `return;`
+      }
+      // The return type is what an untyped literal in the expression pins to.
+      // Read off the ambient `currentReturn` rather than threaded down: it is
+      // set once per body by `beginFunction` and never changes inside one, so a
+      // parameter carrying it through every statement form was a second copy of
+      // the same answer. `?` in fallible.yoop already read it this way.
+      const retType = cx.prog.currentReturn;
+      const got = checkExpr(ref cx, stmt.childA, retType);
+      checkReturnDoesNotEscape(ref cx, stmt.childA);
+      // What this return hands back, for the conferred-PASSTHROUGH tally the
+      // decl-authority check reads once the body is walked. See the
+      // passthrough section of typecheck/markers.yoop.
+      noteReturnMarkers(ref cx, stmt.childA);
+      if (got != TYPE_ERROR_ID && retType != TYPE_ERROR_ID && !typeAccepts(cx.prog, retType, got)) {
+        reportError(
+          cx.prog,
+          `cannot return ${formatType(cx.prog, got)} from a function returning ${formatType(cx.prog, retType)}`,
+          stmt.sourceLoc
+        );
+      }
+    }
+    // `expr;` and `_ = expr;` differ only in whether the discard was written
+    // down. Neither supplies an expectation, so an untyped literal in either
+    // takes its own default.
+    case ASTNodeKind.EXPRESSION_STATEMENT, ASTNodeKind.DISCARD_STATEMENT: {
+      checkExpr(ref cx, stmt.childA, TYPE_ERROR_ID);
+    }
+    case ASTNodeKind.LET_DECL, ASTNodeKind.CONST_DECL: {
+      checkVarDecl(ref cx, stmt, stmtId);
+    }
+    case ASTNodeKind.IF_STATEMENT: {
+      checkCondition(ref cx, stmt.childA);
+      checkBlock(ref cx, stmt.childB);
+      if (stmt.childC != 0) {
+        // The else branch is a BLOCK, or another IF_STATEMENT for `else if`.
+        if (nodeAt(cx.ast, stmt.childC).kind == ASTNodeKind.IF_STATEMENT) {
+          checkStatement(ref cx, stmt.childC);
+        } else {
+          checkBlock(ref cx, stmt.childC);
+        }
+      }
+    }
+    case ASTNodeKind.WHILE_STATEMENT: {
+      checkCondition(ref cx, stmt.childA);
+      cx.scope.loopDepth += 1;
+      checkBlock(ref cx, stmt.childB);
+      cx.scope.loopDepth -= 1;
+    }
+    case ASTNodeKind.FOR_LOOP: {
+      checkForLoop(ref cx, stmt, stmtId);
+    }
+    case ASTNodeKind.FOR_IN_LOOP: {
+      checkForInLoop(ref cx, stmt, stmtId);
+    }
+    case ASTNodeKind.KIND_REGION: {
+      checkKindRegion(ref cx, stmt, stmtId);
+    }
+    case ASTNodeKind.SWITCH_STATEMENT: {
+      checkSwitch(ref cx, stmt);
+    }
+    case ASTNodeKind.BREAK_STATEMENT: {
+      // A SWITCH is a breakable scope, exactly as a loop is: `break` leaves the
+      // switch. So either counter being non-zero makes it legal, and the two
+      // are deliberately NOT merged into one depth - `continue` below reads
+      // only the loop half.
+      if (cx.scope.loopDepth == 0 && cx.scope.switchDepth == 0) {
+        reportError(
+          cx.prog,
+          "\"break\" is only legal inside a loop or a switch",
+          stmt.sourceLoc
+        );
+      }
+    }
+    case ASTNodeKind.CONTINUE_STATEMENT: {
+      // NOT symmetric with `break`. A switch is a break target only, so
+      // `continue` keeps targeting the enclosing LOOP and a switch supplies
+      // none - which is the reference's rule, and why the two depths exist.
+      if (cx.scope.loopDepth == 0) {
+        reportError(
+          cx.prog,
+          "\"continue\" is only legal inside a loop",
+          stmt.sourceLoc
+        );
+      }
+    }
+    default: {
+      reportError(cx.prog, `pass D does not handle ${kindName(stmt.kind)} yet`, stmt.sourceLoc);
+    }
+  }
+}
+
+// A condition has to be a bool. Reporting here rather than in codegen keeps the
+// "codegen is total on well-formed input" contract honest.
+function checkCondition(ref cx: Cx, exprId: NodeId): void {
+  const got = checkExpr(ref cx, exprId, primTypeId(PrimKind.BOOL));
+  if (got != TYPE_ERROR_ID && got != primTypeId(PrimKind.BOOL)) {
+    reportError(cx.prog, "condition must be a bool", nodeAt(cx.ast, exprId).sourceLoc);
+  }
+}
+
+// `let x: T = expr;` / `const x = expr;`
+//
+// The annotation, when present, is what an untyped literal initializer pins to.
+// Without one the initializer's own type is taken, which is how `const n = 42;`
+// lands on int32.
+function checkVarDecl(ref cx: Cx, stmt: ASTNode, stmtId: NodeId): void {
+  // `disposable reg: T = expr { ... }` - the binding OWNS a block, and the
+  // block is its whole cx.scope. So the name goes into a scope of its own rather
+  // than into the enclosing one, and it is gone at the closing brace along with
+  // whatever the kind asks for at scope end. Reading it afterwards is
+  // `undefined variable` on both sides.
+  //
+  // Pushed BEFORE the initializer is checked, which costs nothing (the
+  // initializer cannot see the name it is initializing) and means every exit
+  // path below pops exactly once.
+  const hasRegion = stmt.childD != 0;
+  if (hasRegion) {
+    scopePush(cx.scope);
+  }
+  checkVarDeclInner(ref cx, stmt, stmtId);
+  if (hasRegion) {
+    checkBlock(ref cx, stmt.childD);
+    scopePop(cx.scope);
+  }
+}
+
+function checkVarDeclInner(ref cx: Cx, stmt: ASTNode, stmtId: NodeId): void {
+  // Where the kinds on this binding may be written, and whether one of them
+  // asked to own the trailing block. Neither question needs a type, so both are
+  // answered before anything is resolved. See typecheck/kind_use.yoop.
+  checkBindingKindUse(ref cx, stmt);
+
+  let declared: TypeId = TYPE_ERROR_ID;
+  if (stmt.childA != 0) {
+    declared = resolveTypeAnnotation(cx.prog, cx.tm, cx.ast, stmt.childA);
+  }
+
+  if (stmt.childB == 0) {
+    // `let x: T;` with no initializer. Legal only with an annotation - there is
+    // nothing to infer from otherwise.
+    if (declared == TYPE_ERROR_ID) {
+      reportError(cx.prog, `"${stmt.name}" needs either a type annotation or an initializer`, stmt.sourceLoc);
+    }
+    bindLocal(ref cx, stmt, declared);
+    vec.vecSet(ref cx.tm.resolvedTypes, stmtId, declared);
+    return;
+  }
+
+  const initType = checkExpr(ref cx, stmt.childB, declared);
+  checkAliasKeepsBound(ref cx, stmt);
+  // The initializer flows into the binding's DECLARED type, so the annotation
+  // is the slot both clearance bounds are measured against. Before `bindLocal`,
+  // because the name is not in scope yet and the initializer could not have
+  // named it. See typecheck/markers.yoop.
+  checkBindingMarkers(ref cx, stmt);
+
+  // A SPAWN bound to a name. `pooled h = worker(1)` and `joined d = worker(2)`
+  // bind the HANDLE; `const v: int32 = worker(3)` spawns and joins on the spot
+  // and binds the RESULT, which is why that one is not a type mismatch even
+  // though `Task<int32>` is not an `int32`. Which of the three is decided by
+  // the kind's clauses - see taskBindOf.
+  const bind = taskBindOf(cx.prog, cx.ast, stmt, declared, initType);
+  if (bind == TaskBind.IMMEDIATE) {
+    checkTaskSpawnBinding(ref cx, stmt, bind);
+    bindLocal(ref cx, stmt, declared);
+    vec.vecSet(ref cx.tm.resolvedTypes, stmtId, declared);
+    return;
+  }
+
+  let finalType = initType;
+  if (declared != TYPE_ERROR_ID) {
+    finalType = declared;
+    if (initType != TYPE_ERROR_ID && !typeAccepts(cx.prog, declared, initType)) {
+      reportError(cx.prog, `initializer does not match the declared type of "${stmt.name}"`, stmt.sourceLoc);
+    }
+  }
+
+  if (bind == TaskBind.NONE) {
+    checkDisposableBinding(ref cx, stmt, finalType);
+    checkHandleKindHasTask(ref cx, stmt, finalType);
+  } else {
+    // A handle binding skips checkDisposableBinding on purpose: the kind's
+    // `mustCall join` names a method that `Task<T>` does not and cannot have -
+    // it is a compiler type with no methods at all, so the compiler is the one
+    // thing that can honor the clause.
+    checkTaskSpawnBinding(ref cx, stmt, bind);
+  }
+  bindLocal(ref cx, stmt, finalType);
+  vec.vecSet(ref cx.tm.resolvedTypes, stmtId, finalType);
+}
+
+// What a handle binding owes: a FRESH spawn on the right, unless it is POOLED.
+//
+// A `pooled` handle is heap-allocated and REFCOUNTED, so a second binding onto
+// the same handle is meaningful - it takes its own count, and each binding
+// releases once at its own scope end. Codegen emits the retain; see
+// `emitPooledHandleCopy`.
+//
+// `joined` cannot be copied and neither can the immediate form, and the reason
+// is storage rather than policy: a joined handle lives in the CALLER's frame
+// with no count to take, so two bindings would both join it and the second
+// would wait on a freed sync pair.
+function checkTaskSpawnBinding(ref cx: Cx, stmt: ASTNode, bind: TaskBind): void {
+  if (nodeAt(cx.ast, stmt.childB).kind == ASTNodeKind.CALL_EXPRESSION) {
+    return;
+  }
+  if (bind == TaskBind.POOLED) {
+    return;
+  }
+  reportError(
+    cx.prog,
+    `"${stmt.name}" binds a Task<T> handle that is not a fresh spawn - only a \`pooled\` handle is refcounted, so only that form may be copied`,
+    stmt.sourceLoc
+  );
+}
+
+// A binding whose kind demands a scope-end call has to HAVE that method.
+//
+// Checked here rather than left to codegen because the promise is about the
+// program: `disposable buf: Foo` where Foo has no `dispose` is a mistake in the
+// source, and codegen meeting it would be a mistake in the compiler.
+function checkDisposableBinding(ref cx: Cx, stmt: ASTNode, typeId: TypeId): void {
+  if (stmt.childC == 0 || typeId == TYPE_ERROR_ID) {
+    return;
+  }
+  const list = nodeAt(cx.ast, stmt.childC);
+  let i: usize = 0;
+  while (i < list.childCount) {
+    const prefix = nodeAt(cx.ast, childAt(cx.ast, list, i));
+    switch (lookupKind(cx.prog, prefix.name)) {
+      case Option.Some { value: info }: {
+        // `kind aligned(n: usize)` is a kind with an argument to supply, and a
+        // bare `aligned v: V` supplies none - so whatever the parameter feeds
+        // has no value. A prefix carries no argument list here, which makes
+        // "declares parameters" and "was applied without arguments" the same
+        // question.
+        if (info.paramCount > 0) {
+          reportError(
+            cx.prog,
+            `kind "${prefix.name}" takes ${info.paramCount} argument(s), and the prefix on "${stmt.name}" supplies none`,
+            prefix.sourceLoc
+          );
+        }
+        if (info.disposeMethod.len > 0 &&
+            lookupMethod(cx.prog, typeId, info.disposeMethod) == TYPE_ERROR_ID) {
+          // No method of its own is not automatically a mistake: a type that
+          // declares `propagates<disposable>` says the obligation belongs to
+          // its FIELDS, and the scope-end call becomes one per field that
+          // supplies the kind. See typecheck/propagate.yoop.
+          if (propagatesMustCall(cx.prog, typeId, info.disposeMethod)) {
+            const problem = propagatedDisposeProblem(cx.prog, typeId, info.disposeMethod);
+            if (problem.len > 0) {
+              reportError(
+                cx.prog,
+                `"${stmt.name}" is ${prefix.name} and ${formatType(cx.prog, typeId)} propagates it, but ${problem}`,
+                stmt.sourceLoc
+              );
+            }
+          } else {
+            reportError(
+              cx.prog,
+              `"${stmt.name}" is ${prefix.name}, which requires a "${info.disposeMethod}" method, but ${formatType(cx.prog, typeId)} has none`,
+              stmt.sourceLoc
+            );
+          }
+        }
+      }
+      case Option.None: {
+        reportError(
+          cx.prog,
+          `unknown kind "${prefix.name}" on binding "${stmt.name}"`,
+          prefix.sourceLoc
+        );
+      }
+    }
+    i += 1;
+  }
+}
+
+function bindLocal(ref cx: Cx, stmt: ASTNode, typeId: TypeId): void {
+  const mutable = stmt.kind == ASTNodeKind.LET_DECL;
+  // A kind stating `mustNotEscape scope` bounds THIS binding, so the bound is
+  // recorded on the scope entry rather than derived from the type later - the
+  // same type under a plain `let` is unbounded. See typecheck/kind_use.yoop.
+  let declared = false;
+  if (prefixesBoundToScope(ref cx, stmt.childC)) {
+    declared = scopeDeclareBound(cx.scope, stmt.name, typeId, mutable);
+  } else {
+    declared = scopeDeclare(cx.scope, stmt.name, typeId, mutable);
+  }
+  if (!declared) {
+    reportError(cx.prog, `"${stmt.name}" is already declared in this function`, stmt.sourceLoc);
+    return;
+  }
+  // With an ANNOTATION the annotation is the authority - that is what makes
+  // `const borrowed: string = owned` a deliberate drop of the marker. With
+  // none, the binding INHERITS whatever its initializer carried, since there
+  // is no declared type for the value to have been narrowed to. The reference
+  // reads a missing annotation as an empty set instead, which loses the marker
+  // on `let out = stringConcat(a, b)`; inheriting is right in both directions.
+  if (stmt.childA != 0) {
+    scopeSetMarkers(cx.scope, stmt.name, bindingMarkersOf(ref cx, stmt));
+  } else if (stmt.childB != 0) {
+    scopeSetMarkers(cx.scope, stmt.name, exprMarkers(ref cx, stmt.childB));
+  }
+}
+
+// `ephemeral arenaScope(N) { ... }` - an anonymous region.
+//
+// The subject is an ordinary expression, checked and decorated so codegen can
+// give it a slot; the block is an ordinary block. What makes it a region is the
+// kind, which has to be one declared `appliesTo region` and has to demand a
+// scope-end call - a kind that asks for nothing would make this shape a plain
+// block with extra words.
+function checkKindRegion(ref cx: Cx, stmt: ASTNode, stmtId: NodeId): void {
+  const subjectType = checkExpr(ref cx, stmt.childA, TYPE_ERROR_ID);
+  vec.vecSet(ref cx.tm.resolvedTypes, stmtId, subjectType);
+
+  const list = nodeAt(cx.ast, stmt.childC);
+  let i: usize = 0;
+  while (i < list.childCount) {
+    const prefix = nodeAt(cx.ast, childAt(cx.ast, list, i));
+    switch (lookupKind(cx.prog, prefix.name)) {
+      case Option.None: {
+        reportError(cx.prog, `unknown kind "${prefix.name}"`, prefix.sourceLoc);
+      }
+      case Option.Some { value: info }: {
+        // The reference's rule, and its message names the alternative: a
+        // binding kind used anonymously has nothing to be called ON later.
+        if (!kindAppliesTo(info, SITE_REGION)) {
+          reportError(
+            cx.prog,
+            `kind "${prefix.name}" does not apply to a region - the anonymous "${prefix.name} EXPR { ... }" form needs a region kind. To use it as a named resource, write "${prefix.name} name: T = EXPR;"`,
+            prefix.sourceLoc
+          );
+        } else if (info.disposeMethod.len == 0) {
+          reportError(
+            cx.prog,
+            `kind "${prefix.name}" asks for nothing at scope end, so "${prefix.name} EXPR { ... }" would be a plain block`,
+            prefix.sourceLoc
+          );
+        } else if (subjectType != TYPE_ERROR_ID &&
+                   lookupMethod(cx.prog, subjectType, info.disposeMethod) == TYPE_ERROR_ID) {
+          reportError(
+            cx.prog,
+            `"${prefix.name}" requires a "${info.disposeMethod}" method, but ${formatType(cx.prog, subjectType)} has none`,
+            stmt.sourceLoc
+          );
+        }
+      }
+    }
+    i += 1;
+  }
+
+  // The IMPLICIT form has no block of its own: what it owns is the rest of the
+  // enclosing scope, and there is nothing more to walk here.
+  if (stmt.childB == 0) {
+    return;
+  }
+  scopePush(cx.scope);
+  checkBlock(ref cx, stmt.childB);
+  scopePop(cx.scope);
+}

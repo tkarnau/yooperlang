@@ -65,9 +65,9 @@ function pushToken(t: ref Text, tok: Token): void {
   // A float rides as its BIT PATTERN, not as digits. The two sides format
   // numbers with different libraries and would disagree in the last digit of a
   // decimal rendering for reasons that have nothing to do with lexing; 64 bits
-  // either match or they do not. This field used to be left out of the dump
-  // entirely on the theory that it was not comparable, and that is how a real
-  // decoding bug went unnoticed - see float_literal.yoop.
+  // either match or they do not. Leaving the field out of the dump on the
+  // theory that it is not comparable is how a decoding bug goes unnoticed - see
+  // float_literal.yoop.
   if (tok.tag == TokenTags.FLOATLITERAL) {
     text.push(ref t, " float=");
     pushFloatBitsHex(ref t, floatBits(tok.floatVal));

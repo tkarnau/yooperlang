@@ -1,0 +1,269 @@
+module comptime;
+
+// Variants and value enums at compile time.
+//
+// A VARIANT value is a tag plus that case's payload fields: `bits` holds the
+// ordinal and the child run holds the fields, so a case with no payload is a
+// slot with an empty run rather than a different shape.
+//
+// A VALUE ENUM is not a variant at all. It is a nominal alias over a primitive,
+// so `Color.Red` evaluates to the constant its case carries and nothing here
+// builds a value of enum shape - the same thing codegen does, and the reason
+// the two share no code.
+
+import { Vec }, * as vec from "std/core/vec.yoop";
+import * as str from "std/core/strings.yoop";
+import { Result, Option } from "std/core/types.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import { ASTNode, ASTNodeKind, NodeId, childAt, nodeAt } from "../ast";
+import { Program, TypeId, TYPE_ERROR_ID, isVariantType, isValueEnumType,
+  isStringPrimType, lookupVariantCase, variantCaseFieldNamed, variantCaseFieldAt,
+  lookupEnumCase, primBitWidth, enumUnderlyingOf } from "../typecheck";
+import { DISCARD_BINDING } from "../parse";
+
+// `Shape.Circle { radius: 4 }`, and the payload-less `Shape.Triangle`.
+//
+// The fields land at their POSITION in the case's payload, so a constructor may
+// list them in any order - the rule a struct literal follows, and the reason a
+// pattern can read them back positionally.
+export function evalVariantConstructor(
+  ref cx: EvalCx,
+  expr: ASTNode,
+  exprId: NodeId
+): Result<ValueId, ComptimeError> {
+  const variantTy = typeOfNode(ref cx, exprId);
+  const found = lookupVariantCase(cx.prog, variantTy, expr.name);
+  if (!found.found) {
+    return Result.Err { error: comptimeError(
+      `"${expr.name}" is not a case of this variant`, expr.sourceLoc
+    )};
+  }
+
+  disposable parts: Vec<ValueId> = vec.vecNew(found.fieldCount);
+  let f: usize = 0;
+  while (f < found.fieldCount) {
+    vec.vecPush(ref parts, VALUE_NONE);
+    f += 1;
+  }
+
+  if (expr.childA != 0) {
+    const list = nodeAt(cx.ast, expr.childA);
+    let i: usize = 0;
+    while (i < list.childCount) {
+      const fieldNode = nodeAt(cx.ast, childAt(cx.ast, list, i));
+      const at = variantCaseFieldNamed(cx.prog, variantTy, usize(found.ordinal), fieldNode.name);
+      if (!at.found || at.index >= found.fieldCount) {
+        return Result.Err { error: comptimeError(
+          `"${fieldNode.name}" is not a field of case "${expr.name}"`, fieldNode.sourceLoc
+        )};
+      }
+      vec.vecSet(ref parts, at.index, evalExprValue(ref cx, fieldNode.childA)?);
+      i += 1;
+    }
+  }
+
+  // Any field the constructor did not write gets a zero of its own type. Pass D
+  // requires every field to be named, so this is a belt on top of a brace - and
+  // a VALUE_NONE left in the run would be a slot nothing can read.
+  let p: usize = 0;
+  while (p < found.fieldCount) {
+    if (vec.vecGet(ref parts, p) == VALUE_NONE) {
+      const at = variantCaseFieldAtIndex(cx.prog, variantTy, usize(found.ordinal), p);
+      vec.vecSet(ref parts, p, zeroOfType(ref cx, at));
+    }
+    p += 1;
+  }
+
+  return Result.Ok { value: aggregateValue(
+    cx.va, ValueKind.VARIANT, variantTy, uint64(found.ordinal), ref parts) };
+}
+
+// `Color.Red`. A value enum is an alias over a primitive, so the case's own
+// constant IS the value - there is no enum-shaped slot and nothing to unwrap.
+export function evalEnumCase(
+  ref cx: EvalCx,
+  enumTypeAt: NodeId,
+  expr: ASTNode,
+  exprId: NodeId
+): Result<ValueId, ComptimeError> {
+  const enumTy = typeOfNode(ref cx, enumTypeAt);
+  const found = lookupEnumCase(cx.prog, enumTy, expr.name);
+  if (!found.found) {
+    return Result.Err { error: comptimeError(
+      `"${expr.name}" is not a case of this enum`, expr.sourceLoc
+    )};
+  }
+  const resultTy = typeOfNode(ref cx, exprId);
+  if (isStringPrimType(cx.prog, enumUnderlyingOf(cx.prog, enumTy))) {
+    return Result.Ok { value: strValue(cx.va, resultTy, found.valueStr) };
+  }
+  return Result.Ok { value: intValue(
+    cx.va, resultTy, normalizeInt(cx.prog, enumTy, uint64(found.value))) };
+}
+
+// The type of the i'th field of a case, by position. `variantCaseFieldNamed`
+// answers by name, and a missing field is known only by its position.
+function variantCaseFieldAtIndex(
+  ref prog: Program,
+  variantTy: TypeId,
+  ordinal: usize,
+  i: usize
+): TypeId {
+  return variantCaseFieldAt(ref prog, variantTy, ordinal, i).typeId;
+}
+
+// `switch (subject) { case ...: { } }`.
+//
+// One walk rather than a jump table: the arms are tested in order and the first
+// that matches runs. That is the same ANSWER a table gives, because pass D
+// already refused a duplicate pattern, and it costs nothing at compile time.
+//
+// The subject is evaluated ONCE. A `switch (next(ref it))` that re-evaluated
+// per arm would advance an iterator per test rather than per statement.
+export function execSwitch(ref cx: EvalCx, stmt: ASTNode): Result<Flow, ComptimeError> {
+  const subject = openBorrow(ref cx, evalExpr(ref cx, stmt.childA)?);
+  const subjectTy = typeOfNode(ref cx, stmt.childA);
+  const overVariant = isVariantType(cx.prog, subjectTy);
+
+  // The DEFAULT arm is remembered rather than taken in order: it runs only when
+  // nothing else matched, and it may be written anywhere among the arms.
+  let defaultArm: NodeId = 0;
+  let i: usize = 0;
+  while (i < stmt.childCount) {
+    const armId = childAt(cx.ast, stmt, i);
+    const arm = nodeAt(cx.ast, armId);
+    if (arm.flagA) {
+      defaultArm = armId;
+    } else if (armMatches(ref cx, arm, subject, subjectTy, overVariant)?) {
+      return runArm(ref cx, arm, subject, overVariant);
+    }
+    i += 1;
+  }
+  if (defaultArm != 0) {
+    return runArm(ref cx, nodeAt(cx.ast, defaultArm), subject, overVariant);
+  }
+  // An exhaustive switch with no default that matched nothing means the subject
+  // holds a value pass D proved impossible. Refused rather than skipped: a
+  // silent fall-through would fold to whatever came before it.
+  return Result.Err { error: comptimeError(
+    "no `switch` arm matched at compile time, and there is no default", stmt.sourceLoc
+  )};
+}
+
+// Does any of this arm's patterns match? An arm may list several
+// (`case 1, 2, 3:`), and one match is enough.
+function armMatches(
+  ref cx: EvalCx,
+  arm: ASTNode,
+  subject: ValueId,
+  subjectTy: TypeId,
+  overVariant: bool
+): Result<bool, ComptimeError> {
+  if (arm.childA == 0) {
+    return Result.Ok { value: false };
+  }
+  const patterns = nodeAt(cx.ast, arm.childA);
+  const subjectSlot = valueAt(cx.va, subject);
+  let p: usize = 0;
+  while (p < patterns.childCount) {
+    const patternId = childAt(cx.ast, patterns, p);
+    const pattern = nodeAt(cx.ast, patternId);
+    if (overVariant) {
+      // A variant matches on its TAG and on nothing else, which is also what
+      // makes `==` on two variants a tag comparison.
+      const want = lookupVariantCase(cx.prog, subjectTy, pattern.name);
+      if (want.found && subjectSlot.bits == uint64(want.ordinal)) {
+        return Result.Ok { value: true };
+      }
+    } else if (isValueEnumType(cx.prog, subjectTy)) {
+      const want = lookupEnumCase(cx.prog, subjectTy, pattern.name);
+      if (want.found && subjectSlot.bits == normalizeInt(cx.prog, subjectTy, uint64(want.value))) {
+        return Result.Ok { value: true };
+      }
+    } else {
+      // A literal pattern. `flagA` is the negation the parser recorded, so
+      // `case -1:` arrives as 1 with the flag set.
+      let want: uint64 = pattern.intVal;
+      if (pattern.flagA) {
+        want = 0 - want;
+      }
+      if (subjectSlot.bits == normalizeInt(cx.prog, subjectTy, want)) {
+        return Result.Ok { value: true };
+      }
+    }
+    p += 1;
+  }
+  return Result.Ok { value: false };
+}
+
+// The arm's body, with its payload bindings in scope.
+//
+// `break` LEAVES the switch and does not propagate: a switch is a breakable
+// scope of its own, so an arm that breaks falls out to the statement after the
+// switch rather than out of an enclosing loop.
+function runArm(
+  ref cx: EvalCx,
+  arm: ASTNode,
+  subject: ValueId,
+  overVariant: bool
+): Result<Flow, ComptimeError> {
+  scopeEnter(cx.scope);
+  if (overVariant) {
+    bindPatternPayload(ref cx, arm, subject)?;
+  }
+  const flow = execBlock(ref cx, arm.childB)?;
+  scopeLeave(cx.scope);
+  switch (flow) {
+    case Flow.Broke: { return Result.Ok { value: Flow.Normal }; }
+    default: { return Result.Ok { value: flow }; }
+  }
+}
+
+// `case Shape.Circle { radius: r }:` binds `r` to the payload field for the
+// arm's extent.
+//
+// Only the FIRST pattern of an arm can bind: several patterns sharing an arm
+// would bind different things under one name, and pass D requires every field
+// of a case to be bound - so a shared arm can only hold payload-less cases.
+//
+// The binding names the payload's own SLOT rather than a copy, which is what
+// makes `case Owned.Buffer { data: d }: { intr.heapFree(d); }` free the thing
+// the variant holds rather than a duplicate of it.
+function bindPatternPayload(ref cx: EvalCx, arm: ASTNode, subject: ValueId): Result<bool, ComptimeError> {
+  if (arm.flagA || arm.childA == 0) {
+    return Result.Ok { value: true };
+  }
+  const patterns = nodeAt(cx.ast, arm.childA);
+  if (patterns.childCount == 0) {
+    return Result.Ok { value: true };
+  }
+  const patternId = childAt(cx.ast, patterns, 0);
+  const pattern = nodeAt(cx.ast, patternId);
+  if (pattern.childA == 0) {
+    return Result.Ok { value: true };
+  }
+
+  const variantTy = typeOfNode(ref cx, patternId);
+  const found = lookupVariantCase(cx.prog, variantTy, pattern.name);
+  const subjectSlot = valueAt(cx.va, subject);
+  const list = nodeAt(cx.ast, pattern.childA);
+
+  let i: usize = 0;
+  while (i < list.childCount) {
+    const fieldNode = nodeAt(cx.ast, childAt(cx.ast, list, i));
+    const binding = nodeAt(cx.ast, fieldNode.childA);
+    // `_` binds nothing, which is the difference between ignoring a payload and
+    // forgetting it.
+    if (!str.stringEq(binding.name, DISCARD_BINDING)) {
+      const at = variantCaseFieldNamed(cx.prog, variantTy, usize(found.ordinal), fieldNode.name);
+      if (!at.found || at.index >= subjectSlot.childCount) {
+        return Result.Err { error: comptimeError(
+          `"${fieldNode.name}" is not a field of case "${pattern.name}"`, fieldNode.sourceLoc
+        )};
+      }
+      bindLocal(cx.scope, binding.name, childValueAt(cx.va, subjectSlot, at.index));
+    }
+    i += 1;
+  }
+  return Result.Ok { value: true };
+}

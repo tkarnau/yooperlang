@@ -1,0 +1,40 @@
+// Illegal: two operands agreeing on a type is not enough. Each operator only
+// applies to some CLASSES of operand, and none of these five is one of them.
+//
+// Without the check every line here reaches codegen and emits an instruction
+// that does not exist: `a + b` on two strings is `add ptr %t1, %t2`, which
+// clang refuses outright. So the program does not merely misbehave, it fails
+// to assemble - with the compiler having said nothing.
+//
+// `a == b` on two strings is the line worth reading twice. It is not a missing
+// feature: a `string` is a borrowed view, so comparing two of them would
+// compare ADDRESSES and answer false for two equal spellings. std/core/text.yoop
+// has `text.equals` for the comparison that was meant.
+//
+// The companion LEGAL rows - bools under `==` and `&&`, variants under `==`,
+// pointers under `==`, the whole integer and float sets - are asserted in
+// bootstrap/src/typecheck/typecheck.test.yoop.
+variant Shape { Circle { r: int32 }, Empty }
+
+type Point { x: int32 }
+
+function main(): int32 {
+    let s1: string = "a";
+    let s2: string = "b";
+    let joined: string = s1 + s2;
+    let same: bool = s1 == s2;
+
+    let p1: Point = { x: 1 };
+    let p2: Point = { x: 2 };
+    let summed: Point = p1 + p2;
+
+    let flag: bool = true;
+    let other: bool = false;
+    let ordered: bool = flag < other;
+
+    let c: Shape = Shape.Circle { r: 1 };
+    let e: Shape = Shape.Empty;
+    let ranked: bool = c < e;
+
+    return 0;
+}

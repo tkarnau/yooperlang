@@ -27,11 +27,10 @@ module codegen;
   saying so costs less than converting.
 */
 
-import { Vec }, * as vec from "std/core/vec.yoop";
-import { Map }, * as map from "std/collections/map.yoop";
-import { ASTNode, ASTNodeKind, NodeId, childAt, nodeAt } from "../ast";
+import * as map from "std/collections/map.yoop";
+import { ASTNode, NodeId, childAt, nodeAt } from "../ast";
 import * as str from "std/core/strings.yoop";
-import { Type, typeAt, sizeOfType, isIntrinsicName } from "../typecheck";
+import { Type, typeAt, sizeOfType, derefType, isIntrinsicName } from "../typecheck";
 
 // True when this call names an intrinsic rather than a function.
 //
@@ -62,7 +61,7 @@ export function isIntrinsicCall(ref cx: Cx, expr: ASTNode): bool {
   return map.mapContainsKey(ref cx.tm.intrinsicNames, expr.name);
 }
 
-// Lower one intrinsic call. Returns "" on success, else the error that stopped
+// Lower one intrinsic call. Ok on success, else the error that stopped
 // it - an unknown name here is a compiler bug, since pass A refuses any name
 // this dispatch does not have.
 export function emitIntrinsicCall(
@@ -70,7 +69,7 @@ export function emitIntrinsicCall(
   expr: ASTNode,
   exprId: NodeId,
   ref out: Operand
-): string {
+): EmitResult {
   if (str.stringEq(expr.name, "stringAsBytes")) {
     return emitStringAsBytes(ref cx, expr, ref out);
   }
@@ -127,46 +126,37 @@ export function emitIntrinsicCall(
 //
 // No copy: a yoop string is a NUL-terminated ptr and a uint8[] is that pointer
 // plus a length, so the only missing piece is the length.
-function emitStringAsBytes(ref cx: Cx, expr: ASTNode, ref out: Operand): string {
+function emitStringAsBytes(ref cx: Cx, expr: ASTNode, ref out: Operand): EmitResult {
   let s: Operand = Operand.None;
-  const err = emitIntrinsicArg(ref cx, expr, 0, ref s);
-  if (err.len > 0) {
-    return err;
-  }
+  emitIntrinsicArg(ref cx, expr, 0, ref s)?;
   cx.e.usesStringBuilder = true;
 
   const len = freshTemp(cx.e);
   emitStrlen(ref cx, len, s);
   out = buildDescriptor(ref cx, s, Operand.Temp { id: len });
-  return "";
+  return EmitResult.Ok;
 }
 
 // `bytesAsStringUnchecked(buf)` - the data pointer, and nothing else.
 //
 // The caller guarantees the bytes are valid UTF-8 with a NUL at buf[len], which
 // is exactly what makes this free. `Text.view` maintains both by construction.
-function emitBytesAsString(ref cx: Cx, expr: ASTNode, ref out: Operand): string {
+function emitBytesAsString(ref cx: Cx, expr: ASTNode, ref out: Operand): EmitResult {
   let buf: Operand = Operand.None;
-  const err = emitIntrinsicArg(ref cx, expr, 0, ref buf);
-  if (err.len > 0) {
-    return err;
-  }
+  emitIntrinsicArg(ref cx, expr, 0, ref buf)?;
   const data = freshTemp(cx.e);
   emitExtractValue(ref cx, data, ARRAY_DESCRIPTOR, buf, 0);
   out = Operand.Temp { id: data };
-  return "";
+  return EmitResult.Ok;
 }
 
 // `stringFromBytesUnchecked(buf)` - malloc, copy, terminate.
 //
 // The one intrinsic that allocates, and where a string's storage comes from.
 // The NUL is why it cannot be a view: the bytes may not have one.
-function emitStringFromBytes(ref cx: Cx, expr: ASTNode, ref out: Operand): string {
+function emitStringFromBytes(ref cx: Cx, expr: ASTNode, ref out: Operand): EmitResult {
   let buf: Operand = Operand.None;
-  const err = emitIntrinsicArg(ref cx, expr, 0, ref buf);
-  if (err.len > 0) {
-    return err;
-  }
+  emitIntrinsicArg(ref cx, expr, 0, ref buf)?;
   cx.e.usesStringBuilder = true;
 
   const data = freshTemp(cx.e);
@@ -185,7 +175,7 @@ function emitStringFromBytes(ref cx: Cx, expr: ASTNode, ref out: Operand): strin
   emitStoreNulByte(ref cx, end);
 
   out = Operand.Temp { id: dst };
-  return "";
+  return EmitResult.Ok;
 }
 
 // `heapAlloc<T>(n)` - n ELEMENTS, so the byte count is a multiplication.
@@ -193,12 +183,9 @@ function emitStringFromBytes(ref cx: Cx, expr: ASTNode, ref out: Operand): strin
 // The element size comes from the call's resolved type rather than from the
 // type argument: `T[]` is already substituted there, so this needs no access to
 // the instantiation.
-function emitHeapAlloc(ref cx: Cx, expr: ASTNode, exprId: NodeId, ref out: Operand): string {
+function emitHeapAlloc(ref cx: Cx, expr: ASTNode, exprId: NodeId, ref out: Operand): EmitResult {
   let n: Operand = Operand.None;
-  const err = emitIntrinsicArg(ref cx, expr, 0, ref n);
-  if (err.len > 0) {
-    return err;
-  }
+  emitIntrinsicArg(ref cx, expr, 0, ref n)?;
   cx.e.usesStringBuilder = true;
 
   const size = freshTemp(cx.e);
@@ -206,21 +193,19 @@ function emitHeapAlloc(ref cx: Cx, expr: ASTNode, exprId: NodeId, ref out: Opera
     ref cx, size, "mul", "i64", n,
     Operand.Imm { value: uint64(elementSizeOfResult(ref cx, exprId)) }
   );
+  recordAlloc(ref cx, Operand.Temp { id: size });
   const raw = freshTemp(cx.e);
   emitMalloc(ref cx, raw, Operand.Temp { id: size });
 
   // The length is the ELEMENT count the caller asked for, not the byte count.
   out = buildDescriptor(ref cx, Operand.Temp { id: raw }, n);
-  return "";
+  return EmitResult.Ok;
 }
 
 // `ctxAlloc<T>(n)` - heapAlloc through the allocator context.
-function emitCtxAllocCall(ref cx: Cx, expr: ASTNode, exprId: NodeId, ref out: Operand): string {
+function emitCtxAllocCall(ref cx: Cx, expr: ASTNode, exprId: NodeId, ref out: Operand): EmitResult {
   let n: Operand = Operand.None;
-  const err = emitIntrinsicArg(ref cx, expr, 0, ref n);
-  if (err.len > 0) {
-    return err;
-  }
+  emitIntrinsicArg(ref cx, expr, 0, ref n)?;
   cx.e.usesRuntime = true;
 
   const size = freshTemp(cx.e);
@@ -228,43 +213,69 @@ function emitCtxAllocCall(ref cx: Cx, expr: ASTNode, exprId: NodeId, ref out: Op
     ref cx, size, "mul", "i64", n,
     Operand.Imm { value: uint64(elementSizeOfResult(ref cx, exprId)) }
   );
+  recordAlloc(ref cx, Operand.Temp { id: size });
   const raw = freshTemp(cx.e);
   emitCtxAlloc(ref cx, raw, Operand.Temp { id: size });
   out = buildDescriptor(ref cx, Operand.Temp { id: raw }, n);
-  return "";
+  return EmitResult.Ok;
 }
 
 // `ctxFree(a)` - return the bytes to the allocator they came from.
-function emitCtxFreeCall(ref cx: Cx, expr: ASTNode, ref out: Operand): string {
+function emitCtxFreeCall(ref cx: Cx, expr: ASTNode, ref out: Operand): EmitResult {
   let a: Operand = Operand.None;
-  const err = emitIntrinsicArg(ref cx, expr, 0, ref a);
-  if (err.len > 0) {
-    return err;
-  }
+  emitIntrinsicArg(ref cx, expr, 0, ref a)?;
   cx.e.usesRuntime = true;
 
   const data = freshTemp(cx.e);
   emitExtractValue(ref cx, data, ARRAY_DESCRIPTOR, a, 0);
+  recordFree(ref cx, expr, a);
   emitCtxFree(ref cx, data);
   out = Operand.None;
-  return "";
+  return EmitResult.Ok;
 }
 
 // `heapFree(a)` - free the data pointer. The descriptor is a value and needs no
 // tearing down of its own.
-function emitHeapFree(ref cx: Cx, expr: ASTNode, ref out: Operand): string {
+function emitHeapFree(ref cx: Cx, expr: ASTNode, ref out: Operand): EmitResult {
   let a: Operand = Operand.None;
-  const err = emitIntrinsicArg(ref cx, expr, 0, ref a);
-  if (err.len > 0) {
-    return err;
-  }
+  emitIntrinsicArg(ref cx, expr, 0, ref a)?;
   cx.e.usesStringBuilder = true;
 
   const data = freshTemp(cx.e);
   emitExtractValue(ref cx, data, ARRAY_DESCRIPTOR, a, 0);
+  recordFree(ref cx, expr, a);
   emitFree(ref cx, data);
   out = Operand.None;
-  return "";
+  return EmitResult.Ok;
+}
+
+// `--track-heap` bookkeeping, and a no-op in an ordinary build.
+//
+// Split into these two rather than written at the four call sites, because the
+// FREE side has work to do: a pointer does not know how many bytes it owns, so
+// the count is recovered from the descriptor's length times the element size -
+// the same product the allocation was made from.
+function recordAlloc(ref cx: Cx, bytes: Operand): void {
+  if (!cx.e.trackHeap) {
+    return;
+  }
+  declareDiagCounters(cx.e);
+  emitDiagRecordAlloc(ref cx, bytes);
+}
+
+function recordFree(ref cx: Cx, expr: ASTNode, descriptor: Operand): void {
+  if (!cx.e.trackHeap) {
+    return;
+  }
+  declareDiagCounters(cx.e);
+  const len = freshTemp(cx.e);
+  emitExtractValue(ref cx, len, ARRAY_DESCRIPTOR, descriptor, 1);
+  const bytes = freshTemp(cx.e);
+  emitBinOp(
+    ref cx, bytes, "mul", "i64", Operand.Temp { id: len },
+    Operand.Imm { value: uint64(elementSizeOfArg(ref cx, expr, 0)) }
+  );
+  emitDiagRecordFree(ref cx, Operand.Temp { id: bytes });
 }
 
 // `arraySlice(xs, start, end)` - a borrowing view, no copy.
@@ -274,16 +285,13 @@ function emitHeapFree(ref cx: Cx, expr: ASTNode, ref out: Operand): string {
 //
 // Out-of-range is the caller's problem, the same as an index read: the language
 // does not specify a bounds check and adding one here would diverge.
-function emitArraySlice(ref cx: Cx, expr: ASTNode, exprId: NodeId, ref out: Operand): string {
+function emitArraySlice(ref cx: Cx, expr: ASTNode, exprId: NodeId, ref out: Operand): EmitResult {
   let xs: Operand = Operand.None;
   let start: Operand = Operand.None;
   let end: Operand = Operand.None;
-  const e1 = emitIntrinsicArg(ref cx, expr, 0, ref xs);
-  if (e1.len > 0) { return e1; }
-  const e2 = emitIntrinsicArg(ref cx, expr, 1, ref start);
-  if (e2.len > 0) { return e2; }
-  const e3 = emitIntrinsicArg(ref cx, expr, 2, ref end);
-  if (e3.len > 0) { return e3; }
+  emitIntrinsicArg(ref cx, expr, 0, ref xs)?;
+  emitIntrinsicArg(ref cx, expr, 1, ref start)?;
+  emitIntrinsicArg(ref cx, expr, 2, ref end)?;
 
   const data = freshTemp(cx.e);
   emitExtractValue(ref cx, data, ARRAY_DESCRIPTOR, xs, 0);
@@ -296,7 +304,7 @@ function emitArraySlice(ref cx: Cx, expr: ASTNode, exprId: NodeId, ref out: Oper
   emitBinOp(ref cx, len, "sub", "i64", end, start);
 
   out = buildDescriptor(ref cx, Operand.Temp { id: base }, Operand.Temp { id: len });
-  return "";
+  return EmitResult.Ok;
 }
 
 // ----- shared shapes ---------------------------------------------------------
@@ -312,7 +320,7 @@ function buildDescriptor(ref cx: Cx, data: Operand, len: Operand): Operand {
 }
 
 // The i-th argument of an intrinsic call, evaluated.
-function emitIntrinsicArg(ref cx: Cx, expr: ASTNode, i: usize, ref out: Operand): string {
+function emitIntrinsicArg(ref cx: Cx, expr: ASTNode, i: usize, ref out: Operand): EmitResult {
   if (expr.childA == 0) {
     return internalError("intrinsic call has no arguments", expr.name);
   }
@@ -326,6 +334,23 @@ function emitIntrinsicArg(ref cx: Cx, expr: ASTNode, i: usize, ref out: Operand)
 // The size in bytes of the element of the ARRAY this call returns.
 function elementSizeOfResult(ref cx: Cx, exprId: NodeId): usize {
   switch (typeAt(cx.prog, resolvedTypeAt(ref cx, exprId))) {
+    case Type.Array { elem: e }: { return sizeOfType(cx.prog, e); }
+    default: { return 1; }
+  }
+}
+
+// The element size of an intrinsic's i'th ARGUMENT, which is what a free has to
+// multiply its length by. The result twin above answers about the call, and a
+// free's result is void.
+function elementSizeOfArg(ref cx: Cx, expr: ASTNode, i: usize): usize {
+  if (expr.childA == 0) {
+    return 1;
+  }
+  const list = nodeAt(cx.ast, expr.childA);
+  if (i >= list.childCount) {
+    return 1;
+  }
+  switch (typeAt(cx.prog, derefType(cx.prog, resolvedTypeAt(ref cx, childAt(cx.ast, list, i))))) {
     case Type.Array { elem: e }: { return sizeOfType(cx.prog, e); }
     default: { return 1; }
   }

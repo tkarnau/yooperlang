@@ -1,0 +1,3 @@
+# Illegal: two `mustNotEscape` clauses on one kind. One clause is the whole
+# promise, so the second is written rather than meant.
+4:5: states mustNotEscape twice

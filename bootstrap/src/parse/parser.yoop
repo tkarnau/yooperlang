@@ -10,7 +10,7 @@ module parse;
 import { Result } from "std/core/types.yoop";
 import { Vec }, * as vec from "std/core/vec.yoop";
 import { disposable } from "std/core/kinds.yoop";
-import { AST, ASTNodeKind, NodeId, emptyArena } from "../ast";
+import { AST, ASTNodeKind, NodeId, emptyArena, PROGRAM_FLAG_TEST } from "../ast";
 import { TokenTags, tagName, createLexedVal, LexTables, lexTablesNew } from "../lex";
 import { ParsingError } from "../diagnostics";
 import * as str from "std/core/strings.yoop";
@@ -54,9 +54,12 @@ function parseAST(ref ps: ParserState): Result<NodeId, ParsingError> {
           const directive = parseImportDirective(ref ps)?;
           if (str.stringEq(directive, "unsafe")) {
             program.flagA = true;
+          } else if (str.stringEq(directive, "test")) {
+            // A test module has no `main` of its own; `--test` collects its
+            // suites and generates one. Recorded in the PROGRAM node's flag
+            // word - see PROGRAM_FLAG_TEST in ast/arena.yoop.
+            program.intVal = program.intVal | PROGRAM_FLAG_TEST;
           }
-          // `import.test` needs nothing recorded: a test module's suites are
-          // the harness's business, and the bootstrap does not run them.
         } else {
           vec.vecPush(ref body, parseImportDecl(ref ps)?);
         }
@@ -99,16 +102,9 @@ function parseAST(ref ps: ParserState): Result<NodeId, ParsingError> {
       case TokenTags.AT: {
         vec.vecPush(ref body, parseAttribute(ref ps)?);
       }
-      // A `union` is C's union - every field at offset 0, sized by the largest
-      // - and none of that machinery is here. Named rather than left to
-      // "unexpected token at top level", which reads as a typo on a
-      // declaration that is perfectly well formed. See plans/bootstrap-completion.md.
+      // C's union - every field at offset 0, sized by the largest.
       case TokenTags.UNION: {
-        return Result.Err { error: SelfLexing.createParsingError(
-          ref ps,
-          "`union` declarations are not supported by the bootstrap yet - a union overlays every field at offset 0, which needs its own layout and field access rather than the struct path",
-          peekLengthUsize(ref ps),
-        )};
+        vec.vecPush(ref body, parseUnionDecl(ref ps)?);
       }
       // TODO: rest of tags...
       default: {

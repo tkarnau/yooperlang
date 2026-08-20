@@ -1,0 +1,9 @@
+bytes 221 204 187 170
+after b0 17 170
+built 67305985
+borrowed 17
+byvalue 170
+copied 2 1
+nested 7 99
+wide 42 99
+exit=0

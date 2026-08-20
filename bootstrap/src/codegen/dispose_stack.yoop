@@ -29,6 +29,7 @@ module codegen;
 
 import { Vec }, * as vec from "std/core/vec.yoop";
 import { disposable, Disposable } from "std/core/kinds.yoop";
+import { NodeId } from "../ast";
 import { TypeId } from "../typecheck";
 
 // One binding, or one FIELD of one binding, waiting to be disposed.
@@ -49,6 +50,13 @@ import { TypeId } from "../typecheck";
 export type PendingDispose {
   name: string,       // the local's name, for its slot
   slot: usize,        // its slot id
+  // The DECLARATION this entry came from, and the only thing that can be
+  // discharged by hand. Pass D answers "was this binding's method already
+  // called on every path reaching this exit" against exactly this node - see
+  // typecheck/discharge.yoop - and 0 means "nothing can discharge it": an
+  // anonymous region has no name to write, and a task handle owes the scheduler
+  // rather than a method call.
+  declNode: NodeId,
   ownerType: TypeId,  // what the method is mangled against
   method: string,     // the `mustCall` method - `dispose`, `close`, ...
   viaField: bool,     // gep into a field of the binding first
@@ -66,12 +74,12 @@ export type PendingDispose {
 // A stack of scopes, and nothing else.
 //
 // How far a `break` or a `continue` unwinds is NOT here: it is recorded on the
-// frame the jump targets, in loop_stack.yoop. This used to carry a parallel
-// `loopScopeDepths` stack instead, and that stopped working the moment a switch
-// became a breakable scope - a `break` out of a switch inside a loop unwinds to
-// the SWITCH's depth while a `continue` in the same arm unwinds to the LOOP's,
-// and one stack cannot answer both. Putting the depth on the frame makes each
-// jump read the depth of the thing it is actually leaving.
+// frame the jump targets, in loop_stack.yoop. A parallel `loopScopeDepths`
+// stack cannot answer it, because a switch is a breakable scope too - a `break`
+// out of a switch inside a loop unwinds to the SWITCH's depth while a
+// `continue` in the same arm unwinds to the LOOP's, and one stack cannot hold
+// both. Putting the depth on the frame makes each jump read the depth of the
+// thing it is actually leaving.
 export type DisposeStack propagates<disposable> {
   scopes: Vec<Vec<PendingDispose>>,
 }

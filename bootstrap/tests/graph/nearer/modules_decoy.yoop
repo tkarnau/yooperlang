@@ -1,0 +1,7 @@
+// The DECOY. This file sits beside `nearer/modules/`, which holds only `lib`,
+// while the outer root at `tests/graph/modules/` holds `lib2` as well. The
+// first root the walk meets answers whether or not it holds the name, so this
+// import must FAIL naming the inner root - falling through to the outer one
+// would resolve it from a directory the reader of this file never looks at.
+import { two } from "modules/lib2";
+function main(): int32 { return two(); }

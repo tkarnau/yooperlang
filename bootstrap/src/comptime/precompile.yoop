@@ -1,0 +1,497 @@
+module comptime;
+
+/*
+  `@precompile`, on a module-level const.
+
+      @precompile const FACT_6: int32 = fact(6);
+
+  The initializer is evaluated at BUILD time and a LITERAL is put back in its
+  place. That last part is the whole design: every layer below - const
+  inlinability, const materialization, codegen - reads the answer the ordinary
+  way, and none of them learns that a comptime evaluator exists. The alternative
+  was a side table of folded values threaded through three layers, and a literal
+  is what the fold produced anyway.
+
+  The policy here is the OPPOSITE of an opportunistic fold. A failure is a hard
+  build error, because the user asked for compile-time evaluation and a silent
+  fallback would be a semantics change rather than a mercy: the point of the
+  attribute is usually that the work must NOT happen at startup.
+
+  It runs between typecheck and codegen rather than inside either. It needs pass
+  D's resolved types, so it cannot be a typecheck pass that runs before D; and
+  its failures are diagnostics with source locations, which codegen has no
+  channel for.
+*/
+
+import { Vec }, * as vec from "std/core/vec.yoop";
+import * as str from "std/core/strings.yoop";
+import { Result, Option } from "std/core/types.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import { AST, ASTNode, ASTNodeKind, NodeId, appendChildRun, appendNode, appendString,
+  attributeNameOf, childAt, createASTNode, declOf, nodeAt, replaceNode } from "../ast";
+import { TokenTags } from "../lex";
+import { SourceLocation } from "../diagnostics";
+import { Module, ModuleGraph, SourceFile } from "../source_graph";
+import { Program, TypedModule, TypeId, TYPE_ERROR_ID, TYPE_VOID_ID, SymbolId,
+  SYMBOL_NONE_ID, Symbol, symbolAt, setSymbol, lookupOwnName, reportError,
+  arrayElementOf, moduleLevelValueType, structFieldAt, primIsSigned } from "../typecheck";
+import { floatFromBits } from "../utils";
+
+export const ATTR_PRECOMPILE: string = "precompile";
+
+// Fold every `@precompile` const in the graph, in module and declaration order.
+//
+// One arena and one folded table for the whole run, so a const folded in an
+// earlier module is readable from a later one - the graph is topologically
+// ordered, so a module's imports are always folded before it.
+export function runPrecompilePass(ref prog: Program, ref graph: ModuleGraph): void {
+  disposable va: ValueArena = newValueArena();
+  disposable folded: FoldedConsts = newFoldedConsts();
+
+  let mods: Module[] = vec.vecAsArray(ref graph.modules);
+  let tms: TypedModule[] = vec.vecAsArray(ref prog.modules);
+  let i: usize = 0;
+  while (i < graph.modules.len) {
+    foldModulePrecompiles(ref prog, ref tms[i], ref mods[i], ref graph, ref va, ref folded);
+    i += 1;
+  }
+}
+
+function foldModulePrecompiles(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref m: Module,
+  ref graph: ModuleGraph,
+  ref va: ValueArena,
+  ref folded: FoldedConsts
+): void {
+  let f: usize = 0;
+  while (f < m.files.len) {
+    const root = vec.vecGet(ref m.files, f).root;
+    const programNode = nodeAt(ref m.ast, root);
+    let i: usize = 0;
+    while (i < programNode.childCount) {
+      const entryId = childAt(ref m.ast, programNode, i);
+      if (str.stringEq(attributeNameOf(ref m.ast, entryId), ATTR_PRECOMPILE)) {
+        const targetId = declOf(ref m.ast, entryId);
+        if (nodeAt(ref m.ast, targetId).kind == ASTNodeKind.BLOCK) {
+          foldPrecompileBlock(ref prog, ref tm, ref m, ref graph, ref va, ref folded,
+            root, targetId);
+        } else {
+          foldOnePrecompile(ref prog, ref tm, ref m, ref graph, ref va, ref folded, targetId);
+        }
+      }
+      i += 1;
+    }
+    f += 1;
+  }
+}
+
+/*
+  `@precompile { ... }` - the BLOCK form.
+
+  A different mechanism from the initializer form rather than the same one with
+  a different target. That one produces ONE value for ONE binding; this one runs
+  statements and keeps what they wrote to the module's `let` globals.
+
+  So the fold is bracketed by two halves nothing else needs:
+
+    BEFORE  every module-level `let` in the file is folded to a value and bound
+            by name, so the block can read and write it as an ordinary local
+    AFTER   each binding's final value is written back as the decl's
+            initializer, which is what makes the program START with it
+
+  A global whose own initializer cannot be folded is left UNBOUND rather than
+  refused, so a block that never touches it still runs. Reading one that was
+  left out fails by name inside the block, which is where the reader can see
+  what happened.
+*/
+function foldPrecompileBlock(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref m: Module,
+  ref graph: ModuleGraph,
+  ref va: ValueArena,
+  ref folded: FoldedConsts,
+  root: NodeId,
+  blockId: NodeId
+): void {
+  disposable scope: EvalScope = newEvalScope();
+  disposable names: Vec<string> = vec.vecNew(8);
+  disposable declIds: Vec<NodeId> = vec.vecNew(8);
+  disposable slots: Vec<ValueId> = vec.vecNew(8);
+
+  let cx: EvalCx = {
+    prog: ref prog, tm: ref tm, mod: ref m, ast: ref m.ast, graph: ref graph,
+    va: ref va, scope: ref scope, folded: ref folded,
+    fnRet: TYPE_VOID_ID, depth: 0,
+  };
+
+  // BEFORE: bind every module-level `let` that folds.
+  const programNode = nodeAt(ref m.ast, root);
+  let i: usize = 0;
+  while (i < programNode.childCount) {
+    const declId = declOf(ref m.ast, childAt(ref m.ast, programNode, i));
+    const declNode = nodeAt(ref m.ast, declId);
+    if (declNode.kind == ASTNodeKind.LET_DECL && declNode.childB != 0) {
+      switch (evalExprValue(ref cx, declNode.childB)) {
+        case Result.Ok { value: v }: {
+          const slot = cloneValue(ref va, v);
+          bindLocal(ref scope, declNode.name, slot);
+          vec.vecPush(ref names, declNode.name);
+          vec.vecPush(ref declIds, declId);
+          vec.vecPush(ref slots, slot);
+        }
+        case Result.Err { error: e }: {}
+      }
+    }
+    i += 1;
+  }
+
+  // The block itself.
+  switch (execBlock(ref cx, blockId)) {
+    case Result.Err { error: e }: {
+      reportError(
+        ref prog,
+        `an @precompile block could not be run at compile time: ${e.message}`,
+        e.sourceLoc
+      );
+      return;
+    }
+    case Result.Ok { value: flow }: {}
+  }
+
+  // AFTER: each binding's final value becomes its decl's initializer.
+  let g: usize = 0;
+  while (g < names.len) {
+    const declId = vec.vecGet(ref declIds, g);
+    let declNode = nodeAt(ref m.ast, declId);
+    const declared = moduleLevelValueType(ref prog, ref tm, declNode.name);
+    switch (literalForValue(ref prog, ref tm, ref m.ast, ref va, vec.vecGet(ref slots, g),
+                            declared, false, declNode.sourceLoc)) {
+      case Result.Ok { value: literalId }: {
+        declNode.childB = literalId;
+        replaceNode(ref m.ast, declId, declNode);
+        bakeGlobalInt(ref prog, ref tm, ref va, declNode.name,
+          vec.vecGet(ref slots, g), declared);
+      }
+      case Result.Err { error: e }: {
+        reportError(
+          ref prog,
+          `an @precompile block left "${declNode.name}" holding a value with no literal spelling: ${e.message}`,
+          declNode.sourceLoc
+        );
+      }
+    }
+    g += 1;
+  }
+}
+
+// An integer global's value rides in its SYMBOL as well as in the AST, because
+// that is what codegen bakes into the LLVM global's own initializer. Without
+// this the literal is in the tree and the global still starts at zero.
+function bakeGlobalInt(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref va: ValueArena,
+  name: string,
+  value: ValueId,
+  declared: TypeId
+): void {
+  const slot = valueAt(ref va, value);
+  if (slot.kind != ValueKind.INT && slot.kind != ValueKind.BOOL) {
+    return;
+  }
+  const symId = lookupOwnName(ref tm, name);
+  if (symId == SYMBOL_NONE_ID) {
+    return;
+  }
+  switch (symbolAt(ref prog, symId)) {
+    case Symbol.Global { typeId: t, intVal: v, mutable: mu }: {
+      setSymbol(ref prog, symId,
+        Symbol.Global { typeId: t, intVal: asSigned(ref prog, declared, slot.bits), mutable: mu });
+    }
+    default: {}
+  }
+}
+
+function foldOnePrecompile(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref m: Module,
+  ref graph: ModuleGraph,
+  ref va: ValueArena,
+  ref folded: FoldedConsts,
+  declId: NodeId
+): void {
+  let declNode = nodeAt(ref m.ast, declId);
+  if (declNode.kind != ASTNodeKind.CONST_DECL || declNode.childB == 0) {
+    return;
+  }
+  const symId = lookupOwnName(ref tm, declNode.name);
+  if (symId == SYMBOL_NONE_ID) {
+    return;
+  }
+  const declared = precompiledConstType(ref prog, symId);
+  if (declared == TYPE_ERROR_ID) {
+    return;
+  }
+
+  let value: ValueId = VALUE_NONE;
+  switch (foldExpression(ref prog, ref tm, ref m, ref graph, ref va, ref folded, declNode.childB)) {
+    case Result.Ok { value: v }: { value = v; }
+    case Result.Err { error: e }: {
+      // The hard-error half of the policy. The message is the evaluator's own -
+      // it says what it could not do and where - prefixed with the decl so the
+      // reader knows which `@precompile` asked.
+      reportError(
+        ref prog,
+        `@precompile const "${declNode.name}" could not be folded: ${e.message}`,
+        e.sourceLoc
+      );
+      return;
+    }
+  }
+
+  // The literal that replaces the initializer. Built before anything is
+  // written, so a value with no literal spelling fails without leaving the
+  // arena half-rewritten.
+  let literalId: NodeId = 0;
+  switch (literalForValue(ref prog, ref tm, ref m.ast, ref va, value, declared, true, declNode.sourceLoc)) {
+    case Result.Ok { value: id }: { literalId = id; }
+    case Result.Err { error: e }: {
+      reportError(
+        ref prog,
+        `@precompile const "${declNode.name}" folded to a value with no literal spelling: ${e.message}`,
+        declNode.sourceLoc
+      );
+      return;
+    }
+  }
+
+  declNode.childB = literalId;
+  replaceNode(ref m.ast, declId, declNode);
+
+  // An integer rides in the symbol as well, which is where an inlined const's
+  // value is read from when nothing materialized a module datum for it.
+  const slot = valueAt(ref va, value);
+  if (slot.kind == ValueKind.INT || slot.kind == ValueKind.BOOL) {
+    setSymbol(ref prog, symId,
+      Symbol.Value { typeId: declared, intVal: asSigned(ref prog, declared, slot.bits) });
+  }
+  recordFolded(ref folded, symId, value);
+}
+
+// The declared type of a const, from its symbol. `@precompile` only reaches a
+// `Symbol.Value` - pass C put it there deliberately, whatever the initializer
+// looked like at the time.
+function precompiledConstType(ref prog: Program, symId: SymbolId): TypeId {
+  switch (symbolAt(ref prog, symId)) {
+    case Symbol.Value { typeId: t, intVal: v }: { return t; }
+    default: { return TYPE_ERROR_ID; }
+  }
+}
+
+// Record a synthesized node's type, growing pass D's dense decoration to reach
+// it.
+//
+// PER NODE, and that is the point. A blanket fill with the decl's own type gave
+// a struct literal's FIELD nodes the struct type, and codegen stores a field at
+// `typeOf(fieldNode)` - so it emitted `store %struct.Point 140` into an i32
+// slot, which clang rejects. Every literal below says what it is.
+function noteType(ref tm: TypedModule, nodeId: NodeId, ty: TypeId): void {
+  while (tm.resolvedTypes.len <= nodeId) {
+    vec.vecPush(ref tm.resolvedTypes, TYPE_ERROR_ID);
+  }
+  vec.vecSet(ref tm.resolvedTypes, nodeId, ty);
+}
+
+// A folded value as the literal node that spells it.
+//
+// The shapes are exactly the ones codegen's `scalarConstOperand` reads, because
+// that is who reads these: a number, a bool, a string, and an array of those.
+// Anything else - a struct, a variant - has no constant spelling to inline and
+// is refused BY NAME rather than emitted as a zero.
+function literalForValue(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  ref va: ValueArena,
+  value: ValueId,
+  declared: TypeId,
+  // Whether the literal is going to be INLINED at every use (a const) or
+  // EVALUATED once into a global (a `let`). The two accept different shapes and
+  // the difference is not cosmetic: a struct literal handed to the const path
+  // has no constant spelling, so codegen finds nothing to inline and falls back
+  // to the symbol's integer - which is zero. Silently.
+  inlined: bool,
+  loc: SourceLocation
+): Result<NodeId, ComptimeError> {
+  const slot = valueAt(ref va, value);
+  switch (slot.kind) {
+    case ValueKind.INT: {
+      // Normalized to the DECLARED type on the way in. The evaluator works at
+      // the type it could see, which inside a generic body is a parameter with
+      // no width - so this is the boundary where the value is finally made to
+      // fit the thing it is being stored in, rather than leaving an
+      // out-of-range immediate for a downstream truncation to fix.
+      const bits = normalizeInt(ref prog, declared, slot.bits);
+      const signed = asSigned(ref prog, declared, bits);
+
+      let node = createASTNode(ASTNodeKind.INT_LITERAL, loc);
+      if (primIsSigned(ref prog, declared) && signed < 0) {
+        // A negative value is a UNARY MINUS over the magnitude rather than a
+        // flag on the literal. The flag is read by the const-data path and
+        // IGNORED by `emitExpr`, so a flagged literal came out positive
+        // wherever a global's initializer is emitted as instructions; the unary
+        // form is the one both paths agree on.
+        node.intVal = uint64(0 - signed);
+        const magnitudeId = appendNode(ref ast, node);
+        noteType(ref tm, magnitudeId, declared);
+
+        let negated = createASTNode(ASTNodeKind.UNARY_EXPRESSION, loc);
+        negated.operator = TokenTags.MINUS;
+        negated.childA = magnitudeId;
+        const negatedId = appendNode(ref ast, negated);
+        noteType(ref tm, negatedId, declared);
+        return Result.Ok { value: negatedId };
+      }
+      node.intVal = bits;
+      const id = appendNode(ref ast, node);
+      noteType(ref tm, id, declared);
+      return Result.Ok { value: id };
+    }
+    case ValueKind.BOOL: {
+      let node = createASTNode(ASTNodeKind.BOOL_LITERAL, loc);
+      node.intVal = slot.bits;
+      const id = appendNode(ref ast, node);
+      noteType(ref tm, id, declared);
+      return Result.Ok { value: id };
+    }
+    case ValueKind.FLOAT: {
+      let node = createASTNode(ASTNodeKind.FLOAT_LITERAL, loc);
+      node.floatVal = floatFromBits(slot.bits);
+      const id = appendNode(ref ast, node);
+      noteType(ref tm, id, declared);
+      return Result.Ok { value: id };
+    }
+    case ValueKind.STR: {
+      let node = createASTNode(ASTNodeKind.STRING_LITERAL, loc);
+      node.strId = appendString(ref ast, slot.text);
+      const id = appendNode(ref ast, node);
+      noteType(ref tm, id, declared);
+      return Result.Ok { value: id };
+    }
+    case ValueKind.ARRAY: {
+      return arrayLiteralForValue(ref prog, ref tm, ref ast, ref va, slot, declared, inlined, loc);
+    }
+    // A struct has no spelling an inlined const could use, but a GLOBAL is not
+    // inlined - its initializer is an ordinary expression the module's init
+    // function evaluates - so a struct literal put back there works exactly as
+    // a hand-written one does.
+    case ValueKind.STRUCT: {
+      if (inlined) {
+        return Result.Err { error: comptimeError(
+          "only a number, a bool, a string, or an array of those can be inlined as a const",
+          loc
+        )};
+      }
+      return structLiteralForValue(ref prog, ref tm, ref ast, ref va, slot, declared, inlined, loc);
+    }
+    default: {
+      return Result.Err { error: comptimeError(
+        "only a number, a bool, a string, or an array of those can be inlined as a const",
+        loc
+      )};
+    }
+  }
+}
+
+// `{ x: 1, y: 2 }` - the field literals under a NODE_LIST, each carrying the
+// field's NAME, which is what a struct literal is keyed by.
+function structLiteralForValue(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  ref va: ValueArena,
+  slot: ValueSlot,
+  declared: TypeId,
+  inlined: bool,
+  loc: SourceLocation
+): Result<NodeId, ComptimeError> {
+  disposable ids: Vec<NodeId> = vec.vecNew(slot.childCount);
+  let i: usize = 0;
+  while (i < slot.childCount) {
+    const field = structFieldAt(ref prog, declared, i);
+    if (!field.found) {
+      return Result.Err { error: comptimeError(
+        "a struct value folded for a type with fewer fields than it has", loc
+      )};
+    }
+    const valueId = literalForValue(ref prog, ref tm, ref ast, ref va,
+      childValueAt(ref va, slot, i), field.typeId, inlined, loc)?;
+    let fieldNode = createASTNode(ASTNodeKind.STRUCT_LITERAL_FIELD, loc);
+    fieldNode.name = field.name;
+    fieldNode.childA = valueId;
+    const fieldId = appendNode(ref ast, fieldNode);
+    // The FIELD's type, not the struct's: codegen stores a field at
+    // `typeOf(fieldNode)`.
+    noteType(ref tm, fieldId, field.typeId);
+    vec.vecPush(ref ids, fieldId);
+    i += 1;
+  }
+
+  let list = createASTNode(ASTNodeKind.NODE_LIST, loc);
+  appendChildRun(ref ast, ref list, ref ids);
+  const listId = appendNode(ref ast, list);
+  noteType(ref tm, listId, declared);
+
+  let structNode = createASTNode(ASTNodeKind.STRUCT_LITERAL, loc);
+  structNode.childA = listId;
+  const structId = appendNode(ref ast, structNode);
+  noteType(ref tm, structId, declared);
+  return Result.Ok { value: structId };
+}
+
+// `[1, 4, 9]` - the element literals under a NODE_LIST, which is the shape the
+// parser produces and the shape `arrayConstOperand` walks.
+function arrayLiteralForValue(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  ref va: ValueArena,
+  slot: ValueSlot,
+  declared: TypeId,
+  inlined: bool,
+  loc: SourceLocation
+): Result<NodeId, ComptimeError> {
+  const elem = arrayElementOf(ref prog, declared);
+  if (elem == TYPE_ERROR_ID) {
+    return Result.Err { error: comptimeError(
+      "an array value folded for a const that is not an array type", loc
+    )};
+  }
+
+  // The element nodes are built FIRST and collected: appending one grows the
+  // same arena the list's own run will occupy, so a partial splice would
+  // interleave them.
+  disposable ids: Vec<NodeId> = vec.vecNew(slot.childCount);
+  let i: usize = 0;
+  while (i < slot.childCount) {
+    const elemId = literalForValue(ref prog, ref tm, ref ast, ref va,
+      childValueAt(ref va, slot, i), elem, inlined, loc)?;
+    vec.vecPush(ref ids, elemId);
+    i += 1;
+  }
+
+  let list = createASTNode(ASTNodeKind.NODE_LIST, loc);
+  appendChildRun(ref ast, ref list, ref ids);
+  const listId = appendNode(ref ast, list);
+  noteType(ref tm, listId, declared);
+
+  let arrayNode = createASTNode(ASTNodeKind.ARRAY_LITERAL, loc);
+  arrayNode.childA = listId;
+  const arrayId = appendNode(ref ast, arrayNode);
+  noteType(ref tm, arrayId, declared);
+  return Result.Ok { value: arrayId };
+}

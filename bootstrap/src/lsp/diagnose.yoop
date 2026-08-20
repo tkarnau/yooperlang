@@ -1,0 +1,195 @@
+module lsp;
+
+/*
+  Running the compiler over one open document and turning what it says into
+  what an editor draws.
+
+  HOW AN UNSAVED BUFFER REACHES THE COMPILER, and the one shape where it does
+  not. The compiler reads files by path; the editor is holding text that is not
+  on disk. There is already one path in that starts from bytes -
+  `loadModuleGraphFromSource`, which `--test` uses for the entry module it
+  generates and never writes down - so an open document is compiled as the
+  graph's ENTRY, seeded from the buffer, with everything it imports read from
+  disk as usual.
+
+  That covers every SINGLE-FILE module, which is every program, every example,
+  every `main.yoop` and every `*.test.yoop`. It does NOT cover one file of a
+  DIRECTORY module (a file that declares `module <name>;`), because there the
+  module is the compilation unit: seeding one file of it from memory would
+  produce a module missing every declaration its siblings make, and the editor
+  would fill with "unknown name" on code that is fine. Those files are
+  typechecked FROM DISK instead, so their semantic diagnostics track the last
+  SAVE rather than the last keystroke.
+
+  Syntax is live either way: the buffer is parsed on its own first, so a
+  half-typed line raises where it is, in a directory module as much as anywhere
+  else.
+
+  What would delete that split is an OVERLAY in source_graph: a map from
+  absolute path to bytes, consulted by `readSource`, which is the one place a
+  path becomes bytes.
+
+  WHAT IS PUBLISHED. Only the diagnostics belonging to this document's own
+  path, plus any that carry no path at all. A diagnostic in a file the document
+  imports is dropped rather than published against the wrong URI, which would
+  put a squiggle on an unrelated line. Publishing those as well needs the
+  server to remember which URIs it has published to so that it can clear them
+  again, and nothing here does that yet.
+
+  WARNINGS ARE NOT FILTERED, unlike a build's. `unhandled-disposable` is
+  silenced in a build unless `--warn-disposable` says otherwise, because it has
+  two known false-positive classes and teaching people to stop reading warnings
+  costs more than it finds. An editor is the other case: it is where an
+  advisory belongs, the reader can see the line, and the path filter above
+  already drops everything std says about itself.
+*/
+
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { Text }, * as text from "std/core/text.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import { Result } from "std/core/types.yoop";
+import * as str from "std/core/strings.yoop";
+
+import { AST } from "../ast";
+import { parse, moduleHeaderName } from "../parse";
+import { LoadGraphResult, ModuleGraph, loadModuleGraph, loadModuleGraphFromSource,
+         disposeModuleGraph } from "../source_graph";
+import { Program, typecheckProgram } from "../typecheck";
+import { Diagnostic, Severity } from "../diagnostics";
+import { runPrecompilePass } from "../comptime";
+
+// The LSP severity numbers. There is no enum for them here because they go
+// straight into JSON as integers and naming them twice would be the only
+// difference.
+const SEVERITY_ERROR: int64 = 1;
+const SEVERITY_WARNING: int64 = 2;
+
+/*
+  One diagnostic, already in the editor's coordinates.
+
+  `message` and `code` are BORROWED from the compiler's own strings. That is
+  sound because nothing in this tree ever frees a `string` - see
+  docs/writing_yoop.md 3.1 - and it is why this type is not disposable. It is
+  also the leak this server has, stated plainly: every compile mallocs its
+  diagnostic messages and nothing reclaims them. It is bounded by the number of
+  DIAGNOSTICS rather than by the size of the program, and removing it means
+  giving the compiler's messages an allocator to come out of - which is a
+  change to how the whole compiler builds a string, not anything this file can
+  do on its own.
+*/
+export type LspDiagnostic {
+  message: string,
+  code: string,
+  severity: int64,
+  range: Range,
+}
+
+/*
+  Compile `doc` and fill `out` with what the editor should draw.
+
+  `out` is cleared first and is the caller's buffer, reused across compiles.
+  Always succeeds: a compiler that refuses the document produces diagnostics,
+  which is the point, and a compiler that cannot even find the file produces
+  one diagnostic saying so.
+*/
+export function collectDiagnostics(
+  ref doc: Document,
+  stdRoot: string,
+  ref out: Vec<LspDiagnostic>
+): void {
+  vec.vecClear(ref out);
+  const src = vec.vecAsArray(ref doc.content);
+  const path = text.view(ref doc.path);
+
+  // Parse the BUFFER first. This is the half that is live for every document,
+  // and it also keeps a syntax error from being reported as the graph loader's
+  // pre-formatted "path:line:col: message" string, which has no range in it.
+  const isDirectoryModuleFile = moduleHeaderName(src).len > 0;
+  switch (parse(src)) {
+    case Result.Err { error: e }: {
+      vec.vecPush(ref out, {
+        message: e.rawMessage,
+        code: "",
+        severity: SEVERITY_ERROR,
+        range: rangeOfSpan(src, e.sourceLoc.pos, e.sourceLoc.length),
+      });
+      return;
+    }
+    case Result.Ok { value: parsed }: {
+      // Thrown away: what it proves is that the graph load below will not fail
+      // on THIS file's syntax, and the graph builds its own arena.
+      disposable ast: AST = parsed;
+    }
+  }
+
+  let loaded: LoadGraphResult = loadGraphFor(ref doc, path, stdRoot, isDirectoryModuleFile);
+  switch (loaded) {
+    case LoadGraphResult.Err { error: e }: {
+      // A missing import, an import cycle, a sibling of a directory module
+      // that does not parse. None of these has a location in THIS file, so
+      // they land on its first character, which is where an editor shows a
+      // whole-file problem.
+      vec.vecPush(ref out, {
+        message: e,
+        code: "",
+        severity: SEVERITY_ERROR,
+        range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } },
+      });
+    }
+    case LoadGraphResult.Ok { value: g }: {
+      let graph: ModuleGraph = g;
+      disposable prog: Program = typecheckProgram(ref graph);
+      runPrecompilePass(ref prog, ref graph);
+      let i: usize = 0;
+      while (i < prog.diagnostics.len) {
+        const d = vec.vecGet(ref prog.diagnostics, i);
+        if (belongsToDocument(ref d, path)) {
+          vec.vecPush(ref out, {
+            message: d.message,
+            code: d.code,
+            severity: lspSeverity(d.severity),
+            range: rangeOfSpan(src, d.sourceLoc.pos, d.sourceLoc.length),
+          });
+        }
+        i += 1;
+      }
+      // Not a `disposable` binding: propagated disposal on a ModuleGraph frees
+      // the outer Vec and Map and leaves every module's arena behind. See
+      // source_graph/graph.yoop.
+      disposeModuleGraph(ref graph);
+    }
+  }
+}
+
+function loadGraphFor(
+  ref doc: Document,
+  path: string,
+  stdRoot: string,
+  isDirectoryModuleFile: bool
+): LoadGraphResult {
+  if (isDirectoryModuleFile) {
+    return loadModuleGraph(path, stdRoot);
+  }
+  // The loader MOVES the bytes it is given into the module it seeds, and the
+  // spans in the AST point into exactly those bytes for as long as the graph
+  // lives - so the document keeps its own copy and hands over a fresh one.
+  let seed: Vec<uint8> = vec.vecNew(doc.content.len + 1);
+  vec.vecExtendFrom(ref seed, vec.vecAsArray(ref doc.content));
+  return loadModuleGraphFromSource(seed, path, stdRoot);
+}
+
+// A diagnostic with no file is one raised before any file was being walked, so
+// it is shown on whatever the editor is looking at rather than nowhere.
+function belongsToDocument(ref d: Diagnostic, path: string): bool {
+  if (d.filePath.len == 0) {
+    return true;
+  }
+  return str.stringEq(d.filePath, path);
+}
+
+function lspSeverity(s: Severity): int64 {
+  switch (s) {
+    case Severity.ERROR: { return SEVERITY_ERROR; }
+    case Severity.WARNING: { return SEVERITY_WARNING; }
+  }
+}

@@ -33,7 +33,7 @@ module typecheck;
 //     mustCall join beforeScopeEnd   -> JOINED: stack handle, joined at scope end
 //     no prefix, annotated `T`       -> IMMEDIATE: spawn and join in one statement
 
-import { Map }, * as map from "std/collections/map.yoop";
+import * as map from "std/collections/map.yoop";
 import { Option } from "std/core/types.yoop";
 import * as str from "std/core/strings.yoop";
 import { AST, ASTNode, ASTNodeKind, NodeId, nodeAt, childAt } from "../ast";
@@ -137,6 +137,53 @@ function taskBindOfPrefixes(ref prog: Program, ref ast: AST, listId: NodeId): Ta
   return TaskBind.NONE;
 }
 
+// `pooled h = 7;` - a handle kind on a binding whose right-hand side is not a
+// handle.
+//
+// A REFCOUNTED kind asks for the one storage discipline that only a task handle
+// has: the value is heap-allocated with a count, the binding takes one, and the
+// scope end releases it. There is nothing to count on an `int32`, so the
+// binding promises a release of something that was never retained.
+//
+// Only the refcounted spelling needs this. A kind asking for a scope-end CALL
+// (`joined`, whose `mustCall` is `join`) is already refused by
+// checkDisposableBinding, which finds no such method on the bound type and says
+// so - which is the same mistake reported from the other side.
+//
+// A type that PROPAGATES the kind is legal and is why the check is not simply
+// "the initializer is a Task": `pooled j: Job` where `Job propagates<pooled>`
+// holds the handle in a field, and the release is one per field that supplies
+// it. Same carve-out checkDisposableBinding makes for `mustCall`.
+//
+// Reached only when `taskBindOf` said NONE, so a real handle binding never gets
+// here.
+export function checkHandleKindHasTask(ref cx: Cx, stmt: ASTNode, typeId: TypeId): void {
+  if (stmt.childC == 0 || typeId == TYPE_ERROR_ID ||
+      taskResultOf(cx.prog, typeId) != TYPE_ERROR_ID) {
+    return;
+  }
+  const list = nodeAt(cx.ast, stmt.childC);
+  let i: usize = 0;
+  while (i < list.childCount) {
+    const prefix = nodeAt(cx.ast, childAt(cx.ast, list, i));
+    switch (lookupKind(cx.prog, prefix.name)) {
+      case Option.Some { value: info }: {
+        if (info.refcounted &&
+            !str.stringEq(propagatedKindOf(cx.prog, typeId), prefix.name)) {
+          reportError(
+            cx.prog,
+            `"${stmt.name}" is ${prefix.name}, which holds a refcounted Task<T> handle, but its initializer is ${formatType(cx.prog, typeId)} - there is nothing there to hold a count`,
+            stmt.sourceLoc
+          );
+          return;
+        }
+      }
+      case Option.None: { }
+    }
+    i += 1;
+  }
+}
+
 // The two things a `task` declaration may not be, both refused where the kind
 // is already in hand. Both are the reference's rules.
 //
@@ -205,29 +252,23 @@ export function declIsTaskBody(ref tm: TypedModule, declNode: ASTNode): bool {
 //
 // An `async` function that is not a task may write `wait` freely: std's
 // `awaitTask` ends in one, as the fallback for being called off a worker.
-export function checkWait(
-  ref prog: Program,
-  ref tm: TypedModule,
-  ref ast: AST,
-  expr: ASTNode,
-  ref scope: LocalScope
-): TypeId {
-  const operandType = checkExpr(ref prog, ref tm, ref ast, expr.childA, TYPE_ERROR_ID, ref scope);
+export function checkWait(ref cx: Cx, expr: ASTNode): TypeId {
+  const operandType = checkExpr(ref cx, expr.childA, TYPE_ERROR_ID);
   if (operandType == TYPE_ERROR_ID) {
     return TYPE_ERROR_ID;
   }
-  const result = taskResultOf(ref prog, operandType);
+  const result = taskResultOf(cx.prog, operandType);
   if (result == TYPE_ERROR_ID) {
     reportError(
-      ref prog,
-      `"wait" joins a Task<T> handle, and this operand is ${formatType(ref prog, operandType)}`,
+      cx.prog,
+      `"wait" joins a Task<T> handle, and this operand is ${formatType(cx.prog, operandType)}`,
       expr.sourceLoc
     );
     return TYPE_ERROR_ID;
   }
-  if (prog.currentIsTask) {
+  if (cx.prog.currentIsTask) {
     reportError(
-      ref prog,
+      cx.prog,
       `"wait" is not allowed inside a task body - it would block this task's worker thread. Use "await" on an async call instead, which suspends the task and hands the worker back`,
       expr.sourceLoc
     );

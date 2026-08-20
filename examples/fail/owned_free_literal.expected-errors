@@ -1,0 +1,8 @@
+# Illegal both times: `strFree` takes an `owned string`, which says the storage
+# came from an allocator.
+#
+#   line 14  a string literal lives in read-only memory
+#   line 19  the value WAS allocated, but the binding declares the borrowed
+#            form, and the declared type is the authority - the marker is gone
+14:17: argument 1 of "strFree" requires kind "owned"
+19:24: argument 1 of "strFree" requires kind "owned"

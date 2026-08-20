@@ -19,13 +19,11 @@
 // All "string" returns are empty on success and an error message on
 // failure - matching the std/net convention so callers stay uniform.
 // Failure messages from the libc calls carry the real errno reason
-// (via the Phase 8.D errno bridge) so "not found" and "permission
+// (via the errno bridge) so "not found" and "permission
 // denied" are distinguishable.
 //
-// What's deliberately absent from this MVP:
-//   * No streaming reads. readFile slurps. A `read_chunks` over the
-//     existing Readable trait is the right follow-up once `std/io` is
-//     factored out from std/net.
+// What's deliberately absent:
+//   * No streaming reads. readFile slurps.
 //   * No Windows-specific path handling. Forward slashes only.
 
 import.unsafe;
@@ -54,7 +52,7 @@ extern "C" from "stdio.h" {
 // 0755 mask is a magic number when hand-mirrored in yoop. yoop_io_mkdir
 // (runtime/yoop_io.c) computes the standard directory mode from the POSIX
 // S_* symbols at C compile time and applies it - the same pattern std/net
-// uses for SO_REUSEADDR. See plans/completed/yoopstore-papercuts.md #10.
+// uses for SO_REUSEADDR.
 extern "C" from "yoop_runtime" {
     function yoop_io_mkdir(path: string): c_int;
     function yoop_io_exists(path: string): c_int;
@@ -313,7 +311,7 @@ export function timeString(epoch: int64): string {
     return yoop_io_time_string(epoch);
 }
 
-// odd helpers for now...
+// Odd helpers.
 export function hasYoopFileNameSuffix(s: string): bool {
   const n = s.len;
   if (n < 5) {

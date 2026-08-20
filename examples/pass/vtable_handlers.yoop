@@ -1,13 +1,13 @@
-// Phase 9.G: vtables + `=>` function value types give yoop runtime
+// Vtables + `=>` function value types give yoop runtime
 // polymorphism without monomorphization. This fixture exercises the
 // canonical motivating case: a *heterogeneous* list of handlers, all
 // answering the same trait but each backed by a different struct type
 // with its own state.
 //
-// Pre-9.G, this shape required either generics (one monomorphization
-// per handler type, so the array couldn't be heterogeneous) or
-// hand-rolled function-pointer-plus-void-context fields with no
-// compiler help. The vtable form is the compiler-supported one.
+// Without vtables this shape needs either generics (one monomorphization
+// per handler type, so the array cannot be heterogeneous) or hand-rolled
+// function-pointer-plus-void-context fields with no compiler help. The
+// vtable form is the compiler-supported one.
 
 import * as intr from "std/core/intrinsics.yoop";
 
@@ -55,8 +55,9 @@ vtable Dispatcher for Handler {
 
 // Sequential dispatch over a heterogeneous Dispatcher array. The function
 // takes any Dispatcher value by ref - it has zero knowledge of the underlying
-// impl types. Pre-9.G, this would have had to be `<H implements Handler>` and
-// monomorphize per concrete type, which makes mixed-type arrays impossible.
+// impl types. Without a vtable this would have to be `<H implements Handler>`
+// and monomorphize per concrete type, which makes mixed-type arrays
+// impossible.
 function fan_out(ref handlers: Dispatcher[], req: int32): int32 {
     let i: int32 = 0;
     let n: int32 = int32(handlers.len);

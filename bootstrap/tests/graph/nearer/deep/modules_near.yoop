@@ -1,0 +1,5 @@
+// An entry two levels below the INNER root and three below the outer one. The
+// FIRST root the walk meets wins, so this resolves to ../modules and never
+// reaches bootstrap/tests/graph/modules.
+import { whichRoot } from "modules/lib";
+function main(): int32 { return whichRoot(); }

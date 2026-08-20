@@ -1,0 +1,3 @@
+# Illegal: the field carries `disposable` and `S` propagates nothing, so the
+# `mustCall dispose` obligation the field took on has no holder.
+17:5: which "S" does not propagate

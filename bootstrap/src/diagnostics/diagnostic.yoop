@@ -1,7 +1,6 @@
 module diagnostics;
 
-// The accumulating error channel (decision D3 in
-// plans/bootstrap-pipeline-contracts.md).
+// The accumulating error channel.
 //
 // Lex and parse fail fast and hand back a ParsingError; typecheck instead
 // COLLECTS Diagnostics and never stops, so the user sees every error in one
@@ -20,14 +19,22 @@ export type Diagnostic {
   filePath: string,
   sourceLoc: SourceLocation,
   severity: Severity,
+  // Which diagnostic this IS, for the ones a build can opt out of. "" for
+  // everything that is not opt-in, which is every error and most warnings.
+  //
+  // A code rather than a boolean per flag: the driver filters by it, and the
+  // next opt-in warning needs no new field.
+  code: string,
 }
 
 export function errorAt(message: string, sourceLoc: SourceLocation): Diagnostic {
-  return { message: message, filePath: "", sourceLoc: sourceLoc, severity: Severity.ERROR };
+  return { message: message, filePath: "", sourceLoc: sourceLoc,
+           severity: Severity.ERROR, code: "" };
 }
 
-export function warningAt(message: string, sourceLoc: SourceLocation): Diagnostic {
-  return { message: message, filePath: "", sourceLoc: sourceLoc, severity: Severity.WARNING };
+export function warningAt(message: string, sourceLoc: SourceLocation, code: string): Diagnostic {
+  return { message: message, filePath: "", sourceLoc: sourceLoc,
+           severity: Severity.WARNING, code: code };
 }
 
 // How a diagnostic's location reads: `path:line:column`, or `line:column` when

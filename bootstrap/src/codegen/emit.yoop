@@ -11,8 +11,7 @@ import { Vec }, * as vec from "std/core/vec.yoop";
 import { Map }, * as map from "std/collections/map.yoop";
 import { Text }, * as text from "std/core/text.yoop";
 import { disposable } from "std/core/kinds.yoop";
-import { Type, TypeId, PrimKind, Program, moduleIdOf, typeAt, TYPE_VOID_ID,
-  enumUnderlyingOf } from "../typecheck";
+import { Type, TypeId, PrimKind, Program, moduleIdOf, typeAt, TYPE_VOID_ID, enumUnderlyingOf } from "../typecheck";
 
 export type Emitter propagates<disposable> {
   globals: Text,        // constants and declares, emitted first
@@ -39,6 +38,29 @@ export type Emitter propagates<disposable> {
   // land in one LLVM module and each may name the same symbol. See
   // extern_table.yoop.
   declared: ExternTable,
+  // DWARF metadata, and the two cursors that decide what an instruction is
+  // tagged with. See debug_info.yoop.
+  //
+  // `dbgScope` is the DISubprogram of the function being emitted and `dbgLoc`
+  // is the DILocation of the statement being walked; both are 0 outside a body,
+  // which is what keeps a module-level line untagged. `inInstr` is set by
+  // `startInstr` and read by `endInstr`: a LABEL goes through `endInstr` too,
+  // and `Lfoo:, !dbg !5` is not valid IR.
+  debug: DebugInfo,
+  // The DIFile of the source file being emitted, and the DISubprogram of the
+  // function inside it.
+  dbgFile: DebugNodeId,
+  dbgScope: DebugNodeId,
+  dbgLoc: DebugNodeId,
+  hasDbgLoc: bool,
+  inInstr: bool,
+  declaredDbgIntrinsic: bool,
+  // `--track-heap`: emit a counter call beside every heap allocation and free,
+  // and install the dump as an atexit handler in `main`. Off by default, and
+  // the whole feature is those two things - the counting itself lives in
+  // runtime/yoop_runtime.c.
+  trackHeap: bool,
+  declaredDiagCounters: bool,
   usesPrintf: bool,
   // Set by the first template literal that actually builds one, so a program
   // with none declares no libc string functions at all.
@@ -68,13 +90,19 @@ export type Emitter propagates<disposable> {
   // function have to share one define - a second is an invalid redefinition
   // rather than a duplicate. See instr_vtable.yoop.
   fromFnShims: Map<string, bool>,
+  // The `@<mod>__module_init<N>` functions this program owes, in the order
+  // `main` has to call them. Filled by the globals pre-pass, which walks the
+  // graph in TOPOLOGICAL order, so a module's globals are already stored by the
+  // time an importing module's initializer reads one. See module_init.yoop.
+  moduleInits: Vec<string>,
 }
 
-export function emitterNew(): Emitter propagates<disposable> {
+export function emitterNew(opts: CodegenOptions): Emitter propagates<disposable> {
   // Annotated rather than inline: `V` is not inferable from uint64KeyOps alone
   // and there is no turbofish.
   let constOps: Map<uint64, Operand> = map.mapNew(0, map.uint64KeyOps());
   let fromFnShims: Map<string, bool> = map.mapNew(0, map.stringKeyOps());
+  let moduleInits: Vec<string> = vec.vecNew(0);
   return {
     globals: text.make(1024),
     body: text.make(8192),
@@ -86,37 +114,28 @@ export function emitterNew(): Emitter propagates<disposable> {
     constOps: constOps,
     nextLabel: 0,
     declared: externTableNew(),
+    debug: debugInfoNew(),
+    dbgFile: 0,
+    dbgScope: 0,
+    dbgLoc: 0,
+    hasDbgLoc: false,
+    inInstr: false,
+    declaredDbgIntrinsic: false,
+    trackHeap: opts.trackHeap,
+    declaredDiagCounters: false,
     usesPrintf: false,
     usesStringBuilder: false,
     usesRuntime: false,
     hasTasks: false,
     usesTaskIntrinsics: false,
     fromFnShims: fromFnShims,
+    moduleInits: moduleInits,
   };
-}
-
-export function emitLine(ref e: Emitter, line: string): void {
-  text.push(ref e.fn, line);
-  text.pushByte(ref e.fn, 10);
 }
 
 export function emitGlobal(ref e: Emitter, line: string): void {
   text.push(ref e.globals, line);
   text.pushByte(ref e.globals, 10);
-}
-
-// The whole point of Text: an instruction is appended piece by piece with no
-// intermediate string, so emitting IR allocates only when a buffer grows.
-export function emitPart(ref e: Emitter, part: string): void {
-  text.push(ref e.fn, part);
-}
-
-export function emitUint(ref e: Emitter, v: usize): void {
-  text.pushUint(ref e.fn, uint64(v));
-}
-
-export function endLine(ref e: Emitter): void {
-  text.pushByte(ref e.fn, 10);
 }
 
 // A fresh block label number, unique within the function.
@@ -160,6 +179,11 @@ export function finish(ref e: Emitter): Text propagates<disposable> {
   text.pushText(ref all, ref e.globals);
   text.pushByte(ref all, 10);
   text.pushText(ref all, ref e.body);
+  // The DWARF metadata goes LAST, after every function that references it.
+  // Order is not required by LLVM - metadata is a graph, not a sequence - but
+  // it keeps the readable half of the file at the top where a person looking at
+  // `--emit-ir` output wants it.
+  finalizeDebugInfo(ref e.debug, ref all);
   return all;
 }
 // A yoop type as LLVM spells it. Everything pointer-shaped is `ptr` - LLVM has
@@ -204,6 +228,12 @@ export function llvmType(ref prog: Program, rawId: TypeId): string {
     // then one function pointer per slot. Named for the same reason a struct is.
     case Type.VTable { decl: d, forTrait: ft, fields: f, methodOrder: mo }: {
       return vtableLlvmName(moduleIdOf(ref prog, d.module), d.name);
+    }
+    // A union is `{ [N x i8] }` - a byte BUFFER rather than a field list,
+    // because the fields overlap and LLVM has no type that says so. Every
+    // access reinterprets that buffer at the field's own type; see union.yoop.
+    case Type.Union { decl: d, fields: f }: {
+      return unionLlvmName(moduleIdOf(ref prog, d.module), d.name);
     }
     default: { return "ptr"; }
   }

@@ -1,0 +1,33 @@
+module comptime;
+
+// The module-level consts a fold has already produced values for.
+//
+// Keyed by SymbolId rather than by name, for the reason codegen's const data
+// table is: an IMPORT binds the defining module's SymbolId rather than a copy,
+// so a const folded while walking one module is found by the same key when
+// another module reads it. A name-keyed table would need every importer to
+// re-fold, and would get a different answer whenever the initializer was not
+// pure.
+
+import * as map from "std/collections/map.yoop";
+import { Option } from "std/core/types.yoop";
+import { Map } from "std/collections/map.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import { SymbolId } from "../typecheck";
+
+@derive(display)
+export type FoldedConsts propagates<disposable> {
+  values: Map<uint64, ValueId>,
+}
+
+export function newFoldedConsts(): FoldedConsts propagates<disposable> {
+  return { values: map.mapNew(16, map.uint64KeyOps()) };
+}
+
+export function recordFolded(ref f: FoldedConsts, symId: SymbolId, value: ValueId): void {
+  map.mapInsert(ref f.values, uint64(symId), value);
+}
+
+export function foldedValue(ref f: FoldedConsts, symId: SymbolId): Option<ValueId> {
+  return map.mapGet(ref f.values, uint64(symId));
+}

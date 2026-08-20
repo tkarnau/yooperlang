@@ -1,4 +1,4 @@
-// plans/yooperdoom-takeaways.md 2.4: the const half of the disposable rule.
+// The const half of the disposable rule.
 //
 // A BARE `disposable` binding is const, so neither rebinding it nor assigning
 // to its fields is allowed. This is not an oversight - rebinding would drop

@@ -1,4 +1,4 @@
-// Phase 10.E.2: `expr? "context"` on `string` Err payloads.
+// `expr? "context"` on `string` Err payloads.
 //
 // When both the operand's and the enclosing function's Err payload are
 // plain strings - the shape every `Result` in std/ uses - the compiler

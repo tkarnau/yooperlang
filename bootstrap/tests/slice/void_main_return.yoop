@@ -1,0 +1,27 @@
+// The other way out of a `void` main: an explicit `return;`.
+//
+// void_main.yoop covers the fall-out-the-bottom and leaves the early return
+// unexecuted; this one TAKES it, so the 0 in the exit status comes from the
+// `return;` site rather than from the end of the function. Two sites emit a
+// `ret` for a void function and both have to hand back C's exit status, so both
+// are run.
+//
+// The tail after the return is still emitted and still has to verify, which is
+// what keeps this from being void_main.yoop with the condition flipped.
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+function one(): int32 {
+    return 1;
+}
+
+function main(): void {
+    printf("before the return\n");
+    if (one() == 1) {
+        printf("leaving early, on a line whose length is nowhere near zero\n");
+        return;
+    }
+    printf("never reached, and still has to compile\n");
+}

@@ -1,9 +1,8 @@
-// A reverse proxy: the program that could not be written before.
+// A reverse proxy: a handler whose body is a client call.
 //
-// `Handler.handle` used to be synchronous while `client.send` was async, so a
-// handler could not call the HTTP client. That one mismatch ruled out every
-// sidecar, gateway, and load balancer there is - a proxy is a handler whose
-// body is a client call. Making `handle` async is what this fixture proves.
+// `Handler.handle` is async, the same as `client.send`, so a handler can call
+// the HTTP client. A synchronous `handle` against an async client would rule
+// out every sidecar, gateway, and load balancer there is.
 //
 // Three parties, all in one process:
 //
@@ -14,8 +13,6 @@
 //
 // The assertion is that the client sees the origin's answers - body, status,
 // and a header the origin set - without ever having connected to it.
-//
-// plans/yooperdoom-takeaways.md 3.2.
 
 import { disposable, Disposable } from "../../../std/core/kinds.yoop";
 import { Result, Option } from "../../../std/core/types.yoop";

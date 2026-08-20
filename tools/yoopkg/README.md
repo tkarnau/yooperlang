@@ -13,10 +13,9 @@ knows how to follow relative paths and the `std/` prefix. "Installing" a
 package, then, is just putting files somewhere the resolver will find them.
 That's the whole trick.
 
-A future version could teach the compiler a `pkg/` prefix that mirrors `std/`
-and resolves to `yoop_packages/<name>/...`, which would let users write
-`import * as json from "pkg/yooparse/json.yoop";` instead of the longer
-relative path. The current tool deliberately does not go there.
+The compiler knows no `pkg/` prefix mirroring `std/`, so there is no
+`import * as json from "pkg/yooparse/json.yoop";` form - users write the
+longer relative path. The tool deliberately does not go there.
 
 ## The model
 
@@ -60,9 +59,11 @@ versions to local directories. Override via `YOOPKG_REGISTRY=/path/to/registry.j
 From the repo root:
 
 ```
+repo=$PWD
 cd examples/playground/pkgdemo
-node ../../../tools/yoopkg/yoopkg.mjs install
-node ../../../src/yoopiler.js main.yoop
+node "$repo/tools/yoopkg/yoopkg.mjs" install
+YOOP_STD_ROOT=$repo/std YOOP_RUNTIME_ROOT=$repo/runtime \
+  $(node "$repo/scripts/seed.mjs") main.yoop -o main
 ./main
 ```
 

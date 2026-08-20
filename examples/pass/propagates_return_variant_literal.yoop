@@ -1,4 +1,4 @@
-// Yoopstore-papercut #11 (variant arm): a returned variant constructor that
+// Variant arm: a returned variant constructor that
 // moves a propagating binding into its payload transfers the obligation just
 // like a struct literal does.
 

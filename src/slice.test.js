@@ -3,19 +3,22 @@
 //
 // Each fixture in bootstrap/tests/slice/ has a hand-written `.expected` holding
 // the program's stdout followed by an `exit=N` line. That file is the source of
-// truth, and the primary assertion is bootstrap-output == expected. The JS
-// reference is then checked against the SAME file as a parity bonus.
+// truth, and the assertion is bootstrap-output == expected.
 //
-// The split matters: when the JS compiler retires, the second assertion goes
-// away and every fixture still tests exactly what it tested before. Never
-// capture a `.expected` from compiler output - write it from what the program
-// should do. See the bootstrap testing rule in CLAUDE.md.
-import { describe, it, before } from "node:test";
+// It used to carry a second assertion checking the JS reference against the
+// same file, as a parity bonus. That reference is gone, and the split it was
+// written for did its job: the bonus was deleted and every fixture still tests
+// exactly what it tested before. Never capture a `.expected` from compiler
+// output - write it from what the program should do. See the bootstrap testing
+// rule in CLAUDE.md.
+import { describe, it, before, after } from "node:test";
 import assert from "node:assert";
 import fs from "fs";
 import path from "path";
 import os from "os";
-import { execFileSync, spawn } from "child_process";
+
+import { runProc, runProcOrThrow } from "./testProc.js";
+import { seedCompiler, seedEnv } from "../scripts/seed.mjs";
 
 const REPO = path.resolve(import.meta.dirname, "..");
 const SLICE = path.join(REPO, "bootstrap/tests/slice");
@@ -35,7 +38,8 @@ const fixtures = fs
 // Safe because the fixtures share nothing. Each writes `<stem>_bs` / `<stem>_js`
 // into one shared temp dir, so no two of them name the same output, and none
 // of them binds a port or touches a fixed path. What made it serial was
-// execFileSync and nothing else; the helper below is the async twin.
+// execFileSync and nothing else; src/testProc.js is the async twin, and it is
+// where the deadline-and-tree-kill discipline that conversion needs lives.
 //
 // Measured on a 14-core M-series machine, whole suite, including the ~5s
 // `before()` build that no setting can overlap:
@@ -54,11 +58,25 @@ const fixtures = fs
 const SLICE_CONCURRENCY = Number(process.env.YOOP_SLICE_CONCURRENCY)
   || Math.max(2, Math.min(12, os.cpus().length));
 
+// Deadlines. Nothing here spawns without one - see the header of
+// src/testProc.js for why that is a rule rather than a nicety.
+//
+// A fixture compile is a whole-import-closure build, so it gets the minute the
+// slowest of them could plausibly want on a loaded machine. RUNNING a fixture
+// is another matter: these programs print a few lines and exit in milliseconds,
+// so twenty seconds is not a budget, it is a hang detector with a wide margin
+// for twelve of them competing with as many clangs. The fixtures that could
+// actually wedge are the concurrency-runtime ones - task_spawn,
+// task_intrinsics, async_coroutine - where a shutdown path that regressed would
+// otherwise leave a process nobody is waiting on any more.
+const COMPILE_TIMEOUT_MS = Number(process.env.YOOP_SLICE_COMPILE_TIMEOUT_MS) || 120000;
+const RUN_TIMEOUT_MS = Number(process.env.YOOP_SLICE_RUN_TIMEOUT_MS) || 20000;
+
 describe("vertical slice: the bootstrap compiler produces working executables", { concurrency: SLICE_CONCURRENCY }, () => {
   let boot;
   let work;
 
-  before(() => {
+  before(async () => {
     work = fs.mkdtempSync(path.join(os.tmpdir(), "yoop-slice-"));
     // YOOP_BOOT_COMPILER runs the whole suite through an ALREADY BUILT
     // bootstrap instead of building one here. That is how a self-hosted stage
@@ -70,12 +88,26 @@ describe("vertical slice: the bootstrap compiler produces working executables", 
       return;
     }
     boot = path.join(work, "yoopiler_boot");
-    // The bootstrap compiler, built by the JS compiler.
-    execFileSync("node", [path.join(REPO, "src/yoopiler.js"), BOOT_SRC, "-o", boot], {
-      cwd: REPO,
-      stdio: "pipe",
-    });
+    // The bootstrap compiler, built by the SEED - a previously released
+    // yoopiler_boot. `seedEnv` points it at THIS tree's std and runtime rather
+    // than the ones packaged beside it: the seed exists only to compile today's
+    // source, and today's source imports today's std.
+    await runProcOrThrow(
+      seedCompiler(),
+      [BOOT_SRC, "-o", boot],
+      { cwd: REPO, env: seedEnv(), timeout: COMPILE_TIMEOUT_MS },
+    );
   });
+
+  // Every run of this suite used to leave its temp dir behind - `mkdtempSync`
+  // makes a new one each time and nothing removed it. One session of iterating
+  // left 9,882 of them and filled a 16G tmpfs, which surfaces as a LINK failure
+  // in whatever runs next ("No space left on device") rather than as anything
+  // pointing here.
+  after(() => {
+    if (work) fs.rmSync(work, { recursive: true, force: true });
+  });
+
 
   it("has fixtures", () => {
     assert.ok(fixtures.length > 0, `no .yoop fixtures in ${SLICE}`);
@@ -115,24 +147,6 @@ describe("vertical slice: the bootstrap compiler produces working executables", 
       assert.equal(got, expected, `${stem}: the bootstrap compiler is wrong`);
     });
 
-    // A `<stem>.bootonly` marker file means the fixture asserts behaviour the
-    // JS reference does NOT share, so the parity bonus is skipped for it. Used
-    // where the bootstrap is deliberately better - the file's contents say why,
-    // and are read here only to force the reason to exist.
-    const bootOnly = fs.existsSync(path.join(SLICE, `${stem}.bootonly`));
-
-    // Parity bonus. Delete this block, not the one above, when the JS compiler
-    // retires.
-    it(`${stem}: the JS reference agrees`, { skip: bootOnly }, async () => {
-      const expected = fs.readFileSync(path.join(SLICE, `${stem}.expected`), "utf8");
-      const got = await buildAndRun(
-        "node",
-        [path.join(REPO, "src/yoopiler.js"), path.join(SLICE, name), "-o", path.join(work, `${stem}_js`)],
-        path.join(work, `${stem}_js`),
-        env,
-      );
-      assert.equal(got, expected, `${stem}: the JS reference disagrees with the fixture`);
-    });
   }
 
   // The driver's COMMAND LINE. Nested here rather than in its own file because
@@ -183,6 +197,141 @@ describe("vertical slice: the bootstrap compiler produces working executables", 
       assert.match(r.stderr + r.stdout, /unknown option --bogus/);
     });
 
+    // `--test`: discovery, entry synthesis and the export wrapper, all the way
+    // to a running test binary. Every expectation below is hand-written from
+    // what the run SHOULD report, never captured - see the testing rule in
+    // CLAUDE.md - and the exit code is asserted beside the output because it IS
+    // the failure count, which is what CI gates on.
+    //
+    // std has to be pointed at: the boot compiler lives in a temp directory, so
+    // there is no packaged `lib/std` beside it to discover.
+    const testEnv = () => ({
+      ...process.env,
+      YOOP_RUNTIME_ROOT: path.join(REPO, "runtime"),
+      YOOP_STD_ROOT: path.join(REPO, "std"),
+    });
+
+    // The bootstrap's OWN fixture tree, so this assertion survives the JS
+    // reference's retirement. Four suites across three files and a
+    // subdirectory, in sorted order, with the `.hidden/` copy skipped and
+    // `plain.yoop` not discovered - none of which is visible any other way,
+    // because a suite with no cases still announces itself.
+    it("--test finds every suite below a path, sorted, and runs them", async () => {
+      const r = await runProc(boot, ["--test", path.join(REPO, "bootstrap/tests/testmode")], {
+        cwd: REPO,
+        env: testEnv(),
+      });
+      assert.equal(
+        r.stdout,
+        "# alpha.test.yoop:addsOne\n" +
+          "# alpha.test.yoop:addsTwo\n" +
+          "# nested/beta.test.yoop:betaBehaves\n" +
+          "# zeta.test.yoop:zetaBehaves\n" +
+          "1..0\n" +
+          "# 0 passed, 0 failed\n",
+        r.stderr,
+      );
+      assert.equal(r.code, 0, r.stderr);
+    });
+
+    it("--test on a passing tree reports every case and exits 0", async () => {
+      const r = await runProc(boot, ["--test", path.join(REPO, "examples/testing/pass")], {
+        cwd: REPO,
+        env: testEnv(),
+      });
+      assert.equal(
+        r.stdout,
+        "# strange_add.test.yoop:addsStrangelyWhenFirstIsTwoModFive\n" +
+          "ok 1 - adds an extra 1 when a % 5 == 2\n" +
+          "ok 2 - still adds the extra 1 at 7\n" +
+          "# strange_add.test.yoop:addsPlainlyOtherwise\n" +
+          "ok 3 - adds plainly when a % 5 is not 2\n" +
+          "1..3\n" +
+          "# 3 passed, 0 failed\n",
+        r.stderr,
+      );
+      assert.equal(r.code, 0, r.stderr);
+    });
+
+    // The exit code IS the failure count, so a two-failure run exits 2.
+    it("--test on a failing tree reports the failures and exits with their count", async () => {
+      const r = await runProc(boot, ["--test", path.join(REPO, "examples/testing/fail")], {
+        cwd: REPO,
+        env: testEnv(),
+      });
+      assert.equal(
+        r.stdout,
+        "# failing.test.yoop:reportsFailures\n" +
+          "ok 1 - passes\n" +
+          "not ok 2 - fails with detail\n" +
+          "    n was 2, which is not 10\n" +
+          "not ok 3 - fails with no detail\n" +
+          "1..3\n" +
+          "# 1 passed, 2 failed\n",
+        r.stderr,
+      );
+      assert.equal(r.code, 2, r.stderr);
+    });
+
+    // The in-file flag's payoff: a test module has no `main`, so without the
+    // shorthand, pointing the compiler at one would just be an error.
+    it("a *.test.yoop entry with no flag enters test mode on its own", async () => {
+      const r = await runProc(
+        boot,
+        [path.join(REPO, "examples/testing/pass/strange_add.test.yoop")],
+        { cwd: REPO, env: testEnv() },
+      );
+      assert.match(r.stdout, /# 3 passed, 0 failed\n$/);
+      assert.equal(r.code, 0, r.stderr);
+    });
+
+    // Extra positionals are suite-name filters rather than a second input file.
+    it("a filter after the path selects suites by substring", async () => {
+      const r = await runProc(
+        boot,
+        ["--test", path.join(REPO, "examples/testing/pass"), "addsPlainly"],
+        { cwd: REPO, env: testEnv() },
+      );
+      assert.equal(
+        r.stdout,
+        "# strange_add.test.yoop:addsPlainlyOtherwise\n" +
+          "ok 1 - adds plainly when a % 5 is not 2\n" +
+          "1..1\n" +
+          "# 1 passed, 0 failed\n",
+        r.stderr,
+      );
+      assert.equal(r.code, 0, r.stderr);
+    });
+
+    // The three ways a `--test` line has nothing to run, each named rather than
+    // left to fail somewhere further down as a missing `main`.
+    it("--test refuses a missing path, a tree with no test files, and a tree with no suites", async () => {
+      const missing = await runProc(boot, ["--test", "/no/such/place"], { cwd: REPO, env: testEnv() });
+      assert.equal(missing.code, 1);
+      assert.match(missing.stderr + missing.stdout, /--test: path not found/);
+
+      const noFiles = await runProc(boot, ["--test", path.join(REPO, "runtime")], { cwd: REPO, env: testEnv() });
+      assert.equal(noFiles.code, 1);
+      assert.match(noFiles.stderr + noFiles.stdout, /no \*\.test\.yoop files found/);
+
+      const noSuites = await runProc(boot, ["--test", path.join(REPO, "bootstrap/tests/graph")], {
+        cwd: REPO,
+        env: testEnv(),
+      });
+      assert.equal(noSuites.code, 1);
+      assert.match(noSuites.stderr + noSuites.stdout, /test file\(s\) but no suites/);
+    });
+
+    it("a *.test.yoop file that does not declare import.test is refused by name", async () => {
+      const r = await runProc(
+        boot,
+        ["--test", path.join(REPO, "bootstrap/tests/testmode_bad")],
+        { cwd: REPO, env: testEnv() },
+      );
+      assert.equal(r.code, 1);
+      assert.match(r.stderr + r.stdout, /does not declare 'import\.test;'/);
+    });
+
     it("-o with nothing after it, no input, and two inputs are each named", async () => {
       const noPath = await runProc(boot, [hello, "-o"], { cwd: REPO, env: env() });
       assert.equal(noPath.code, 2);
@@ -199,34 +348,32 @@ describe("vertical slice: the bootstrap compiler produces working executables", 
   });
 });
 
-// Run a child process and resolve with its output. Async so two fixtures can
-// overlap: a test waiting on clang yields to another instead of blocking the
-// event loop, which is the whole of what SLICE_CONCURRENCY buys.
-//
-// A non-zero exit is DATA, not an error - `ret_code` asserts on one. A death by
-// SIGNAL gives a null code and is not, which is why it is separated out below
-// rather than rendered as `exit=null`.
-function runProc(cmd, args, opts = {}) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(cmd, args, { cwd: opts.cwd, env: opts.env ?? process.env });
-    let stdout = "";
-    let stderr = "";
-    child.stdout.on("data", (d) => { stdout += d; });
-    child.stderr.on("data", (d) => { stderr += d; });
-    child.on("error", reject);
-    child.on("close", (code, signal) => resolve({ stdout, stderr, code, signal }));
-  });
-}
-
 // Compiles, runs the program, and renders it in .expected form: stdout, then
-// `exit=N`. A failed COMPILE throws with the compiler's own stderr attached,
-// which is what execFileSync used to do.
+// `exit=N`. A failed COMPILE throws with the compiler's own stderr attached.
+//
+// Both halves run through src/testProc.js, which is what keeps this file from
+// leaking. This helper RUNS COMPILED EXECUTABLES - 134 fixtures, twice each -
+// so it is the single spot in the tree where an unkilled child would
+// accumulate fastest. Every spawn there
+// carries a deadline, and every kill walks the process tree, which is the only
+// way to reach the clang the compiler started.
 async function buildAndRun(compiler, args, exe, env = process.env) {
-  const built = await runProc(compiler, args, { cwd: REPO, env });
+  const built = await runProc(compiler, args, {
+    cwd: REPO,
+    env,
+    timeout: COMPILE_TIMEOUT_MS,
+  });
   if (built.code !== 0) {
-    throw new Error(`${compiler} ${args.join(" ")} exited ${built.code}\n${built.stderr}`);
+    const how = built.timedOut ? "never finished" : `exited ${built.code}`;
+    throw new Error(`${compiler} ${args.join(" ")} ${how}\n${built.stderr}`);
   }
-  const ran = await runProc(exe, []);
+  const ran = await runProc(exe, [], { timeout: RUN_TIMEOUT_MS });
+  if (ran.timedOut) {
+    throw new Error(
+      `${exe} did not exit within ${RUN_TIMEOUT_MS}ms and was killed - ` +
+        `the program hangs, or its runtime never shuts down`,
+    );
+  }
   if (ran.code === null) throw new Error(`${exe} was killed by ${ran.signal}`);
   return `${ran.stdout}exit=${ran.code}\n`;
 }

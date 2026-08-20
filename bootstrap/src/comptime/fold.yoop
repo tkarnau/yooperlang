@@ -1,0 +1,40 @@
+module comptime;
+
+// The layer's entry point: evaluate one expression at compile time.
+//
+// Everything above this file is the evaluator; this is the only thing outside
+// the module has to know about. It takes what typecheck produced and what the
+// graph owns, builds a frame with nothing in it, and hands back either a value
+// or the reason there is not one.
+//
+// A fold is INDEPENDENT of every other fold except through `folded`, the table
+// of module-level consts already evaluated. That is deliberate: a fold has no
+// ambient state to leak into the next one, so the order two unrelated consts
+// are folded in cannot change either answer.
+
+import { Result } from "std/core/types.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import { AST, NodeId } from "../ast";
+import { Module, ModuleGraph } from "../source_graph";
+import { Program, TypedModule, TYPE_VOID_ID } from "../typecheck";
+
+export function foldExpression(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref mod: Module,
+  ref graph: ModuleGraph,
+  ref va: ValueArena,
+  ref folded: FoldedConsts,
+  exprId: NodeId
+): Result<ValueId, ComptimeError> {
+  disposable scope: EvalScope = newEvalScope();
+  let cx: EvalCx = {
+    prog: ref prog, tm: ref tm, mod: ref mod, ast: ref mod.ast, graph: ref graph,
+    // A const initializer is not inside a function, so there is no return type
+    // for a `?` to build an Err of - and pass D already refused a bare `?`
+    // written there for exactly that reason.
+    va: ref va, scope: ref scope, folded: ref folded,
+    fnRet: TYPE_VOID_ID, depth: 0,
+  };
+  return evalExprValue(ref cx, exprId);
+}

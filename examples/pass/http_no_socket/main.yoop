@@ -1,19 +1,14 @@
 // A complete HTTP request/response exchange with NO SOCKET.
 //
-// `std/http` used to name `TcpStream` in every signature, so the only way to
-// exercise it was to open a listener and dial it. It now takes the erased
-// `Reader` / `Writer` vtables instead, which means anything implementing
-// `Readable` / `Writable` can drive it - a socket, an in-memory buffer, or
-// (the reason this refactor happened) a `TlsStream`.
-//
-// std/core/traits.yoop declared those vtables for exactly this case and named
-// TlsStream in the comment; they had simply never been used.
+// `std/http` takes the erased `Reader` / `Writer` vtables from
+// std/core/traits.yoop rather than naming `TcpStream` in every signature,
+// which means anything implementing `Readable` / `Writable` can drive it - a
+// socket, an in-memory buffer, or a `TlsStream`. Naming the concrete socket
+// would make opening a listener and dialing it the only way to exercise it.
 //
 // This fixture is the proof, and it is useful on its own merits: a server test
 // that needs no port, no timing, and no cleanup, and that can hand the server
 // bytes no real client would send.
-//
-// See plans/tls.md phase 0.
 
 import { disposable, Disposable } from "../../../std/core/kinds.yoop";
 import { Result } from "../../../std/core/types.yoop";

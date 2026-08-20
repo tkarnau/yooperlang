@@ -1,0 +1,47 @@
+untouched:
+  open 1
+  body
+  close 1
+manual:
+  open 2
+  close 2
+  after manual
+both branches, true:
+  open 3
+  close 3
+  then
+  after if
+both branches, false:
+  open 3
+  close 3
+  else
+  after if
+one branch, false:
+  open 4
+  after if
+  close 4
+one branch, true:
+  open 4
+  close 4
+  then
+  after if
+  close 4
+early return, bailing:
+  open 5
+  bailing
+  close 5
+early return, through:
+  open 5
+  close 5
+  after manual
+loop, zero times:
+  open 6
+  after loop
+  close 6
+other binding:
+  open 7
+  open 8
+  close 8
+  after closing h
+  close 7
+exit=0

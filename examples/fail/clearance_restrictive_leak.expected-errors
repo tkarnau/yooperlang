@@ -1,0 +1,4 @@
+# Illegal: `tainted` is RESTRICTIVE, so it cannot be silently dropped. `t`
+# carries it and `plain_sink`'s parameter says nothing about it, which is the
+# leak the polarity exists to stop.
+15:17: argument 1 of "plain_sink" does not accept kind "tainted"

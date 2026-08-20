@@ -1,0 +1,8 @@
+seeded=40
+span=40,41
+derived=41
+pair=41,7
+table=3,4,5
+table=3,44,5 twin=3,4,5
+derived=42 plain=10
+exit=0

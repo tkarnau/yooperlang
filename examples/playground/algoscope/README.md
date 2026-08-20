@@ -8,27 +8,34 @@ arrows (`total <- total + i`), quantifiers (`forall x in xs`), recursion markers
 of an algorithm without drowning in the leaves.
 
 It is written entirely in Yooperlang and talks to SDL2 + SDL2_ttf over the C FFI
-- a self-hosting / dogfooding exercise. The only JavaScript involved is the
-compiler flag that produces its input.
+- a self-hosting / dogfooding exercise. Its input comes from the compiler's own
+`--dump-ast-json` flag.
 
 ## Build and run
 
+Every command below runs from the repository root. `node scripts/seed.mjs`
+prints the path of a compiler, and the two variables point it at this tree's
+`std/` and `runtime/`.
+
 ```sh
 # 1. dump an AST to JSON (the input format)
-node src/yoopiler.js path/to/source.yoop --dump-ast-json /tmp/x.ast.json
+YOOP_STD_ROOT=$PWD/std YOOP_RUNTIME_ROOT=$PWD/runtime \
+  $(node scripts/seed.mjs) path/to/source.yoop --dump-ast-json /tmp/x.ast.json
 
 # 2. build the playground (one time)
-node src/yoopiler.js examples/playground/algoscope/main.yoop
+YOOP_STD_ROOT=$PWD/std YOOP_RUNTIME_ROOT=$PWD/runtime \
+  $(node scripts/seed.mjs) examples/playground/algoscope/main.yoop -o /tmp/algoscope
 
 # 3. run it on the dumped AST
-examples/playground/algoscope/main /tmp/x.ast.json
+/tmp/algoscope /tmp/x.ast.json
 ```
 
 Try it on the standard-library quicksort (generics, recursion, range loops):
 
 ```sh
-node src/yoopiler.js bootstrap/src/utils/arrayUtils.yoop --dump-ast-json /tmp/arr.ast.json
-examples/playground/algoscope/main /tmp/arr.ast.json
+YOOP_STD_ROOT=$PWD/std YOOP_RUNTIME_ROOT=$PWD/runtime \
+  $(node scripts/seed.mjs) bootstrap/src/utils/arrayUtils.yoop --dump-ast-json /tmp/arr.ast.json
+/tmp/algoscope /tmp/arr.ast.json
 ```
 
 Requires SDL2 + SDL2_ttf (e.g. `brew install sdl2 sdl2_ttf`). The window font is
@@ -73,7 +80,7 @@ redraws after input, so per-line texture creation costs nothing while idle.
 ## Notes / limitations
 
 - Only top-level functions (including `export function`) are listed; trait/type
-  methods are not yet surfaced.
+  methods are not surfaced.
 - A handful of expression kinds (template literals, some patterns) render as
   placeholders; unknown node kinds degrade to a `<KIND>` line rather than crash.
 - Notation is intentionally ASCII (the repo avoids non-keyboard glyphs in source);

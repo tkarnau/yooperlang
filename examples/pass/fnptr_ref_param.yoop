@@ -1,18 +1,18 @@
 // A named function whose parameter is `ref T` can be materialized as a
-// function VALUE. It could not before: `isAssignable` bailed on any FuncType
-// param carrying `isRef`, so every `(ref m: Box) => void` slot rejected the
-// only functions that could fill it, in every position - local binding, struct
-// field, array element, and `VTableName.fromFn(...)`.
+// function VALUE, in every position - local binding, struct field, array
+// element, and `VTableName.fromFn(...)`. An `isAssignable` that bailed on a
+// FuncType param carrying `isRef` would make every `(ref m: Box) => void` slot
+// reject the only functions that can fill it.
 //
 // The `ref` lives in the param TYPE on both sides (FuncType stores
 // `RefType(T)` with a redundant `isRef: true`; the annotation `(ref m: T) => R`
 // resolves its param to `RefType(T)` too), so comparing types is the whole
-// check. The diagnostic also used to print the `ref` twice - "(ref ref struct
-// Box) -> void" - which read like a double-reference bug rather than a
-// signature mismatch.
+// check. The mismatch diagnostic prints the `ref` once: doubling it up -
+// "(ref ref struct Box) -> void" - reads like a double-reference bug rather
+// than a signature mismatch.
 //
-// This is what unblocks a C-style action table; the vtable workaround (still
-// exercised below) is no longer the only shape that works.
+// This is what makes a C-style action table possible; the vtable form (also
+// exercised below) is not the only shape that works.
 
 import * as intr from "std/core/intrinsics.yoop";
 

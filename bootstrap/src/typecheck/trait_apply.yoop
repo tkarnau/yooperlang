@@ -3,9 +3,8 @@ module typecheck;
 /*
   Applying a generic TRAIT: `Comparable<Token>` from `trait Comparable<T>`.
 
-  This is the slice of generic trait instantiation (3.2 in
-  plans/bootstrap-completion.md) that type-parameter BOUNDS needed, and the same
-  slice an `implements` clause needs. Both write a trait name with arguments,
+  This is the slice of generic trait instantiation that type-parameter BOUNDS
+  need, and the same slice an `implements` clause needs. Both write a trait name with arguments,
   and both have to know WHICH application they mean - a bound asking for
   `Comparable<T>` is not satisfied by a type implementing `Comparable<int32>`.
 
@@ -21,7 +20,7 @@ module typecheck;
 */
 
 import { Vec }, * as vec from "std/core/vec.yoop";
-import { Map, MapIter, MapEntry }, * as map from "std/collections/map.yoop";
+import { Map, MapIter }, * as map from "std/collections/map.yoop";
 import { disposable } from "std/core/kinds.yoop";
 import { SourceLocation } from "../diagnostics";
 

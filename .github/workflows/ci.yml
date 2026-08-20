@@ -1,0 +1,176 @@
+# Tests every push and PR, and cuts a release of the self-hosted bootstrap
+# compiler when a v* tag is pushed.
+#
+#   git tag v0.2.0 && git push origin v0.2.0
+#
+# The release job runs AFTER the test job and only for tags, so a tag on a red
+# commit publishes nothing. A tag carrying a prerelease suffix (v0.2.0-alpha.1)
+# is published as a prerelease.
+#
+# Ubuntu only for now. The repo is developed on macOS, so a first Linux run may
+# well turn up real portability bugs; those are bugs, not reasons to drop the
+# runner.
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One run per ref. Superseded PR pushes are cancelled; main and tags are not,
+# because a cancelled tag run is a release that silently did not happen.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      # Every suite kills its children on a deadline (src/testProc.js). The
+      # defaults are tuned for a dev machine, and a hosted runner is several
+      # times slower, so a timeout here would read as a hang rather than as a
+      # slow machine. These raise the deadlines without disabling them.
+      YOOP_SELFHOST_TIMEOUT_MS: "900000"
+      YOOP_SLICE_COMPILE_TIMEOUT_MS: "300000"
+      YOOP_SLICE_RUN_TIMEOUT_MS: "60000"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+
+      # clang is preinstalled on the ubuntu images, but which version it is
+      # matters when a link or a codegen failure has to be reproduced, so put
+      # it in the log rather than leaving it to be guessed at.
+      - name: Toolchain
+        run: |
+          clang --version
+          node --version
+
+      - run: npm ci
+
+      # The compiler is self-hosted, so the build starts from a previously
+      # released binary. Fetching it first makes a download failure its own
+      # red step rather than a confusing failure inside the tests.
+      - name: Fetch the bootstrap seed
+        run: node scripts/seed.mjs
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      # The bootstrap's own Yoop tests - 1435 of them, and the largest single
+      # body of coverage in the tree. Run first and on their own because they
+      # need nothing but a compiler, so a failure here is unambiguous.
+      - name: Bootstrap Yoop unit tests
+        run: $(node scripts/seed.mjs) --test bootstrap/src
+        env:
+          YOOP_STD_ROOT: ${{ github.workspace }}/std
+          YOOP_RUNTIME_ROOT: ${{ github.workspace }}/runtime
+
+      # The modules the compiler depends on but does not contain. Separate
+      # because `--test` takes one tree, and separate in the log for the same
+      # reason as the step above.
+      - name: Module Yoop unit tests
+        run: $(node scripts/seed.mjs) --test modules
+        env:
+          YOOP_STD_ROOT: ${{ github.workspace }}/std
+          YOOP_RUNTIME_ROOT: ${{ github.workspace }}/runtime
+
+      # The harnesses that drive the bootstrap from Node: the program corpus,
+      # the diagnostic fixtures, the slice fixtures, and the three-stage
+      # self-hosting fixpoint.
+      - name: Test suites
+        run: npm test
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      # A suite that wedged and got killed should not leave a clang or a stage
+      # binary behind. If this ever prints anything, the deadline or the tree
+      # kill in src/testProc.js has a hole in it.
+      - name: Orphan check
+        if: always()
+        run: |
+          orphans=$(ps -eo pid,ppid,pcpu,etime,args \
+            | awk '$2==1 && /clang|yoopiler|dump_tokens|yoop[-_]|stage[0-9]/' || true)
+          if [ -n "$orphans" ]; then
+            echo "orphaned processes survived the suite:"
+            echo "$orphans"
+          else
+            echo "none"
+          fi
+
+  release:
+    name: release bootstrap compiler
+    needs: test
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+
+      - name: Toolchain
+        run: clang --version
+
+      - run: npm ci
+
+      - name: Version from the tag
+        id: meta
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          # A semver prerelease suffix (0.2.0-alpha.1) marks the GitHub release
+          # as a prerelease too, so it does not become "Latest" on the repo.
+          case "$version" in
+            *-*) echo "prerelease=true" >> "$GITHUB_OUTPUT" ;;
+            *)   echo "prerelease=false" >> "$GITHUB_OUTPUT" ;;
+          esac
+
+      # Builds stage1/2/3, asserts stage2 and stage3 are byte-identical, stages
+      # bin/ + lib/, compiles and runs hello.yoop with the PACKAGED binary and
+      # no env overrides, then tars it. Fails the release rather than shipping
+      # if any of that does not hold.
+      # The tag reaches the shell through the environment rather than through
+      # ${{ }} interpolation, which would splice it into the script text.
+      - name: Build, verify the fixpoint, and package
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: node scripts/package_bootstrap.mjs --version "$VERSION"
+
+      # A fixpoint mismatch is a miscompile somewhere in 30k lines of Yoop, and
+      # the diff between the two .ll files is the whole lead. Keep them.
+      - name: Keep the stage IR when the fixpoint fails
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: selfhost-stage-ir
+          path: build/selfhost/*/*.ll
+          retention-days: 14
+          if-no-files-found: ignore
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --verify-tag \
+            --title "yoopiler_boot $VERSION" \
+            --generate-notes \
+            ${{ steps.meta.outputs.prerelease == 'true' && '--prerelease' || '' }} \
+            dist/*.tar.gz dist/*.tar.gz.sha256

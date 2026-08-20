@@ -29,7 +29,7 @@ module parse;
   comes next.
 */
 
-import { Result, Option } from "std/core/types.yoop";
+import { Result } from "std/core/types.yoop";
 import { Vec }, * as vec from "std/core/vec.yoop";
 import { disposable } from "std/core/kinds.yoop";
 import { ASTNode, ASTNodeKind, NodeId, createASTNode } from "../ast";
@@ -92,10 +92,7 @@ export function parseTemplateLiteral(ref ps: ParserState): Result<ASTNode, Parsi
   ps.pos = tok.start + usize(tok.length);
   SelfLexing.advance(ref ps)?;
 
-  const start: usize = ps.ast.childIds.len;
-  vec.vecExtendFrom(ref ps.ast.childIds, vec.vecAsArray(ref ids));
-  node.childStart = start;
-  node.childCount = ids.len;
+  spliceChildren(ref ps, ref node, ref ids);
   return Result.Ok { value: node };
 }
 

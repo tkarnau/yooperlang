@@ -1,6 +1,6 @@
 // Regression: a non-void function whose body ends in an exhaustive variant
-// `switch` where every arm returns used to emit malformed IR - the synthesized
-// `switch_end` block was left without a terminator. Codegen now caps such an
+// `switch` where every arm returns emits malformed IR if the synthesized
+// `switch_end` block is left without a terminator. Codegen caps such an
 // unreachable tail block with `unreachable`. Covers both the explicit-arms
 // form and the `default:` form.
 

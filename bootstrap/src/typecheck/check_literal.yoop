@@ -1,0 +1,175 @@
+module typecheck;
+
+// The literals with a SHAPE, checked against the type they are landing in.
+//
+// An int or a string literal is a value and is handled inline in check_expr.yoop.
+// These four are different: each carries a list the declaration has to agree
+// with, so checking one means looking up a type and walking two lists together -
+// an array literal's elements against one element type, a struct literal's
+// fields against a declaration's, and a template's interpolations against what
+// can be rendered.
+
+import * as vec from "std/core/vec.yoop";
+import { ASTNode, ASTNodeKind, childAt, nodeAt } from "../ast";
+// `[a, b, c]` - every element must agree, and an empty literal takes its element
+// type from context.
+function checkArrayLiteral(ref cx: Cx, expr: ASTNode, expected: TypeId): TypeId {
+  // An expected `T[]` tells the elements what to be, which is what lets
+  // `let xs: int64[] = [1, 2]` pin its untyped literals to int64.
+  let elemExpected: TypeId = TYPE_ERROR_ID;
+  if (expected != TYPE_ERROR_ID) {
+    switch (typeAt(cx.prog, expected)) {
+      case Type.Array { elem: e }: { elemExpected = e; }
+      default: { }
+    }
+  }
+
+  let elemType: TypeId = elemExpected;
+  if (expr.childA != 0) {
+    const list = nodeAt(cx.ast, expr.childA);
+    let i: usize = 0;
+    while (i < list.childCount) {
+      const got = checkExpr(ref cx, childAt(cx.ast, list, i), elemType);
+      if (elemType == TYPE_ERROR_ID) {
+        elemType = got;   // the first element sets the type
+      } else if (got != TYPE_ERROR_ID && !typeAccepts(cx.prog, elemType, got)) {
+        reportError(cx.prog, "array elements have different types", expr.sourceLoc);
+      }
+      i += 1;
+    }
+  }
+
+  if (elemType == TYPE_ERROR_ID) {
+    reportError(cx.prog, "cannot infer the element type of an empty array literal - annotate the binding", expr.sourceLoc);
+    return TYPE_ERROR_ID;
+  }
+  return internArray(cx.prog, elemType);
+}
+
+// `{ x: 1, y: 2 }` - which struct it is comes from CONTEXT, not from the
+// literal, so `let p: Point = { ... }` is the only shape that works. A literal
+// with nothing to take its type from is refused by name.
+function checkStructLiteral(ref cx: Cx, expr: ASTNode, expected: TypeId): TypeId {
+  // A union literal is the same TOKENS as a struct literal, so which one this
+  // is comes entirely from the target type. Checked first, because a union
+  // fails the struct test below and would report as an untypeable literal.
+  if (expected != TYPE_ERROR_ID && isUnionType(cx.prog, expected)) {
+    return checkUnionLiteral(ref cx, expr, expected);
+  }
+  if (expected == TYPE_ERROR_ID || !isStructType(cx.prog, expected)) {
+    reportError(
+      cx.prog,
+      "cannot tell which struct this literal is - annotate the binding or the parameter it goes to",
+      expr.sourceLoc
+    );
+    // Still walk the field values so a mistake inside one is reported too.
+    checkLiteralFieldValues(ref cx, expr, TYPE_ERROR_ID);
+    return TYPE_ERROR_ID;
+  }
+
+  const present = checkLiteralFieldValues(ref cx, expr, expected);
+  const needed = structFieldCount(cx.prog, expected);
+  if (present < needed) {
+    reportError(
+      cx.prog,
+      `struct literal is missing ${needed - present} of ${needed} fields - every field must be given a value`,
+      expr.sourceLoc
+    );
+  }
+  return expected;
+}
+
+// Checks each `name: value` against the struct's field of that name, and returns
+// how many DISTINCT known fields were given a value.
+function checkLiteralFieldValues(ref cx: Cx, expr: ASTNode, structType: TypeId): usize {
+  let present: usize = 0;
+  if (expr.childA == 0) {
+    return present;
+  }
+  const list = nodeAt(cx.ast, expr.childA);
+  let i: usize = 0;
+  while (i < list.childCount) {
+    const fieldId = childAt(cx.ast, list, i);
+    const fieldNode = nodeAt(cx.ast, fieldId);
+
+    let fieldType: TypeId = TYPE_ERROR_ID;
+    if (structType != TYPE_ERROR_ID) {
+      const found = lookupField(cx.prog, structType, fieldNode.name);
+      if (found.found) {
+        fieldType = found.typeId;
+        present += 1;
+        // The field's POSITION is what codegen stores to, so record it on the
+        // node rather than making codegen look it up again.
+        vec.vecSet(ref cx.tm.resolvedTypes, fieldId, found.typeId);
+      } else {
+        reportError(
+          cx.prog,
+          `${formatType(cx.prog, structType)} has no field "${fieldNode.name}"`,
+          fieldNode.sourceLoc
+        );
+      }
+    }
+
+    const got = checkExpr(ref cx, fieldNode.childA, fieldType);
+    if (fieldType != TYPE_ERROR_ID && got != TYPE_ERROR_ID && !typeAccepts(cx.prog, fieldType, got)) {
+      reportError(
+        cx.prog,
+        `field "${fieldNode.name}" expects ${formatType(cx.prog, fieldType)}, found ${formatType(cx.prog, got)}`,
+        fieldNode.sourceLoc
+      );
+    }
+    i += 1;
+  }
+  return present;
+}
+
+// Every `${...}` in a template literal, checked and decorated.
+//
+// A template literal BUILDS a string, so each interpolation has to become one.
+// Refusing the shapes that cannot here, by name and pointing at the
+// interpolation, is what keeps codegen from meeting a part it has no lowering
+// for - `${somePoint}` should say so at the `${`, not surface as an internal
+// error after the whole program typechecked.
+function checkTemplateParts(ref cx: Cx, expr: ASTNode): void {
+  let i: usize = 0;
+  while (i < expr.childCount) {
+    const partId = childAt(cx.ast, expr, i);
+    const part = nodeAt(cx.ast, partId);
+    // A literal run is already a string and has no expression to check.
+    if (part.kind != ASTNodeKind.EXPR_PART) {
+      vec.vecSet(ref cx.tm.resolvedTypes, partId, primTypeId(PrimKind.STRING));
+      i += 1;
+      continue;
+    }
+
+    // TYPE_ERROR_ID doubles as "no expectation" here, the same way every other
+    // free-standing expression in this file passes it: an interpolation takes
+    // whatever the expression is.
+    const inner = checkExpr(ref cx, part.childA, TYPE_ERROR_ID);
+    vec.vecSet(ref cx.tm.resolvedTypes, partId, primTypeId(PrimKind.STRING));
+    // An expression that already failed produced its own diagnostic; a second
+    // one naming the error type would only be noise.
+    if (inner != TYPE_ERROR_ID &&
+        templatePartKind(cx.prog, inner) == TemplatePartKind.UNSUPPORTED) {
+      // A type carrying `@derive(display)` reads as "this prints" to whoever
+      // wrote it, so the generic message would send them looking for a typo.
+      // The attribute PARSES and is unwrapped; generating the `toString` is a
+      // separate piece of work that needs Display dispatch in interpolation
+      // first, and saying so is what keeps the gap from looking like a bug.
+      if (carriesDeriveDisplay(cx.prog, inner)) {
+        reportError(
+          cx.prog,
+          `"${formatType(cx.prog, inner)}" carries @derive(display), which the bootstrap parses but does not expand yet - write \`toString\` by hand, or interpolate the fields`,
+          part.sourceLoc
+        );
+      } else {
+        reportError(
+          cx.prog,
+          `cannot interpolate a value of type "${formatType(cx.prog, inner)}" into a template literal - it is not a string, integer or bool, and carries no \`toString(ref self): string\``,
+          part.sourceLoc
+        );
+      }
+    }
+    i += 1;
+  }
+}

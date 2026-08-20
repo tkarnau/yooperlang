@@ -5,7 +5,7 @@
 // a `task` body (which is implicitly async). Those two rules together
 // guarantee a suspend always has a frame to propagate into - that is the
 // whole reason the language has to know about it rather than the runtime
-// figuring it out alone. See plans/async-coroutines.md.
+// figuring it out alone.
 //
 // Nothing here actually suspends: an async call that never blocks runs
 // straight through on the first step. The suspension case is

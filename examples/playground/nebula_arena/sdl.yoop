@@ -77,7 +77,7 @@ export enum GLAttr {
 }
 
 // Profile-mask values fed into SDL_GL_SetAttribute(ContextProfileMask, ...).
-// Single useful value today; the field is a bitmask in SDL but core/compat
+// Single useful value here; the field is a bitmask in SDL but core/compat
 // are the only options we care about.
 export enum GLProfile {
     Core 0x0001,

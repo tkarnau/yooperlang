@@ -1,4 +1,4 @@
-// Phase 10.C.3: Deque<T> is a power-of-two ring buffer. Smoke-tests
+// Deque<T> is a power-of-two ring buffer. Smoke-tests
 // the four-end API (push_front/push_back/pop_front/pop_back), indexed
 // get, growth across the cap boundary, and Disposable auto-cleanup.
 

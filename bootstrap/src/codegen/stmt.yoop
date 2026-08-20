@@ -2,10 +2,9 @@ module codegen;
 
 // Statements: emit the instructions one statement implies.
 //
-// Same convention as expr.yoop - "" on success, an internal-error message
+// Same convention as expr.yoop - `EmitResult.Ok`, or an internal-error message
 // otherwise, and no text assembly in this file.
 
-import { Vec }, * as vec from "std/core/vec.yoop";
 import { Text }, * as text from "std/core/text.yoop";
 import { ASTNode, ASTNodeKind, NodeId, childAt, nodeAt, kindName } from "../ast";
 import { TaskBind, taskBindOf } from "../typecheck";
@@ -22,7 +21,7 @@ export function emitBlock(
   blockId: NodeId,
   retTy: string,
   ref terminated: bool,
-  ref err: string
+  ref err: EmitResult
 ): void {
   terminated = false;
   const block = nodeAt(cx.ast, blockId);
@@ -42,7 +41,7 @@ export function emitBlock(
     const stmtId = childAt(cx.ast, list, i);
     let stmtTerminated = false;
     err = emitStatement(ref cx, stmtId, retTy, ref stmtTerminated);
-    if (err.len > 0) {
+    if (emitFailed(err)) {
       disposePopScope(cx.disposes);
       localsPopBlock(cx.locals);
       return;
@@ -58,8 +57,10 @@ export function emitBlock(
     i += 1;
   }
 
-  // Fell out the bottom: this scope's bindings are done with.
-  err = emitScopeDisposals(ref cx, disposeScopeDepth(cx.disposes) - 1);
+  // Fell out the bottom: this scope's bindings are done with. The BLOCK is the
+  // exit site pass D keyed its answers by, so a binding disposed by hand
+  // earlier in it is skipped here.
+  err = emitScopeDisposals(ref cx, disposeScopeDepth(cx.disposes) - 1, blockId);
   disposePopScope(cx.disposes);
   localsPopBlock(cx.locals);
 }
@@ -69,13 +70,17 @@ export function emitStatement(
   stmtId: NodeId,
   retTy: string,
   ref terminated: bool
-): string {
+): EmitResult {
   terminated = false;
   const stmt = nodeAt(cx.ast, stmtId);
+  // Per STATEMENT rather than per expression: a debugger steps by line, and
+  // tagging each sub-expression with its own column makes one `next` stop
+  // several times inside one statement.
+  setDebugLine(ref cx, stmt.sourceLoc);
   switch (stmt.kind) {
     case ASTNodeKind.RETURN_STATEMENT: {
       terminated = true;
-      return emitReturn(ref cx, stmt, retTy);
+      return emitReturn(ref cx, stmt, stmtId, retTy);
     }
 
     // `expr;` and `_ = expr;` alike. The value is discarded; the instructions
@@ -138,13 +143,10 @@ export function emitStatement(
       const target = innermostBreakable(ref cx);
       // Everything between here and that frame is being left, so it is
       // disposed. The reference does NOT do this - see dispose_stack.yoop.
-      const err = emitUnwindTo(ref cx, target.scopeDepth);
-      if (err.len > 0) {
-        return err;
-      }
+      emitUnwindTo(ref cx, target.scopeDepth, stmtId)?;
       noteBreakTaken(ref cx);
       emitBr(ref cx, target.breakTarget);
-      return "";
+      return EmitResult.Ok;
     }
     case ASTNodeKind.CONTINUE_STATEMENT: {
       terminated = true;
@@ -154,12 +156,9 @@ export function emitStatement(
         return internalError("continue outside a loop reached", "codegen");
       }
       const loop = innermostLoop(ref cx);
-      const cerr = emitUnwindTo(ref cx, loop.scopeDepth);
-      if (cerr.len > 0) {
-        return cerr;
-      }
+      emitUnwindTo(ref cx, loop.scopeDepth, stmtId)?;
       emitBr(ref cx, loop.continueTarget);
-      return "";
+      return EmitResult.Ok;
     }
     default: {
       return internalError("codegen cannot emit statement", kindName(stmt.kind));
@@ -167,42 +166,40 @@ export function emitStatement(
   }
 }
 
-function emitReturn(ref cx: Cx, stmt: ASTNode, retTy: string): string {
+function emitReturn(ref cx: Cx, stmt: ASTNode, stmtId: NodeId, retTy: string): EmitResult {
   if (stmt.childA == 0) {
-    const verr = emitUnwindTo(ref cx, 0);
-    if (verr.len > 0) {
-      return verr;
-    }
+    emitUnwindTo(ref cx, 0, stmtId)?;
     // In a coroutine there is no `ret <value>` anywhere: the result goes to the
     // caller-owned slot and control falls into the shared final-suspend
     // trailer, which is the block that hands the handle back. See coro.yoop.
     if (cx.coro.active) {
       emitCoroReturn(ref cx, retTy, Operand.None, false);
-      return "";
+      return EmitResult.Ok;
     }
     emitSchedulerShutdown(ref cx);
+    // A bare `return;` out of a `void` main is still C's "exit 0" - the
+    // function's emitted signature says i32 whatever the source said. See
+    // Cx.voidMain.
+    if (cx.voidMain) {
+      emitRetMainZero(ref cx);
+      return EmitResult.Ok;
+    }
     emitRetVoid(ref cx);
-    return "";
+    return EmitResult.Ok;
   }
   // The returned VALUE is computed before anything is disposed - it may read a
   // binding that is about to go, and a returned `Text.view` into an arena has
   // to be taken while the arena is still there.
   let value: Operand = Operand.None;
-  const err = emitExpr(ref cx, stmt.childA, ref value);
-  if (err.len > 0) {
-    return err;
-  }
-  const uerr = emitUnwindTo(ref cx, 0);
-  if (uerr.len > 0) {
-    return uerr;
-  }
+  emitExpr(ref cx, stmt.childA, ref value)?;
+  emitUnwindTo(ref cx, 0, stmtId)?;
   if (cx.coro.active) {
     emitCoroReturn(ref cx, retTy, value, true);
-    return "";
+    return EmitResult.Ok;
   }
   emitSchedulerShutdown(ref cx);
   emitRet(ref cx, retTy, value);
-  return "";
+  return EmitResult.Ok;
 }
 
 // `call void @yoop_runtime_shutdown()` on the way out of `main`, and only
@@ -219,7 +216,7 @@ function emitSchedulerShutdown(ref cx: Cx): void {
 
 // `let x: T = expr;` is a stack slot plus a store. Without an initializer it is
 // just the slot - reading it before assignment is typecheck's problem.
-function emitVarDecl(ref cx: Cx, stmt: ASTNode, stmtId: NodeId): string {
+function emitVarDecl(ref cx: Cx, stmt: ASTNode, stmtId: NodeId): EmitResult {
   const ty = typeOf(ref cx, stmtId);
   const hasInit = stmt.childB != 0;
 
@@ -239,13 +236,12 @@ function emitVarDecl(ref cx: Cx, stmt: ASTNode, stmtId: NodeId): string {
   let value: Operand = Operand.None;
   if (hasInit) {
     // Lowered BEFORE the slot is recorded, so `let x = x;` cannot see itself.
-    const err = emitExpr(ref cx, stmt.childB, ref value);
-    if (err.len > 0) {
-      return err;
-    }
+    emitExpr(ref cx, stmt.childB, ref value)?;
   }
 
   const slotInfo = declareLocal(ref cx, stmt.name, ty);
+  noteLocalDebug(ref cx, stmt.name, slotInfo.id, resolvedTypeAt(ref cx, stmtId),
+    stmt.sourceLoc.line, 0);
   if (hasInit) {
     emitStore(ref cx, ty, value, stmt.name, slotInfo.id);
   }

@@ -1,0 +1,5 @@
+// Named like a test module and not declaring `import.test;`. Collection refuses
+// it BY NAME rather than compiling a module with no main and no suites.
+import { suite, test, Case } from "std/test.yoop";
+
+suite function looksLikeASuite(): void { }

@@ -1,0 +1,5 @@
+main: after own alloc used=128
+task: arena used=128
+main: after task used=128 rc=0
+hog rc=0
+exit=0

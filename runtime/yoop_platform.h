@@ -1,10 +1,9 @@
 // Platform shims shared by the runtime's translation units.
 //
-// These used to live as `static inline` definitions inside
-// yoop_runtime.c, which was fine while it was the only file that
-// needed a mutex. yoop_cancel.c needs the same primitives (a mutex, a
-// condvar, and a timed wait that agrees with yoop_now_ns), so they move
-// here rather than getting a second, subtly different copy.
+// yoop_runtime.c and yoop_cancel.c both need the same primitives (a
+// mutex, a condvar, and a timed wait that agrees with yoop_now_ns), so
+// they live here rather than as a second, subtly different copy inside
+// each.
 //
 // Everything is `static inline` - each TU gets its own copy and there
 // is nothing to link. The concrete `struct yoop_mutex` / `yoop_cond` /

@@ -1,0 +1,5 @@
+# Illegal: `pooled` is `refcounted`, which is the storage discipline of a
+# Task<T> handle - the value is heap-allocated with a count and the scope end
+# releases it. An int32 has nothing to hold a count, so the binding promises a
+# release of something never retained.
+2:5: there is nothing there to hold a count

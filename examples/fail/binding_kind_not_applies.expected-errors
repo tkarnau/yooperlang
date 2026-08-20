@@ -1,0 +1,4 @@
+# Illegal: `paramOnly` declares `appliesTo parameter`, and it is written on a
+# BINDING. A kind written where its declaration does not allow it is inert -
+# no pass would ever look at it again.
+23:5: does not apply to bindings

@@ -1,10 +1,9 @@
 // std/core/intrinsics.yoop - the compiler-recognized intrinsic surface.
 //
 // These declarations name operations the codegen lowers directly to LLVM
-// IR or to libc calls, rather than to a yoop function body. They used to
-// be auto-injected into every module; now they're only in scope when you
-// import this file. As with anything under std/, value imports from here
-// must use the namespace form:
+// IR or to libc calls, rather than to a yoop function body. They are in
+// scope only when you import this file. As with anything under std/, value
+// imports from here must use the namespace form:
 //
 //     import * as intr from "std/core/intrinsics.yoop";
 //     let buf: int32[] = intr.heapAlloc(8);

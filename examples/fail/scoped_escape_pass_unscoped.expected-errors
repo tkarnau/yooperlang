@@ -1,0 +1,4 @@
+# Illegal: `a` is `scoped`, which states `mustNotEscape scope`, and `leak`'s
+# parameter carries no kind with that bound - so nothing downstream would stop
+# the borrow from outliving the frame.
+30:10: argument 1 of "leak" is bounded by the scope that declares it

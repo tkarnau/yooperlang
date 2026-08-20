@@ -1,0 +1,497 @@
+module typecheck;
+
+// The expressions that name STORAGE rather than produce a value.
+//
+// A field path, an array element, a slice, a borrow (`ref x.f`), an address
+// (`&x`) and a dereference (`*p`) all walk the same kind of path, and they all
+// ask the same question at the bottom of it: does this have an address. A name
+// does, a field of one does, an element does; a temporary does not, and that is
+// the rule every refusal in this file comes back to.
+//
+// Assignment is here for the same reason. `a.b.c = v` is that walk with a value
+// checked against whatever the path arrived at, and reading and writing go
+// through one address walk on purpose - one being legal and the other not would
+// be an inconsistency with nothing behind it.
+
+import * as vec from "std/core/vec.yoop";
+import * as map from "std/collections/map.yoop";
+import { AST, ASTNode, ASTNodeKind, NodeId, nodeAt, kindName } from "../ast";
+import * as str from "std/core/strings.yoop";
+import { Option } from "std/core/types.yoop";
+// `ref x` - a borrow of a NAMED binding.
+//
+// Restricted to a plain name on purpose: a borrow needs an address, and a local
+// is the only thing the bootstrap has one for. `ref f()` would have to
+// materialize a temporary and hand out a pointer to it, which outlives nothing
+// useful and is a different feature.
+function checkRefExpr(ref cx: Cx, expr: ASTNode): TypeId {
+  const target = nodeAt(cx.ast, expr.childA);
+  // A named binding, a FIELD of one, or an array ELEMENT.
+  // `Disposable.dispose(ref self.data)` is how a container disposes what it
+  // owns, and `Comparable.compare(ref xs[i], p)` is how a sort orders one.
+  // All three have storage; a temporary does not, which is the whole rule.
+  if (target.kind != ASTNodeKind.IDENT &&
+      target.kind != ASTNodeKind.FIELD_ACCESS &&
+      target.kind != ASTNodeKind.INDEX_EXPRESSION) {
+    reportError(
+      cx.prog,
+      "`ref` takes a named binding, a field of one, or an array element - there is no address for a temporary",
+      expr.sourceLoc
+    );
+    return TYPE_ERROR_ID;
+  }
+  if (target.kind == ASTNodeKind.FIELD_ACCESS &&
+      !fieldPathBottomsOutInAName(cx.ast, expr.childA)) {
+    reportError(
+      cx.prog,
+      "`ref` on a field needs a path that bottoms out in a named binding or an array element - `ref f().x` has no address the field walk can start from",
+      expr.sourceLoc
+    );
+    return TYPE_ERROR_ID;
+  }
+  const inner = checkExpr(ref cx, expr.childA, TYPE_ERROR_ID);
+  if (inner == TYPE_ERROR_ID) {
+    return TYPE_ERROR_ID;
+  }
+  // `ref` on something that is ALREADY a borrow is a RE-borrow, not a second
+  // one. `let fp: ref FILE = fopen(...); fclose(ref fp);` is how every C handle
+  // in the corpus is passed on, and `ref ref FILE` is not a type - there is one
+  // address either way, and the callee gets it. The reference agrees: `ref r`
+  // and a bare `r` both reach a `ref P` parameter there, and both write
+  // through to the same object. Codegen's half is in emitRefExpr.
+  if (derefType(cx.prog, inner) != inner) {
+    return inner;
+  }
+  return internRef(cx.prog, inner);
+}
+
+// Walk a field path down to whatever it started from. `ref a.b.c` is fine at
+// any depth - codegen's `emitFieldAddress` already recurses through a nested
+// base, so the address is a gep on a gep and there is nothing new to build.
+//
+// An array ELEMENT bottoms out too - `ref entries[i].dispatcher` is how
+// std/http's router reaches a route's erased handler, and an element has an
+// address exactly as a named binding does. What is refused is a path whose
+// bottom has no storage at all: `ref f().x`, where the temporary is gone before
+// anything could point at it. Named rather than left to fail in codegen, where
+// the message would be about a slot lookup.
+function fieldPathBottomsOutInAName(ref ast: AST, targetId: NodeId): bool {
+  let atId = targetId;
+  let node = nodeAt(ref ast, atId);
+  while (node.kind == ASTNodeKind.FIELD_ACCESS) {
+    atId = node.childA;
+    node = nodeAt(ref ast, atId);
+  }
+  return node.kind == ASTNodeKind.IDENT || node.kind == ASTNodeKind.INDEX_EXPRESSION;
+}
+
+// Whether a field write's base has an ADDRESS to compute: a name, or a path of
+// fields reaching one. `a.b.c = v` walks down to `a`; `f().x = v` does not,
+// because a call's result lives in a temp with nowhere to store back to.
+//
+// A field READ needs none of this - it is an extractvalue on a loaded value, so
+// it works on any struct expression. The asymmetry is the same one a struct
+// field write already had, just applied one level at a time.
+function isAddressableFieldBase(ref ast: AST, id: NodeId): bool {
+  const node = nodeAt(ref ast, id);
+  if (node.kind == ASTNodeKind.IDENT) {
+    return true;
+  }
+  // An array ELEMENT has an address too, and `emitFieldAddress` builds it the
+  // same way for a write as for a borrow. Keeping the two answers in step is
+  // the point: `ref xs[i].f` and `xs[i].f = v` are the same gep, so one being
+  // legal and the other not would be an inconsistency with no reason behind it.
+  if (node.kind == ASTNodeKind.INDEX_EXPRESSION) {
+    return true;
+  }
+  if (node.kind == ASTNodeKind.FIELD_ACCESS) {
+    return isAddressableFieldBase(ref ast, node.childA);
+  }
+  return false;
+}
+
+// `target = value`. A name, a field of an addressable base, a deref and an
+// index are assignable; anything else is refused by name.
+function checkAssignment(ref cx: Cx, expr: ASTNode): TypeId {
+  const target = nodeAt(cx.ast, expr.childA);
+  let targetType: TypeId = TYPE_ERROR_ID;
+
+  if (target.kind == ASTNodeKind.IDENT) {
+    switch (scopeBinding(cx.scope, target.name)) {
+      case Option.Some { value: bound }: {
+        targetType = bound.typeId;
+        // The compound forms desugar to this same node in the parser, so
+        // `a += 1` is covered here too and needs no second check.
+        if (!bound.mutable) {
+          reportError(cx.prog, `cannot assign to const "${target.name}"`, target.sourceLoc);
+          return TYPE_ERROR_ID;
+        }
+      }
+      case Option.None: {
+        // Not a local, so it may be a module-level `let` - this module's own,
+        // or another module's reached through an import. The second one is
+        // refused: a module's mutable state is its own, and a write from
+        // outside it is invisible to every invariant the declaring module
+        // keeps about it. The import is what makes it visible, not writable.
+        switch (map.mapGet(ref cx.tm.importedFrom, target.name)) {
+          case Option.Some { value: origin }: {
+            reportError(
+              cx.prog,
+              `"${target.name}" is imported, and a module-level "let" is written only inside the module that declares it`,
+              target.sourceLoc
+            );
+            return TYPE_ERROR_ID;
+          }
+          case Option.None: { }
+        }
+        // A `const` reaches here too and is refused by name: it has no storage
+        // to write to.
+        targetType = moduleGlobalType(cx.prog, cx.tm, target.name);
+        if (targetType == TYPE_ERROR_ID) {
+          if (moduleConstType(cx.prog, cx.tm, target.name) != TYPE_ERROR_ID) {
+            reportError(
+              cx.prog,
+              `cannot assign to const "${target.name}" - a module-level const is immutable, whether it inlines at every use or is backed by a global`,
+              target.sourceLoc
+            );
+          } else {
+            reportError(cx.prog, `unknown name "${target.name}"`, target.sourceLoc);
+          }
+          return TYPE_ERROR_ID;
+        }
+      }
+    }
+    vec.vecSet(ref cx.tm.resolvedTypes, expr.childA, targetType);
+  } else if (target.kind == ASTNodeKind.FIELD_ACCESS) {
+    // `p.x = v`, and `a.b.c = v`. checkFieldAccess records the field's type,
+    // which the store needs; the base has to have an ADDRESS, which means a
+    // name or a path of fields reaching one. A call's result has no address to
+    // store into, so `f().x = v` is still refused.
+    if (!isAddressableFieldBase(cx.ast, target.childA)) {
+      reportError(
+        cx.prog,
+        "only a field of a named binding, or of a field path reaching one, can be assigned to",
+        target.sourceLoc
+      );
+      return TYPE_ERROR_ID;
+    }
+    if (!frozenFieldBase(ref cx, target.childA)) {
+      return TYPE_ERROR_ID;
+    }
+    targetType = checkFieldAccess(ref cx, target, TYPE_ERROR_ID);
+    vec.vecSet(ref cx.tm.resolvedTypes, expr.childA, targetType);
+  } else if (target.kind == ASTNodeKind.DEREF_EXPRESSION) {
+    // `*p = v` - a store THROUGH a pointer. The target's type is the pointee,
+    // which is the same thing a read of it produces.
+    targetType = checkDeref(ref cx, target);
+    vec.vecSet(ref cx.tm.resolvedTypes, expr.childA, targetType);
+  } else if (target.kind == ASTNodeKind.INDEX_EXPRESSION) {
+    // `xs[i] = v` - checkIndex records the element type on the node, which is
+    // what the store needs.
+    targetType = checkIndex(ref cx, target);
+    vec.vecSet(ref cx.tm.resolvedTypes, expr.childA, targetType);
+  } else {
+    reportError(cx.prog, `cannot assign to ${kindName(target.kind)}`, target.sourceLoc);
+    return TYPE_ERROR_ID;
+  }
+
+  const valueType = checkExpr(ref cx, expr.childB, targetType);
+  if (valueType != TYPE_ERROR_ID && !typeAccepts(cx.prog, targetType, valueType)) {
+    reportError(cx.prog, `cannot assign to "${target.name}": types do not match`, expr.sourceLoc);
+  }
+  // An assignment is a statement, not a value - nothing consumes its type.
+  return TYPE_VOID_ID;
+}
+
+// Whether a field write's base is writable, reporting when it is not.
+//
+// `const` freezes the NAME, and a field of the value that name holds is part of
+// what was frozen. The chain is walked to its root rather than only one level,
+// so `const p: Outer; p.inner.x = 1` is refused the same way `p.x = 1` is.
+//
+// An INDEX stops the walk and allows the write, and that is the whole subtlety:
+// `const xs: T[]` freezes the name `xs` and not the buffer behind it, so
+// `xs[i].f = v` reaches storage the binding does not own. That is the same rule
+// `isAddressableFieldBase` follows for the borrow.
+//
+// True means "carry on"; false means a diagnostic was reported.
+function frozenFieldBase(ref cx: Cx, baseId: NodeId): bool {
+  let node = nodeAt(cx.ast, baseId);
+  while (node.kind == ASTNodeKind.FIELD_ACCESS) {
+    node = nodeAt(cx.ast, node.childA);
+  }
+  if (node.kind != ASTNodeKind.IDENT) {
+    return true;
+  }
+  switch (scopeBinding(cx.scope, node.name)) {
+    case Option.Some { value: bound }: {
+      if (bound.mutable) {
+        return true;
+      }
+      reportError(
+        cx.prog,
+        `cannot assign to a field of "${node.name}", which is bound by const`,
+        node.sourceLoc
+      );
+      return false;
+    }
+    case Option.None: { }
+  }
+  // A module-level name. A `let` has storage and is writable; a `const` is not,
+  // whether it inlines at every use or is backed by a global.
+  if (moduleGlobalStorageType(cx.prog, cx.tm, node.name) != TYPE_ERROR_ID ||
+      moduleLevelValueType(cx.prog, cx.tm, node.name) == TYPE_ERROR_ID) {
+    return true;
+  }
+  reportError(
+    cx.prog,
+    `cannot assign to a field of "${node.name}", which is a module-level const`,
+    node.sourceLoc
+  );
+  return false;
+}
+
+// `xs[i]` - the base must be an array and the index an integer.
+function checkIndex(ref cx: Cx, expr: ASTNode): TypeId {
+  const baseType = checkExpr(ref cx, expr.childA, TYPE_ERROR_ID);
+  const idxType = checkExpr(ref cx, expr.childB, primTypeId(PrimKind.USIZE));
+  // An INTEGER-BACKED value enum indexes too, which is what makes a table keyed
+  // by an enum (`AST_NODE_KIND_NAMES[kind]`) read the way it wants to. Nothing
+  // is converted: an enum's value IS an integer, and gep takes any width.
+  if (idxType != TYPE_ERROR_ID && !isIntPrimType(cx.prog, enumUnderlyingOf(cx.prog, idxType))) {
+    reportError(
+      cx.prog,
+      `an array index must be an integer, found ${formatType(cx.prog, idxType)}`,
+      expr.sourceLoc
+    );
+  }
+
+  if (baseType == TYPE_ERROR_ID) {
+    return TYPE_ERROR_ID;
+  }
+  // A borrow of an array indexes like the array. Codegen opens it, because only
+  // codegen knows whether this subscript is being read or written through.
+  switch (typeAt(cx.prog, derefType(cx.prog, baseType))) {
+    case Type.Array { elem: e }: { return e; }
+    default: {
+      reportError(cx.prog, `cannot index ${formatType(cx.prog, baseType)}`, expr.sourceLoc);
+      return TYPE_ERROR_ID;
+    }
+  }
+}
+
+// `xs.len` is the only field access in the subset. Struct fields arrive with
+// struct values.
+function checkFieldAccess(ref cx: Cx, expr: ASTNode, expected: TypeId): TypeId {
+  // `Result.None` is a payload-less CONSTRUCTOR wearing a field access - the
+  // same tokens as `p.x`. Checked before the base is checked as a value,
+  // because a variant name is not one and would report as an unknown name.
+  if (isPayloadlessConstructor(ref cx, expr)) {
+    return checkVariantConstructor(ref cx, expr, expr.childA, 0, expected);
+  }
+
+  // `Color.Red` wears the same shape, and for the same reason: an enum name is
+  // not a value, so the base must not be checked as one.
+  if (isEnumCaseAccess(ref cx, expr)) {
+    return checkEnumCaseAccess(cx.prog, cx.tm, cx.ast, expr);
+  }
+
+  const baseType = checkExpr(ref cx, expr.childA, TYPE_ERROR_ID);
+  if (baseType == TYPE_ERROR_ID) {
+    return TYPE_ERROR_ID;
+  }
+  // A borrow reaches its fields like the thing it borrows - `cx.e.usesPrintf`
+  // where `e: ref Emitter`, `srcRef.len` where `srcRef` came out of a
+  // `ref uint8[]` field. The node KEEPS its `ref T` type, and codegen opens the
+  // borrow, because a field READ wants the value and a field WRITE wants the
+  // address - and only codegen knows which one this is.
+  switch (typeAt(cx.prog, derefType(cx.prog, baseType))) {
+    case Type.Array { elem: e }: {
+      if (str.stringEq(expr.name, "len")) {
+        return primTypeId(PrimKind.USIZE);
+      }
+      // `xs.ptr` - the DATA pointer, for handing a buffer to C. An array is
+      // already a pointer plus a length, so this is a projection rather than a
+      // conversion, and it borrows: the pointer is only valid while the array
+      // is. Ungated on purpose - reading it is safe, and everything you can DO
+      // with the result already needs `import.unsafe;`.
+      if (str.stringEq(expr.name, "ptr")) {
+        return internUnsafePtr(cx.prog, e);
+      }
+      reportError(
+        cx.prog,
+        `an array has no field "${expr.name}" - only "len" and "ptr"`,
+        expr.sourceLoc
+      );
+      return TYPE_ERROR_ID;
+    }
+    case Type.Struct { decl: d, fields: f, methods: mm, implementsTraits: it, generic: g }: {
+      const found = lookupField(cx.prog, derefType(cx.prog, baseType), expr.name);
+      if (!found.found) {
+        reportError(cx.prog, `struct "${d.name}" has no field "${expr.name}"`, expr.sourceLoc);
+        return TYPE_ERROR_ID;
+      }
+      return found.typeId;
+    }
+    // A union field read is a REINTERPRETATION rather than a projection: it
+    // says "read the bytes at the union's address as this field's type", and
+    // nothing here or in codegen checks that those are the bytes the last write
+    // put there. C makes the same bargain.
+    case Type.Union { decl: d, fields: f }: {
+      const found = lookupUnionField(cx.prog, derefType(cx.prog, baseType), expr.name);
+      if (!found.found) {
+        reportError(cx.prog, `union "${d.name}" has no field "${expr.name}"`, expr.sourceLoc);
+        return TYPE_ERROR_ID;
+      }
+      return found.typeId;
+    }
+    // `s.len` - the string's BYTE length, which is what `strlen` returns and
+    // what `stringAsBytes(s).len` would give. Not a character count: yoop has
+    // no character type, and the byte length is the one every caller here
+    // actually wants.
+    case Type.Prim { prim: p }: {
+      if (p == PrimKind.STRING && str.stringEq(expr.name, "len")) {
+        return primTypeId(PrimKind.USIZE);
+      }
+      reportError(
+        cx.prog,
+        `field access on ${formatType(cx.prog, baseType)} is not supported by the bootstrap typechecker yet`,
+        expr.sourceLoc
+      );
+      return TYPE_ERROR_ID;
+    }
+    // The base is an enum VALUE rather than the enum's name - a local shadowing
+    // it, or a struct field. An enum has no fields at all, so the only thing a
+    // dot after one could have meant is a case, and saying that is what points
+    // at the real mistake (`dir.len` on an `enum<string>` is reaching for the
+    // string's length through a type that is not a string).
+    case Type.ValueEnum { decl: d, underlying: u, cases: cs, isOpen: o,
+                          methods: mm, implementsTraits: it }: {
+      reportError(cx.prog, `enum "${d.name}" has no case "${expr.name}"`, expr.sourceLoc);
+      return TYPE_ERROR_ID;
+    }
+    default: {
+      reportError(
+        cx.prog,
+        `field access on ${formatType(cx.prog, baseType)} is not supported by the bootstrap typechecker yet`,
+        expr.sourceLoc
+      );
+      return TYPE_ERROR_ID;
+    }
+  }
+}
+
+// `xs[a..b]` - a BORROWING view over part of an array.
+//
+// The result is the same array type as the base: a slice is a data pointer and
+// a length, exactly like the thing it came from, and it shares the storage. So
+// there is nothing to allocate and nothing to copy - and equally, nothing keeps
+// the base alive, which is the caller's problem the same way it is for any
+// borrow.
+//
+// Bounds are usize and are NOT checked here or at run time. The language does
+// not specify a bounds check on an index either, and inventing one for slices
+// alone would be the odd rule out.
+function checkSlice(ref cx: Cx, expr: ASTNode): TypeId {
+  const baseType = checkExpr(ref cx, expr.childA, TYPE_ERROR_ID);
+  const usize = primTypeId(PrimKind.USIZE);
+  // An omitted bound is 0 - "from the beginning" / "to the end" - and there is
+  // no expression to check.
+  if (expr.childB != 0) {
+    checkExpr(ref cx, expr.childB, usize);
+  }
+  if (expr.childC != 0) {
+    checkExpr(ref cx, expr.childC, usize);
+  }
+
+  if (baseType == TYPE_ERROR_ID) {
+    return TYPE_ERROR_ID;
+  }
+  switch (typeAt(cx.prog, derefType(cx.prog, baseType))) {
+    case Type.Array { elem: e }: { return derefType(cx.prog, baseType); }
+    default: {
+      reportError(
+        cx.prog,
+        `cannot slice a value of type "${formatType(cx.prog, baseType)}" - only an array can be sliced`,
+        expr.sourceLoc
+      );
+      return TYPE_ERROR_ID;
+    }
+  }
+}
+
+// `&x` - the address of a binding, as a raw pointer.
+//
+// Distinct from `ref x`, which is a checked BORROW. `&` produces an
+// `unsafe_ptr<T>` with none of a borrow's guarantees, and exists to hand a
+// local to C - so it is gated on `import.unsafe;` exactly as the pointer type
+// is. Handing out an address without saying the file is unsafe would let the
+// gate be bypassed by one character.
+//
+// The target must be a NAMED binding: an address needs storage, and a
+// temporary has none. Same limitation `ref` carries, and for the same reason.
+function checkAddressOf(ref cx: Cx, expr: ASTNode): TypeId {
+  if (!cx.tm.unsafeAllowed) {
+    reportError(
+      cx.prog,
+      `'&x' takes a raw address and requires 'import.unsafe;' at module top`,
+      expr.sourceLoc
+    );
+    return TYPE_ERROR_ID;
+  }
+  const target = nodeAt(cx.ast, expr.childA);
+  if (target.kind != ASTNodeKind.IDENT) {
+    reportError(
+      cx.prog,
+      "`&` takes a named binding - there is no address for a temporary",
+      expr.sourceLoc
+    );
+    return TYPE_ERROR_ID;
+  }
+  const inner = checkExpr(ref cx, expr.childA, TYPE_ERROR_ID);
+  if (inner == TYPE_ERROR_ID) {
+    return TYPE_ERROR_ID;
+  }
+  return internUnsafePtr(cx.prog, inner);
+}
+
+// `*p` - the value a pointer points at.
+//
+// Only a TYPED pointer can be dereferenced. The opaque `unsafe_ptr` is "some
+// pointer" and has no pointee to produce, so reading through one has no type -
+// which is the practical cost of widening, and the reason the two are distinct.
+function checkDeref(ref cx: Cx, expr: ASTNode): TypeId {
+  if (!cx.tm.unsafeAllowed) {
+    reportError(
+      cx.prog,
+      `'*p' reads through a raw pointer and requires 'import.unsafe;' at module top`,
+      expr.sourceLoc
+    );
+    return TYPE_ERROR_ID;
+  }
+  const inner = checkExpr(ref cx, expr.childA, TYPE_ERROR_ID);
+  if (inner == TYPE_ERROR_ID) {
+    return TYPE_ERROR_ID;
+  }
+  switch (typeAt(cx.prog, inner)) {
+    case Type.UnsafePtr { pointee: p }: {
+      if (p == TYPE_ERROR_ID) {
+        reportError(
+          cx.prog,
+          `cannot read through an opaque "unsafe_ptr" - it has no pointee type; use "unsafe_ptr<T>"`,
+          expr.sourceLoc
+        );
+        return TYPE_ERROR_ID;
+      }
+      return p;
+    }
+    default: {
+      reportError(
+        cx.prog,
+        `cannot dereference a value of type "${formatType(cx.prog, inner)}" - only a raw pointer can be`,
+        expr.sourceLoc
+      );
+      return TYPE_ERROR_ID;
+    }
+  }
+}

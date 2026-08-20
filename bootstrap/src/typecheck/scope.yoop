@@ -37,6 +37,22 @@ export type Binding {
   // a borrow - which is what lets it be forwarded into another `ref T` slot
   // with no second `ref` written. See `reborrowIfWanted` in pass_d.yoop.
   refParam: bool,
+  // True when the name was declared with a kind stating `mustNotEscape scope`.
+  // The bound is about THIS binding rather than about its type - the same type
+  // is unbounded under a plain `let` - so the scope entry is the only place it
+  // can be recorded. Read by typecheck/kind_use.yoop, which owns both rules
+  // that enforce it.
+  noEscape: bool,
+  // The CLEARANCE markers the binding's annotation and prefixes declare, as the
+  // two bitmasks typecheck/markers.yoop compares. `markKnown` is false until
+  // something establishes them, and an unknown set satisfies every bound - see
+  // the permissiveness note at the top of that file. They ride here rather than
+  // in a side map for the reason `noEscape` does: the answer is about the
+  // BINDING, and the same type under a different annotation carries different
+  // markers.
+  markConf: uint64,
+  markRestr: uint64,
+  markKnown: bool,
 }
 
 export type LocalScope propagates<disposable> {
@@ -91,7 +107,23 @@ export function scopeDeclare(
   typeId: TypeId,
   mutable: bool
 ): bool {
-  return scopeDeclareBinding(ref s, name, { typeId: typeId, mutable: mutable, refParam: false });
+  return scopeDeclareBinding(ref s, name,
+    { typeId: typeId, mutable: mutable, refParam: false, noEscape: false,
+      markConf: 0, markRestr: 0, markKnown: false });
+}
+
+// The same, for a binding whose kind bounds it to the declaring scope. Separate
+// for the reason `scopeDeclareRefParam` is: one caller asks, and every other
+// declaration would have to write `false` for a question it never poses.
+export function scopeDeclareBound(
+  ref s: LocalScope,
+  name: string,
+  typeId: TypeId,
+  mutable: bool
+): bool {
+  return scopeDeclareBinding(ref s, name,
+    { typeId: typeId, mutable: mutable, refParam: false, noEscape: true,
+      markConf: 0, markRestr: 0, markKnown: false });
 }
 
 // The same, for a name that arrived as a `ref T` PARAMETER. Separate rather
@@ -103,7 +135,29 @@ export function scopeDeclareRefParam(
   name: string,
   typeId: TypeId
 ): bool {
-  return scopeDeclareBinding(ref s, name, { typeId: typeId, mutable: true, refParam: true });
+  return scopeDeclareBinding(ref s, name,
+    { typeId: typeId, mutable: true, refParam: true, noEscape: false,
+      markConf: 0, markRestr: 0, markKnown: false });
+}
+
+// Stamp the clearance markers onto a name THIS block just declared. Separate
+// from the declare calls because only two of the six sites can answer - a
+// parameter and a `let` / `const` read them off an annotation, while a pattern
+// binding, a loop variable and a `?` handler binding have no annotation to read
+// and are left unknown on purpose. See typecheck/markers.yoop.
+export function scopeSetMarkers(ref s: LocalScope, name: string, m: MarkerSet): void {
+  let top = vec.vecGet(ref s.blocks, s.blocks.len - 1);
+  switch (map.mapGet(ref top, name)) {
+    case Option.Some { value: existing }: {
+      let updated = existing;
+      updated.markConf = m.conf;
+      updated.markRestr = m.restr;
+      updated.markKnown = m.known;
+      map.mapInsert(ref top, name, updated);
+      vec.vecSet(ref s.blocks, s.blocks.len - 1, top);
+    }
+    case Option.None: { }
+  }
 }
 
 function scopeDeclareBinding(ref s: LocalScope, name: string, b: Binding): bool {

@@ -1,8 +1,7 @@
-// Ownership redesign (2026-06-17, plans/ownership-and-typestate-redesign.md):
-// a `disposable`-keyword binding declared inside a `switch` arm gets its
-// auto-cleanup injected at the end of that arm's block. Before the redesign,
-// kindCheck did not walk SWITCH_STATEMENT, so the cleanup for `r` here was
-// silently never emitted. The expected output proves dispose fires at arm end
+// A `disposable`-keyword binding declared inside a `switch` arm gets its
+// auto-cleanup injected at the end of that arm's block. kindCheck has to walk
+// SWITCH_STATEMENT for that; without it the cleanup for `r` here is silently
+// never emitted. The expected output proves dispose fires at arm end
 // (before "after"), not at function exit.
 
 extern "C" from "stdio.h" {

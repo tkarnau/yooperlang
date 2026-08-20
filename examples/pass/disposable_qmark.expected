@@ -1,0 +1,5 @@
+disposing fd=5
+ok r1=5 err=''
+disposing fd=5
+fail r2=0 err='boom'
+exit=0

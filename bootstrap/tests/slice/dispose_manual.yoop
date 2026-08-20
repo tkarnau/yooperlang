@@ -1,0 +1,153 @@
+// A scope-end call that was ALREADY MADE BY HAND is not made a second time.
+//
+//     tracked b: Res = open(2);
+//     Closer.close(ref b);        // the obligation is answered here
+//     printf("  after manual\n");
+//   }                            // and the brace emits nothing
+//
+// Without this the brace closes a value that was already closed. `close` here
+// only prints, so the fixture shows it as a duplicate line; on a real resource
+// it is a double free.
+//
+// The answer is PATH-SENSITIVE, which is the whole reason it cannot be a flag
+// on the binding, and this file is arranged around the three ways a path can
+// go:
+//
+//   both branches close it     the join is closed too, so the brace is silent
+//   one branch closes it       the OTHER branch reaches the brace still owing
+//                              the call, so the brace makes it - which means
+//                              the branch that closed by hand closes twice.
+//                              Conservative on purpose: the other direction
+//                              leaks on the branch that did nothing
+//   a loop body closes it      a loop may run zero times, so nothing it did is
+//                              relied on afterwards
+//
+// Each function is called with the flag both ways where the two paths differ,
+// because half of the point is what happens on the path that did NOT dispose.
+
+kind tracked {
+  appliesTo binding;
+  requires Closer;
+  mustCall close beforeScopeEnd;
+}
+
+trait Closer {
+  function close(ref self): void;
+}
+
+type Res implements Closer {
+  id: int,
+  function close(ref self): void {
+    printf("  close %d\n", self.id);
+  }
+}
+
+function open(n: int): Res {
+  printf("  open %d\n", n);
+  return { id: n };
+}
+
+// The baseline: nothing is written by hand, so the brace is the only close.
+// It is here because the failure mode of this whole feature is skipping a call
+// that was never made, and that is a leak rather than a duplicate.
+function untouched(): void {
+  tracked a: Res = open(1);
+  printf("  body\n");
+}
+
+// The top level of a scope. One path, and it closed.
+function manual(): void {
+  tracked b: Res = open(2);
+  Closer.close(ref b);
+  printf("  after manual\n");
+}
+
+// Both arms close it, so every path reaching the brace has already closed.
+function bothBranches(flag: bool): void {
+  tracked c: Res = open(3);
+  if (flag) {
+    Closer.close(ref c);
+    printf("  then\n");
+  } else {
+    Closer.close(ref c);
+    printf("  else\n");
+  }
+  printf("  after if\n");
+}
+
+// Only one arm closes it. The brace cannot tell which arm ran, so it closes.
+function oneBranch(flag: bool): void {
+  tracked d: Res = open(4);
+  if (flag) {
+    Closer.close(ref d);
+    printf("  then\n");
+  }
+  printf("  after if\n");
+}
+
+// An early `return` sits BEFORE the manual close, so it leaves owing the call
+// and has to make it. The same binding, the same function, two different
+// answers - which is what "path-sensitive" means in practice.
+function earlyReturn(bail: bool): void {
+  tracked e: Res = open(5);
+  if (bail) {
+    printf("  bailing\n");
+    return;
+  }
+  Closer.close(ref e);
+  printf("  after manual\n");
+}
+
+// A loop body that closes it. Run zero times here, which is exactly the case
+// that says the body's close cannot be relied on: the brace has to close, or
+// the resource is never closed at all.
+function inLoop(n: int): void {
+  tracked f: Res = open(6);
+  let i: int = 0;
+  while (i < n) {
+    Closer.close(ref f);
+    i = i + 1;
+  }
+  printf("  after loop\n");
+}
+
+// A close of a DIFFERENT binding answers nothing for this one. Both are still
+// closed at the brace - one by hand and one by the compiler - and in reverse
+// declaration order, like every other disposal.
+function otherBinding(): void {
+  tracked g: Res = open(7);
+  tracked h: Res = open(8);
+  Closer.close(ref h);
+  printf("  after closing h\n");
+}
+
+function main(): int {
+  printf("untouched:\n");
+  untouched();
+
+  printf("manual:\n");
+  manual();
+
+  printf("both branches, true:\n");
+  bothBranches(true);
+  printf("both branches, false:\n");
+  bothBranches(false);
+
+  printf("one branch, false:\n");
+  oneBranch(false);
+  printf("one branch, true:\n");
+  oneBranch(true);
+
+  printf("early return, bailing:\n");
+  earlyReturn(true);
+  printf("early return, through:\n");
+  earlyReturn(false);
+
+  printf("loop, zero times:\n");
+  inLoop(0);
+
+  printf("other binding:\n");
+  otherBinding();
+
+  return 0;
+}

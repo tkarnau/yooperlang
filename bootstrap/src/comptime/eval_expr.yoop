@@ -1,0 +1,448 @@
+module comptime;
+
+// Expression evaluation: an AST node in, a ValueId out.
+//
+// The dispatch mirrors codegen's `emitExpr` deliberately, so the two can be
+// read side by side and a form handled there but not here is visible as a
+// missing case rather than as a wrong answer. What differs is only the output:
+// codegen writes an instruction that will compute the value, and this computes
+// it.
+//
+// Everything outside the handled set is refused BY NAME. That is not a
+// courtesy - it is the whole safety property. A comptime evaluator that guesses
+// produces a program whose constants are wrong and whose build was green.
+
+import { Vec }, * as vec from "std/core/vec.yoop";
+import * as str from "std/core/strings.yoop";
+import { Result, Option } from "std/core/types.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import { AST, ASTNode, ASTNodeKind, NodeId, childAt, kindName, nodeAt } from "../ast";
+import { TokenTags } from "../lex";
+import { SourceLocation } from "../diagnostics";
+import { Program, TypedModule, TypeId, TYPE_ERROR_ID, Symbol, SymbolId, SYMBOL_NONE_ID,
+  symbolAt, lookupOwnName, isIntPrimType, isFloatPrimType, isStringPrimType,
+  arrayElementOf, primTypeId, PrimKind, Type, typeAt, derefType, lookupField,
+  structFieldCount, isVariantType, isValueEnumType, isStructType, isUnionType,
+  primBitWidth } from "../typecheck";
+
+// The type pass D resolved for a node. No monomorphization applied: a generic
+// body is not evaluated here yet, and reading a TypeParam as though it were
+// concrete would be worse than refusing the call that reached it.
+export function typeOfNode(ref cx: EvalCx, nodeId: NodeId): TypeId {
+  return vec.vecGet(ref cx.tm.resolvedTypes, nodeId);
+}
+
+// The one refusal helper, so every message reads the same way.
+export function unhandled(what: string, loc: SourceLocation): Result<ValueId, ComptimeError> {
+  return Result.Err { error: comptimeError(
+    `the comptime evaluator does not handle ${what}`, loc
+  )};
+}
+
+export function evalExpr(ref cx: EvalCx, exprId: NodeId): Result<ValueId, ComptimeError> {
+  if (exprId == 0) {
+    return Result.Err { error: comptimeError("an empty expression", zeroLoc()) };
+  }
+  const expr = nodeAt(cx.ast, exprId);
+  const ty = typeOfNode(ref cx, exprId);
+
+  switch (expr.kind) {
+    case ASTNodeKind.INT_LITERAL: {
+      return Result.Ok { value: intValue(cx.va, ty, normalizeInt(cx.prog, ty, uint64(expr.intVal))) };
+    }
+    case ASTNodeKind.FLOAT_LITERAL: {
+      return Result.Ok { value: floatValue(cx.va, ty, floatBitsFor(cx.prog, ty, expr.floatVal)) };
+    }
+    case ASTNodeKind.BOOL_LITERAL: {
+      return Result.Ok { value: boolValue(cx.va, ty, expr.intVal != 0) };
+    }
+    case ASTNodeKind.STRING_LITERAL: {
+      return Result.Ok { value: strValue(cx.va, ty, vec.vecGet(ref cx.ast.strings, expr.strId)) };
+    }
+    case ASTNodeKind.IDENT: {
+      return evalIdent(ref cx, expr, exprId);
+    }
+    case ASTNodeKind.UNARY_EXPRESSION: {
+      return evalUnary(ref cx, expr, exprId);
+    }
+    case ASTNodeKind.BINARY_EXPRESSION: {
+      return evalBinary(ref cx, expr, exprId);
+    }
+    case ASTNodeKind.ARRAY_LITERAL: {
+      return evalArrayLiteral(ref cx, expr, exprId);
+    }
+    case ASTNodeKind.STRUCT_LITERAL: {
+      return evalStructLiteral(ref cx, expr, exprId);
+    }
+    case ASTNodeKind.FIELD_ACCESS: {
+      return evalFieldAccess(ref cx, expr, exprId);
+    }
+    case ASTNodeKind.INDEX_EXPRESSION: {
+      return evalIndex(ref cx, expr, exprId);
+    }
+    case ASTNodeKind.CALL_EXPRESSION: {
+      return evalCall(ref cx, expr, exprId);
+    }
+    // `wait h`. A comptime fold has no scheduler, so a `task` call already ran
+    // synchronously and its "handle" IS its result - which makes waiting on one
+    // the identity. The distinction `joined` and `pooled` draw is about handle
+    // LIFETIME at run time, and there is no run time here.
+    case ASTNodeKind.WAIT_EXPRESSION: {
+      return Result.Ok { value: openBorrow(ref cx, evalExpr(ref cx, expr.childA)?) };
+    }
+    case ASTNodeKind.TEMPLATE_LITERAL: {
+      return evalTemplateLiteral(ref cx, expr, exprId);
+    }
+    case ASTNodeKind.TRY_OP: {
+      return evalTryOp(ref cx, expr, exprId);
+    }
+    case ASTNodeKind.VARIANT_CONSTRUCTOR: {
+      return evalVariantConstructor(ref cx, expr, exprId);
+    }
+    case ASTNodeKind.ASSIGNMENT: {
+      return evalAssignment(ref cx, expr);
+    }
+    // A borrow is the id of the slot it names, so taking one costs nothing and
+    // writing through it writes that slot. See value.yoop.
+    case ASTNodeKind.REF_EXPRESSION: {
+      const place = evalPlace(ref cx, expr.childA)?;
+      return Result.Ok { value: refValue(cx.va, ty, place) };
+    }
+    default: {
+      return unhandled(kindName(expr.kind), expr.sourceLoc);
+    }
+  }
+}
+
+// A value POSITION wants the thing rather than the borrow, so a `ref T` that
+// reaches one is opened. Pass D recorded which nodes those are, exactly as it
+// does for codegen; here the open is a hop to the target slot rather than a
+// load instruction.
+export function evalExprValue(ref cx: EvalCx, exprId: NodeId): Result<ValueId, ComptimeError> {
+  const id = evalExpr(ref cx, exprId)?;
+  return Result.Ok { value: openBorrow(ref cx, id) };
+}
+
+// One hop through a borrow, if there is one. Not recursive: `ref ref T` is not
+// a type, so there is never a second hop to take.
+export function openBorrow(ref cx: EvalCx, id: ValueId): ValueId {
+  const slot = valueAt(cx.va, id);
+  if (slot.kind == ValueKind.REF) {
+    return slot.target;
+  }
+  return id;
+}
+
+// A name. A LOCAL first, so an inner binding shadows a module-level one, then a
+// const this fold has already produced a value for, then a const whose value
+// rode in the symbol because it was an inlinable integer.
+function evalIdent(ref cx: EvalCx, expr: ASTNode, exprId: NodeId): Result<ValueId, ComptimeError> {
+  switch (lookupLocal(cx.scope, expr.name)) {
+    case Option.Some { value: slot }: { return Result.Ok { value: slot }; }
+    case Option.None: {}
+  }
+
+  const symId = lookupOwnName(cx.tm, expr.name);
+  if (symId == SYMBOL_NONE_ID) {
+    return Result.Err { error: comptimeError(
+      `"${expr.name}" is not a local or a module-level const, so it has no compile-time value`,
+      expr.sourceLoc
+    )};
+  }
+
+  switch (foldedValue(cx.folded, symId)) {
+    case Option.Some { value: v }: { return Result.Ok { value: cloneValue(cx.va, v) }; }
+    case Option.None: {}
+  }
+
+  switch (symbolAt(cx.prog, symId)) {
+    // An inlinable integer const carries its value in the symbol itself.
+    case Symbol.Value { typeId: t, intVal: v }: {
+      if (isIntPrimType(cx.prog, t)) {
+        return Result.Ok { value: intValue(cx.va, t, normalizeInt(cx.prog, t, uint64(v))) };
+      }
+      return Result.Err { error: comptimeError(
+        `the const "${expr.name}" is inlined as data rather than as a number, and the comptime evaluator cannot read it yet`,
+        expr.sourceLoc
+      )};
+    }
+    // A global's value is whatever the program has put there by the time the
+    // read runs, which at compile time is nothing.
+    default: {
+      return Result.Err { error: comptimeError(
+        `"${expr.name}" is not known at compile time`, expr.sourceLoc
+      )};
+    }
+  }
+}
+
+function evalUnary(ref cx: EvalCx, expr: ASTNode, exprId: NodeId): Result<ValueId, ComptimeError> {
+  const operand = evalExprValue(ref cx, expr.childA)?;
+  const slot = valueAt(cx.va, operand);
+  const ty = arithTypeOf(ref cx, slot.typeId, typeOfNode(ref cx, exprId));
+
+  if (expr.operator == TokenTags.BANG) {
+    if (slot.kind != ValueKind.BOOL) {
+      return unhandled("`!` on something that is not a bool", expr.sourceLoc);
+    }
+    return Result.Ok { value: boolValue(cx.va, ty, slot.bits == 0) };
+  }
+  if (slot.kind == ValueKind.FLOAT) {
+    const bits = floatUnary(cx.prog, ty, expr.operator, slot.bits, expr.sourceLoc)?;
+    return Result.Ok { value: floatValue(cx.va, ty, bits) };
+  }
+  if (slot.kind == ValueKind.INT) {
+    const bits = intUnary(cx.prog, ty, expr.operator, slot.bits, expr.sourceLoc)?;
+    return Result.Ok { value: intValue(cx.va, ty, bits) };
+  }
+  return unhandled("a unary operator on this kind of value", expr.sourceLoc);
+}
+
+function evalBinary(ref cx: EvalCx, expr: ASTNode, exprId: NodeId): Result<ValueId, ComptimeError> {
+  const ty = typeOfNode(ref cx, exprId);
+
+  // `&&` and `||` do NOT evaluate the right side unless they have to. Emitting
+  // them as a plain operation would be observable here for the same reason it
+  // is at run time - the right side may be the thing that divides by zero.
+  if (expr.operator == TokenTags.ANDAND || expr.operator == TokenTags.OROR) {
+    const left = valueAt(cx.va, evalExprValue(ref cx, expr.childA)?);
+    const leftTrue = left.bits != 0;
+    if (expr.operator == TokenTags.ANDAND && !leftTrue) {
+      return Result.Ok { value: boolValue(cx.va, ty, false) };
+    }
+    if (expr.operator == TokenTags.OROR && leftTrue) {
+      return Result.Ok { value: boolValue(cx.va, ty, true) };
+    }
+    const right = valueAt(cx.va, evalExprValue(ref cx, expr.childB)?);
+    return Result.Ok { value: boolValue(cx.va, ty, right.bits != 0) };
+  }
+
+  const lhs = valueAt(cx.va, evalExprValue(ref cx, expr.childA)?);
+  const rhs = valueAt(cx.va, evalExprValue(ref cx, expr.childB)?);
+
+  // The OPERAND type decides how the bits are read, and it is not the node's
+  // type: a comparison is a bool whose operands are int32s, and reading the
+  // operands at the result's width would be a different answer.
+  const operandTy = arithTypeOf(ref cx, lhs.typeId, typeOfNode(ref cx, expr.childA));
+  const resultTy = arithTypeOf(ref cx, lhs.typeId, ty);
+
+  if (isComparison(expr.operator)) {
+    // `==` and `!=` on two VARIANTS compare tags and nothing else: two Circles
+    // with different radii are equal, and a structural comparison is what
+    // `switch` is for. The reference's rule, and the emitted code's.
+    if (lhs.kind == ValueKind.VARIANT) {
+      if (expr.operator == TokenTags.EQEQ) {
+        return Result.Ok { value: boolValue(cx.va, ty, lhs.bits == rhs.bits) };
+      }
+      if (expr.operator == TokenTags.NEQ) {
+        return Result.Ok { value: boolValue(cx.va, ty, lhs.bits != rhs.bits) };
+      }
+      return unhandled("ordering two variants", expr.sourceLoc);
+    }
+    if (lhs.kind == ValueKind.FLOAT) {
+      const r = floatCompare(expr.operator, lhs.bits, rhs.bits, expr.sourceLoc)?;
+      return Result.Ok { value: boolValue(cx.va, ty, r) };
+    }
+    if (lhs.kind == ValueKind.STR) {
+      if (expr.operator == TokenTags.EQEQ) {
+        return Result.Ok { value: boolValue(cx.va, ty, str.stringEq(lhs.text, rhs.text)) };
+      }
+      if (expr.operator == TokenTags.NEQ) {
+        return Result.Ok { value: boolValue(cx.va, ty, !str.stringEq(lhs.text, rhs.text)) };
+      }
+      return unhandled("ordering two strings", expr.sourceLoc);
+    }
+    const r = intCompare(cx.prog, operandTy, expr.operator, lhs.bits, rhs.bits, expr.sourceLoc)?;
+    return Result.Ok { value: boolValue(cx.va, ty, r) };
+  }
+
+  if (lhs.kind == ValueKind.FLOAT) {
+    const bits = floatBinary(cx.prog, resultTy, expr.operator, lhs.bits, rhs.bits, expr.sourceLoc)?;
+    return Result.Ok { value: floatValue(cx.va, resultTy, bits) };
+  }
+  if (lhs.kind == ValueKind.INT) {
+    const bits = intBinary(cx.prog, resultTy, expr.operator, lhs.bits, rhs.bits, expr.sourceLoc)?;
+    return Result.Ok { value: intValue(cx.va, resultTy, bits) };
+  }
+  return unhandled("a binary operator on this kind of value", expr.sourceLoc);
+}
+
+// Which type an operation is performed AT.
+//
+// Normally the node's, which pass D resolved. Inside a GENERIC body it is a
+// type PARAMETER, and a parameter has no width - so the operand VALUE's own
+// type is preferred whenever it has one. That propagates concreteness inward
+// from the arguments, which is what monomorphization does for codegen and what
+// keeps `addT(a: uint8, b: uint8)` wrapping at eight bits here.
+//
+// Without it the arithmetic runs unmasked and the answer is only corrected by
+// whatever truncation happens downstream - which is right by accident, and
+// wrong the moment an intermediate result is read back.
+export function arithTypeOf(ref cx: EvalCx, valueTy: TypeId, nodeTy: TypeId): TypeId {
+  if (primBitWidth(cx.prog, valueTy) > 0) {
+    return valueTy;
+  }
+  return nodeTy;
+}
+
+export function isComparison(op: TokenTags): bool {
+  return op == TokenTags.EQEQ || op == TokenTags.NEQ || op == TokenTags.LT ||
+         op == TokenTags.LTE || op == TokenTags.GT || op == TokenTags.GTE;
+}
+
+// `[1, 2, 3]`. The elements are evaluated FIRST and collected, because building
+// one appends to the same child pool this array's run will occupy.
+function evalArrayLiteral(ref cx: EvalCx, expr: ASTNode, exprId: NodeId): Result<ValueId, ComptimeError> {
+  const ty = typeOfNode(ref cx, exprId);
+  disposable parts: Vec<ValueId> = vec.vecNew(4);
+  if (expr.childA != 0) {
+    const list = nodeAt(cx.ast, expr.childA);
+    let i: usize = 0;
+    while (i < list.childCount) {
+      vec.vecPush(ref parts, evalExprValue(ref cx, childAt(cx.ast, list, i))?);
+      i += 1;
+    }
+  }
+  return Result.Ok { value: aggregateValue(cx.va, ValueKind.ARRAY, ty, 0, ref parts) };
+}
+
+// `{ y: 4, x: 3 }`. The fields land in DECLARED order rather than in written
+// order, so the value has the same shape whichever way the literal was spelled
+// and a field read can index it positionally.
+function evalStructLiteral(ref cx: EvalCx, expr: ASTNode, exprId: NodeId): Result<ValueId, ComptimeError> {
+  const ty = typeOfNode(ref cx, exprId);
+  const count = structFieldCount(cx.prog, ty);
+  if (count == 0 && expr.childA != 0) {
+    return unhandled("a struct literal of a type with no fields", expr.sourceLoc);
+  }
+
+  // Seeded with zeros so a field the literal omits is still a slot, and filled
+  // by POSITION as each written field is matched to its declaration.
+  disposable parts: Vec<ValueId> = vec.vecNew(count);
+  let f: usize = 0;
+  while (f < count) {
+    vec.vecPush(ref parts, zeroOfType(ref cx, fieldTypeAtIndex(cx.prog, ty, f)));
+    f += 1;
+  }
+
+  // The written fields hang off childA as a NODE_LIST, the same way a call's
+  // arguments do; the node's own child run is empty.
+  if (expr.childA != 0) {
+    const list = nodeAt(cx.ast, expr.childA);
+    let i: usize = 0;
+    while (i < list.childCount) {
+      const fieldNode = nodeAt(cx.ast, childAt(cx.ast, list, i));
+      const found = lookupField(cx.prog, ty, fieldNode.name);
+      if (!found.found) {
+        return Result.Err { error: comptimeError(
+          `"${fieldNode.name}" is not a field of this struct`, fieldNode.sourceLoc
+        )};
+      }
+      vec.vecSet(ref parts, found.index, evalExprValue(ref cx, fieldNode.childA)?);
+      i += 1;
+    }
+  }
+  return Result.Ok { value: aggregateValue(cx.va, ValueKind.STRUCT, ty, 0, ref parts) };
+}
+
+// Five things wear this shape and pass D already decided which, so the ORDER
+// here mirrors codegen's exactly: an enum case (`Color.Red`), a struct field, a
+// payload-less variant constructor (`Shape.Empty`), a string's `.len`, and an
+// array's `.len`.
+//
+// The struct test has to come before the variant one. A field whose own type is
+// a variant makes `a.value` an expression of variant type, which is exactly
+// what a payload-less constructor looks like from here - and reading the whole
+// expression instead would fold `a.value` to case 0 with an empty payload,
+// silently. That mistake cost the reference implementation its third
+// self-compile stage; the comment in codegen/expr.yoop has the story.
+//
+// The first two forms are decided on the base's TYPE rather than on a value,
+// because their base is a TYPE NAME and there is nothing to evaluate.
+function evalFieldAccess(ref cx: EvalCx, expr: ASTNode, exprId: NodeId): Result<ValueId, ComptimeError> {
+  const baseTy = typeOfNode(ref cx, expr.childA);
+
+  if (isValueEnumType(cx.prog, baseTy)) {
+    return evalEnumCase(ref cx, expr.childA, expr, exprId);
+  }
+  if (isUnionType(cx.prog, derefType(cx.prog, baseTy))) {
+    return unhandled("a union field read", expr.sourceLoc);
+  }
+  if (!isStructType(cx.prog, derefType(cx.prog, baseTy)) &&
+      isVariantType(cx.prog, typeOfNode(ref cx, exprId))) {
+    return evalVariantConstructor(ref cx, expr, exprId);
+  }
+
+  const base = openBorrow(ref cx, evalExpr(ref cx, expr.childA)?);
+  const baseSlot = valueAt(cx.va, base);
+  const ty = typeOfNode(ref cx, exprId);
+
+  // A length is not a field: an array's length IS its child count and a
+  // string's is its bytes, so both answer from the slot rather than from a run.
+  if (baseSlot.kind == ValueKind.ARRAY && str.stringEq(expr.name, "len")) {
+    return Result.Ok { value: intValue(cx.va, ty, uint64(baseSlot.childCount)) };
+  }
+  if (baseSlot.kind == ValueKind.STR && str.stringEq(expr.name, "len")) {
+    return Result.Ok { value: intValue(cx.va, ty, uint64(baseSlot.text.len)) };
+  }
+  if (baseSlot.kind != ValueKind.STRUCT) {
+    return unhandled(`a "${expr.name}" read of this kind of value`, expr.sourceLoc);
+  }
+  const found = lookupField(cx.prog, derefType(cx.prog, baseSlot.typeId), expr.name);
+  if (!found.found || found.index >= baseSlot.childCount) {
+    return Result.Err { error: comptimeError(
+      `"${expr.name}" is not a field of this struct`, expr.sourceLoc
+    )};
+  }
+  return Result.Ok { value: childValueAt(cx.va, baseSlot, found.index) };
+}
+
+// `xs[i]`. An out-of-range index is a comptime ERROR rather than whatever byte
+// happens to be there, which is the one place this evaluator is stricter than
+// the program it is folding.
+function evalIndex(ref cx: EvalCx, expr: ASTNode, exprId: NodeId): Result<ValueId, ComptimeError> {
+  const base = openBorrow(ref cx, evalExpr(ref cx, expr.childA)?);
+  const baseSlot = valueAt(cx.va, base);
+  if (baseSlot.kind != ValueKind.ARRAY) {
+    return unhandled("an index of something that is not an array", expr.sourceLoc);
+  }
+  const idx = valueAt(cx.va, evalExprValue(ref cx, expr.childB)?);
+  if (idx.bits >= uint64(baseSlot.childCount)) {
+    return Result.Err { error: comptimeError(
+      `index ${idx.bits} is past the end of a ${baseSlot.childCount}-element array`,
+      expr.sourceLoc
+    )};
+  }
+  return Result.Ok { value: childValueAt(cx.va, baseSlot, usize(idx.bits)) };
+}
+
+// A zero of `ty`, for a struct field a literal left out. Only the scalar shapes
+// have an obvious zero; an aggregate one gets an empty slot, which is what a
+// zeroinitializer means for it too.
+export function zeroOfType(ref cx: EvalCx, ty: TypeId): ValueId {
+  if (isFloatPrimType(cx.prog, ty)) {
+    return floatValue(cx.va, ty, 0);
+  }
+  if (isStringPrimType(cx.prog, ty)) {
+    return strValue(cx.va, ty, "");
+  }
+  return intValue(cx.va, ty, 0);
+}
+
+// The type of a struct's i'th field. `lookupField` answers by NAME, and a
+// literal that leaves a field out needs the answer by POSITION.
+function fieldTypeAtIndex(ref prog: Program, structType: TypeId, i: usize): TypeId {
+  switch (typeAt(ref prog, structType)) {
+    case Type.Struct { decl: d, fields: f, methods: mm, implementsTraits: it, generic: g }: {
+      if (i >= f.len) {
+        return TYPE_ERROR_ID;
+      }
+      return vec.vecGet(ref f, i).typeId;
+    }
+    default: { return TYPE_ERROR_ID; }
+  }
+}
+
+export function zeroLoc(): SourceLocation {
+  return { pos: 0, line: 0, column: 0, length: 0 };
+}

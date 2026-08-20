@@ -1,7 +1,7 @@
 // Shared knowledge of how to invoke the host C toolchain.
 //
 // Three call sites shell out to clang - the user-facing driver
-// (src/yoopiler.js), the e2e suite (src/e2e.test.js) and the C runtime suite
+// the C runtime suite
 // (src/runtimeC.test.js) - and on Windows "invoke clang" is materially more
 // than the string "clang". Keeping that knowledge here is what stops the
 // tests from passing on a machine where the real driver fails, or vice versa.
@@ -152,20 +152,30 @@ export const EXE_SUFFIX = process.platform === "win32" ? ".exe" : "";
 // every platform has one. On Windows that is opengl32.lib (plus the entry
 // point loader in runtime/yoop_gl_win32.c, added by glueSourcesForLinkFlags -
 // opengl32.dll exports only GL 1.1, so the .lib alone links a fraction of the
-// API). Any other framework name still drops, since those really are Apple's.
+// API); on Linux it is libGL. Any other framework name still drops, since
+// those really are Apple's.
 //
 // Every other name lowers to `-lNAME`, which clang maps to `NAME.lib` when
 // driving the MSVC linker, so ordinary third-party libraries still work.
 const WINDOWS_IMPLICIT_LIBS = new Set(["m", "pthread"]);
-const WINDOWS_FRAMEWORK_EQUIVALENTS = new Map([["OpenGL", ["-lopengl32"]]]);
+
+// The non-Apple spelling of a framework, where the thing it names exists off
+// Apple at all. Keyed by framework name, then by `process.platform`; a name
+// absent from the table, or present without an entry for this platform, drops.
+//
+// Linux was missing from here until nebula_arena was built on one: OpenGL
+// silently contributed NOTHING to the link line, and the failure surfaced as
+// ~40 undefined references to glCreateShader and friends rather than as
+// anything naming OpenGL. macOS and Windows both resolved it, so the gap was
+// invisible on the two platforms this had been built on.
+const FRAMEWORK_EQUIVALENTS = new Map([
+  ["OpenGL", { win32: ["-lopengl32"], linux: ["-lGL"] }],
+]);
 export function lowerLinkFlag(name) {
   if (name.startsWith("framework:")) {
     const framework = name.slice("framework:".length);
     if (process.platform === "darwin") return ["-framework", framework];
-    if (process.platform === "win32") {
-      return WINDOWS_FRAMEWORK_EQUIVALENTS.get(framework) ?? [];
-    }
-    return [];
+    return FRAMEWORK_EQUIVALENTS.get(framework)?.[process.platform] ?? [];
   }
   if (process.platform === "win32" && WINDOWS_IMPLICIT_LIBS.has(name)) return [];
   // OpenSSL is two libraries and naming either one always means both: libssl
@@ -288,7 +298,7 @@ export function librarySearchArgs() {
 //   * A build failure is not swallowed. It throws, and the caller surfaces it
 //     exactly as a per-fixture compile failure would have.
 //
-// This is deliberately NOT used by the production driver (src/yoopiler.js): a
+// This is deliberately NOT used by the compiler itself: a
 // user compiles one program per invocation, so there is no second link to
 // amortize against, and a stale cache in a user's tree would be a real hazard.
 let cachedRuntimeObjects = null;
@@ -318,7 +328,11 @@ export function prebuiltRuntimeObjects(runtimeSources, extraArgs = []) {
       ...windowsClangArgs().filter((a) => a !== "-fuse-ld=link"), // compile-only
       ...extraArgs,
     ],
-    { stdio: "pipe", env: clangEnv(), cwd: dir },
+    // A deadline, because this is the one clang the test suites run
+    // synchronously, and a wedged one here would block a whole test file with
+    // no way out but killing it by hand. Five minutes is far past a cold compile
+    // of the runtime on any machine that can run the suite at all.
+    { stdio: "pipe", env: clangEnv(), cwd: dir, timeout: 300000, killSignal: "SIGKILL" },
   );
 
   const objects = fs

@@ -1,0 +1,171 @@
+module lsp;
+
+/*
+  The JSON-RPC messages this server sends, and nothing else.
+
+  Every builder here is split from its sender, so the exact bytes that go on
+  the wire can be asserted in a unit test without a pipe on either end. The
+  senders are three lines each and do the framing.
+
+  The `id` of a response is COPIED out of the request rather than read as an
+  integer: the protocol allows a string too, and a response whose id is not
+  identical to the request's is one the client discards.
+*/
+
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { Text }, * as text from "std/core/text.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import * as json from "modules/json";
+import { JsonDoc, JsonId } from "modules/json";
+
+// The JSON-RPC error codes this server produces. Two, because those are the
+// two things it ever refuses: a method it does not implement, and any request
+// that arrives before `initialize`.
+export const ERR_METHOD_NOT_FOUND: int64 = 0 - 32601;
+export const ERR_NOT_INITIALIZED: int64 = 0 - 32002;
+
+// `source` on every diagnostic, so an editor showing several servers at once
+// says which one complained.
+const DIAGNOSTIC_SOURCE: string = "yoopiler";
+
+// ----- envelopes -----------------------------------------------------------
+
+// `{"jsonrpc":"2.0","id":<the request's own id>}`, ready for a `result` or an
+// `error` to be attached.
+export function beginResponse(ref d: JsonDoc, ref req: JsonDoc, idNode: JsonId): JsonId {
+  const root = json.addObject(ref d);
+  json.objectSetString(ref d, root, "jsonrpc", "2.0");
+  const idCopy = json.copyValue(ref d, ref req, idNode);
+  json.objectSet(ref d, root, "id", idCopy);
+  return root;
+}
+
+// `{"jsonrpc":"2.0","method":<method>,"params":{}}`, with the params object's
+// id handed back so the caller can fill it.
+export function beginNotification(ref d: JsonDoc, method: string): JsonId {
+  const root = json.addObject(ref d);
+  json.objectSetString(ref d, root, "jsonrpc", "2.0");
+  json.objectSetString(ref d, root, "method", method);
+  const params = json.addObject(ref d);
+  json.objectSet(ref d, root, "params", params);
+  json.setRoot(ref d, root);
+  return params;
+}
+
+// ----- the messages --------------------------------------------------------
+
+/*
+  The `initialize` result.
+
+  It advertises exactly what is built: full-text sync, so the server is told
+  the whole document on every edit, and open/close and save notifications.
+  Nothing else - a capability announced and not implemented is a client waiting
+  on a reply that never comes.
+*/
+export function buildInitializeResponse(ref d: JsonDoc, ref req: JsonDoc, idNode: JsonId): JsonId {
+  const root = beginResponse(ref d, ref req, idNode);
+  const result = json.addObject(ref d);
+  const caps = json.addObject(ref d);
+
+  const sync = json.addObject(ref d);
+  json.objectSetBool(ref d, sync, "openClose", true);
+  // TextDocumentSyncKind.Full: the editor sends the whole document on every
+  // edit. Incremental sync would mean applying ranged edits to this server's
+  // own copy of the buffer, and nothing here does that.
+  json.objectSetInt(ref d, sync, "change", 1);
+  const save = json.addObject(ref d);
+  json.objectSetBool(ref d, save, "includeText", false);
+  json.objectSet(ref d, sync, "save", save);
+  json.objectSet(ref d, caps, "textDocumentSync", sync);
+
+  json.objectSet(ref d, result, "capabilities", caps);
+
+  const info = json.addObject(ref d);
+  json.objectSetString(ref d, info, "name", "yoopiler_boot");
+  json.objectSet(ref d, result, "serverInfo", info);
+
+  json.objectSet(ref d, root, "result", result);
+  json.setRoot(ref d, root);
+  return root;
+}
+
+// A response whose result is `null`, which is what `shutdown` answers.
+export function buildNullResponse(ref d: JsonDoc, ref req: JsonDoc, idNode: JsonId): JsonId {
+  const root = beginResponse(ref d, ref req, idNode);
+  const nul = json.addNull(ref d);
+  json.objectSet(ref d, root, "result", nul);
+  json.setRoot(ref d, root);
+  return root;
+}
+
+export function buildErrorResponse(
+  ref d: JsonDoc,
+  ref req: JsonDoc,
+  idNode: JsonId,
+  code: int64,
+  message: string
+): JsonId {
+  const root = beginResponse(ref d, ref req, idNode);
+  const err = json.addObject(ref d);
+  json.objectSetInt(ref d, err, "code", code);
+  json.objectSetString(ref d, err, "message", message);
+  json.objectSet(ref d, root, "error", err);
+  json.setRoot(ref d, root);
+  return root;
+}
+
+/*
+  `textDocument/publishDiagnostics`.
+
+  An EMPTY diagnostics array is a real message and not an omission: it is the
+  only way to clear squiggles the last compile put there, so this is sent after
+  every compile and after a `didClose`.
+*/
+export function buildPublishDiagnostics(
+  ref d: JsonDoc,
+  uri: string,
+  version: int64,
+  ref diags: Vec<LspDiagnostic>
+): JsonId {
+  const params = beginNotification(ref d, "textDocument/publishDiagnostics");
+  json.objectSetString(ref d, params, "uri", uri);
+  json.objectSetInt(ref d, params, "version", version);
+  const arr = json.addArray(ref d);
+  let i: usize = 0;
+  while (i < diags.len) {
+    const dg = vec.vecGet(ref diags, i);
+    const item = json.addObject(ref d);
+    const range = json.addObject(ref d);
+    json.objectSet(ref d, range, "start", buildPosition(ref d, dg.range.start));
+    json.objectSet(ref d, range, "end", buildPosition(ref d, dg.range.end));
+    json.objectSet(ref d, item, "range", range);
+    json.objectSetInt(ref d, item, "severity", dg.severity);
+    // Written only when the compiler gave one. Most diagnostics have no code,
+    // and an empty string reads in an editor as a code named "".
+    if (dg.code.len > 0) {
+      json.objectSetString(ref d, item, "code", dg.code);
+    }
+    json.objectSetString(ref d, item, "source", DIAGNOSTIC_SOURCE);
+    json.objectSetString(ref d, item, "message", dg.message);
+    json.arrayPush(ref d, arr, item);
+    i += 1;
+  }
+  json.objectSet(ref d, params, "diagnostics", arr);
+  return params;
+}
+
+function buildPosition(ref d: JsonDoc, p: Position): JsonId {
+  const o = json.addObject(ref d);
+  json.objectSetInt(ref d, o, "line", int64(p.line));
+  json.objectSetInt(ref d, o, "character", int64(p.character));
+  return o;
+}
+
+// ----- sending -------------------------------------------------------------
+
+// Serialize a built document and put it on stdout, framed. False means the
+// pipe is gone, which is the server's cue to stop.
+export function sendMessage(ref d: JsonDoc): bool {
+  disposable payload: Text = json.serializeDoc(ref d);
+  return writeFrame(STDOUT_FD, text.bytes(ref payload));
+}

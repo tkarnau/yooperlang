@@ -1,0 +1,9 @@
+simple  ok  "hello world"
+extras  ok  "abcdefghijklmnopqrstuvwxyz"
+many    ok  len=160
+badsize err 400 chunk size is not hexadecimal
+nocrlf  err 400 chunk data is not followed by CRLF
+both    err 400 message has both Transfer-Encoding and Content-Length
+request ok  "got:chunked-body!"
+done
+exit=0

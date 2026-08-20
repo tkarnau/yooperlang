@@ -2,9 +2,9 @@
 // std/http/server.yoop. Dispatches GET / HEAD / PUT / POST / DELETE against
 // the on-disk storage rooted at `rootDir`.
 //
-// Response bodies are owned now (yoopstore-papercut #6): the GET path reads
-// the file into a local Vec and *seals* it into the Response via
-// bytesFromVec (a zero-copy hand-off - papercut #5), so there is no
+// Response bodies are owned: the GET path reads the file into a local Vec
+// and *seals* it into the Response via bytesFromVec (a zero-copy
+// hand-off), so there is no
 // per-handler buffer to keep alive across the return and no copy. The
 // Response disposes the bytes itself. The handler therefore owns nothing and
 // doesn't need Disposable.
@@ -57,8 +57,8 @@ export type StorageHandler implements Handler {
                 return HandleOutcome.Ok;
             }
             case HttpMethod.Head: {
-                // HEAD: fill Content-Length from a stat (papercut #2's
-                // fileSize) without reading or sending the body.
+                // HEAD: fill Content-Length from a stat (storage.fileSize)
+                // without reading or sending the body.
                 let sz: int64 = storage.fileSize(full);
                 if (sz < 0) {
                     respondText(ref resp, http.notFound(), `not found: ${rel}\n`);

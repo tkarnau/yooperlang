@@ -1,4 +1,4 @@
-// Phase 8.F.1: exercise yoop_park_token_t round-trips.
+// Exercise yoop_park_token_t round-trips.
 //
 // Three cases:
 //   1. unpark-then-park (pending-wake path).

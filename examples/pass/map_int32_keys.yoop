@@ -1,4 +1,4 @@
-// Phase 10.X.2 follow-up: `Map<K, V>` keyed off int32, demonstrating
+// `Map<K, V>` keyed off int32, demonstrating
 // that the generic shape works for non-string K. Uses the pre-built
 // `map.int32KeyOps()` helper from std/collections/map.yoop.
 

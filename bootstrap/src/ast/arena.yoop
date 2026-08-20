@@ -102,6 +102,78 @@ export function declOf(ref ast: AST, id: NodeId): NodeId {
   }
 }
 
+// The ATTRIBUTE wrapping a top-level entry, by name, or "" when there is none.
+//
+// The twin of `declOf`, which walks past the wrapper to reach the decl. This
+// one asks what the wrapper WAS, which is the question `@precompile` makes
+// load-bearing: the same `const` means two different things depending on
+// whether an attribute stands above it.
+//
+// One level only, and past an `export`, because that is the one nesting the
+// parser produces: the attribute is written above the `export`, so ATTRIBUTE
+// wraps EXPORT_DECL wraps the decl.
+export function attributeNameOf(ref ast: AST, id: NodeId): string {
+  const node = nodeAt(ref ast, id);
+  if (node.kind == ASTNodeKind.ATTRIBUTE) {
+    return node.name;
+  }
+  return "";
+}
+
+// ----- writing into a built arena -------------------------------------------
+//
+// The parser builds the arena through ParserState; these are for the one pass
+// that writes into it AFTERWARDS. `@precompile` folds an initializer to a value
+// and puts a LITERAL back in its place, so every layer below it - inlinability,
+// const materialization, codegen - reads the answer the ordinary way and none
+// of them learns that comptime exists.
+//
+// The alternative was a side table of folded values threaded through three
+// layers, and a literal is what the fold produced anyway.
+
+export function appendNode(ref ast: AST, node: ASTNode): NodeId {
+  vec.vecPush(ref ast.nodes, node);
+  return ast.nodes.len - 1;
+}
+
+// Overwrite a node in place. Used to REPOINT a decl at its folded initializer;
+// nothing else in the compiler rewrites a node once it is built.
+export function replaceNode(ref ast: AST, id: NodeId, node: ASTNode): void {
+  vec.vecSet(ref ast.nodes, id, node);
+}
+
+// Point `node` at a run of children appended to the shared pool. The same
+// contract the parser's splice has: the ids are collected FIRST, because a
+// nested build appends to this pool too and a partial splice would interleave.
+export function appendChildRun(ref ast: AST, ref node: ASTNode, ref ids: Vec<NodeId>): void {
+  node.childStart = ast.childIds.len;
+  node.childCount = ids.len;
+  let i: usize = 0;
+  while (i < ids.len) {
+    vec.vecPush(ref ast.childIds, vec.vecGet(ref ids, i));
+    i += 1;
+  }
+}
+
+// A string into the arena's pool, returning the `strId` a literal node carries.
+export function appendString(ref ast: AST, s: string): usize {
+  vec.vecPush(ref ast.strings, s);
+  return ast.strings.len - 1;
+}
+
+// A PROGRAM node's `intVal` is the module FLAG WORD. `import.unsafe;` and
+// `import.test;` are module-level flags rather than imports - they bind no
+// name, so the PROGRAM node is the only place they can be recorded - and
+// `flagA` was already spoken for by the first of them. One bit each from here.
+export const PROGRAM_FLAG_TEST: uint64 = 1;
+
+// True when the file declared `import.test;`. A test module has no `main` of
+// its own on purpose: `--test` collects its suites and generates one. See
+// test_mode/.
+export function isTestModuleProgram(ref ast: AST, root: NodeId): bool {
+  return (nodeAt(ref ast, root).intVal & PROGRAM_FLAG_TEST) != 0;
+}
+
 // Whether a top-level child is exported, looking through an attribute - the
 // `export` sits under the `@derive`, so a naive test on the outer node says no
 // for every decorated declaration.

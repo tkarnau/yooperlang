@@ -6,9 +6,9 @@ but issues, questions, and patches are welcome.
 ## Ground rules
 
 This is a from-scratch compiler with no third-party dependencies. Please keep it
-that way for the JavaScript compiler itself - plain Node, no build tools, no npm
-packages. (Auxiliary tooling under `tools/` may have its own isolated
-dependencies.)
+that way: the compiler is Yooperlang plus its own standard library and C runtime,
+and the Node scripts around it use nothing but Node's own libraries. (Auxiliary
+tooling under `tools/` may have its own isolated dependencies.)
 
 A note on AI: the compiler code is intended to be written by hand, on purpose, so the author
 actually understands each piece. AI is used for planning and organizing, not for
@@ -24,52 +24,71 @@ Branches and idea builds are encouraged and using AI to get an idea moving to
 see the ergonomics of trying to write "working" code with that new feature is
 valuable. You can write tools as well, but please make sure there are some pass
 and/or fail example programs written to validate the compiler features being
-added. I don't care really how those are written in the JS side of the compiler,
-but eventually we need to write a yoop test harness for the bootstrap compiler.
-Keeping that in mind, we should stick to only testing with features that will
-eventually exist in the regular language. The default node testing library
-should be good enough.
+added. Every compiler change ships tests, and there are three levels to pick
+from: Yoop unit tests (`*.test.yoop` beside the module), the fixture suites
+under `bootstrap/tests/slice/`, `examples/pass/` and `examples/fail/`, and the
+three-stage self-hosting build. An `.expected` file is written by hand from what
+the program should do, never captured from what the compiler currently prints.
 
 ## Running the tests
 
 ```bash
-npm test          # everything (unit + end-to-end; needs clang)
-npm run test:unit # fast unit tests, no clang required
-npm run test:e2e  # full lex -> parse -> typecheck -> codegen -> clang -> run
+npm test          # every Node-driven suite: 460 tests, needs clang
+npm run test:unit # fast, no clang
+npm run test:e2e  # the suites that build and run programs, needs clang
 ```
 
-Tests use Node's built-in test runner (`node --test`) with `node:assert/strict`.
-Unit tests live next to the code they cover as `<file>.test.js`. The
-end-to-end suite is [src/e2e.test.js](src/e2e.test.js) - when in doubt about
-whether a change works for real, add a small fixture there.
+The compiler's own tests are written in Yooperlang and run by the compiler
+itself - 1390 of them, and the largest body of coverage in the tree:
 
-The `examples/pass/` and `examples/fail/` directories are also test material:
-programs that must compile, and programs that must be rejected, respectively.
+```bash
+YOOP_STD_ROOT=$PWD/std YOOP_RUNTIME_ROOT=$PWD/runtime \
+  $(node scripts/seed.mjs) --test bootstrap/src
+```
+
+The Node suites use Node's built-in test runner (`node --test`) and live in
+`src/`, which holds test harnesses and nothing else. Each drives the compiler
+over a corpus:
+
+- `npm run test:pass` - 247 tests: programs under `examples/pass/` and
+  `examples/tour/` compiled, run, and checked against a hand-written `.expected`
+- `npm run test:fail` - 77 tests: programs under `examples/fail/` that must be
+  REFUSED, checked against `.expected-errors`
+- `npm run test:slice` - 205 tests: the fixtures in `bootstrap/tests/slice/`,
+  taken all the way to an executable
+- `npm run test:selfhost` - 6 tests: the three-stage build and its fixpoint
+- `npm run test:debug` - 3 tests: the DWARF the compiler emits, read back by gdb
+  or lldb
+
+When in doubt about whether a change works for real, add a small program to one
+of those corpora with the output it should produce.
 
 ## The lay of the land
 
-The pipeline is: source `.yoop` -> lex -> parse -> typecheck -> codegen (LLVM IR)
--> clang -> executable. Each stage lives in its own subdirectory under `src/`:
+The compiler is written in Yooperlang and compiles itself. The pipeline is:
+source `.yoop` -> lex -> parse -> typecheck -> codegen (LLVM IR) -> clang ->
+executable, and each layer is a module directory under `bootstrap/src/`:
 
-- `src/jsyooplexer/` - lexing
-- `src/jsyooparser/` - parsing
-- `src/jsyooptypecheck/` - the type system
-- `src/jsyoopcodegen/` - LLVM IR emission
-- `src/jsyoopdriver/` - module graph and driver
-- `src/yoopiler.js` - the entry point
+- `bootstrap/src/lex/` - tokens and the lexer
+- `bootstrap/src/parse/` - recursive descent, one file per construct
+- `bootstrap/src/ast/` - the node arena
+- `bootstrap/src/source_graph/` - modules, imports, and finding the std root
+- `bootstrap/src/typecheck/` - the type system, kinds, async and tasks
+- `bootstrap/src/codegen/` - LLVM IR emission
+- `bootstrap/src/link/` - shelling out to clang
+- `bootstrap/src/main.yoop` - the driver
 
-For the full subsystem map, the cross-cutting invariants, and the design notes
-that are not obvious from any single file, read [CLAUDE.md](CLAUDE.md). It is the
-de facto architecture document for this repo.
+Outside that: `std/` is the standard library in Yooperlang, `runtime/` is the C
+runtime clang links in, and `src/` holds the Node test harnesses.
 
-## The phase model
+Building the compiler starts from a SEED, a previously released `yoopiler_boot`
+binary that [scripts/seed.mjs](scripts/seed.mjs) resolves and downloads;
+`YOOP_SEED` points at one you already have.
 
-Features land phase by phase. The current focus and the small consolidated plan
-live in [plans/](plans/); per-phase write-ups for shipped work are in
-[plans/completed/](plans/completed/), and the full historical roadmap is at
-[plans/archive/roadmap.md](plans/archive/roadmap.md). Code is annotated with phase comments
-(`// Phase 7.1:`, `// 6.5:`) marking the version a piece of logic became
-correct - treat those as load-bearing breadcrumbs.
+For the module map layer by layer, read [bootstrap/README.md](bootstrap/README.md).
+The other two docs worth knowing: [SPEC.md](SPEC.md) is the grammar and semantics
+authority, and [docs/writing_yoop.md](docs/writing_yoop.md) is how to write Yoop
+itself (std, the compiler, tools, examples).
 
 ## Reporting issues
 

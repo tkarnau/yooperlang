@@ -1,0 +1,104 @@
+module lsp;
+
+/*
+  THE ONE PLACE a compiler location becomes an editor location.
+
+  The two disagree in three ways, and every one of them puts the squiggle under
+  the wrong thing if it is handled anywhere else:
+
+    1. LSP counts lines from ZERO. So does `SourceLocation.line`, which is why
+       everything that PRINTS one writes `line + 1`.
+
+    2. LSP counts `character` in UTF-16 CODE UNITS, from zero, not in bytes and
+       not in codepoints. A line with an accented letter before the error is
+       one unit narrower than it is bytes wide; a line with an emoji is two
+       units for four bytes.
+
+    3. `SourceLocation.column` cannot be used at all. `posToSourceLocation`
+       computes it as `pos - lastNewLinePos` where `lastNewLinePos` is the
+       INDEX OF the newline, so it is 0-based on the first line of a file and
+       1-based on every line after it. That inconsistency is invisible in a
+       printed message and would be a one-column shift here on line 1 only.
+
+  So this file ignores `line` and `column` and recomputes both from `pos`
+  against the document's own bytes, which is the only input that can answer (2)
+  anyway. The walk is linear in the offset, which is fine for the handful of
+  diagnostics a file has and is the thing to replace first if it ever is not:
+  a single pass over the source building a line table would answer every
+  diagnostic in one scan.
+*/
+
+import * as text from "std/core/text.yoop";
+
+export type Position {
+  line: usize,
+  character: usize,
+}
+
+export type Range {
+  start: Position,
+  end: Position,
+}
+
+// The 0-based line and UTF-16 character of `byteOffset` in `src`.
+//
+// An offset past the end clamps to the end, because a diagnostic on a
+// truncated buffer is still a diagnostic somebody should see.
+export function positionOfByte(src: uint8[], byteOffset: usize): Position {
+  let limit: usize = byteOffset;
+  if (limit > src.len) {
+    limit = src.len;
+  }
+  let line: usize = 0;
+  let character: usize = 0;
+  let i: usize = 0;
+  while (i < limit) {
+    const b = src[i];
+    if (b == '\n') {
+      line += 1;
+      character = 0;
+      i += 1;
+    } else {
+      // A carriage return before a newline is part of the terminator and
+      // occupies no editor column, so it is skipped rather than counted.
+      if (b == '\r' && i + 1 < src.len && src[i + 1] == '\n') {
+        i += 1;
+      } else {
+        const width = text.seqLen(b);
+        if (width == 0) {
+          // Not a legal UTF-8 start byte. Step one byte and count one unit
+          // rather than stalling: the source is not valid UTF-8, and a
+          // position that is merely approximate beats a loop that never ends.
+          character += 1;
+          i += 1;
+        } else {
+          // A codepoint above the BMP is a surrogate PAIR in UTF-16, which is
+          // the whole reason this is not a codepoint count.
+          if (width == 4) {
+            character += 2;
+          } else {
+            character += 1;
+          }
+          i += width;
+        }
+      }
+    }
+  }
+  return { line: line, character: character };
+}
+
+// The span `[pos, pos + length)` as an editor range.
+//
+// A zero length becomes one byte wide, because a range whose start equals its
+// end renders as a caret with nothing under it in most editors and reads as a
+// missing squiggle rather than as a precise one.
+export function rangeOfSpan(src: uint8[], pos: usize, length: usize): Range {
+  let span: usize = length;
+  if (span == 0) {
+    span = 1;
+  }
+  return {
+    start: positionOfByte(src, pos),
+    end: positionOfByte(src, pos + span),
+  };
+}

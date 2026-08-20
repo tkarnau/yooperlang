@@ -1,0 +1,4 @@
+shout 3
+quiet
+a last line long enough that its length could not be mistaken for a zero
+exit=0

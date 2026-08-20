@@ -1,4 +1,4 @@
-// Yoopstore-papercut #4: bulk-fill a Vec from a raw array in one shot.
+// Bulk-fill a Vec from a raw array in one shot.
 // vecFromArray builds a fresh Vec copy; vecExtendFrom appends an array
 // growing the backing buffer at most once instead of O(log n) push reallocs.
 

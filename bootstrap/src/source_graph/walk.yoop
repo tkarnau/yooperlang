@@ -40,6 +40,11 @@ type Loader propagates<disposable> {
   byPath: Map<string, usize>,
   onStack: Map<string, bool>,
   stdRoot: string,
+  // The ENTRY's bytes, when the entry is synthetic. See
+  // `loadModuleGraphFromSource` - only the entry can come from memory, so this
+  // is read exactly once and then moved into the module it seeds.
+  entrySrc: Vec<uint8>,
+  entryFromSource: bool,
 }
 
 // A loaded module's index in `Loader.modules`, or the error that stopped us.
@@ -47,7 +52,7 @@ type LoadUnitResult = Result<usize, string>;
 
 // `stdRoot` is where `std/...` imports resolve. It is a PARAMETER rather than
 // something this layer discovers, so a caller that already knows its root (a
-// test pointing at a stub, and eventually the LSP) never touches the
+// test pointing at a stub, or an editor server) never touches the
 // filesystem probing in std_root.yoop. The driver discovers it and passes it.
 export function loadModuleGraph(entryPath: string, stdRoot: string): LoadGraphResult {
   if (!fs.exists(entryPath)) {
@@ -57,7 +62,41 @@ export function loadModuleGraph(entryPath: string, stdRoot: string): LoadGraphRe
   if (entryAbs.len == 0) {
     return LoadGraphResult.Err { error: `unable to identify a canonical path from ${entryPath}` };
   }
+  let noSource: Vec<uint8> = vec.vecNew(0);
+  return loadGraphFrom(entryAbs, entryPath, stdRoot, noSource, false);
+}
 
+/*
+  The same walk, with the ENTRY seeded from bytes instead of from a file.
+
+  `--test` generates its entry module and never writes it to disk (see
+  test_mode/entry.yoop for why that matters), so the loader needs one path in
+  that starts from source it was handed. It is deliberately not a general
+  "answer this path from memory" overlay: the generated entry is the only
+  synthetic file, nothing imports it, and everything IT imports is real - the
+  test files by absolute path and std/test.yoop through the std root. So one
+  seeded module and an ordinary walk out of it is the whole requirement.
+
+  `entryPath` is where the entry is REGISTERED. It is not opened, but it is what
+  the entry's own relative imports would resolve against and what a diagnostic
+  in the generated source names, so it has to be an absolute path in the
+  directory the run is rooted at.
+*/
+export function loadModuleGraphFromSource(
+  entrySource: Vec<uint8>,
+  entryPath: string,
+  stdRoot: string
+): LoadGraphResult {
+  return loadGraphFrom(entryPath, entryPath, stdRoot, entrySource, true);
+}
+
+function loadGraphFrom(
+  entryAbs: string,
+  blamePath: string,
+  stdRoot: string,
+  entrySrc: Vec<uint8>,
+  entryFromSource: bool
+): LoadGraphResult {
   // Annotated locals rather than inline construction: `V` is not inferable from
   // `stringKeyOps()` alone and there is no turbofish. The struct COPIES them,
   // which shares the storage - so `loader.byPath` is the one that gets disposed
@@ -69,6 +108,8 @@ export function loadModuleGraph(entryPath: string, stdRoot: string): LoadGraphRe
     byPath: byPath,
     onStack: onStack,
     stdRoot: stdRoot,
+    entrySrc: entrySrc,
+    entryFromSource: entryFromSource,
   };
 
   // The std autoloads go in BEFORE the entry, so they sit early in the
@@ -82,7 +123,7 @@ export function loadModuleGraph(entryPath: string, stdRoot: string): LoadGraphRe
     return LoadGraphResult.Err { error: autoErr };
   }
 
-  const loaded = loadUnit(ref loader, entryAbs, entryPath, true);
+  const loaded = loadUnit(ref loader, entryAbs, blamePath, true);
   // The scaffolding goes now, on both paths. `modules` does not: on success it
   // is MOVED into the graph (the one-owner discipline the rest of this module
   // follows), and on failure the compile ends in the next breath - see
@@ -151,7 +192,7 @@ function loadUnit(ref st: Loader, absPath: string, blamePath: string, isEntry: b
   map.mapInsert(ref st.onStack, absPath, true);
 
   let mod: Module;
-  switch (loadOwningModule(absPath, blamePath, isEntry)) {
+  switch (loadEntryOrOwningModule(ref st, absPath, blamePath, isEntry)) {
     case LoadModuleResult.Err { error: e }: { return Result.Err { error: e }; }
     case LoadModuleResult.Ok { value: m }: { mod = m; }
   }
@@ -184,6 +225,26 @@ function loadUnit(ref st: Loader, absPath: string, blamePath: string, isEntry: b
   map.mapInsert(ref st.byPath, absPath, index);
   vec.vecPush(ref st.modules, mod);
   return Result.Ok { value: index };
+}
+
+// The module a path names, or - for the ENTRY of a graph seeded from source -
+// the module those bytes are.
+//
+// The fork is here rather than inside `loadOwningModule` because it is a
+// property of THIS walk and not of the path: only the entry can be synthetic,
+// and everything below it is read off the filesystem exactly as always.
+function loadEntryOrOwningModule(
+  ref st: Loader,
+  absPath: string,
+  blamePath: string,
+  isEntry: bool
+): LoadModuleResult {
+  if (isEntry && st.entryFromSource) {
+    // The id is stamped by the caller once the module's position is known, the
+    // same as every other module's.
+    return moduleFromSource("", absPath, st.entrySrc);
+  }
+  return loadOwningModule(absPath, blamePath, isEntry);
 }
 
 // What the module's id is derived from: the DIRECTORY for a directory module,
@@ -290,12 +351,6 @@ function resolveImportTarget(
   sourcePath: string,
   stdRoot: string
 ): Result<string, string> {
-  if (str.stringStartsWith(sourcePath, "modules/")) {
-    return Result.Err {
-      error: `import "${sourcePath}" from ${importerAbsPath}: the modules/ import root is not supported by the bootstrap compiler yet`
-    };
-  }
-
   // A std import that cannot resolve is usually a broken INSTALL rather than a
   // typo, so it gets the message that says which root was searched. Checked
   // before resolving so the answer does not depend on why the path failed.

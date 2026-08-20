@@ -1,0 +1,15 @@
+get  served=1 bytes=110
+get  status=HTTP/1.1 200 OK
+get  body=path:/hello
+post served=1 bytes=109
+post status=HTTP/1.1 200 OK
+post body=echo:hullo
+chunk served=1 bytes=109
+chunk status=HTTP/1.1 200 OK
+chunk body=echo:abcde
+bad  served=1 bytes=148
+bad  status=HTTP/1.1 400 Bad Request
+bad  body=400 Bad Request: header line has no ":"
+
+done
+exit=0
