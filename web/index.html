@@ -49,12 +49,11 @@
     <div>
       <h1>A small systems language with a TypeScript feel.</h1>
       <p class="lede">
-        Yooperlang started as one idea I wanted to try: put more context about how a value
-        is <em>used</em> into the code itself, and see whether that makes systems programming
-        easier to follow coming from the garbage collected web world. That context is the
-        <code>kind</code> layer. Everything around it is a deliberately small language:
-        structs plus free functions, traits, no GC, LLVM IR out and a native binary from
-        <code>clang</code>.
+        One idea I wanted to try: put how a value is <em>used</em> into the code itself,
+        and see whether that makes systems programming easier to follow coming from the
+        garbage collected web world. That part is the <code>kind</code> layer. The rest is
+        a deliberately small language: structs plus free functions, traits, no GC, LLVM IR
+        out and a native binary from <code>clang</code>.
       </p>
       <p class="hero-actions">
         <a href="tour.html">Take the tour</a>
@@ -210,16 +209,17 @@ function main(): int32 {
     <div class="section-head">
       <h2>Where it actually stands</h2>
       <p class="lede">
-        A personal project by someone who is not a compiler engineer, so here is the state of it
+        A personal project by someone who is not a compiler engineer, so here it is
         without a coat of paint.
       </p>
     </div>
     <dl class="defs">
       <dt>self hosting</dt>
       <dd>
-        The compiler is written in Yoop and is the only compiler for the language. It builds
-        itself, and the release refuses to package unless stage2 and stage3 come out
-        byte-identical.
+        The compiler is written in Yoop and is the only compiler for the language, so
+        nothing here can be checked against a second opinion. It builds itself, and the
+        release refuses to package unless stage2 and stage3 come out identical. That
+        check is doing a lot of load bearing.
       </dd>
 
       <dt>what works</dt>
@@ -271,13 +271,16 @@ function main(): int32 {
 <pre data-file="terminal"><code class="shell">git clone https://github.com/tkarnau/yooperlang.git
 cd yooperlang
 
-YOOP_STD_ROOT=$PWD/std YOOP_RUNTIME_ROOT=$PWD/runtime \
-  $(node scripts/seed.mjs) examples/tour/hello.yoop -o /tmp/hello
+export YOOP_STD_ROOT=$PWD/std YOOP_RUNTIME_ROOT=$PWD/runtime
+$(node scripts/seed.mjs) examples/tour/hello.yoop -o /tmp/hello
 /tmp/hello</code></pre>
     <p class="muted small">
-      Needs <code>clang</code> on your PATH, plus Node 22 or newer to run the script that fetches
-      the seed compiler. The compiler is written in Yoop, so a build starts from a previously
-      released binary; <code>scripts/seed.mjs</code> downloads one on first use.
+      Needs <code>clang</code> on your PATH, plus Node 22 or newer for the script that
+      fetches the seed. The compiler is written in Yoop, so a build has to start from a
+      compiler that already exists; <code>scripts/seed.mjs</code> downloads one on first
+      use. The chain had to start somewhere, and it started with a compiler I wrote in
+      JavaScript, which is no longer in the tree but is still in the history, which is
+      how the macOS build got made.
     </p>
   </div>
 </section>

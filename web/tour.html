@@ -82,27 +82,33 @@
       <section>
         <h2 id="install">Get the compiler</h2>
         <p>
-          Grab the release, unpack it, and check that you have <code>clang</code>. The compiler
-          emits LLVM IR and shells out to clang to link, so clang is not optional and is not
-          in the box.
+          Grab the release, unpack it, and check that you have <code>clang</code>. The
+          compiler emits LLVM IR and hands it to clang to link, so clang does the last
+          mile and you have to supply it.
         </p>
-<pre data-file="terminal"><code class="shell">curl -LO https://github.com/tkarnau/yooperlang/releases/download/v0.1.0/yoopiler-boot-0.1.0-linux-x64.tar.gz
-tar xzf yoopiler-boot-0.1.0-linux-x64.tar.gz
-cd yoopiler-boot-0.1.0-linux-x64
+<pre data-file="terminal"><code class="shell">V=0.2.0
+P=darwin-arm64        # or linux-x64
 
-clang --version                # you need this
-./bin/yoopiler_boot            # prints its usage</code></pre>
+curl -LO https://github.com/tkarnau/yooperlang/releases/download/v$V/yoopiler-boot-$V-$P.tar.gz
+tar xzf yoopiler-boot-$V-$P.tar.gz
+cd yoopiler-boot-$V-$P
+
+xattr -dr com.apple.quarantine .   # macOS only, it is not notarized
+clang --version                    # you need this, it is not in the box
+./bin/yoopiler_boot                # prints its usage</code></pre>
         <p class="muted small">
-          Linux x64 only. If you have a checkout instead, build the compiler from
-          <code>bootstrap/src/main.yoop</code> and it does the same job.
+          macOS on Apple Silicon and Linux x64 have archives. Windows builds from a
+          checkout but nobody has packaged one. If you have a checkout, building
+          <code>bootstrap/src/main.yoop</code> does the same job.
         </p>
         <div class="callout">
           <div class="callout-title">what you just downloaded</div>
           <p>
-            The compiler for Yooperlang, written in Yooperlang, compiled by itself. The binary
-            was built by a compiler built by a compiler built from the same source, and the
-            last two came out byte-identical. It handles the subset the compiler itself is
-            written in, which is most of the language but not all of it.
+            The compiler for Yooperlang, written in Yooperlang, compiled by itself. It was
+            built by a compiler built by a compiler built from the same source, and the last
+            two came out identical, which is most of the reason I trust it at all. It handles
+            the subset the compiler itself is written in, which is most of the language but
+            not all of it.
           </p>
         </div>
       </section>
@@ -180,11 +186,10 @@ echo $?</code></pre>
         </p>
         <p>
           Calls are trait-qualified, <code>Greeter.greet(ref g)</code> rather than
-          <code>g.greet()</code>. That looks verbose for about five minutes, and then you
-          notice that two traits on one type can both have a <code>greet</code> with no
-          ambiguity and no resolution order to learn. Generics monomorphize against the bound,
-          so <code>announce</code> becomes one machine function per type you actually call it
-          with.
+          <code>g.greet()</code>. It is more typing. What you get for it is that two traits
+          on one type can both have a <code>greet</code> with no ambiguity and no resolution
+          order to learn. Generics monomorphize against the bound, so <code>announce</code>
+          becomes one machine function per type you actually call it with.
         </p>
         <div data-episode="traits"></div>
       </section>
