@@ -1,0 +1,198 @@
+module json;
+
+/*
+  A JsonDoc back out as bytes.
+
+  Compact - no spaces, no newlines - because everything this writes goes down a
+  pipe to a program, and the one thing that reads it byte-for-byte is a test.
+
+  The escape set is the one the spec REQUIRES: the quote, the backslash, and
+  every control character below 0x20. Anything at or above 0x20 is passed
+  through as its own bytes, which is correct for UTF-8. Note `/` is NOT escaped:
+  it is legal to escape and legal not to, and a document full of `file:\/\/\/`
+  is only harder to read.
+
+  bootstrap/src/ast/dump_json.yoop escapes by the same rules and deliberately
+  does NOT call this: it is a STREAMING emitter that walks an AST arena and
+  writes as it goes, so routing it through here would mean building a second
+  arena holding the whole tree in order to print it once, and it would put a
+  `modules/` dependency underneath the compiler's own `ast` layer.
+*/
+
+import { Text }, * as text from "std/core/text.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import * as intr from "std/core/intrinsics.yoop";
+
+// A hand-built document can be made cyclic (link a node under itself), and a
+// serializer that trusted it would write forever. Same bound the parser uses.
+const MAX_SERIALIZE_DEPTH: usize = 128;
+
+// The document's root, as bytes.
+export function serializeDoc(ref d: JsonDoc): Text propagates<disposable> {
+  return serialize(ref d, d.root);
+}
+
+export function serialize(ref d: JsonDoc, id: JsonId): Text propagates<disposable> {
+  let out: Text = text.make(256);
+  pushValue(ref out, ref d, id);
+  return out;
+}
+
+// One value and everything under it, appended to `out`.
+export function pushValue(ref out: Text, ref d: JsonDoc, id: JsonId): void {
+  pushValueAt(ref out, ref d, id, 0);
+}
+
+function pushValueAt(ref out: Text, ref d: JsonDoc, id: JsonId, depth: usize): void {
+  if (depth >= MAX_SERIALIZE_DEPTH) {
+    text.push(ref out, "null");
+    return;
+  }
+  const n = nodeAt(ref d, id);
+  switch (n.kind) {
+    case JsonKind.NULL: {
+      text.push(ref out, "null");
+    }
+    case JsonKind.BOOL: {
+      if (n.boolVal) {
+        text.push(ref out, "true");
+      } else {
+        text.push(ref out, "false");
+      }
+    }
+    case JsonKind.NUMBER: {
+      pushNumber(ref out, n);
+    }
+    case JsonKind.STRING: {
+      // Written from the BYTES, so a nul inside the value survives the trip
+      // out the same way it survived the trip in.
+      pushJsonBytes(ref out, asBytes(ref d, id));
+    }
+    case JsonKind.ARRAY: {
+      text.pushByte(ref out, '[');
+      let cur: JsonId = n.firstChild;
+      let wrote: usize = 0;
+      while (cur != 0) {
+        if (wrote > 0) {
+          text.pushByte(ref out, ',');
+        }
+        pushValueAt(ref out, ref d, cur, depth + 1);
+        wrote += 1;
+        cur = nextSibling(ref d, cur);
+      }
+      text.pushByte(ref out, ']');
+    }
+    case JsonKind.OBJECT: {
+      text.pushByte(ref out, '{');
+      let cur: JsonId = n.firstChild;
+      let wrote: usize = 0;
+      while (cur != 0) {
+        if (wrote > 0) {
+          text.pushByte(ref out, ',');
+        }
+        pushJsonString(ref out, keyOf(ref d, cur));
+        text.pushByte(ref out, ':');
+        pushValueAt(ref out, ref d, cur, depth + 1);
+        wrote += 1;
+        cur = nextSibling(ref d, cur);
+      }
+      text.pushByte(ref out, '}');
+    }
+  }
+}
+
+// An integer goes out through `pushUint` / `pushInt`, which format digits
+// straight into the buffer and allocate nothing. A float goes through the
+// runtime's compact `%g`, which is the only formatter in the tree that can
+// render one.
+function pushNumber(ref out: Text, n: JsonNode): void {
+  if (n.isInt) {
+    text.pushInt(ref out, n.intVal);
+    return;
+  }
+  if (!isFiniteFloat(n.floatVal)) {
+    // JSON has no NaN and no infinity. `null` is what every mainstream writer
+    // substitutes, and it keeps the output PARSEABLE, which a bare `nan` would
+    // not.
+    text.push(ref out, "null");
+    return;
+  }
+  text.push(ref out, fmtFloat(n.floatVal));
+}
+
+// NaN is the value that is not equal to itself. Infinity is the value HALVING
+// does not change - which is the test rather than a comparison against the
+// largest finite float64, because no decimal literal in this language can spell
+// that number (the lexer decodes scales from 10^-22 to 10^22 and refuses wider
+// ones rather than rounding them wrong).
+function isFiniteFloat(x: float64): bool {
+  if (x != x) {
+    return false;
+  }
+  if (x == 0.0) {
+    return true;
+  }
+  return x * 0.5 != x;
+}
+
+extern "C" from "yoop_runtime" {
+  function yoop_float_to_string(x: float64): string;
+}
+
+function fmtFloat(x: float64): string {
+  return yoop_float_to_string(x);
+}
+
+// A quoted, escaped JSON string. Exported because the LSP's header writer and
+// anything else assembling a fragment by hand needs the same escaping.
+export function pushJsonString(ref out: Text, s: string): void {
+  text.pushByte(ref out, '"');
+  pushEscaped(ref out, intr.stringAsBytes(s));
+  text.pushByte(ref out, '"');
+}
+
+export function pushJsonBytes(ref out: Text, src: uint8[]): void {
+  text.pushByte(ref out, '"');
+  pushEscaped(ref out, src);
+  text.pushByte(ref out, '"');
+}
+
+function pushEscaped(ref out: Text, src: uint8[]): void {
+  let i: usize = 0;
+  while (i < src.len) {
+    const b = src[i];
+    if (b == '"') {
+      text.push(ref out, "\\\"");
+    } else if (b == '\\') {
+      text.push(ref out, "\\\\");
+    } else if (b == '\n') {
+      text.push(ref out, "\\n");
+    } else if (b == '\r') {
+      text.push(ref out, "\\r");
+    } else if (b == '\t') {
+      text.push(ref out, "\\t");
+    } else if (b == 8) {
+      text.push(ref out, "\\b");
+    } else if (b == 12) {
+      text.push(ref out, "\\f");
+    } else if (b < 32) {
+      // The remaining controls have no short escape, so they go out as \u00XX.
+      text.push(ref out, "\\u00");
+      pushHexDigit(ref out, b >> 4);
+      pushHexDigit(ref out, b & 15);
+    } else {
+      text.pushByte(ref out, b);
+    }
+    i += 1;
+  }
+}
+
+function pushHexDigit(ref out: Text, v: uint8): void {
+  const ZERO: uint8 = 48;     // '0'
+  const LOWER_A: uint8 = 97;  // 'a'
+  if (v < 10) {
+    text.pushByte(ref out, ZERO + v);
+  } else {
+    text.pushByte(ref out, LOWER_A + (v - 10));
+  }
+}

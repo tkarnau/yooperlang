@@ -11,7 +11,7 @@ Linux.
 ## Run it
 
 ```
-yoopiler examples/playground/todo_api/main.yoop -o todo_api
+yoopiler_boot examples/playground/todo_api/main.yoop -o todo_api
 ./todo_api
 ```
 

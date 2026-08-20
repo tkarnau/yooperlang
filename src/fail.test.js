@@ -50,6 +50,7 @@ import path from "path";
 import os from "os";
 
 import { runProc, runProcOrThrow } from "./testProc.js";
+import { seedCompiler, seedEnv } from "../scripts/seed.mjs";
 
 const REPO = path.resolve(import.meta.dirname, "..");
 const FAIL = path.join(REPO, "examples/fail");
@@ -105,9 +106,9 @@ describe("diagnostics: the bootstrap compiler refuses the programs in examples/f
     }
     boot = path.join(work, "yoopiler_boot");
     await runProcOrThrow(
-      "node",
-      [path.join(REPO, "src/yoopiler.js"), BOOT_SRC, "-o", boot],
-      { cwd: REPO, timeout: BUILD_TIMEOUT_MS },
+      seedCompiler(),
+      [BOOT_SRC, "-o", boot],
+      { cwd: REPO, env: seedEnv(), timeout: BUILD_TIMEOUT_MS },
     );
   });
 

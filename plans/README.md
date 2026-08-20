@@ -10,9 +10,9 @@ the document goes.
 Style: ASCII only, no em-dashes, no curly quotes, no fancy markdown tables.
 
 For how to write Yoop, read [../docs/writing_yoop.md](../docs/writing_yoop.md).
-For compiler internals, read
+For the runtime and the cross-cutting invariants, read
 [../docs/compiler_internals.md](../docs/compiler_internals.md). For the
-language itself, read [../SPEC.md](../SPEC.md). For the self-hosted compiler,
-read [../bootstrap/README.md](../bootstrap/README.md).
+language itself, read [../SPEC.md](../SPEC.md). For the compiler, read
+[../bootstrap/README.md](../bootstrap/README.md).
 
-Nothing is in flight right now.
+In flight: [removing_node.md](removing_node.md).

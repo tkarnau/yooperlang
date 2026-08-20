@@ -1,13 +1,22 @@
 # Yooperlang - Claude working notes
 
-A JS-implemented compiler for the Yooperlang language. Emits LLVM IR text, shells
-out to `clang` to link and produce an executable.
-
-The compiler is also written in Yoop, in `bootstrap/`, and compiles itself. The
-JS implementation is the reference the Yoop one is checked against.
+The compiler for the Yooperlang language. It is written in Yoop, lives in
+`bootstrap/`, and compiles itself. It emits LLVM IR text and shells out to
+`clang` to link and produce an executable. The driver binary is `yoopiler_boot`.
 
 Pipeline: source `.yoop` -> **lex** -> **parse** -> **typecheck** -> **codegen**
 (LLVM IR) -> `clang` -> executable.
+
+**A build starts from a SEED.** The compiler compiles itself, so building it
+needs a Yoop compiler that already exists: a previously released
+`yoopiler_boot` binary, resolved by [scripts/seed.mjs](scripts/seed.mjs).
+`node scripts/seed.mjs` prints its path and downloads it on first use (through
+`gh`) into the gitignored `.seed/` cache. `YOOP_SEED=/path/to/yoopiler_boot`
+overrides it, which is how you build against a stage you just produced. The
+release that can compile THIS tree is pinned as `SEED_TAG` in that file; raising
+it is a deliberate edit, and the change that raises it is the one that has to
+prove the new seed builds the tree. Read that file's header before doing
+anything with the build.
 
 IMPORTANT: even in Auto mode, do not spend a lot of time on assumptions! Stop and
 ask for clarification early on contradictions or when spinning wheels on tooling
@@ -29,10 +38,18 @@ below, and you usually need exactly one of them.
   `string` vs `Text`, arenas and the allocator context, errors, async coloring,
   modules, and the test harness. **That doc is the authority on how to write
   Yoop today**; where an older example disagrees with it, the example is wrong.
-- **Editing the JS compiler** (`src/`, `runtime/`):
-  [docs/compiler_internals.md](docs/compiler_internals.md). Subsystem map, pass
-  ordering, codegen and runtime invariants, packaging, the `--test` driver flow.
+- **The C runtime, the concurrency ABI, and the invariants that cross layers**
+  (`runtime/`, and the harnesses in `src/`):
+  [docs/compiler_internals.md](docs/compiler_internals.md). The runtime and its
+  ABI, the packaged layout, std internals, the pipeline's layer contracts, the
+  `--test` harness, and the cross-cutting rules that are not obvious from any
+  one file. `src/` holds no compiler: it is the Node test harnesses and the
+  clang/runtime helpers they share.
 - **Language reference**: [SPEC.md](SPEC.md). Grammar and semantics.
+- **Modules outside std** (`modules/`): [modules/README.md](modules/README.md).
+  Opt-in Yoop modules the project maintains and ships but does not force on
+  every program. The compiler is allowed to depend on one, and does:
+  `modules/json` is what the language server reads and writes.
 - **Working on the bootstrap compiler** (`bootstrap/`):
   [bootstrap/README.md](bootstrap/README.md). Module map, the language subset it
   compiles today, and how to run it. **Every bootstrap change ships tests** - see
@@ -83,34 +100,42 @@ with the measurements, in
 - Value-`enum` cases and module-level `const`s: `SCREAMING_SNAKE`.
 - Never `snake_case` for an identifier. Two carve-outs, both "mirror C exactly":
   `extern "C"` symbol names, and structs mirroring a C ABI struct.
-- The JS reference impl uses ordinary JS conventions; only the file/directory
-  rule applies to it.
+- The Node test harnesses in `src/` and `scripts/` use ordinary JS conventions;
+  only the file/directory rule applies to them.
 
 **The bootstrap carries its own regression tests, and every change adds to
-them.** The JS compiler is going to be retired, and when it is, the bootstrap's
-tests are the only thing left standing between a change and a silent regression.
-So they must never be *derived from* the JS compiler - it is only the thing that
-currently RUNS them. Three levels, and a change picks whichever fits:
+them.** They are the only thing standing between a change and a silent
+regression. There is one compiler, so a test can only ever be an assertion about
+what a program SHOULD do; nothing in the tree can be checked against a second
+opinion. Three levels, and a change picks whichever fits:
 
 - **Yoop unit tests** - `*.test.yoop` beside the module, run with
-  `node src/yoopiler.js --test bootstrap/src/<module>`. For anything checkable
-  without producing a binary (token values, pass A bindings, diagnostics).
+  `$(node scripts/seed.mjs) --test bootstrap/src/<module>`. For anything
+  checkable without producing a binary (token values, pass A bindings,
+  diagnostics). This is the largest body of coverage in the tree.
 - **Slice fixtures** - a program in [bootstrap/tests/slice/](bootstrap/tests/slice/)
-  plus a `.expected` file, run by `npm run test:slice`. For anything that has to
-  reach an executable. The `.expected` is the source of truth and is asserted
-  against the BOOTSTRAP; the JS compiler is checked against the same file as a
-  parity bonus, so retiring it deletes an assertion rather than the test.
-- **Parity corpus** - [bootstrap/tests/parity/](bootstrap/tests/parity/), run by
-  `npm run test:parity`. Layer-boundary dumps diffed against the JS reference.
-  This one DOES retire with the JS side, by design.
+  plus a `.expected` file holding its stdout and then `exit=N`, run by
+  `npm run test:slice`. For anything that has to reach an executable.
+- **The program and diagnostic corpora** - a program under `examples/pass/` or
+  `examples/tour/` with a hand-written `.expected` (`npm run test:pass`), or an
+  illegal program under `examples/fail/` with a hand-written `.expected-errors`
+  (`npm run test:fail`). For a change that shows up in what a whole program
+  prints, or in what the compiler refuses.
 
-Yes, it is odd to lean on the compiler under test. That is why the levels are
-split: a slice fixture's `.expected` is written by hand from what the program
-should do, never captured from whatever the compiler currently emits.
+**NEVER CAPTURE AN EXPECTATION FROM COMPILER OUTPUT.** Write it from what the
+program should do, by reading the program. A captured file asserts that today's
+behaviour equals today's behaviour, which is not an assertion, and it silently
+blesses whatever bug is being captured. That rule is the whole reason the corpora
+are worth having: 243 independently derived expectations found no miscompile,
+and a captured corpus would have reported that by construction. A program whose
+output is not determined by the program gets a `<name>.nondeterministic` marker
+saying why, and "it looked stable over a few runs" is not a reason: two of the
+six exclusions there passed until they were stress-tested under load.
 
 **[examples/playground/](examples/playground/) is not a test surface** and does
-not have to be kept compiling. Nothing under it is covered by e2e (only
-[examples/pass/](examples/pass/) and [examples/testing/](examples/testing/) are).
+not have to be kept compiling. Nothing under it is covered by the suites (only
+[examples/pass/](examples/pass/), [examples/tour/](examples/tour/),
+[examples/fail/](examples/fail/) and [examples/testing/](examples/testing/) are).
 Do not treat a stale program there as a regression, and do not let one expand the
 change in front of you. Do reach for one when it is genuinely the best available
 check on a change, and say so when you do.
@@ -119,106 +144,130 @@ check on a change, and say so when you do.
 
 ## Run / test
 
-- `npm test` - all tests (unit + e2e). Currently 1627 tests, ~55s.
-- `npm run test:unit` - fast, no clang.
-- `npm run test:e2e` - full pipeline, requires `clang` on PATH.
-- `npm run test:pass` - the PROGRAM corpus: every example under
+- `npm test` - every Node-driven suite. 464 tests, about two minutes. Needs
+  `clang` and a seed.
+- `npm run test:unit` - fast, no clang: the C runtime's own tests and the std
+  index check.
+- `npm run test:e2e` - the five suites that build and run real programs
+  (`slice`, `pass`, `fail`, `selfhost`, `lsp`). Requires `clang` on PATH.
+- `npm run test:pass` - the PROGRAM corpus, 247 tests: every example under
   `examples/pass/` and `examples/tour/` built and run with the bootstrap and
   checked against a hand-written `.expected` beside it (stdout, then `exit=N`).
-  This is the absolute twin of `scripts/probe_programs.sh`, which only ever said
-  the two compilers AGREE. **Never capture a `.expected` from compiler output** -
-  write it from what the program should do. A program whose output is not
-  determined by the program gets a `<name>.nondeterministic` marker saying why,
-  and "it looked stable over a few runs" is not a reason: two of the six
-  exclusions there passed until they were stress-tested under load.
+  This is what says whether a program WORKS, and it is the only thing in the
+  tree that can catch a MISCOMPILE. It can do that only because the
+  expectations were derived by READING each program - see the rule above.
+- `npm run test:fail` - the DIAGNOSTIC corpus, 77 tests: every fixture under
+  `examples/fail/` carrying a hand-written `.expected-errors`, each line of
+  which is a `<line>:<column>: <substring>` the compiler has to report.
+- `npm run test:lsp` - the language server, driven over a real pipe the way an
+  editor drives it. Everything BELOW the protocol is covered by Yoop unit tests
+  in `bootstrap/src/lsp/`; this is the only thing that says a spawned
+  `yoopiler_boot --lsp` and an editor can actually talk.
 - **If the machine feels slow after a day of suite runs, look for ORPHANS before
   rebooting:**
 
-      ps -eo pid,ppid,pcpu,etime,args | awk '$2==1 && $3>5 && /clang|yoopiler|dump_tokens|yoop[-_]|stage[0-9]|\/prog$|_bs$|_js$/'
+      ps -eo pid,ppid,pcpu,etime,args | awk '$2==1 && $3>5 && /clang|yoopiler|dump_tokens|yoop[-_]|stage[0-9]|\/prog$|_bs$/'
 
-  A `ppid` of 1 means the parent is gone. Every child the suites and the probes
-  start now goes through [src/testProc.js](src/testProc.js), carries a deadline,
-  and is killed as a TREE, so this should stay empty; anything in it is a bug
-  there or in the probes' `limit_run`. Deliberately, none of those children are
+  A `ppid` of 1 means the parent is gone. Every child the suites and the probe
+  start goes through [src/testProc.js](src/testProc.js), carries a deadline, and
+  is killed as a TREE, so this should stay empty; anything in it is a bug there
+  or in the probe's `limit_run`. Deliberately, none of those children are
   `detached` - a detached child SURVIVES the group kill a Ctrl-C or a tool
   timeout sends, which is the opposite of what is wanted. Deadlines are
-  overridable per suite (`YOOP_SLICE_RUN_TIMEOUT_MS`, `YOOP_E2E_RUN_TIMEOUT_MS`,
-  `YOOP_E2E_CLANG_TIMEOUT_MS`, `YOOP_PARITY_DUMP_TIMEOUT_MS`,
-  `YOOP_SELFHOST_TIMEOUT_MS`, `YOOP_PROBE_COMPILE_LIMIT`, `YOOP_PROBE_RUN_LIMIT`).
-- **The `dwarf:` e2e tests need macOS to have authorized DEBUGGING.** Until it
-  has, `lldb -o run` blocks forever on an authorization prompt nobody can answer,
-  and the two tests that LAUNCH a debuggee (rather than only resolving symbols)
-  burn their whole deadline and fail. It is neither a compiler bug nor a harness
-  bug: a trivial `int main(){return 0;}` hangs exactly the same way, which is the
-  one-line check worth running first.
+  overridable per suite (`YOOP_SLICE_COMPILE_TIMEOUT_MS`,
+  `YOOP_SLICE_RUN_TIMEOUT_MS`, `YOOP_PASS_COMPILE_TIMEOUT_MS`,
+  `YOOP_PASS_RUN_TIMEOUT_MS`, `YOOP_FAIL_BUILD_TIMEOUT_MS`,
+  `YOOP_FAIL_COMPILE_TIMEOUT_MS`, `YOOP_SELFHOST_TIMEOUT_MS`,
+  `YOOP_DEBUG_COMPILE_TIMEOUT_MS`, `YOOP_DEBUG_TIMEOUT_MS`,
+  `YOOP_PROBE_COMPILE_LIMIT`, `YOOP_PROBE_IR_LIMIT`).
+- **The debugger tests need macOS to have authorized DEBUGGING.** Until it has,
+  `lldb -o run` blocks forever on an authorization prompt nobody can answer, and
+  the tests in `npm run test:debug` that LAUNCH a debuggee (rather than only
+  resolving symbols) burn their whole deadline and fail. It is neither a
+  compiler bug nor a harness bug: a trivial `int main(){return 0;}` hangs
+  exactly the same way, which is the one-line check worth running first.
 
       cd /tmp && printf 'int main(){return 0;}\n' > t.c && clang -g -o t t.c
       perl -e 'alarm 25; exec("lldb","-o","run","-o","quit","--batch","/tmp/t")'
 
-  If that prints `Process ... exited with status = 0`, lldb is fine and a dwarf
-  failure is real. Note `DevToolsSecurity -status` is NOT the signal - it read
-  "disabled" both before and after authorization here, while the tests went from
-  hanging to passing in 1.9s. Answering the GUI prompt once is what unblocks it.
-- Compile one file: `node src/yoopiler.js path/to/file.yoop -o out`.
-- Driver entry: [src/yoopiler.js](src/yoopiler.js). End-user invocation is
-  `yoopiler_alpha <entry.yoop>` (the `bin` name in package.json); the entry file
-  pulls in everything else via its imports.
-- `yoopiler --test <dir>` runs the Yoop-level test harness (filters ride as extra
-  positionals).
+  If that prints `Process ... exited with status = 0`, lldb is fine and a
+  failure there is real. Note `DevToolsSecurity -status` is NOT the signal - it
+  read "disabled" both before and after authorization here, while the tests went
+  from hanging to passing in 1.9s. Answering the GUI prompt once is what
+  unblocks it.
+- Build a compiler to work with:
+
+      YOOP_STD_ROOT=$PWD/std YOOP_RUNTIME_ROOT=$PWD/runtime \
+        $(node scripts/seed.mjs) bootstrap/src/main.yoop -o /tmp/yoopiler_boot
+
+  **Those two variables are not optional here.** A compiler that does not get
+  them reads the std and C runtime packaged BESIDE it, so a seed would compile
+  today's source against the std it shipped with - quietly, and with no error to
+  read. The Node harnesses set them for you (`seedEnv` in
+  [scripts/seed.mjs](scripts/seed.mjs)); a command line has to say them.
+- Compile one file: `yoopiler_boot path/to/file.yoop -o out`. `--emit-ir` stops
+  after writing `<out>.ll`, which is what `scripts/probe_surface.sh` uses - a
+  link nobody reads was a quarter of the probe's wall clock. The other flags are
+  `--test`, `--lsp`, `--dump-ast-json`, `--track-heap`, `--warn-disposable`,
+  `--warn-std` and `--list-attributes`.
+- `yoopiler_boot --test <dir>` runs the Yoop-level test harness (filters ride as
+  extra positionals).
+- `yoopiler_boot --lsp` runs the LANGUAGE SERVER over stdio instead of
+  compiling: `initialize`/`shutdown`/`exit`, full-text document sync, and
+  `textDocument/publishDiagnostics`. Nothing else is implemented and nothing
+  else is advertised. **In that mode stdout IS the protocol's transport**, so
+  the flag is answered at the top of `main()` and nothing on the path may
+  `printf` - `std/log.yoop` writes to stderr, which is why every note the
+  compiler makes is safe. It lives in
+  [bootstrap/src/lsp/](bootstrap/src/lsp/); the JSON it speaks is
+  [modules/json/](modules/json/).
 - `--warn-disposable` opts a BUILD into the `unhandled-disposable` warning
-  (silent otherwise; the LSP shows it either way). It finds real leaks but has
-  two known false positives - see
-  [docs/writing_yoop.md](docs/writing_yoop.md) section 4. `unreachable-code` is
-  ON by default and needs no flag: it inherits `alwaysDiverges`'s conservatism,
-  so it can only ever MISS dead code, never flag live code.
-- Bootstrap: `npm run test:slice` (end-to-end executables, ~18s),
-  `npm run test:parity` (layer dumps vs the JS reference, ~3s),
-  `npm run test:selfhost` (the three-stage build and its fixpoint, ~18s),
-  `npm run test:debug` (gdb or lldb reads the DWARF the bootstrap emits, ~9s;
-  SKIPS when neither is on PATH), and
-  `node src/yoopiler.js --test bootstrap/src` for every Yoop unit test at once
-  (965 of them, ~9s, ONE build of the graph - the five per-module
-  `--test bootstrap/src/<module>` commands rebuild it five times and take ~15s
-  between them; reach for one while iterating on that module).
-  **The bootstrap compiles itself**; `YOOP_BOOT_COMPILER=<path>
-  npm run test:slice` runs the slice suite through an already-built stage
-  instead of building one with the JS reference.
-- The bootstrap driver is `yoopiler_boot <entry.yoop> [-o <out>] [--emit-ir]`.
-  `--emit-ir` stops after writing `<out>.ll`, which is what
-  `scripts/probe_surface.sh` uses - a link nobody reads was a quarter of the
-  probe's wall clock. `YOOP_SLICE_CONCURRENCY` and `YOOP_E2E_CONCURRENCY`
-  override how many fixtures those two suites run at once. It runs the Yoop
-  test harness too: `yoopiler_boot --test <dir>`.
-- **Two probes, and they answer different questions.**
-  `scripts/probe_surface.sh` compiles every non-test file under `std/`,
-  `examples/pass/` and `bootstrap/src/` and stops at the IR - it says whether
-  codegen HANDLED the file.
-  `scripts/probe_programs.sh` takes every entry point under `examples/` that
-  declares a `main`, builds it with BOTH compilers, RUNS both, and compares
-  stdout and exit code - it says whether the program WORKS, and it is the only
-  one that can catch a miscompile. Run both after a change, and run each with
-  stage1 and stage3. Neither may move the other's numbers.
-- `yoopiler --lsp` runs the language server over stdio instead of compiling. The
-  import of [src/lsp/server.js](src/lsp/server.js) is **dynamic on purpose** -
-  that module attaches `process.stdin` handlers at module scope, so a static
-  import would hijack stdin on every ordinary compile. The flag is handled before
-  anything in `main()` reaches stdout, because in LSP mode stdout IS the transport.
+  (silent otherwise). It finds real leaks but has two known false positives -
+  see [docs/writing_yoop.md](docs/writing_yoop.md) section 4. `unreachable-code`
+  is ON by default and needs no flag: it inherits `alwaysDiverges`'s
+  conservatism, so it can only ever MISS dead code, never flag live code.
+- Bootstrap suites: `npm run test:slice` (205 fixtures taken to an executable),
+  `npm run test:selfhost` (6 tests: the three-stage build and its fixpoint),
+  and `npm run test:debug` (3 tests: gdb or lldb reads the DWARF the bootstrap
+  emits; SKIPS when neither is on PATH). `YOOP_SLICE_CONCURRENCY`,
+  `YOOP_PASS_CONCURRENCY` and `YOOP_FAIL_CONCURRENCY` override how many fixtures
+  those suites run at once.
+- Every Yoop unit test at once, 1435 of them, in ONE build of the graph:
+
+      YOOP_STD_ROOT=$PWD/std YOOP_RUNTIME_ROOT=$PWD/runtime \
+        $(node scripts/seed.mjs) --test bootstrap/src
+
+  Ten directories under `bootstrap/src/` carry `*.test.yoop` files, and a
+  per-module `--test bootstrap/src/<module>` rebuilds the graph again for each
+  one; reach for one only while iterating on that module.
+- **The bootstrap compiles itself**, so a suite can be pointed at a stage it
+  produced: `YOOP_BOOT_COMPILER=<path> npm run test:slice` runs the slice suite
+  through an already-built compiler instead of building one from the seed. That
+  is how a self-hosted stage gets tested against the same hand-written
+  `.expected` files.
+- **One probe, and it answers one question.** `scripts/probe_surface.sh`
+  compiles every non-test file under `std/`, `examples/pass/` and
+  `bootstrap/src/` and stops at the IR - it says whether codegen HANDLED the
+  file. Whether a program WORKS is `npm run test:pass`, and that is the better
+  answer of the two: a probe can only say a program compiled, while an
+  expectation written from the program says the output is right. Run the probe
+  with stage1 and with stage3 after a change; nothing may move its numbers.
 - `npm run gen:web` - regenerate the web site's data (std pages, tour programs
   and their output, pipeline dumps, break-it diagnostics, search index). Needs
-  clang; takes ~30s because it compiles and runs every program it shows. Run it
-  after changing `std/`, `examples/tour/`, the fixtures the break-it cards name,
-  or any heading in `web/*.html`.
-- `npm run build:sea` / `npm run package` - standalone binary and release zip.
-  See [docs/compiler_internals.md](docs/compiler_internals.md) for the dist
-  layout and what adding a non-JS data file requires.
-- `npm run package:boot` - the same idea for the SELF-HOSTED compiler: builds
-  the three stages, refuses to package unless stage2 and stage3 are
-  byte-identical, stages `bin/` beside `lib/std` and `lib/runtime`, and proves
-  the layout by compiling and running hello.yoop with the packaged binary and
-  no `YOOP_STD_ROOT` set. Output is `dist/yoopiler-boot-<version>-<platform>.tar.gz`.
+  clang; it builds a compiler from the seed and then compiles and runs every
+  program it shows. Run it after changing `std/`, `examples/tour/`, the fixtures
+  the break-it cards name, or any heading in `web/*.html`.
+- `npm run package:boot` - builds the three stages, refuses to package unless
+  stage2 and stage3 are byte-identical, stages `bin/` beside `lib/std` and
+  `lib/runtime`, and proves the layout by compiling and running hello.yoop with
+  the packaged binary and no `YOOP_STD_ROOT` set. Output is
+  `dist/yoopiler-boot-<version>-<platform>.tar.gz`, and that archive is what a
+  later checkout uses as its seed.
 - CI is [.github/workflows/ci.yml](.github/workflows/ci.yml): ubuntu-latest,
-  bootstrap Yoop tests then `npm test` on every push and PR, and a release of
-  the bootstrap compiler (via `package:boot`) when a `v*` tag is pushed.
+  fetch the seed, then the bootstrap's Yoop tests, then `npm test`, on every
+  push and PR - plus a release of the bootstrap compiler (via `package:boot`)
+  when a `v*` tag is pushed. The seed is fetched as its own step so a download
+  failure is its own red step rather than a confusing failure inside the tests.
   `scripts/ci_local.sh {lint,quick,test,release,shell}` runs those same steps
   against the working tree without a push: `lint` is actionlint plus the job
   graph act resolves (no container, instant), `quick` compiles the C runtime

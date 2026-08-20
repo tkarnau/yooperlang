@@ -1,0 +1,420 @@
+import.test;
+
+// Tests for the `json` module, living inside the module directory.
+//
+// `*.test.yoop` is excluded from a directory module's source file list, so this
+// file is NOT part of `json`: it imports the module by the same path a consumer
+// writes, and only reaches the exported surface.
+
+import * as t from "std/test.yoop";
+import { suite, test, Case } from "std/test.yoop";
+import { Text }, * as text from "std/core/text.yoop";
+import { Disposable, disposable } from "std/core/kinds.yoop";
+import * as json from "modules/json";
+import { JsonDoc, JsonKind, ParseResult } from "modules/json";
+
+// What a failed parse renders as, so a round-trip assertion can compare one
+// string either way instead of branching.
+const PARSE_FAILED: string = "<refused>";
+
+// Parse and serialize back. The result is OWNED by the caller, so it is a
+// plain `let` plus `propagates<disposable>` on the signature.
+function reserialize(src: string): Text propagates<disposable> {
+  switch (json.parseString(src)) {
+    case ParseResult.Err { error: e }: {
+      return text.fromString(PARSE_FAILED);
+    }
+    case ParseResult.Ok { value: parsed }: {
+      disposable doc: JsonDoc = parsed;
+      return json.serializeDoc(ref doc);
+    }
+  }
+}
+
+function refuses(src: string): bool {
+  switch (json.parseString(src)) {
+    case ParseResult.Err { error: e }: {
+      return true;
+    }
+    case ParseResult.Ok { value: parsed }: {
+      disposable doc: JsonDoc = parsed;
+      return false;
+    }
+  }
+}
+
+// The one assertion shape this file repeats: parse `src`, write it back, and
+// compare to `want`.
+function checkRoundTrip(ref theory: Case, src: string, want: string): void {
+  disposable got: Text = reserialize(src);
+  theory.isSuccessful = text.equals(text.view(ref got), want);
+  theory.detail = `${src} came back as ${text.view(ref got)}, wanted ${want}`;
+}
+
+// The serialized form of a JSON string whose content is `prefix` followed by
+// the codepoint `cp`. Built with `pushChar` rather than written out, so no
+// non-ASCII byte has to appear in this source file for the assertion to say
+// which codepoint it means.
+function quoted(prefix: string, cp: uint32): Text propagates<disposable> {
+  let out: Text = text.make(16);
+  text.pushByte(ref out, '"');
+  text.push(ref out, prefix);
+  text.pushChar(ref out, cp);
+  text.pushByte(ref out, '"');
+  return out;
+}
+
+function checkDecodesTo(ref theory: Case, src: string, prefix: string, cp: uint32): void {
+  disposable want: Text = quoted(prefix, cp);
+  disposable got: Text = reserialize(src);
+  theory.isSuccessful = text.equals(text.view(ref got), text.view(ref want));
+  theory.detail = `${src} came back as ${text.view(ref got)}, wanted ${text.view(ref want)}`;
+}
+
+suite function roundTripsEveryValueShape(): void {
+  let test theory: Case = t.asserts("the six value kinds survive a round trip") {
+    checkRoundTrip(ref theory,
+      "{\"a\":null,\"b\":true,\"c\":false,\"d\":7,\"e\":\"x\",\"f\":[1,2],\"g\":{}}",
+      "{\"a\":null,\"b\":true,\"c\":false,\"d\":7,\"e\":\"x\",\"f\":[1,2],\"g\":{}}");
+  }
+
+  let test theory: Case = t.asserts("insignificant whitespace is dropped") {
+    checkRoundTrip(ref theory, "  {\n  \"a\" : [ 1 , 2 ]\n}  ", "{\"a\":[1,2]}");
+  }
+
+  let test theory: Case = t.asserts("an empty array and an empty object survive") {
+    checkRoundTrip(ref theory, "[[],{},[{}]]", "[[],{},[{}]]");
+  }
+
+  let test theory: Case = t.asserts("a bare scalar is a legal document") {
+    checkRoundTrip(ref theory, "42", "42");
+  }
+}
+
+suite function keepsIntegersExact(): void {
+  let test theory: Case = t.asserts("an integer past 2^53 round trips exactly") {
+    // The value a float64 cannot represent: 2^53 + 1. A parser that routed
+    // every number through a double would hand back 9007199254740992.
+    checkRoundTrip(ref theory, "9007199254740993", "9007199254740993");
+  }
+
+  let test theory: Case = t.asserts("a negative integer keeps its sign") {
+    checkRoundTrip(ref theory, "-1234567890123", "-1234567890123");
+  }
+
+  let test theory: Case = t.asserts("an id read back out is the id that went in") {
+    switch (json.parseString("{\"id\":8123456789}")) {
+      case ParseResult.Err { error: e }: {
+        theory.isSuccessful = false;
+        theory.detail = `parse refused a well formed object: ${e}`;
+      }
+      case ParseResult.Ok { value: parsed }: {
+        disposable doc: JsonDoc = parsed;
+        const got = json.memberInt(ref doc, doc.root, "id", 0);
+        theory.isSuccessful = got == 8123456789;
+        theory.detail = `id came back as ${got}, wanted 8123456789`;
+      }
+    }
+  }
+
+  let test theory: Case = t.asserts("a fractional number is still a number") {
+    checkRoundTrip(ref theory, "[1.5,-0.25]", "[1.5,-0.25]");
+  }
+}
+
+suite function escapesEveryCornerOfAString(): void {
+  let test theory: Case = t.asserts("quote, backslash and the short controls") {
+    // In yoop source `\\\"` is one backslash and one quote, so the JSON input
+    // below is  "a\"b\\c\nd\te"  and the value it denotes is  a"b\c<NL>d<TAB>e.
+    checkRoundTrip(ref theory,
+      "\"a\\\"b\\\\c\\nd\\te\"",
+      "\"a\\\"b\\\\c\\nd\\te\"");
+  }
+
+  let test theory: Case = t.asserts("a control with no short escape goes out as \\u00XX") {
+    checkRoundTrip(ref theory, "\"\\u0001\\u001f\"", "\"\\u0001\\u001f\"");
+  }
+
+  let test theory: Case = t.asserts("backspace and form feed use their short escapes") {
+    checkRoundTrip(ref theory, "\"\\b\\f\"", "\"\\b\\f\"");
+  }
+
+  let test theory: Case = t.asserts("an escaped solidus is decoded and written bare") {
+    // Escaping `/` is legal and not writing it is also legal. This side does
+    // not, which is what keeps a file:// URI readable.
+    checkRoundTrip(ref theory, "\"file:\\/\\/\\/tmp\"", "\"file:///tmp\"");
+  }
+
+  let test theory: Case = t.asserts("a \\u escape becomes UTF-8 bytes") {
+    // U+00E9, two bytes in UTF-8, written back unescaped.
+    checkDecodesTo(ref theory, "\"caf\\u00e9\"", "caf", 233);
+  }
+
+  let test theory: Case = t.asserts("a surrogate pair joins into one codepoint") {
+    // U+1F600, written on the wire as the UTF-16 pair D83D DE00.
+    checkDecodesTo(ref theory, "\"\\ud83d\\ude00\"", "", 128512);
+  }
+
+  let test theory: Case = t.asserts("raw UTF-8 in the input is passed through") {
+    disposable src: Text = quoted("h", 233);
+    disposable got: Text = reserialize(text.view(ref src));
+    theory.isSuccessful = text.equals(text.view(ref got), text.view(ref src));
+    theory.detail = `a raw two-byte sequence came back as ${text.view(ref got)}`;
+  }
+
+  let test theory: Case = t.asserts("an unpaired surrogate becomes U+FFFD rather than a crash") {
+    checkDecodesTo(ref theory, "\"\\ud83d\"", "", 65533);
+  }
+}
+
+suite function refusesMalformedInputRatherThanCrashing(): void {
+  let test theory: Case = t.asserts("empty input is refused") {
+    theory.isSuccessful = refuses("");
+    theory.detail = "an empty document was accepted";
+  }
+
+  let test theory: Case = t.asserts("an unterminated object is refused") {
+    theory.isSuccessful = refuses("{\"a\":1");
+    theory.detail = "an unterminated object was accepted";
+  }
+
+  let test theory: Case = t.asserts("an unterminated string is refused") {
+    theory.isSuccessful = refuses("\"abc");
+    theory.detail = "an unterminated string was accepted";
+  }
+
+  let test theory: Case = t.asserts("a trailing comma is refused") {
+    theory.isSuccessful = refuses("[1,2,]") && refuses("{\"a\":1,}");
+    theory.detail = "a trailing comma was accepted";
+  }
+
+  let test theory: Case = t.asserts("a missing colon is refused") {
+    theory.isSuccessful = refuses("{\"a\" 1}");
+    theory.detail = "a member with no colon was accepted";
+  }
+
+  let test theory: Case = t.asserts("a missing value is refused") {
+    theory.isSuccessful = refuses("{\"a\":}");
+    theory.detail = "a member with no value was accepted";
+  }
+
+  let test theory: Case = t.asserts("a truncated keyword is refused") {
+    theory.isSuccessful = refuses("tru") && refuses("nul") && refuses("fals");
+    theory.detail = "a truncated keyword was accepted";
+  }
+
+  let test theory: Case = t.asserts("trailing input after the value is refused") {
+    theory.isSuccessful = refuses("{} {}") && refuses("1 2");
+    theory.detail = "trailing input was accepted";
+  }
+
+  let test theory: Case = t.asserts("a raw control byte inside a string is refused") {
+    theory.isSuccessful = refuses("\"a\nb\"");
+    theory.detail = "an unescaped newline inside a string was accepted";
+  }
+
+  let test theory: Case = t.asserts("a bad hex digit in a \\u escape is refused") {
+    theory.isSuccessful = refuses("\"\\u00zz\"") && refuses("\"\\u12\"");
+    theory.detail = "a malformed \\u escape was accepted";
+  }
+
+  let test theory: Case = t.asserts("an unknown escape is refused") {
+    theory.isSuccessful = refuses("\"\\q\"");
+    theory.detail = "an unknown escape was accepted";
+  }
+
+  let test theory: Case = t.asserts("a number with no digits is refused") {
+    theory.isSuccessful = refuses("-") && refuses("1.") && refuses("1e");
+    theory.detail = "a malformed number was accepted";
+  }
+
+  let test theory: Case = t.asserts("nesting past the depth bound is refused, not overflowed") {
+    // 200 opening brackets, past the parser's 128. The point of the assertion
+    // is that this RETURNS: without the bound it is a stack overflow.
+    disposable deep: Text = text.repeat("[", 200);
+    theory.isSuccessful = refuses(text.view(ref deep));
+    theory.detail = "200 levels of nesting did not come back as an error";
+  }
+}
+
+suite function readsAValueBackOut(): void {
+  let test theory: Case = t.asserts("member lookup reaches a nested field") {
+    switch (json.parseString("{\"params\":{\"textDocument\":{\"uri\":\"file:///a.yoop\"}}}")) {
+      case ParseResult.Err { error: e }: {
+        theory.isSuccessful = false;
+        theory.detail = `parse refused a well formed object: ${e}`;
+      }
+      case ParseResult.Ok { value: parsed }: {
+        disposable doc: JsonDoc = parsed;
+        const td = json.path2(ref doc, doc.root, "params", "textDocument");
+        const uri = json.memberString(ref doc, td, "uri");
+        theory.isSuccessful = text.equals(uri, "file:///a.yoop");
+        theory.detail = `uri came back as "${uri}", wanted "file:///a.yoop"`;
+      }
+    }
+  }
+
+  let test theory: Case = t.asserts("a missing member is the null id rather than a trap") {
+    switch (json.parseString("{\"a\":1}")) {
+      case ParseResult.Err { error: e }: {
+        theory.isSuccessful = false;
+        theory.detail = `parse refused a well formed object: ${e}`;
+      }
+      case ParseResult.Ok { value: parsed }: {
+        disposable doc: JsonDoc = parsed;
+        const missing = json.member(ref doc, doc.root, "nope");
+        theory.isSuccessful = missing == 0
+          && json.isNull(ref doc, missing)
+          && json.memberInt(ref doc, doc.root, "nope", 99) == 99
+          && text.equals(json.memberString(ref doc, doc.root, "nope"), "");
+        theory.detail = `a missing member answered ${missing} instead of 0`;
+      }
+    }
+  }
+
+  let test theory: Case = t.asserts("array elements are reachable by index and by kind") {
+    switch (json.parseString("[10,\"x\",true]")) {
+      case ParseResult.Err { error: e }: {
+        theory.isSuccessful = false;
+        theory.detail = `parse refused a well formed array: ${e}`;
+      }
+      case ParseResult.Ok { value: parsed }: {
+        disposable doc: JsonDoc = parsed;
+        const zero = json.at(ref doc, doc.root, 0);
+        const one = json.at(ref doc, doc.root, 1);
+        const two = json.at(ref doc, doc.root, 2);
+        theory.isSuccessful = json.childCount(ref doc, doc.root) == 3
+          && json.asInt(ref doc, zero, 0) == 10
+          && text.equals(json.asString(ref doc, one), "x")
+          && json.asBool(ref doc, two, false)
+          && json.at(ref doc, doc.root, 3) == 0
+          && json.kindOf(ref doc, doc.root) == JsonKind.ARRAY;
+        theory.detail = "an array element did not read back as it went in";
+      }
+    }
+  }
+}
+
+suite function buildsADocumentFromNothing(): void {
+  let test theory: Case = t.asserts("a built object serializes in insertion order") {
+    disposable doc: JsonDoc = json.docNew();
+    const root = json.addObject(ref doc);
+    json.objectSetString(ref doc, root, "jsonrpc", "2.0");
+    json.objectSetInt(ref doc, root, "id", 1);
+    const result = json.addObject(ref doc);
+    json.objectSetBool(ref doc, result, "ready", true);
+    json.objectSet(ref doc, root, "result", result);
+    json.setRoot(ref doc, root);
+
+    disposable out: Text = json.serializeDoc(ref doc);
+    const want = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"ready\":true}}";
+    theory.isSuccessful = text.equals(text.view(ref out), want);
+    theory.detail = `built ${text.view(ref out)}, wanted ${want}`;
+  }
+
+  let test theory: Case = t.asserts("a nested value may be built before it is attached") {
+    // The linked-list child model is what makes this legal: the inner array is
+    // appended to the arena AFTER the object it ends up inside.
+    disposable doc: JsonDoc = json.docNew();
+    const root = json.addObject(ref doc);
+    json.objectSetInt(ref doc, root, "first", 1);
+    const arr = json.addArray(ref doc);
+    json.arrayPush(ref doc, arr, json.addInt(ref doc, 7));
+    json.arrayPush(ref doc, arr, json.addString(ref doc, "eight"));
+    json.objectSet(ref doc, root, "items", arr);
+    json.objectSetInt(ref doc, root, "last", 2);
+    json.setRoot(ref doc, root);
+
+    disposable out: Text = json.serializeDoc(ref doc);
+    const want = "{\"first\":1,\"items\":[7,\"eight\"],\"last\":2}";
+    theory.isSuccessful = text.equals(text.view(ref out), want);
+    theory.detail = `built ${text.view(ref out)}, wanted ${want}`;
+  }
+
+  let test theory: Case = t.asserts("a built string is escaped on the way out") {
+    disposable doc: JsonDoc = json.docNew();
+    json.setRoot(ref doc, json.addString(ref doc, "say \"hi\"\n"));
+    disposable out: Text = json.serializeDoc(ref doc);
+    const want = "\"say \\\"hi\\\"\\n\"";
+    theory.isSuccessful = text.equals(text.view(ref out), want);
+    theory.detail = `built ${text.view(ref out)}, wanted ${want}`;
+  }
+}
+
+suite function movesAValueBetweenDocuments(): void {
+  let test theory: Case = t.asserts("a copied value is deep and shares no storage") {
+    switch (json.parseString("{\"a\":[1,\"two\",{\"b\":true}],\"c\":null}")) {
+      case ParseResult.Err { error: e }: {
+        theory.isSuccessful = false;
+        theory.detail = `parse refused a well formed object: ${e}`;
+      }
+      case ParseResult.Ok { value: parsed }: {
+        disposable src: JsonDoc = parsed;
+        disposable dst: JsonDoc = json.docNew();
+        json.setRoot(ref dst, json.copyValue(ref dst, ref src, src.root));
+        // The source is released BEFORE the copy is written out, so a copy
+        // that had merely borrowed the strings would render garbage here.
+        Disposable.dispose(ref src);
+        disposable out: Text = json.serializeDoc(ref dst);
+        const want = "{\"a\":[1,\"two\",{\"b\":true}],\"c\":null}";
+        theory.isSuccessful = text.equals(text.view(ref out), want);
+        theory.detail = `copy rendered ${text.view(ref out)}, wanted ${want}`;
+      }
+    }
+  }
+
+  let test theory: Case = t.asserts("a copied integer is still an integer, not a float") {
+    switch (json.parseString("9007199254740993")) {
+      case ParseResult.Err { error: e }: {
+        theory.isSuccessful = false;
+        theory.detail = `parse refused a well formed number: ${e}`;
+      }
+      case ParseResult.Ok { value: parsed }: {
+        disposable src: JsonDoc = parsed;
+        disposable dst: JsonDoc = json.docNew();
+        json.setRoot(ref dst, json.copyValue(ref dst, ref src, src.root));
+        disposable out: Text = json.serializeDoc(ref dst);
+        theory.isSuccessful = text.equals(text.view(ref out), "9007199254740993");
+        theory.detail = `copy rendered ${text.view(ref out)}`;
+      }
+    }
+  }
+}
+
+suite function handsBackTheExactBytesOfAString(): void {
+  let test theory: Case = t.asserts("asBytes gives the decoded bytes, nul included") {
+    // A document an editor sent may legitimately hold a nul, and a `string`
+    // stops at one. This is why anything moving a payload through takes bytes.
+    switch (json.parseString("{\"t\":\"a\\u0000b\"}")) {
+      case ParseResult.Err { error: e }: {
+        theory.isSuccessful = false;
+        theory.detail = `parse refused a well formed object: ${e}`;
+      }
+      case ParseResult.Ok { value: parsed }: {
+        disposable doc: JsonDoc = parsed;
+        const raw = json.asBytes(ref doc, json.member(ref doc, doc.root, "t"));
+        const asStr = json.memberString(ref doc, doc.root, "t");
+        disposable back: Text = json.serializeDoc(ref doc);
+        theory.isSuccessful = raw.len == 3 && raw[0] == 'a' && raw[1] == 0
+          && raw[2] == 'b' && asStr.len == 1
+          && text.equals(text.view(ref back), "{\"t\":\"a\\u0000b\"}");
+        theory.detail = `asBytes gave ${raw.len} bytes, the string view gave ${asStr.len}, rendered ${text.view(ref back)}`;
+      }
+    }
+  }
+
+  let test theory: Case = t.asserts("asBytes of something that is not a string is empty") {
+    switch (json.parseString("{\"n\":7}")) {
+      case ParseResult.Err { error: e }: {
+        theory.isSuccessful = false;
+        theory.detail = `parse refused a well formed object: ${e}`;
+      }
+      case ParseResult.Ok { value: parsed }: {
+        disposable doc: JsonDoc = parsed;
+        theory.isSuccessful = json.asBytes(ref doc, json.member(ref doc, doc.root, "n")).len == 0
+          && json.asBytes(ref doc, 0).len == 0;
+        theory.detail = "a non-string answered with bytes";
+      }
+    }
+  }
+}

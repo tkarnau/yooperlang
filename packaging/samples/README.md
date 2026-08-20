@@ -1,34 +1,36 @@
 # Sample programs (drop zone)
 
-Everything in this directory gets copied into a distribution build as
-`samples/`, so whatever you leave here is what your recipient finds when they
-unzip it.
+Small, self-contained programs meant to be handed to someone who has just
+installed the compiler: `hello.yoop`, `fibonacci.yoop`,
+`structs_and_traits.yoop` (all three from `examples/intro/`), and
+`yoopls.yoop` - a small `ls` built on `std/fs` that shows a trait, a kind and a
+variant doing real work.
 
-Add or delete freely. `npm run build:sea` copies the directory as-is on every
-build, so there is no list to keep in sync.
-
-Three starter programs are here to begin with, copied from `examples/intro/`,
-plus `yoopls.yoop` - a small `ls` built on `std/fs` that shows a trait, a kind
-and a variant doing real work. Swap them out for whatever you want to show off.
+Nothing copies this directory into a release today. `npm run package:boot`
+ships the compiler, `lib/std`, `lib/runtime` and
+[../bootstrap_readme.md](../bootstrap_readme.md), and nothing else. Adding
+samples to the package means adding them to
+[../../scripts/package_bootstrap.mjs](../../scripts/package_bootstrap.mjs).
 
 ## Conventions worth keeping
 
 - Only `.yoop` sources and markdown. Compiled binaries are extensionless and
-  the build skips them, but there is no reason to commit them here anyway.
+  there is no reason to commit them here.
 - Each program should compile against the shipped standard library alone. If a
   sample needs something outside `std/` (SDL2, a network service on localhost),
   say so in a comment at the top - the recipient has no way to guess.
 - Keep them runnable end to end. A sample that fails to compile is a worse
   first impression than no sample at all.
 
-## Checking them before you ship
+## Checking them
 
-There is no automated test over this directory. To sanity check the whole set
-against a build:
+There is no automated test over this directory. To sanity check the whole set:
 
 ```sh
-npm run build:sea
-for f in dist/yoopiler-*/samples/*.yoop; do
-  ./dist/yoopiler-*/bin/yoopiler_alpha "$f" || echo "FAILED: $f"
+YOOP_STD_ROOT=$PWD/std YOOP_RUNTIME_ROOT=$PWD/runtime \
+  $(node scripts/seed.mjs) bootstrap/src/main.yoop -o /tmp/yoopiler_boot
+for f in packaging/samples/*.yoop; do
+  YOOP_STD_ROOT=$PWD/std YOOP_RUNTIME_ROOT=$PWD/runtime \
+    /tmp/yoopiler_boot "$f" -o /tmp/sample || echo "FAILED: $f"
 done
 ```

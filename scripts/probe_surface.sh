@@ -46,7 +46,7 @@ JOBS="${2:-}"
 
 if [ ! -x "$COMPILER" ]; then
   echo "probe_surface: no compiler at $COMPILER" >&2
-  echo "build one with: node src/yoopiler.js bootstrap/src/main.yoop -o /tmp/yoopiler_boot" >&2
+  echo "build one with: \$(node scripts/seed.mjs) bootstrap/src/main.yoop -o /tmp/yoopiler_boot" >&2
   exit 1
 fi
 
@@ -70,11 +70,11 @@ export YOOP_RUNTIME_ROOT="${YOOP_RUNTIME_ROOT:-$ROOT/runtime}"
 COMPILE_LIMIT="${YOOP_PROBE_COMPILE_LIMIT:-60}"
 IR_LIMIT="${YOOP_PROBE_IR_LIMIT:-60}"
 
-# Same supervisor scripts/probe_programs.sh uses, and the reasoning is written
-# out there. Short version: it kills the process TREE so the clang a compiler
-# started goes with the compiler, it deliberately leaves the child in this
-# probe's process group so a group-directed kill of the probe still reaches it,
-# and it holds its own alarm so the limit survives losing its caller.
+# A supervisor with three properties, each of which had to be arranged for.
+# It kills the process TREE, so the clang a compiler started goes with the
+# compiler. It deliberately leaves the child in this probe's process group, so
+# a group-directed kill of the probe still reaches it. And it holds its own
+# alarm, so the limit survives losing its caller.
 limit_run() {
   perl -e '
     sub descend {

@@ -3,13 +3,14 @@
 //
 // Each fixture in bootstrap/tests/slice/ has a hand-written `.expected` holding
 // the program's stdout followed by an `exit=N` line. That file is the source of
-// truth, and the primary assertion is bootstrap-output == expected. The JS
-// reference is then checked against the SAME file as a parity bonus.
+// truth, and the assertion is bootstrap-output == expected.
 //
-// The split matters: when the JS compiler retires, the second assertion goes
-// away and every fixture still tests exactly what it tested before. Never
-// capture a `.expected` from compiler output - write it from what the program
-// should do. See the bootstrap testing rule in CLAUDE.md.
+// It used to carry a second assertion checking the JS reference against the
+// same file, as a parity bonus. That reference is gone, and the split it was
+// written for did its job: the bonus was deleted and every fixture still tests
+// exactly what it tested before. Never capture a `.expected` from compiler
+// output - write it from what the program should do. See the bootstrap testing
+// rule in CLAUDE.md.
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert";
 import fs from "fs";
@@ -17,6 +18,7 @@ import path from "path";
 import os from "os";
 
 import { runProc, runProcOrThrow } from "./testProc.js";
+import { seedCompiler, seedEnv } from "../scripts/seed.mjs";
 
 const REPO = path.resolve(import.meta.dirname, "..");
 const SLICE = path.join(REPO, "bootstrap/tests/slice");
@@ -86,11 +88,14 @@ describe("vertical slice: the bootstrap compiler produces working executables", 
       return;
     }
     boot = path.join(work, "yoopiler_boot");
-    // The bootstrap compiler, built by the JS compiler.
+    // The bootstrap compiler, built by the SEED - a previously released
+    // yoopiler_boot. `seedEnv` points it at THIS tree's std and runtime rather
+    // than the ones packaged beside it: the seed exists only to compile today's
+    // source, and today's source imports today's std.
     await runProcOrThrow(
-      "node",
-      [path.join(REPO, "src/yoopiler.js"), BOOT_SRC, "-o", boot],
-      { cwd: REPO, timeout: COMPILE_TIMEOUT_MS },
+      seedCompiler(),
+      [BOOT_SRC, "-o", boot],
+      { cwd: REPO, env: seedEnv(), timeout: COMPILE_TIMEOUT_MS },
     );
   });
 
@@ -142,24 +147,6 @@ describe("vertical slice: the bootstrap compiler produces working executables", 
       assert.equal(got, expected, `${stem}: the bootstrap compiler is wrong`);
     });
 
-    // A `<stem>.bootonly` marker file means the fixture asserts behaviour the
-    // JS reference does NOT share, so the parity bonus is skipped for it. Used
-    // where the bootstrap is deliberately better - the file's contents say why,
-    // and are read here only to force the reason to exist.
-    const bootOnly = fs.existsSync(path.join(SLICE, `${stem}.bootonly`));
-
-    // Parity bonus. Delete this block, not the one above, when the JS compiler
-    // retires.
-    it(`${stem}: the JS reference agrees`, { skip: bootOnly }, async () => {
-      const expected = fs.readFileSync(path.join(SLICE, `${stem}.expected`), "utf8");
-      const got = await buildAndRun(
-        "node",
-        [path.join(REPO, "src/yoopiler.js"), path.join(SLICE, name), "-o", path.join(work, `${stem}_js`)],
-        path.join(work, `${stem}_js`),
-        env,
-      );
-      assert.equal(got, expected, `${stem}: the JS reference disagrees with the fixture`);
-    });
   }
 
   // The driver's COMMAND LINE. Nested here rather than in its own file because

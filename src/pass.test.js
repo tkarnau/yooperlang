@@ -6,14 +6,14 @@
 // its stdout plus exit code asserted against that file. The `.expected` is the
 // source of truth.
 //
-// WHY THIS EXISTS. scripts/probe_programs.sh answers the same question by
-// building each program with BOTH compilers and diffing the two runs against
-// each other. That is the only thing in the tree that can catch a miscompile,
-// and it dies with the JS reference: two compilers are what it needs, and after
-// the retirement there is one. This suite is what replaces it, and the
-// difference is the whole point - a differential comparison says "the two
-// agree", an absolute one says "the program is right". The former passes
-// happily when both compilers are wrong the same way.
+// WHY THIS EXISTS. This is the only thing in the tree that can catch a
+// MISCOMPILE. The surface probe says codegen handled a file; only running the
+// program says it did so correctly.
+//
+// The assertion is ABSOLUTE, which is the whole point: an expectation written
+// from the program says "the program is right". A comparison against another
+// compiler would only say "the two agree", and that passes happily when both
+// are wrong the same way.
 //
 // FORMAT of a `.expected` file - the same one bootstrap/tests/slice/ uses, so
 // there is one format to learn and not two:
@@ -53,6 +53,7 @@ import path from "path";
 import os from "os";
 
 import { runProc, runProcOrThrow } from "./testProc.js";
+import { seedCompiler, seedEnv } from "../scripts/seed.mjs";
 
 const REPO = path.resolve(import.meta.dirname, "..");
 const PASS = path.join(REPO, "examples/pass");
@@ -120,9 +121,9 @@ describe("the corpus: the bootstrap compiler builds and runs examples/ correctly
     }
     boot = path.join(work, "yoopiler_boot");
     await runProcOrThrow(
-      "node",
-      [path.join(REPO, "src/yoopiler.js"), BOOT_SRC, "-o", boot],
-      { cwd: REPO, timeout: COMPILE_TIMEOUT_MS },
+      seedCompiler(),
+      [BOOT_SRC, "-o", boot],
+      { cwd: REPO, env: seedEnv(), timeout: COMPILE_TIMEOUT_MS },
     );
   });
 
@@ -143,7 +144,7 @@ describe("the corpus: the bootstrap compiler builds and runs examples/ correctly
   // A marker means "this program's output is not fully determined by the
   // program", so no `.expected` can be written for it. Its CONTENTS say why,
   // and are read here only to force the reason to exist - the same trick the
-  // slice suite's `.bootonly` uses.
+  // marker files elsewhere in the tree use.
   it("every exclusion marker states a reason", () => {
     const silent = excluded.filter((p) => fs.readFileSync(markerOf(p), "utf8").trim().length === 0);
     assert.deepEqual(

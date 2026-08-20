@@ -16,9 +16,9 @@ module source_graph;
 // The graph holds modules in topological order (leaves first) and points at the
 // entry by INDEX rather than keeping a second copy, which would double-own it.
 
-import { Vec } from "std/core/vec.yoop";
+import { Vec }, * as vec from "std/core/vec.yoop";
 import { Map } from "std/collections/map.yoop";
-import { disposable } from "std/core/kinds.yoop";
+import { Disposable, disposable } from "std/core/kinds.yoop";
 import { AST, NodeId } from "../ast";
 
 export type ImportEdge {
@@ -49,4 +49,46 @@ export type ModuleGraph propagates<disposable> {
   modules: Vec<Module>,            // topo-ordered, leaves first; the entry is IN this list
   entryIndex: usize,               // index of the entry module in `modules` (not a copy)
   autoLoadModuleIds: Map<string, string>,
+}
+
+/*
+  Release everything a loaded graph owns.
+
+  There is no `dispose` METHOD here, and that is deliberate: `disposable g:
+  ModuleGraph` would get PROPAGATED disposal, which frees the `Vec<Module>` and
+  the id map and nothing inside them - the ASTs and the source bytes of every
+  module in the program. That is invisible in a compile-and-exit driver and it
+  is a leak of the whole std closure per keystroke in a language server, which
+  is the caller this exists for.
+
+  A free function rather than a method because the walk is three levels deep
+  and none of the three types below carries a `dispose` of its own; propagated
+  disposal cannot chain, so somebody has to write the loop.
+
+  Call it ONCE. It works through the copies `vecGet` hands back, so a module's
+  own `cap` bookkeeping is not updated the way `Vec.dispose` updates its own,
+  and there is no second-call guard here. The graph is dead after it either
+  way: the vector the modules lived in is the last thing released.
+*/
+export function disposeModuleGraph(ref g: ModuleGraph): void {
+  let i: usize = 0;
+  while (i < g.modules.len) {
+    let m: Module = vec.vecGet(ref g.modules, i);
+    let f: usize = 0;
+    while (f < m.files.len) {
+      let sf: SourceFile = vec.vecGet(ref m.files, f);
+      Disposable.dispose(ref sf.src);
+      Disposable.dispose(ref sf.imports);
+      f += 1;
+    }
+    Disposable.dispose(ref m.files);
+    // AST has no `dispose` either - it is three Vecs and a root - so its
+    // storage is released the same way, one field at a time.
+    Disposable.dispose(ref m.ast.nodes);
+    Disposable.dispose(ref m.ast.childIds);
+    Disposable.dispose(ref m.ast.strings);
+    i += 1;
+  }
+  Disposable.dispose(ref g.modules);
+  Disposable.dispose(ref g.autoLoadModuleIds);
 }

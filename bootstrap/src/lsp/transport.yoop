@@ -1,0 +1,363 @@
+module lsp;
+
+/*
+  The Language Server Protocol's wire framing, over a file descriptor.
+
+      Content-Length: 47\r\n
+      \r\n
+      {"jsonrpc":"2.0","method":"initialized",...}
+
+  Every message carries a byte COUNT, and a reader that gets the count wrong
+  does not fail loudly - it blocks forever waiting for bytes that already
+  arrived, and the editor sits there with no diagnostics and no error. That is
+  why the header scan is a PURE function over a buffer (`scanHeader`), tested
+  on its own, and why the descriptor only ever appears in `fill` and
+  `writeAll`.
+
+  `read` and `write` rather than `fread`/`fwrite`: the count is exact on both
+  sides, there is no `stdin` macro to chase across platforms, and a short read
+  is an ordinary answer rather than something to distinguish from an error.
+*/
+
+import.unsafe;
+
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { Text }, * as text from "std/core/text.yoop";
+import { Disposable, disposable } from "std/core/kinds.yoop";
+import * as intr from "std/core/intrinsics.yoop";
+
+extern "C" from "unistd.h" {
+  function read(fd: c_int, buf: unsafe_ptr<uint8>, count: c_size_t): c_ssize_t;
+  function write(fd: c_int, buf: unsafe_ptr<uint8>, count: c_size_t): c_ssize_t;
+}
+
+export const STDIN_FD: int32 = 0;
+export const STDOUT_FD: int32 = 1;
+
+// How much is read in one syscall. Nothing depends on it: a message may span
+// any number of fills and several may arrive in one.
+const FILL_CHUNK: usize = 8192;
+
+// A header claiming more than this is refused instead of allocated. An LSP
+// message is a JSON document describing one edit; 64 MiB is far past anything
+// legitimate and well short of what an accidental read of a binary file would
+// ask for.
+const MAX_CONTENT_LENGTH: usize = 67108864;
+
+export enum FrameStatus {
+  // `out` holds one message body.
+  MESSAGE,
+  // The input ended cleanly, between messages.
+  ENDED,
+  // The input ended mid-message, or a header made no sense. `reader.error`
+  // says which.
+  MALFORMED,
+}
+
+/*
+  A buffered reader over one descriptor.
+
+  `pos` is how much of `buf` has been handed out. The buffer is compacted once
+  a message is taken rather than on every read, so the common case (one message
+  per fill) copies nothing.
+
+  `live` false means "never touch the descriptor": the buffer it was built with
+  is the whole of the input. That is what lets the framing be tested end to end
+  without a pipe.
+*/
+export type FrameReader implements Disposable propagates<disposable> {
+  fd: int32,
+  live: bool,
+  buf: Vec<uint8>,
+  scratch: Vec<uint8>,
+  pos: usize,
+  atEof: bool,
+  error: string,
+
+  function dispose(ref self): void {
+    Disposable.dispose(ref self.buf);
+    Disposable.dispose(ref self.scratch);
+  }
+}
+
+export function frameReaderNew(fd: int32): FrameReader propagates<disposable> {
+  return {
+    fd: fd, live: true,
+    buf: vec.vecNew(FILL_CHUNK),
+    scratch: vec.vecNew(FILL_CHUNK),
+    pos: 0, atEof: false, error: "",
+  };
+}
+
+// A reader whose whole input is `src`. No descriptor is ever touched.
+export function frameReaderFromBytes(src: uint8[]): FrameReader propagates<disposable> {
+  let r: FrameReader = {
+    fd: 0, live: false,
+    buf: vec.vecNew(src.len),
+    scratch: vec.vecNew(0),
+    pos: 0, atEof: true, error: "",
+  };
+  vec.vecExtendFrom(ref r.buf, src);
+  return r;
+}
+
+// True when a complete message is ALREADY buffered, without reading anything.
+//
+// This is the server's debounce: after handling a notification it asks whether
+// the editor has already sent the next one, and if so it defers the compile
+// and drains first. See server.yoop.
+export function hasBufferedMessage(ref r: FrameReader): bool {
+  const scan = scanHeader(vec.vecAsArray(ref r.buf), r.pos);
+  if (!scan.valid || !scan.complete) {
+    return false;
+  }
+  return r.buf.len >= scan.headerEnd + scan.contentLength;
+}
+
+// Take the next message body into `out`, reading as much as it takes.
+//
+// `out` is the CALLER's buffer and is reused across messages, which is what
+// keeps a server that has handled ten thousand keystrokes from having
+// allocated ten thousand message buffers.
+export function readFrame(ref r: FrameReader, ref out: Vec<uint8>): FrameStatus {
+  while (true) {
+    const scan = scanHeader(vec.vecAsArray(ref r.buf), r.pos);
+    if (!scan.valid) {
+      r.error = scan.error;
+      return FrameStatus.MALFORMED;
+    }
+    if (scan.complete) {
+      const need = scan.headerEnd + scan.contentLength;
+      if (r.buf.len >= need) {
+        vec.vecClear(ref out);
+        vec.vecExtendFrom(ref out,
+          intr.arraySlice(vec.vecAsArray(ref r.buf), scan.headerEnd, need));
+        r.pos = need;
+        compact(ref r);
+        return FrameStatus.MESSAGE;
+      }
+    }
+    if (!fill(ref r)) {
+      if (r.pos >= r.buf.len) {
+        return FrameStatus.ENDED;
+      }
+      r.error = "input ended in the middle of a message";
+      return FrameStatus.MALFORMED;
+    }
+  }
+}
+
+// Read once. False means the input has ended (or the descriptor failed, which
+// is the same thing to a server: there is nobody to tell).
+function fill(ref r: FrameReader): bool {
+  if (!r.live || r.atEof) {
+    r.atEof = true;
+    return false;
+  }
+  const n = read(r.fd, r.scratch.data.ptr, r.scratch.cap);
+  if (n <= 0) {
+    r.atEof = true;
+    return false;
+  }
+  vec.vecExtendFrom(ref r.buf, intr.arraySlice(r.scratch.data, 0, usize(n)));
+  return true;
+}
+
+// Drop what has been handed out. Whatever arrived behind the last message
+// moves to the front, so `pos` is 0 again and the scan below never has to
+// think about an offset that grows without bound.
+function compact(ref r: FrameReader): void {
+  if (r.pos == 0) {
+    return;
+  }
+  if (r.pos >= r.buf.len) {
+    vec.vecClear(ref r.buf);
+    r.pos = 0;
+    return;
+  }
+  disposable tail: Vec<uint8> = vec.vecNew(r.buf.len - r.pos);
+  vec.vecExtendFrom(ref tail,
+    intr.arraySlice(vec.vecAsArray(ref r.buf), r.pos, r.buf.len));
+  vec.vecClear(ref r.buf);
+  vec.vecExtendFrom(ref r.buf, vec.vecAsArray(ref tail));
+  r.pos = 0;
+}
+
+// ----- the header ----------------------------------------------------------
+
+/*
+  What a scan of the header block found.
+
+  Three answers, not two: `valid` false is "this can never become a message",
+  `complete` false is "not enough bytes YET", and both true is a length to
+  trust. Collapsing the middle one into an error is exactly the bug that hangs
+  an editor, because a header split across two reads is completely ordinary.
+*/
+export type HeaderScan {
+  valid: bool,
+  complete: bool,
+  // Index of the first BODY byte, once complete.
+  headerEnd: usize,
+  contentLength: usize,
+  error: string,
+}
+
+export function scanHeader(buf: uint8[], start: usize): HeaderScan {
+  let sawLength: bool = false;
+  let length: usize = 0;
+  let lineStart: usize = start;
+
+  while (true) {
+    const nl = indexOfByte(buf, lineStart, '\n');
+    if (nl >= buf.len) {
+      return incomplete();
+    }
+    // The terminator is `\r\n`, but a lone `\n` is accepted: it costs one
+    // comparison and it is the difference between working and hanging when
+    // something on the way strips the carriage return.
+    let lineEnd: usize = nl;
+    if (lineEnd > lineStart && buf[lineEnd - 1] == '\r') {
+      lineEnd -= 1;
+    }
+    if (lineEnd == lineStart) {
+      // The blank line: the header block is over.
+      if (!sawLength) {
+        return bad("a message header with no Content-Length");
+      }
+      return { valid: true, complete: true, headerEnd: nl + 1,
+               contentLength: length, error: "" };
+    }
+    const colon = indexOfByte(buf, lineStart, ':');
+    if (colon >= lineEnd) {
+      return bad("a message header line with no colon");
+    }
+    if (asciiCaseEq(buf, lineStart, colon, "content-length")) {
+      switch (parseDecimal(buf, colon + 1, lineEnd)) {
+        case DecimalResult.Err { error: e }: {
+          return bad(e);
+        }
+        case DecimalResult.Ok { value: v }: {
+          if (v > MAX_CONTENT_LENGTH) {
+            return bad("a Content-Length past the size a message may be");
+          }
+          sawLength = true;
+          length = v;
+        }
+      }
+    }
+    // Every other header (Content-Type is the only one the protocol defines)
+    // is read and ignored.
+    lineStart = nl + 1;
+  }
+}
+
+function incomplete(): HeaderScan {
+  return { valid: true, complete: false, headerEnd: 0, contentLength: 0, error: "" };
+}
+
+function bad(why: string): HeaderScan {
+  return { valid: false, complete: false, headerEnd: 0, contentLength: 0, error: why };
+}
+
+variant DecimalResult {
+  Ok { value: usize },
+  Err { error: string },
+}
+
+// The digits between `from` and `to`, with surrounding spaces and tabs
+// allowed. Deliberately strict about everything else: a Content-Length that is
+// not a plain decimal is a framing problem, not a number to guess at.
+function parseDecimal(buf: uint8[], start: usize, to: usize): DecimalResult {
+  let i: usize = start;
+  while (i < to && (buf[i] == ' ' || buf[i] == '\t')) {
+    i += 1;
+  }
+  const digitsStart = i;
+  let v: usize = 0;
+  while (i < to && buf[i] >= '0' && buf[i] <= '9') {
+    // The MAX_CONTENT_LENGTH check happens on the way out, but a header of
+    // thirty digits would wrap on the way in, so the guard is here too.
+    if (v > MAX_CONTENT_LENGTH) {
+      return DecimalResult.Err { error: "a Content-Length past the size a message may be" };
+    }
+    v = v * 10 + usize(buf[i] - '0');
+    i += 1;
+  }
+  if (i == digitsStart) {
+    return DecimalResult.Err { error: "a Content-Length that is not a number" };
+  }
+  while (i < to && (buf[i] == ' ' || buf[i] == '\t')) {
+    i += 1;
+  }
+  if (i != to) {
+    return DecimalResult.Err { error: "trailing text after a Content-Length" };
+  }
+  return DecimalResult.Ok { value: v };
+}
+
+function indexOfByte(buf: uint8[], start: usize, b: uint8): usize {
+  let i: usize = start;
+  while (i < buf.len) {
+    if (buf[i] == b) {
+      return i;
+    }
+    i += 1;
+  }
+  return buf.len;
+}
+
+// `buf[start..to]` against `lit`, ASCII-case-insensitively. Header field names
+// are case insensitive and real clients do vary the spelling.
+function asciiCaseEq(buf: uint8[], start: usize, to: usize, lit: string): bool {
+  const l = intr.stringAsBytes(lit);
+  if (to - start != l.len) {
+    return false;
+  }
+  let i: usize = 0;
+  while (i < l.len) {
+    if (lowerAscii(buf[start + i]) != lowerAscii(l[i])) {
+      return false;
+    }
+    i += 1;
+  }
+  return true;
+}
+
+function lowerAscii(b: uint8): uint8 {
+  if (b >= 'A' && b <= 'Z') {
+    return b + 32;
+  }
+  return b;
+}
+
+// ----- writing -------------------------------------------------------------
+
+// One message, header and body, as a single buffer. Built whole rather than
+// written in two pieces so the header and its body cannot be interleaved with
+// anything, and so the framing is testable without a descriptor.
+export function frameMessage(body: uint8[]): Text propagates<disposable> {
+  let out: Text = text.make(body.len + 32);
+  text.push(ref out, "Content-Length: ");
+  text.pushUint(ref out, uint64(body.len));
+  text.push(ref out, "\r\n\r\n");
+  text.pushBytes(ref out, body);
+  return out;
+}
+
+export function writeFrame(fd: int32, body: uint8[]): bool {
+  disposable msg: Text = frameMessage(body);
+  return writeAll(fd, text.bytes(ref msg));
+}
+
+// A short write is ordinary on a pipe, so the loop is the point.
+export function writeAll(fd: int32, src: uint8[]): bool {
+  let off: usize = 0;
+  while (off < src.len) {
+    const n = write(fd, intr.arraySlice(src, off, src.len).ptr, src.len - off);
+    if (n <= 0) {
+      return false;
+    }
+    off += usize(n);
+  }
+  return true;
+}

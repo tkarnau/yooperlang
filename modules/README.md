@@ -16,6 +16,14 @@ accept. That makes this the right home for
 - anything useful enough to maintain but too opinionated or too heavy to force
   on every program that imports `std/core`.
 
+## What is here
+
+- **`json/`** - a JSON value model, parser and serializer. It is here rather
+  than in `std/` because not every program needs one, and the compiler itself
+  is its first consumer: `yoopiler_boot --lsp` reads and writes the Language
+  Server Protocol through it. That is the standing decision in practice - the
+  compiler may depend on a module outside `std/`.
+
 ## Layout
 
 Each subdirectory is one module, and is exactly what a user installs:

@@ -1,7 +1,7 @@
 // Shared knowledge of how to invoke the host C toolchain.
 //
 // Three call sites shell out to clang - the user-facing driver
-// (src/yoopiler.js), the e2e suite (src/e2e.test.js) and the C runtime suite
+// the C runtime suite
 // (src/runtimeC.test.js) - and on Windows "invoke clang" is materially more
 // than the string "clang". Keeping that knowledge here is what stops the
 // tests from passing on a machine where the real driver fails, or vice versa.
@@ -298,7 +298,7 @@ export function librarySearchArgs() {
 //   * A build failure is not swallowed. It throws, and the caller surfaces it
 //     exactly as a per-fixture compile failure would have.
 //
-// This is deliberately NOT used by the production driver (src/yoopiler.js): a
+// This is deliberately NOT used by the compiler itself: a
 // user compiles one program per invocation, so there is no second link to
 // amortize against, and a stale cache in a user's tree would be a real hazard.
 let cachedRuntimeObjects = null;

@@ -1,0 +1,430 @@
+module json;
+
+/*
+  The JSON value model: an ARENA of nodes plus indices, the same shape the
+  compiler's own AST uses and for the same reason. A JSON value is recursive,
+  and a `variant` holding a `Vec` of itself has no finite size, so the tree is
+  flattened into `JsonDoc.nodes` and every edge is an index.
+
+  Children hang off a node as a LINKED LIST (`firstChild` / `nextSibling`, with
+  `lastChild` for O(1) append) rather than as a contiguous range. A range would
+  be the tighter representation, but it forces every container's children to be
+  built before anything else is appended, and the whole point of the builder
+  API is that a caller can open an object, fill in a nested one, and come back:
+
+      const res = json.addObject(ref d);
+      json.objectSetInt(ref d, res, "id", 1);
+      const caps = json.addObject(ref d);          // appended AFTER `res`
+      json.objectSet(ref d, res, "capabilities", caps);
+
+  Index 0 is the NULL id, so `nodes[0]` is a dummy and `strings[0]` is an empty
+  Text. That is what lets `member(...)` answer "absent" with a plain 0 instead
+  of an Option, which matters because reading an LSP request is a run of
+  lookups that are each allowed to miss.
+
+  A number carries BOTH an int64 and a float64, with `isInt` saying which one
+  was written. JSON has one number type and this model reports one KIND, but a
+  request id has to come back out of `parse` exactly as it went in - LSP
+  matches responses on it - and routing every integer through a float64 makes
+  that a claim about mantissa width rather than a fact.
+*/
+
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { Text }, * as text from "std/core/text.yoop";
+import { Disposable, disposable } from "std/core/kinds.yoop";
+import * as intr from "std/core/intrinsics.yoop";
+
+// An index into `JsonDoc.nodes`. 0 is the null id and names no value.
+export type JsonId = usize;
+
+export enum JsonKind { NULL, BOOL, NUMBER, STRING, ARRAY, OBJECT }
+
+export type JsonNode {
+  kind: JsonKind,
+  boolVal: bool,
+  // Which of the two number slots below is the value. See the header note.
+  isInt: bool,
+  intVal: int64,
+  floatVal: float64,
+  // Index into `JsonDoc.strings`, for a STRING. 0 means the empty string.
+  strId: usize,
+  // This node's key, when it is a member of an OBJECT. 0 means it has none,
+  // which is every array element and every root.
+  keyId: usize,
+  firstChild: JsonId,
+  lastChild: JsonId,
+  nextSibling: JsonId,
+  childCount: usize,
+}
+
+/*
+  A whole document: the node arena, the string storage the nodes index into,
+  and whichever node is the root.
+
+  The strings are OWNED here rather than borrowed out of the input, because a
+  parsed string is not a slice of the source - `"a\nb"` is four bytes on the
+  wire and three in the value - and because a built document has no input to
+  borrow from at all.
+*/
+export type JsonDoc implements Disposable propagates<disposable> {
+  nodes: Vec<JsonNode>,
+  strings: Vec<Text>,
+  root: JsonId,
+
+  function dispose(ref self): void {
+    // `Vec<Text>` disposal frees the VECTOR, never the Texts in it, so each one
+    // is disposed by hand first. The copy `vecGet` hands back shares the
+    // buffer pointer with the stored struct, so freeing through it is the same
+    // free; the stored copy is dangling afterwards and the vector is about to
+    // go with it.
+    let i: usize = 0;
+    while (i < self.strings.len) {
+      let t: Text = vec.vecGet(ref self.strings, i);
+      Disposable.dispose(ref t);
+      i += 1;
+    }
+    Disposable.dispose(ref self.strings);
+    Disposable.dispose(ref self.nodes);
+  }
+}
+
+// An empty document: one dummy node and one empty string, both at index 0, so
+// that 0 can mean "nothing" everywhere else.
+export function docNew(): JsonDoc propagates<disposable> {
+  let d: JsonDoc = {
+    nodes: vec.vecNew(16),
+    strings: vec.vecNew(8),
+    root: 0,
+  };
+  vec.vecPush(ref d.nodes, blankNode(JsonKind.NULL));
+  vec.vecPush(ref d.strings, text.make(0));
+  return d;
+}
+
+function blankNode(k: JsonKind): JsonNode {
+  return {
+    kind: k, boolVal: false, isInt: false, intVal: 0, floatVal: 0.0,
+    strId: 0, keyId: 0, firstChild: 0, lastChild: 0, nextSibling: 0,
+    childCount: 0,
+  };
+}
+
+function appendNode(ref d: JsonDoc, node: JsonNode): JsonId {
+  const id: JsonId = d.nodes.len;
+  vec.vecPush(ref d.nodes, node);
+  return id;
+}
+
+// Copy `s` into the document's own storage and hand back its string index.
+// Exported because a key is stored the same way a value is, and the LSP's
+// response builders reach for both.
+export function internString(ref d: JsonDoc, s: string): usize {
+  if (s.len == 0) {
+    return 0;
+  }
+  const id: usize = d.strings.len;
+  vec.vecPush(ref d.strings, text.fromString(s));
+  return id;
+}
+
+// The same, from bytes. A JSON string may legitimately hold a nul - `"a\u0000b"`
+// is three bytes of content - and a `string` stops at one, so the parser
+// interns what it decoded rather than a view of it.
+export function internBytes(ref d: JsonDoc, src: uint8[]): usize {
+  if (src.len == 0) {
+    return 0;
+  }
+  const id: usize = d.strings.len;
+  vec.vecPush(ref d.strings, text.fromBytes(src));
+  return id;
+}
+
+export function stringAt(ref d: JsonDoc, strId: usize): string {
+  if (strId == 0 || strId >= d.strings.len) {
+    return "";
+  }
+  let t: Text = vec.vecGet(ref d.strings, strId);
+  return text.view(ref t);
+}
+
+// ----- building ------------------------------------------------------------
+
+export function addNull(ref d: JsonDoc): JsonId {
+  return appendNode(ref d, blankNode(JsonKind.NULL));
+}
+
+export function addBool(ref d: JsonDoc, v: bool): JsonId {
+  let n: JsonNode = blankNode(JsonKind.BOOL);
+  n.boolVal = v;
+  return appendNode(ref d, n);
+}
+
+export function addInt(ref d: JsonDoc, v: int64): JsonId {
+  let n: JsonNode = blankNode(JsonKind.NUMBER);
+  n.isInt = true;
+  n.intVal = v;
+  n.floatVal = float64(v);
+  return appendNode(ref d, n);
+}
+
+export function addFloat(ref d: JsonDoc, v: float64): JsonId {
+  let n: JsonNode = blankNode(JsonKind.NUMBER);
+  n.isInt = false;
+  n.floatVal = v;
+  return appendNode(ref d, n);
+}
+
+export function addString(ref d: JsonDoc, s: string): JsonId {
+  const strId = internString(ref d, s);
+  let n: JsonNode = blankNode(JsonKind.STRING);
+  n.strId = strId;
+  return appendNode(ref d, n);
+}
+
+export function addStringBytes(ref d: JsonDoc, src: uint8[]): JsonId {
+  const strId = internBytes(ref d, src);
+  let n: JsonNode = blankNode(JsonKind.STRING);
+  n.strId = strId;
+  return appendNode(ref d, n);
+}
+
+export function addArray(ref d: JsonDoc): JsonId {
+  return appendNode(ref d, blankNode(JsonKind.ARRAY));
+}
+
+export function addObject(ref d: JsonDoc): JsonId {
+  return appendNode(ref d, blankNode(JsonKind.OBJECT));
+}
+
+// Name the document's top-level value. A function rather than `d.root = id`
+// because the binding that holds a JsonDoc is normally `disposable`, and a
+// `disposable` binding is const on purpose - so the field is only reachable
+// through a borrow.
+export function setRoot(ref d: JsonDoc, id: JsonId): void {
+  d.root = id;
+}
+
+// Append `child` to `parent`'s child list. The one place the linked list is
+// written, so `arrayPush` and `objectSet` cannot drift apart.
+function linkChild(ref d: JsonDoc, parent: JsonId, child: JsonId): void {
+  if (parent == 0 || parent >= d.nodes.len) { return; }
+  if (child == 0 || child >= d.nodes.len) { return; }
+  let p: JsonNode = vec.vecGet(ref d.nodes, parent);
+  if (p.firstChild == 0) {
+    p.firstChild = child;
+  } else {
+    let prev: JsonNode = vec.vecGet(ref d.nodes, p.lastChild);
+    prev.nextSibling = child;
+    vec.vecSet(ref d.nodes, p.lastChild, prev);
+  }
+  p.lastChild = child;
+  p.childCount += 1;
+  vec.vecSet(ref d.nodes, parent, p);
+}
+
+export function arrayPush(ref d: JsonDoc, arr: JsonId, child: JsonId): void {
+  linkChild(ref d, arr, child);
+}
+
+export function objectSet(ref d: JsonDoc, obj: JsonId, key: string, child: JsonId): void {
+  if (child == 0 || child >= d.nodes.len) { return; }
+  const keyId = internString(ref d, key);
+  let c: JsonNode = vec.vecGet(ref d.nodes, child);
+  c.keyId = keyId;
+  vec.vecSet(ref d.nodes, child, c);
+  linkChild(ref d, obj, child);
+}
+
+// The three shapes an LSP response is mostly made of, spelled out so a caller
+// building one is not writing `objectSet(ref d, o, "k", addString(ref d, v))`
+// forty times.
+export function objectSetString(ref d: JsonDoc, obj: JsonId, key: string, v: string): void {
+  objectSet(ref d, obj, key, addString(ref d, v));
+}
+
+export function objectSetInt(ref d: JsonDoc, obj: JsonId, key: string, v: int64): void {
+  objectSet(ref d, obj, key, addInt(ref d, v));
+}
+
+export function objectSetBool(ref d: JsonDoc, obj: JsonId, key: string, v: bool): void {
+  objectSet(ref d, obj, key, addBool(ref d, v));
+}
+
+// ----- reading -------------------------------------------------------------
+
+export function nodeAt(ref d: JsonDoc, id: JsonId): JsonNode {
+  if (id >= d.nodes.len) {
+    return blankNode(JsonKind.NULL);
+  }
+  return vec.vecGet(ref d.nodes, id);
+}
+
+export function kindOf(ref d: JsonDoc, id: JsonId): JsonKind {
+  return nodeAt(ref d, id).kind;
+}
+
+// True for the null id AND for a real `null`, which is what a caller asking
+// "is there a value here" means either way.
+export function isNull(ref d: JsonDoc, id: JsonId): bool {
+  return id == 0 || nodeAt(ref d, id).kind == JsonKind.NULL;
+}
+
+export function asBool(ref d: JsonDoc, id: JsonId, dflt: bool): bool {
+  const n = nodeAt(ref d, id);
+  if (n.kind != JsonKind.BOOL) { return dflt; }
+  return n.boolVal;
+}
+
+export function asInt(ref d: JsonDoc, id: JsonId, dflt: int64): int64 {
+  const n = nodeAt(ref d, id);
+  if (n.kind != JsonKind.NUMBER) { return dflt; }
+  if (n.isInt) { return n.intVal; }
+  return int64(n.floatVal);
+}
+
+export function asFloat(ref d: JsonDoc, id: JsonId, dflt: float64): float64 {
+  const n = nodeAt(ref d, id);
+  if (n.kind != JsonKind.NUMBER) { return dflt; }
+  return n.floatVal;
+}
+
+// A borrow into the document's own storage, so it dies with the document.
+// "" for anything that is not a string, which is the same answer a missing key
+// gives - a caller that needs to tell them apart checks `kindOf` first.
+export function asString(ref d: JsonDoc, id: JsonId): string {
+  const n = nodeAt(ref d, id);
+  if (n.kind != JsonKind.STRING) { return ""; }
+  return stringAt(ref d, n.strId);
+}
+
+export function keyOf(ref d: JsonDoc, id: JsonId): string {
+  return stringAt(ref d, nodeAt(ref d, id).keyId);
+}
+
+export function childCount(ref d: JsonDoc, id: JsonId): usize {
+  return nodeAt(ref d, id).childCount;
+}
+
+export function firstChild(ref d: JsonDoc, id: JsonId): JsonId {
+  return nodeAt(ref d, id).firstChild;
+}
+
+export function nextSibling(ref d: JsonDoc, id: JsonId): JsonId {
+  return nodeAt(ref d, id).nextSibling;
+}
+
+// The `i`th child, or 0. A linear walk, because the children are a list; array
+// indexing is not what this model is for and an LSP array is short.
+export function at(ref d: JsonDoc, id: JsonId, i: usize): JsonId {
+  let cur: JsonId = firstChild(ref d, id);
+  let seen: usize = 0;
+  while (cur != 0) {
+    if (seen == i) { return cur; }
+    seen += 1;
+    cur = nextSibling(ref d, cur);
+  }
+  return 0;
+}
+
+// The member of `obj` named `key`, or 0 when there is none. First match wins,
+// which is what a duplicate key means here.
+export function member(ref d: JsonDoc, obj: JsonId, key: string): JsonId {
+  let cur: JsonId = firstChild(ref d, obj);
+  while (cur != 0) {
+    if (text.equals(keyOf(ref d, cur), key)) {
+      return cur;
+    }
+    cur = nextSibling(ref d, cur);
+  }
+  return 0;
+}
+
+// `a.b` in one call, for the reaches an LSP request makes constantly
+// (`params.textDocument.uri`).
+export function path2(ref d: JsonDoc, obj: JsonId, a: string, b: string): JsonId {
+  return member(ref d, member(ref d, obj, a), b);
+}
+
+export function memberString(ref d: JsonDoc, obj: JsonId, key: string): string {
+  return asString(ref d, member(ref d, obj, key));
+}
+
+export function memberInt(ref d: JsonDoc, obj: JsonId, key: string, dflt: int64): int64 {
+  return asInt(ref d, member(ref d, obj, key), dflt);
+}
+
+// The exact bytes of a STRING node, with no nul and no `strlen`.
+//
+// `asString` is the convenient form and is what almost everything wants, but a
+// document's text may legitimately contain a nul byte and a `string` cannot
+// carry one past it. Anything moving a payload through rather than reading it
+// takes this.
+export function asBytes(ref d: JsonDoc, id: JsonId): uint8[] {
+  const n = nodeAt(ref d, id);
+  if (n.kind != JsonKind.STRING || n.strId == 0 || n.strId >= d.strings.len) {
+    return intr.arraySlice(intr.stringAsBytes(""), 0, 0);
+  }
+  let t: Text = vec.vecGet(ref d.strings, n.strId);
+  return text.bytes(ref t);
+}
+
+/*
+  Deep-copy `id` out of `src` and into `dst`, returning its new id.
+
+  `dst` and `src` must be DIFFERENT documents. Copying within one would append
+  to the arena that is being walked, which is a loop rather than a copy.
+
+  This is what moves a request's `id` into its response without deciding what
+  shape an id is: the protocol allows an integer or a string, a client may use
+  either, and a response whose id is not identical to the request's is a
+  response the client throws away.
+*/
+export function copyValue(ref dst: JsonDoc, ref src: JsonDoc, id: JsonId): JsonId {
+  return copyValueAt(ref dst, ref src, id, 0);
+}
+
+const MAX_COPY_DEPTH: usize = 128;
+
+function copyValueAt(ref dst: JsonDoc, ref src: JsonDoc, id: JsonId, depth: usize): JsonId {
+  if (depth >= MAX_COPY_DEPTH) {
+    return addNull(ref dst);
+  }
+  const n = nodeAt(ref src, id);
+  switch (n.kind) {
+    case JsonKind.NULL: {
+      return addNull(ref dst);
+    }
+    case JsonKind.BOOL: {
+      return addBool(ref dst, n.boolVal);
+    }
+    case JsonKind.NUMBER: {
+      if (n.isInt) {
+        return addInt(ref dst, n.intVal);
+      }
+      return addFloat(ref dst, n.floatVal);
+    }
+    case JsonKind.STRING: {
+      return addStringBytes(ref dst, asBytes(ref src, id));
+    }
+    case JsonKind.ARRAY: {
+      const arr = addArray(ref dst);
+      let cur: JsonId = n.firstChild;
+      while (cur != 0) {
+        const child = copyValueAt(ref dst, ref src, cur, depth + 1);
+        arrayPush(ref dst, arr, child);
+        cur = nextSibling(ref src, cur);
+      }
+      return arr;
+    }
+    case JsonKind.OBJECT: {
+      const obj = addObject(ref dst);
+      let cur: JsonId = n.firstChild;
+      while (cur != 0) {
+        const child = copyValueAt(ref dst, ref src, cur, depth + 1);
+        objectSet(ref dst, obj, keyOf(ref src, cur), child);
+        cur = nextSibling(ref src, cur);
+      }
+      return obj;
+    }
+  }
+}

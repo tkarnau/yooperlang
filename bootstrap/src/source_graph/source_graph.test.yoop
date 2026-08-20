@@ -18,7 +18,54 @@ import * as str from "std/core/strings.yoop";
 import { Vec }, * as vec from "std/core/vec.yoop";
 import { Map }, * as map from "std/collections/map.yoop";
 import { disposable } from "std/core/kinds.yoop";
-import { LoadGraphResult, ModuleGraph, loadModuleGraph, moduleIdFor } from "../source_graph";
+import { LoadGraphResult, ModuleGraph, loadModuleGraph, moduleIdFor,
+         disposeModuleGraph } from "../source_graph";
+
+/*
+  A loaded graph OWNS every module's arena and every file's bytes, and
+  `disposable g: ModuleGraph` releases neither: propagated disposal frees the
+  outer Vec and Map and stops there, because neither `Module` nor `AST` carries
+  a `dispose` for it to chain into. `disposeModuleGraph` is the walk that does.
+
+  It matters to exactly one caller today and it matters a lot there: the
+  language server loads a graph per compile, so what a driver that exits can
+  ignore is the whole std closure per keystroke in an editor.
+
+  One assertion, because only one of the two halves is READABLE afterwards. The
+  graph's own vectors are, and `cap` going to zero is exactly what a released
+  Vec looks like - the same guard `Vec.dispose` uses to stay idempotent. What
+  the walk frees INSIDE each module is not: the walk works through the copy
+  `vecGet` hands back, so the buffers are freed while the stored struct's
+  bookkeeping is untouched, and the vector holding it is gone a moment later
+  anyway.
+
+  Nor is there anything useful this file can write about that inner half, which
+  is worth saying out loud: a test SUITE runs inside an arena scope, where
+  every free is a no-op, so a "release it a hundred times and see if the
+  allocator survives" test would exercise no frees at all. What does exercise
+  them is the language server, which loads and releases a graph per compile
+  against the ordinary malloc allocator.
+*/
+suite function aLoadedGraphCanBeReleased(): void {
+  switch (loadModuleGraph(fixture("slice", "dir_modules.yoop"), "")) {
+    case LoadGraphResult.Err { error: e }: {
+      let test theory: Case = t.asserts("the directory-module fixture loads") {
+        theory.isSuccessful = false;
+        theory.detail = `loading the slice directory module failed: ${e}`;
+      }
+    }
+    case LoadGraphResult.Ok { value: loaded }: {
+      let graph: ModuleGraph = loaded;
+      const hadModules = graph.modules.cap > 0;
+      disposeModuleGraph(ref graph);
+
+      let test theory: Case = t.asserts("disposal releases the graph's own vectors") {
+        theory.isSuccessful = hadModules && graph.modules.cap == 0;
+        theory.detail = `modules.cap started nonzero: ${hadModules}, is now ${graph.modules.cap}`;
+      }
+    }
+  }
+}
 
 suite function anImportCycleIsRefusedRatherThanFollowed(): void {
   let test theory: Case = t.asserts("a two-module cycle is detected") {

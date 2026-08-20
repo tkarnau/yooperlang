@@ -39,8 +39,8 @@
 .DS_Store
 
 # Dependency + build trees. These need naming explicitly: the "!*.*" rule
-# above would otherwise track every .js in node_modules and every .yoop the
-# SEA build copies into dist/*/lib/std.
+# above would otherwise track every .js in node_modules and every .yoop
+# `package:boot` copies into dist/*/lib/std.
 node_modules/
 build/
 dist/

@@ -29,6 +29,7 @@ import path from "path";
 import os from "os";
 
 import { runProcOrThrow } from "./testProc.js";
+import { seedCompiler } from "../scripts/seed.mjs";
 
 const REPO = path.resolve(import.meta.dirname, "..");
 const BOOT_SRC = path.join(REPO, "bootstrap/src/main.yoop");
@@ -59,7 +60,11 @@ describe("self-hosting: the bootstrap compiles itself to a fixpoint", () => {
     stage3 = path.join(work, "s3/yoopiler");
 
     const opts = { cwd: REPO, env, timeout: BUILD_TIMEOUT_MS };
-    await runProcOrThrow("node", [path.join(REPO, "src/yoopiler.js"), BOOT_SRC, "-o", stage1], opts);
+    // stage1 comes from the SEED - a previously released yoopiler_boot. That is
+    // the whole point of the fixpoint below: the seed is an OLD compiler, so if
+    // stage2 and stage3 agree, the tree's own source is what decided the output
+    // and the seed only got the chain started.
+    await runProcOrThrow(seedCompiler(), [BOOT_SRC, "-o", stage1], opts);
     await runProcOrThrow(stage1, [BOOT_SRC, "-o", stage2], opts);
     await runProcOrThrow(stage2, [BOOT_SRC, "-o", stage3], opts);
   });
@@ -74,7 +79,7 @@ describe("self-hosting: the bootstrap compiles itself to a fixpoint", () => {
   });
 
 
-  it("stage1 - the JS reference builds the bootstrap", () => {
+  it("stage1 - the released seed builds the bootstrap", () => {
     assert.ok(fs.existsSync(stage1), "stage1 was not produced");
   });
 

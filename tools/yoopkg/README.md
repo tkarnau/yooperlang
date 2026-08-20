@@ -59,9 +59,11 @@ versions to local directories. Override via `YOOPKG_REGISTRY=/path/to/registry.j
 From the repo root:
 
 ```
+repo=$PWD
 cd examples/playground/pkgdemo
-node ../../../tools/yoopkg/yoopkg.mjs install
-node ../../../src/yoopiler.js main.yoop
+node "$repo/tools/yoopkg/yoopkg.mjs" install
+YOOP_STD_ROOT=$repo/std YOOP_RUNTIME_ROOT=$repo/runtime \
+  $(node "$repo/scripts/seed.mjs") main.yoop -o main
 ./main
 ```
 

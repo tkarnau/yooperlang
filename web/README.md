@@ -12,7 +12,7 @@ that touches this directory.
 
 ```text
 index.html       landing page: the pitch, the three-layer model, the kind/IR demo
-tour.html        install the compiler, then five programs and their real output
+tour.html        get the compiler, then five programs and their real output
 pipeline.html    source -> tokens -> AST -> LLVM IR -> the program running
 reference.html   the language reference, hand written
 std.html         every exported signature in std/, generated from the source
@@ -31,14 +31,16 @@ data/*.data.js       GENERATED - see below
 ## The generated data is the point
 
 Nothing on this site retypes what the compiler does. `data/*.data.js` is written
-by [scripts/gen_web.mjs](../scripts/gen_web.mjs), which **actually runs the
-compiler in this checkout** and captures what came out:
+by [scripts/gen_web.mjs](../scripts/gen_web.mjs), which **builds the compiler
+from this checkout and runs it** - the seed compiles `bootstrap/src/main.yoop`
+and `bootstrap/tools/dump_tokens.yoop`, and everything below comes out of those
+two binaries:
 
 | File | What is in it | Where it came from |
 | --- | --- | --- |
 | `std.data.js` | every `export` in `std/`, with signature, doc comment and source line | reading `std/**/*.yoop` |
 | `tour.data.js` | the tour programs, their stdout and stderr, their exit codes, plus the break-it diagnostics | compiling and running `examples/tour/` and `examples/fail/` |
-| `pipeline.data.js` | token streams, ASTs, LLVM IR excerpts | `--dump-tokens`, `--dump-ast-json`, `--keep-ir` |
+| `pipeline.data.js` | token streams, ASTs, LLVM IR excerpts | the `dump_tokens` tool, `--dump-ast-json`, and the `.ll` written beside each executable |
 | `home.data.js` | the two functions the landing page diffs, in source and in IR | sliced out of the pipeline data |
 | `status.data.js` | module and example counts, version, commit | the repository |
 | `search.data.js` | every heading on every page, every std export, every episode | reading the `.html` files in this directory |

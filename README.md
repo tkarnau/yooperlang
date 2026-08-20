@@ -19,11 +19,11 @@ The main objective with this project, is to help me avoid making unreadable and 
 
 ## Status
 
-This is a re-imagining of a version I first wrote in C and have since abandoned. The current compiler is written in JavaScript (plain Node, no build tools, no dependencies) for readability by me (having lived in web languages and node backend worlds for a bit too long,) with the long-term plan of bootstrapping the compiler in Yooperlang itself once enough of the language is in place.
+This is a re-imagining of a version I first wrote in C and have since abandoned. The compiler is written in Yooperlang and compiles itself. Its source is [bootstrap/](bootstrap/), and because a self-hosted compiler needs a compiler to start from, a build begins at a SEED: a previously released `yoopiler_boot` binary, resolved by [scripts/seed.mjs](scripts/seed.mjs).
 
 The workflow is - that I write as much as I "know" and have AI help me understand some of the deep topics and bring the current version into a working state and I scrutinize how it works and try to understand more and more. I eventually rewrite the feature in the bootstrap side or take another pass at it myself to learn. The emitted LLVM IR is relatively simple, but each new concept is harder and harder to understand.
 
-What works today: a "working" chunk of the pipeline (lex, parse, typecheck, codegen, link). That covers structs, traits, kinds, generics, enums and unions, error handling, tasks and concurrency, and a starting standard library (`std/core`, `std/net`, `std/http`, `std/collections`). Self-hosting (rewriting the compiler in Yooperlang itself) is the current focus, to unlock some iteration on a bytecode layer and feel the language out; the bootstrap compiler under [bootstrap/](bootstrap/) already compiles itself.
+What works today: a "working" chunk of the pipeline (lex, parse, typecheck, codegen, link). That covers structs, traits, kinds, generics, enums and unions, error handling, tasks and concurrency, and a starting standard library (`std/core`, `std/net`, `std/http`, `std/collections`). The compiler compiles itself, and a release is refused unless the second and third stages of that build come out byte-identical.
 
 Typically I will begin writing a small document about the next portion of the language to work on and have a few iterations with LLMs to build out a plan and some pseudocode and begin implementation from there. Ideally very little of the compiler is AI generated, but there are some parts of codegen and LLVM and the C-runtime edges that I will lean on some AI implementation to get a better understanding to see it working in the context of this language.
 
@@ -38,10 +38,12 @@ tournament downtimes, with the occasional pass on windows and linux. macOS
 (arm64 and intel) and linux (x86_64) both build and pass the full suite today;
 windows builds but has not been re-verified as recently.
 
-There is still no build server, so "works on the other two" means "someone ran
-it there recently" rather than "CI says so". Cross-platform bugs here tend to be
-of one shape - a platform that was never wired up, silently contributing
-nothing, rather than doing something visibly wrong. See [Linux setup](#linux-setup)
+CI ([.github/workflows/ci.yml](.github/workflows/ci.yml)) runs the suites on
+ubuntu-latest, so linux x86_64 is the one platform a green check speaks for.
+For macOS and windows, "it works there" means "someone ran it there recently".
+Cross-platform bugs here tend to be of one shape - a platform that was never
+wired up, silently contributing nothing, rather than doing something visibly
+wrong. See [Linux setup](#linux-setup)
 for what the linux bring-up needed.
 
 ## A taste
@@ -95,45 +97,70 @@ type Megaphone implements Greeter {
 
 Prerequisites:
 
-- Node.js 22 or newer (no `npm install` needed - the compiler has zero dependencies)
-- `clang` on your `PATH` (codegen emits LLVM IR and links it with clang)
+- `clang` on your `PATH` - the compiler emits LLVM IR and shells out to clang to link it
+- Node.js 22 or newer, only if you are working in a checkout: the compiler is a native
+  binary, but the seed script, the test suites and the site generator run on Node
+- the GitHub CLI (`gh`), authenticated, the first time a checkout downloads its seed
 
-Install the compiler, then compile and run a program:
+Grab a release from <https://github.com/tkarnau/yooperlang/releases>, unpack it,
+and compile a program:
 
 ```bash
-npm install -g yooperlang
-yoopiler_alpha hello.yoop
+tar -xzf yoopiler-boot-0.2.0-linux-x64.tar.gz
+yoopiler-boot-0.2.0-linux-x64/bin/yoopiler_boot hello.yoop -o hello
 ./hello
 ```
 
-Or run it straight from a checkout, no install step:
+A release holds the compiler in `bin/` and the standard library and C runtime in
+`lib/`. The binary finds them beside itself, so there is nothing to configure -
+keep `bin/` and `lib/` together and move them together.
+
+Or build the compiler from a checkout. `node scripts/seed.mjs` prints the seed's
+path, downloading it into the gitignored `.seed/` the first time:
 
 ```bash
-node ./src/yoopiler.js examples/intro/hello.yoop
-./examples/intro/hello
+YOOP_STD_ROOT=$PWD/std YOOP_RUNTIME_ROOT=$PWD/runtime \
+  $(node scripts/seed.mjs) bootstrap/src/main.yoop -o /tmp/yoopiler_boot
+
+YOOP_STD_ROOT=$PWD/std YOOP_RUNTIME_ROOT=$PWD/runtime \
+  /tmp/yoopiler_boot examples/intro/hello.yoop -o /tmp/hello
+/tmp/hello
 ```
 
-The compiler writes a native executable next to the input file (same name, no `.yoop` extension) - you can use the `-o {path}` to override this.
+Those two variables point a compiler at THIS tree's `std/` and `runtime/`, which
+a stage built into `/tmp` has no `lib/` beside it to find.
+
+The whole command line:
+
+```text
+yoopiler_boot <entry.yoop> [-o <out>] [--emit-ir]
+yoopiler_boot --test <dir-or-file> [filter...]
+```
+
+`-o` says where the executable goes and defaults to `a.out`; the IR is always
+written beside it as `<out>.ll`. `--emit-ir` stops there, before clang. The entry
+file pulls in everything else through its imports, so you name one file no matter
+how many the program is.
 
 A few environment variables are available when the defaults don't fit:
 
-- `YOOP_CLANG` - full path to clang, if it isn't on your `PATH`
 - `YOOP_STD_ROOT` - the `std/` directory to import `std/...` paths from
-- `YOOP_RUNTIME_DIR` - the directory holding the C runtime sources
-
-And `--keep-ir` keeps the generated `.ll` around and prints its path, which is handy when you want to read the IR for a program.
+- `YOOP_RUNTIME_ROOT` - the directory holding the C runtime sources
+- `YOOP_SEED` - a `yoopiler_boot` binary to build with, instead of downloading one
+- `YOOP_LIB_PATH` and `YOOP_INCLUDE_PATH` - extra `-L` and `-I` directories for the link
 
 ## Linux setup
 
-Everything below is optional except the first line - Node and clang are the
-whole hard requirement, and the rest only matters if you want the graphical
-examples, the editor, or the debugger.
+Everything below is optional except the first line - clang, plus Node for the
+scripts in a checkout, is the whole hard requirement. The rest only matters if
+you want the graphical examples or a debugger to read the DWARF the compiler
+emits.
 
 ```bash
 # Arch
 sudo pacman -S clang nodejs npm          # required
 sudo pacman -S sdl2 mesa                 # graphical examples
-sudo pacman -S lldb                      # F5 debugging in VS Code
+sudo pacman -S lldb                      # reading DWARF (npm run test:debug)
 
 # Debian / Ubuntu
 sudo apt install clang nodejs npm
@@ -147,17 +174,17 @@ sudo dnf install lldb
 ```
 
 Node 22 or newer, from your distro or from a version manager (nvm / fnm /
-volta) - the compiler does not care which.
+volta) - it is only needed in a checkout, for the seed script and the test
+suites, and it does not care which.
 
-Check it works:
+Check it works, straight through the seed compiler:
 
 ```bash
-node src/yoopiler.js examples/intro/hello.yoop -o /tmp/hello && /tmp/hello
+YOOP_STD_ROOT=$PWD/std YOOP_RUNTIME_ROOT=$PWD/runtime \
+  $(node scripts/seed.mjs) examples/intro/hello.yoop -o /tmp/hello && /tmp/hello
 ```
 
-That needs no `npm install`: the compiler itself has zero runtime dependencies.
-`npm install` is only for the test runner and the packaging scripts, so run it
-before `npm test`.
+`npm install` is only for the test runner, so run it before `npm test`.
 
 ### Graphical examples
 
@@ -167,7 +194,8 @@ Programs name their libraries in the source - `extern "C" from library "SDL2"`
 and `extern "C" from library "framework:OpenGL"` - so there are no flags to pass:
 
 ```bash
-node src/yoopiler.js examples/playground/nebula_arena/main.yoop -o /tmp/nebula && /tmp/nebula
+YOOP_STD_ROOT=$PWD/std YOOP_RUNTIME_ROOT=$PWD/runtime \
+  /tmp/yoopiler_boot examples/playground/nebula_arena/main.yoop -o /tmp/nebula && /tmp/nebula
 ```
 
 `framework:OpenGL` is the portable spelling. It is an Apple concept by origin,
@@ -176,9 +204,13 @@ windows, `-lGL` on linux.
 
 ### Editor
 
-The VS Code extension is in [editors/vscode/](editors/vscode/) and gives you
-diagnostics, hover, go-to-definition, find-references, rename, completion, and
-an outline:
+The VS Code extension is in [editors/vscode/](editors/vscode/). It gives you
+syntax highlighting, bracket matching and comment toggling, and DIAGNOSTICS:
+it starts `yoopiler_boot --lsp`, which is the compiler itself speaking the
+Language Server Protocol, so the squiggles are the errors a build would report.
+Nothing beyond that is implemented - no hovers, no go-to-definition, no
+completion - and the F5 debug launch does not work today. Point
+`yoopiler.binaryPath` at a `yoopiler_boot` binary and:
 
 ```bash
 cd editors/vscode && npm install && cd ../..
@@ -186,14 +218,22 @@ ln -s "$PWD/editors/vscode" ~/.vscode/extensions/yoop-lang.yoop-lang-0.1.0
 ```
 
 Restart VS Code afterwards - it only scans that directory at startup. Full
-notes, including the debugger, are in [editors/vscode/README.md](editors/vscode/README.md).
+notes are in [editors/vscode/README.md](editors/vscode/README.md).
 
 ### Running the tests
 
 ```bash
-npm install       # test runner + packaging deps only
-npm test          # everything: ~1270 tests, needs clang
+npm install       # test runner deps only
+npm test          # every Node-driven suite: 460 tests, needs clang
 npm run test:unit # fast, no clang
+```
+
+The compiler's own Yoop tests are the largest body of coverage in the tree, and
+they need nothing but a compiler - 1390 of them, out of one build:
+
+```bash
+YOOP_STD_ROOT=$PWD/std YOOP_RUNTIME_ROOT=$PWD/runtime \
+  $(node scripts/seed.mjs) --test bootstrap/src
 ```
 
 The C runtime also has its own suite that runs without Node, and it will use
@@ -203,36 +243,43 @@ The C runtime also has its own suite that runs without Node, and it will use
 bash runtime/tests/run_tests.sh
 ```
 
-## Building a standalone binary
+## Packaging the compiler
 
-If you'd rather hand someone a compiler that doesn't need Node installed:
+To hand someone a compiler:
 
 ```bash
-npm install          # only for the build tooling; the compiler itself still has no runtime deps
-npm run package      # build, verify the samples, and zip it up
+npm run package:boot
 ```
 
-That produces `dist/yoopiler-alpha-<version>-<platform>-<arch>.zip`, ready to hand to someone. Use `npm run build:sea` instead if you only want the unzipped directory.
+That builds three stages - the seed builds the compiler, the compiler builds
+itself, and that one builds it again - and refuses to package unless stage2 and
+stage3 come out byte-identical, as IR and as binaries. It then stages the
+package, compiles and runs `hello.yoop` with the packaged binary and no
+environment overrides (the only step that proves the layout is the one discovery
+finds), and writes `dist/yoopiler-boot-<version>-<platform>-<arch>.tar.gz` with a
+`.sha256` beside it.
 
-That writes `dist/yoopiler-<platform>-<arch>/`:
+The directory inside the tarball:
 
 ```text
-bin/            the compiler (Node is baked in)
-lib/            std library + C runtime it reads at compile time
-samples/        whatever you put in packaging/samples/
-editor/vscode/  the VS Code extension, node_modules included
-INSTALL.md      setup instructions for whoever you send it to
-EDITOR_SETUP.md editor + LSP instructions
-AI_SETUP.md     a runbook to paste into an AI assistant (npm run package only)
+bin/yoopiler_boot  the compiler
+lib/std/           the standard library, as .yoop source
+lib/runtime/       the C runtime sources handed to clang
+README.md          setup instructions for whoever you send it to
 ```
 
-The whole directory is relocatable - move it anywhere, and the binary finds its data files relative to itself. It's around 114 MB (35 MB zipped), because a single-executable build embeds the Node runtime.
+`lib/` stays outside the binary because clang is a separate process and needs
+real files at real paths. The whole directory is relocatable - the binary finds
+`lib/` beside itself - but `bin/` and `lib/` have to move together.
 
-To change what ships in `samples/`, add or remove `.yoop` files in [packaging/samples/](packaging/samples/); the build copies the directory as-is. The editor instructions are [packaging/editor_setup.md](packaging/editor_setup.md).
+Two caveats. The build produces a binary for the machine it runs on, so build on
+each platform you want to ship. And `clang` is still required at run time: this
+packages the compiler, not the toolchain underneath it. On macOS the binary is
+not notarized, so a recipient who downloads it has to clear the quarantine flag
+(`xattr -dr com.apple.quarantine .`) or Gatekeeper kills it with no error
+message - the shipped README leads with this.
 
-The bundled extension needs no configuration: it auto-detects the compiler at `../../bin/` relative to itself, and drives it via `yoopiler_alpha --lsp`, so a recipient gets diagnostics, hover, and go-to-definition without a repo or a Node install.
-
-Three caveats. The build copies the *running* Node binary, so it only produces a binary for the machine it runs on - build on each platform you want to ship. `clang` is still required at run time: this packages the compiler, not the toolchain underneath it. And on macOS the binary is ad-hoc signed rather than notarized, so a recipient who downloads it has to clear the quarantine flag (`xattr -dr com.apple.quarantine .`) or Gatekeeper kills it with no error message - the generated INSTALL.md leads with this.
+The shipped README is generated from [packaging/bootstrap_readme.md](packaging/bootstrap_readme.md).
 
 ## Try it
 
@@ -255,15 +302,15 @@ There are also hundreds of feature fixtures under [examples/pass/](examples/pass
 ## Contributing / hacking on the compiler
 
 - [CONTRIBUTING.md](CONTRIBUTING.md) - how to run the tests and the lay of the land
-- [docs/compiler_internals.md](docs/compiler_internals.md) - the architecture deep-dive (subsystem map, invariants, design notes)
-- [docs/writing_yoop.md](docs/writing_yoop.md) - how to write Yooperlang itself (std, the bootstrap compiler, tools, examples)
+- [bootstrap/README.md](bootstrap/README.md) - the compiler's module map, layer by layer
+- [docs/writing_yoop.md](docs/writing_yoop.md) - how to write Yooperlang itself (std, the compiler, tools, examples)
 
 Run the tests:
 
 ```bash
-npm test          # everything (needs clang)
+npm test          # every Node-driven suite (needs clang)
 npm run test:unit # fast, no clang
-npm run test:e2e  # full pipeline, needs clang
+npm run test:e2e  # the suites that build and run programs, needs clang
 ```
 
 ## License

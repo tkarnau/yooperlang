@@ -4,19 +4,21 @@ This walks you from nothing to a running Yooperlang program in a few minutes.
 
 ## 1. Install the prerequisites
 
-You need two things:
+You need:
 
-- **Node.js 22 or newer** - the compiler itself is written in plain JavaScript
-  and runs on Node. There are no dependencies, so there is no `npm install`
-  step.
 - **clang** - the compiler emits LLVM IR text and shells out to `clang` to link
   it into a native executable.
+- **Node.js 22 or newer**, if you are working from a checkout. The compiler is a
+  native binary, but the script that fetches the seed compiler and the test
+  suites run on Node.
+- **the GitHub CLI (`gh`)**, authenticated, the first time a checkout fetches its
+  seed compiler.
 
-Check that you have both:
+Check that you have them:
 
 ```bash
-node --version    # should print v18.x or higher
 clang --version   # should print a clang version
+node --version    # should print v22.x or higher
 ```
 
 Getting clang:
@@ -27,12 +29,31 @@ Getting clang:
 - Windows: install LLVM (https://releases.llvm.org) and make sure `clang` is on
   your `PATH`
 
-## 2. Get the code
+## 2. Get a compiler
+
+The quickest way is a release from
+<https://github.com/tkarnau/yooperlang/releases>. Unpack it and the compiler is
+`bin/yoopiler_boot`, with the standard library and C runtime in `lib/` beside it:
+
+```bash
+tar -xzf yoopiler-boot-0.2.0-linux-x64.tar.gz
+yoopiler-boot-0.2.0-linux-x64/bin/yoopiler_boot --list-attributes
+```
+
+To work on the language itself, clone the repository instead. The compiler is
+written in Yooperlang, so building it starts from a SEED - a previously released
+`yoopiler_boot`, which `scripts/seed.mjs` finds and downloads on first use:
 
 ```bash
 git clone https://github.com/tkarnau/yooperlang.git
 cd yooperlang
+
+YOOP_STD_ROOT=$PWD/std YOOP_RUNTIME_ROOT=$PWD/runtime \
+  $(node scripts/seed.mjs) bootstrap/src/main.yoop -o /tmp/yoopiler_boot
 ```
+
+The two variables point the compiler at this checkout's `std/` and `runtime/`.
+A compiler unpacked from a release finds its own and needs neither.
 
 ## 3. Compile and run your first program
 
@@ -40,8 +61,9 @@ There are small, commented starter programs in [../examples/intro/](../examples/
 Start with hello:
 
 ```bash
-node ./src/yoopiler.js examples/intro/hello.yoop
-./examples/intro/hello
+YOOP_STD_ROOT=$PWD/std YOOP_RUNTIME_ROOT=$PWD/runtime \
+  /tmp/yoopiler_boot examples/intro/hello.yoop -o /tmp/hello
+/tmp/hello
 ```
 
 You should see:
@@ -50,15 +72,15 @@ You should see:
 Hello from Yooperlang!
 ```
 
-The compiler writes the native executable next to the source file, using the
-same name without the `.yoop` extension. So `examples/intro/hello.yoop` produces
-`examples/intro/hello`.
+`-o` says where the executable goes, and defaults to `a.out` in the current
+directory. The LLVM IR is always written beside the executable as `<out>.ll`;
+`--emit-ir` stops there and never calls clang.
 
-To compile your own file somewhere else:
+To compile your own file:
 
 ```bash
-node ./src/yoopiler.js path/to/program.yoop
-./path/to/program
+yoopiler_boot path/to/program.yoop -o program
+./program
 ```
 
 ## 4. Walk through the starter programs
@@ -99,8 +121,8 @@ Then open <http://localhost:8080/>. Opening `web/index.html` straight from the
 filesystem works too.
 
 The code, output and diagnostics the site shows are captured by actually
-running this compiler, so after changing `std/` or the tour programs,
-regenerate them:
+building this checkout's compiler and running it, so after changing `std/` or
+the tour programs, regenerate them:
 
 ```bash
 npm run gen:web
@@ -108,7 +130,7 @@ npm run gen:web
 
 ## Where to go next
 
-- if using vscode: try installing the debugger, LSP, and syntax highlighting in the [editors/vscode](../editors/vscode/README.md) folder
+- if using vscode: syntax highlighting for `.yoop` files is in the [editors/vscode](../editors/vscode/README.md) folder
 - [../SPEC.md](../SPEC.md) - the language spec, syntax first
 - [writing_yoop.md](writing_yoop.md) - current practice for writing Yoop: kinds,
   `string` versus `Text`, arenas, errors, async, modules, tests
