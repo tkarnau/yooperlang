@@ -1,13 +1,13 @@
 # yoopiler_boot {{VERSION}} ({{TARGET}})
 
-This is the Yooperlang compiler written in Yooperlang, compiled by itself. Not
-the JavaScript one that started this. The binary in `bin/` was built by a
-compiler built by a compiler built from this same source, and the last two of
-those came out byte-identical, which is the check that says the thing compiles
-itself correctly rather than merely compiling.
+This is the Yooperlang compiler, written in Yooperlang and compiled by itself.
+The binary in `bin/` was built by a compiler built by a compiler built from this
+same source, and the last two of those came out byte-identical, which is the
+check that says the thing compiles itself correctly rather than merely
+compiling.
 
-It is an alpha. It handles the language the compiler itself is written in,
-which is a real subset but not all of what the reference implementation takes.
+It is an alpha. It handles the language the compiler itself is written in, which
+is most of what the specification describes but not all of it.
 
 ## What you need
 
@@ -26,10 +26,13 @@ On {{PLATFORM_HUMAN}}, that is all.
 The whole command line:
 
     {{BIN}} <entry.yoop> [-o <out>] [--emit-ir]
+    {{BIN}} --test <dir-or-file> [filter...]
 
     -o <out>    where the executable goes. The IR is always written beside it,
                 as <out>.ll. Defaults to a.out.
     --emit-ir   stop after writing <out>.ll. No clang, no executable.
+    --test      run the yoop test harness over a directory or one file, with
+                any extra positionals as suite-name filters.
 
 The entry file pulls in everything else through its imports, so you name one
 file no matter how many the program is.

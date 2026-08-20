@@ -11,14 +11,18 @@ bytes went."
 
 ## Build and run
 
+From the repository root. `node scripts/seed.mjs` prints the path of a compiler,
+and the two variables point it at this tree's `std/` and `runtime/`.
+
 ```sh
 # build (one time)
-node src/yoopiler.js examples/playground/diskscope/main.yoop
+YOOP_STD_ROOT=$PWD/std YOOP_RUNTIME_ROOT=$PWD/runtime \
+  $(node scripts/seed.mjs) examples/playground/diskscope/main.yoop -o /tmp/diskscope
 
 # run on a directory (defaults to "." if omitted)
-examples/playground/diskscope/main ~/some/project
-examples/playground/diskscope/main /usr/lib
-examples/playground/diskscope/main          # scans the current directory
+/tmp/diskscope ~/some/project
+/tmp/diskscope /usr/lib
+/tmp/diskscope          # scans the current directory
 ```
 
 Requires SDL2 + SDL2_ttf (e.g. `brew install sdl2 sdl2_ttf`). The window font is

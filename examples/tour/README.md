@@ -13,25 +13,28 @@ captured, is at <https://tkarnau.github.io/yooperlang/tour.html>.
 
 ## Running them
 
-With the compiler from a release:
+With a compiler from a release, which finds its own std:
 
 ```sh
-yoopiler_boot examples/tour/hello.yoop
-./examples/tour/hello
+yoopiler_boot examples/tour/hello.yoop -o /tmp/hello
+/tmp/hello
 ```
 
-Or from a checkout:
+From a checkout, point it at this tree's std and runtime; `node scripts/seed.mjs`
+prints the path of a compiler that can build them:
 
 ```sh
-node ./src/yoopiler.js examples/tour/hello.yoop
-./examples/tour/hello
+YOOP_STD_ROOT=$PWD/std YOOP_RUNTIME_ROOT=$PWD/runtime \
+  $(node scripts/seed.mjs) examples/tour/hello.yoop -o /tmp/hello
+/tmp/hello
 ```
 
-The binary lands next to the source with the extension stripped. To hide
-clang's target-triple warning:
+`-o` says where the binary lands, and defaults to `a.out`. To hide clang's
+target-triple warning:
 
 ```sh
-node ./src/yoopiler.js examples/tour/kinds.yoop 2>&1 | grep -v "warning:\|generated"
+YOOP_STD_ROOT=$PWD/std YOOP_RUNTIME_ROOT=$PWD/runtime \
+  $(node scripts/seed.mjs) examples/tour/kinds.yoop -o /tmp/kinds 2>&1 | grep -v "warning:\|generated"
 ```
 
 ## If you add one

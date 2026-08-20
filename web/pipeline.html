@@ -47,10 +47,10 @@
     <h1>Watch a program become a binary</h1>
     <p class="lede">
       Source goes in, five stages happen, an executable comes out. Everything on this page is
-      a real dump from a real build: the token stream is what <code>--dump-tokens</code>
-      printed, the tree is what <code>--dump-ast-json</code> wrote, the LLVM is what
-      <code>--keep-ir</code> left behind, and the output is what the binary printed when it
-      ran.
+      a real dump from a real build: the token stream is what the <code>dump_tokens</code> tool
+      printed, the tree is what <code>--dump-ast-json</code> wrote, the LLVM is the
+      <code>.ll</code> the compiler writes beside every executable, and the output is what the
+      binary printed when it ran.
     </p>
   </div>
 
@@ -66,8 +66,8 @@
     <noscript>
       <div class="noscript">
         <strong>This page is a viewer over generated dumps, so it needs JavaScript.</strong>
-        The same dumps are a command away in a checkout:
-        <code>node src/yoopiler.js --dump-tokens examples/tour/hello.yoop</code>.
+        The same dumps come out of a checkout with
+        <code>npm run gen:web</code>, which builds the compiler and runs it.
       </div>
     </noscript>
   </div>
@@ -119,15 +119,15 @@
         <p>
           The compiler shells out to <code>clang</code> with the emitted <code>.ll</code>, the
           small C runtime, and any <code>-l</code> flags your <code>extern</code> blocks asked
-          for. What lands next to your source is an ordinary native executable.
+          for. What lands where <code>-o</code> says is an ordinary native executable.
         </p>
       </div>
       <div class="card">
         <span class="card-mark">bonus</span>
         <h3>It is all inspectable</h3>
         <p>
-          <code>--dump-tokens</code>, <code>--dump-ast</code> (which writes a cross-linked HTML
-          viewer much like this page), <code>--dump-ast-json</code>, <code>--keep-ir</code>,
+          The <code>dump_tokens</code> tool, <code>--dump-ast-json</code>, the
+          <code>.ll</code> written beside every executable (<code>--emit-ir</code> stops there),
           and <code>--track-heap</code>. None of it is a debug build.
         </p>
       </div>

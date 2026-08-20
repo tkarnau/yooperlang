@@ -344,7 +344,7 @@
     const base = sample.file.replace(/^.*\//, "").replace(/\.yoop$/, "");
     wrap.appendChild(
       codeBlock(
-        `node ./src/yoopiler.js ${sample.file}\n./${sample.file.replace(/\.yoop$/, "")}`,
+        `yoopiler_boot ${sample.file}\n./${sample.file.replace(/\.yoop$/, "")}`,
         { lang: "shell", name: "terminal" },
       ),
     );

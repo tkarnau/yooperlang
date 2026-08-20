@@ -30,6 +30,7 @@ import os from "os";
 import { spawnSync } from "child_process";
 
 import { runProc, runProcOrThrow } from "./testProc.js";
+import { seedCompiler, seedEnv } from "../scripts/seed.mjs";
 
 const REPO = path.resolve(import.meta.dirname, "..");
 const FIXTURE = path.join(REPO, "bootstrap/tests/debug/frames.yoop");
@@ -95,9 +96,9 @@ describe("dwarf: a debugger can read what the bootstrap emits", () => {
     if (!boot) {
       boot = path.join(work, "yoopiler_boot");
       await runProcOrThrow(
-        "node",
-        [path.join(REPO, "src/yoopiler.js"), BOOT_SRC, "-o", boot],
-        { cwd: REPO, timeout: COMPILE_TIMEOUT_MS },
+        seedCompiler(),
+        [BOOT_SRC, "-o", boot],
+        { cwd: REPO, env: seedEnv(), timeout: COMPILE_TIMEOUT_MS },
       );
     }
     binPath = path.join(work, "frames");

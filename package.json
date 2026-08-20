@@ -3,6 +3,7 @@
   "version": "0.2.0",
   "description": "A systems language with a TypeScript feel - no garbage collector, structs plus free functions, traits and kinds. Compiles to LLVM IR.",
   "type": "module",
+  "private": true,
   "license": "MIT",
   "author": "Tom Karnau",
   "homepage": "https://tkarnau.github.io/yooperlang/",
@@ -23,37 +24,18 @@
   "engines": {
     "node": ">=22"
   },
-  "bin": {
-    "yoopiler_alpha": "src/yoopiler.js"
-  },
-  "files": [
-    "src",
-    "std",
-    "runtime",
-    "SPEC.md",
-    "!src/**/*.test.js",
-    "!src/testProc.js",
-    "!runtime/tests"
-  ],
   "scripts": {
     "test": "node --test --test-reporter=spec \"src/**/*.test.js\"",
-    "test:unit": "node --test --test-reporter=spec \"src/**/!(e2e|parity|selfhost|fail|pass).test.js\"",
-    "test:e2e": "node --test --test-reporter=spec src/e2e.test.js src/parity.test.js src/slice.test.js src/fail.test.js src/pass.test.js src/selfhost.test.js",
-    "test:parity": "node --test --test-reporter=spec src/parity.test.js",
+    "test:unit": "node --test --test-reporter=spec \"src/**/!(selfhost|fail|pass|slice|debug|lsp).test.js\"",
+    "test:e2e": "node --test --test-reporter=spec src/slice.test.js src/fail.test.js src/pass.test.js src/selfhost.test.js src/lsp.test.js",
     "test:slice": "node --test --test-reporter=spec src/slice.test.js",
+    "test:lsp": "node --test --test-reporter=spec src/lsp.test.js",
     "test:fail": "node --test --test-reporter=spec src/fail.test.js",
     "test:pass": "node --test --test-reporter=spec src/pass.test.js",
     "test:selfhost": "node --test --test-reporter=spec src/selfhost.test.js",
     "test:debug": "node --test --test-reporter=spec src/debug.test.js",
-    "lsp": "node src/lsp/server.js",
-    "build:sea": "node scripts/build_sea.mjs",
-    "package": "node scripts/package_release.mjs",
     "package:boot": "node scripts/package_bootstrap.mjs",
     "gen:index": "node scripts/gen_std_index.mjs",
     "gen:web": "node scripts/gen_web.mjs"
-  },
-  "devDependencies": {
-    "esbuild": "^0.28.1",
-    "postject": "^1.0.0-alpha.6"
   }
 }

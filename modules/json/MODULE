@@ -1,0 +1,8 @@
+name     json
+version  0.1.0
+
+# Informational only. The compiler does not read, resolve, choose, or enforce
+# anything from this file.
+#
+# `requires` records the dependency versions json was BUILT AND TESTED against.
+# json depends on nothing but std, so the block is empty.

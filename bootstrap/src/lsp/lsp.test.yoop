@@ -1,0 +1,499 @@
+import.test;
+
+// The language server's three testable seams, none of which needs a pipe or a
+// running editor:
+//
+//   * the Content-Length FRAMING, which is what hangs an editor when it is
+//     wrong rather than failing loudly,
+//   * the compiler location -> editor POSITION conversion, which is where an
+//     off-by-one puts the squiggle under the wrong token,
+//   * the exact BYTES of the messages that go out.
+//
+// The fourth seam - an editor really talking to the built binary - is
+// src/lsp.test.js, because only a spawned process can say that.
+
+import * as t from "std/test.yoop";
+import { suite, test, Case } from "std/test.yoop";
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { Text }, * as text from "std/core/text.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import * as intr from "std/core/intrinsics.yoop";
+import * as json from "modules/json";
+import { JsonDoc, ParseResult } from "modules/json";
+
+import { FrameStatus, HeaderScan, FrameReader, scanHeader, readFrame,
+         frameReaderFromBytes, frameMessage } from "../lsp";
+import { Position, Range, positionOfByte, rangeOfSpan } from "../lsp";
+import { Document, DocumentStore, storeNew, storeUpsert, storeIndexOf,
+         storeGet, storeClose, storeNextPending, storeMarkPublished,
+         uriToPath } from "../lsp";
+import { LspDiagnostic, collectDiagnostics } from "../lsp";
+import { buildPublishDiagnostics, buildInitializeResponse, buildNullResponse,
+         buildErrorResponse, ERR_METHOD_NOT_FOUND } from "../lsp";
+
+// ----- helpers -------------------------------------------------------------
+
+// Read one message out of `wire` and hand its body back as text. A status
+// other than MESSAGE renders as a marker, so an assertion compares one string
+// either way rather than branching.
+function firstBody(wire: string): Text propagates<disposable> {
+  disposable r: FrameReader = frameReaderFromBytes(intr.stringAsBytes(wire));
+  disposable body: Vec<uint8> = vec.vecNew(64);
+  switch (readFrame(ref r, ref body)) {
+    case FrameStatus.MESSAGE: {
+      return text.fromBytes(vec.vecAsArray(ref body));
+    }
+    case FrameStatus.ENDED: {
+      return text.fromString("<ended>");
+    }
+    case FrameStatus.MALFORMED: {
+      return text.fromString("<malformed>");
+    }
+  }
+}
+
+// The status of the Nth read from `wire`, as a word.
+function statusAfter(wire: string, skip: usize): Text propagates<disposable> {
+  disposable r: FrameReader = frameReaderFromBytes(intr.stringAsBytes(wire));
+  disposable body: Vec<uint8> = vec.vecNew(64);
+  let i: usize = 0;
+  while (i < skip) {
+    const _s = readFrame(ref r, ref body);
+    i += 1;
+  }
+  switch (readFrame(ref r, ref body)) {
+    case FrameStatus.MESSAGE: { return text.fromString("message"); }
+    case FrameStatus.ENDED: { return text.fromString("ended"); }
+    case FrameStatus.MALFORMED: { return text.fromString("malformed"); }
+  }
+}
+
+function checkText(ref theory: Case, ref got: Text, want: string): void {
+  theory.isSuccessful = text.equals(text.view(ref got), want);
+  theory.detail = `got "${text.view(ref got)}", wanted "${want}"`;
+}
+
+// The JSON a built message serializes to.
+function rendered(ref d: JsonDoc): Text propagates<disposable> {
+  return json.serializeDoc(ref d);
+}
+
+// ----- framing -------------------------------------------------------------
+
+suite function readsTheContentLengthFraming(): void {
+  let test theory: Case = t.asserts("a header names exactly how many bytes follow") {
+    const scan = scanHeader(intr.stringAsBytes("Content-Length: 5\r\n\r\nhello"), 0);
+    theory.isSuccessful = scan.valid && scan.complete
+      && scan.contentLength == 5 && scan.headerEnd == 21;
+    theory.detail = `valid=${scan.valid} complete=${scan.complete} len=${scan.contentLength} end=${scan.headerEnd}`;
+  }
+
+  let test theory: Case = t.asserts("a header split mid-way is INCOMPLETE, not invalid") {
+    // The distinction the whole file exists for: an editor's write may land in
+    // two reads, and answering "invalid" would drop a perfectly good message.
+    const scan = scanHeader(intr.stringAsBytes("Content-Len"), 0);
+    theory.isSuccessful = scan.valid && !scan.complete;
+    theory.detail = `valid=${scan.valid} complete=${scan.complete}`;
+  }
+
+  let test theory: Case = t.asserts("a header with no blank line yet is incomplete") {
+    const scan = scanHeader(intr.stringAsBytes("Content-Length: 5\r\n"), 0);
+    theory.isSuccessful = scan.valid && !scan.complete;
+    theory.detail = `valid=${scan.valid} complete=${scan.complete}`;
+  }
+
+  let test theory: Case = t.asserts("the field name is case insensitive") {
+    const scan = scanHeader(intr.stringAsBytes("content-LENGTH: 7\r\n\r\n"), 0);
+    theory.isSuccessful = scan.valid && scan.complete && scan.contentLength == 7;
+    theory.detail = `len=${scan.contentLength}`;
+  }
+
+  let test theory: Case = t.asserts("other header fields are read and ignored") {
+    const wire = "Content-Type: application/vscode-jsonrpc; charset=utf-8\r\nContent-Length: 2\r\n\r\n{}";
+    disposable got: Text = firstBody(wire);
+    checkText(ref theory, ref got, "{}");
+  }
+
+  let test theory: Case = t.asserts("a lone \\n terminator is accepted") {
+    disposable got: Text = firstBody("Content-Length: 2\n\n{}");
+    checkText(ref theory, ref got, "{}");
+  }
+
+  let test theory: Case = t.asserts("a header with no Content-Length is refused") {
+    const scan = scanHeader(intr.stringAsBytes("Content-Type: x\r\n\r\n"), 0);
+    theory.isSuccessful = !scan.valid;
+    theory.detail = "a header with no length was accepted";
+  }
+
+  let test theory: Case = t.asserts("a Content-Length that is not a number is refused") {
+    const a = scanHeader(intr.stringAsBytes("Content-Length: abc\r\n\r\n"), 0);
+    const b = scanHeader(intr.stringAsBytes("Content-Length: 12x\r\n\r\n"), 0);
+    const c = scanHeader(intr.stringAsBytes("Content-Length:\r\n\r\n"), 0);
+    theory.isSuccessful = !a.valid && !b.valid && !c.valid;
+    theory.detail = `a=${a.valid} b=${b.valid} c=${c.valid}`;
+  }
+
+  let test theory: Case = t.asserts("a header line with no colon is refused") {
+    const scan = scanHeader(intr.stringAsBytes("garbage\r\n\r\n"), 0);
+    theory.isSuccessful = !scan.valid;
+    theory.detail = "a header line with no colon was accepted";
+  }
+
+  let test theory: Case = t.asserts("the COUNT is what ends a body, not a scan for a blank line") {
+    // The body itself contains `\r\n\r\n`. A reader that looked for the
+    // separator instead of counting would cut the message in half here.
+    const body = "{\"a\":\"x\\r\\n\\r\\ny\"}";
+    disposable got: Text = firstBody(`Content-Length: 18\r\n\r\n${body}`);
+    checkText(ref theory, ref got, body);
+  }
+
+  let test theory: Case = t.asserts("the count is BYTES, not characters") {
+    // A two-byte codepoint written as a JSON escape decodes to two bytes, so a
+    // 12-byte body is 11 characters. Counting characters would read one byte
+    // short and desynchronize every message after it.
+    disposable want: Text = text.make(16);
+    text.push(ref want, "{\"k\":\"");
+    text.pushChar(ref want, 233);          // U+00E9, two bytes in UTF-8
+    text.push(ref want, "\"}");
+    disposable wire: Text = text.make(64);
+    text.push(ref wire, "Content-Length: ");
+    text.pushUint(ref wire, uint64(text.bytes(ref want).len));
+    text.push(ref wire, "\r\n\r\n");
+    text.pushText(ref wire, ref want);
+    disposable got: Text = firstBody(text.view(ref wire));
+    checkText(ref theory, ref got, text.view(ref want));
+  }
+
+  let test theory: Case = t.asserts("two messages back to back are read as two") {
+    const wire = "Content-Length: 5\r\n\r\nfirstContent-Length: 6\r\n\r\nsecond";
+    disposable r: FrameReader = frameReaderFromBytes(intr.stringAsBytes(wire));
+    disposable body: Vec<uint8> = vec.vecNew(64);
+    const s1 = readFrame(ref r, ref body);
+    disposable one: Text = text.fromBytes(vec.vecAsArray(ref body));
+    const s2 = readFrame(ref r, ref body);
+    disposable two: Text = text.fromBytes(vec.vecAsArray(ref body));
+    const s3 = readFrame(ref r, ref body);
+    theory.isSuccessful = s1 == FrameStatus.MESSAGE && s2 == FrameStatus.MESSAGE
+      && s3 == FrameStatus.ENDED
+      && text.equals(text.view(ref one), "first")
+      && text.equals(text.view(ref two), "second");
+    theory.detail = `got "${text.view(ref one)}" then "${text.view(ref two)}"`;
+  }
+
+  let test theory: Case = t.asserts("empty input ends cleanly") {
+    disposable got: Text = statusAfter("", 0);
+    checkText(ref theory, ref got, "ended");
+  }
+
+  let test theory: Case = t.asserts("a body cut short is malformed, not a message") {
+    disposable got: Text = statusAfter("Content-Length: 10\r\n\r\nshort", 0);
+    checkText(ref theory, ref got, "malformed");
+  }
+
+  let test theory: Case = t.asserts("a header cut short is malformed at end of input") {
+    disposable got: Text = statusAfter("Content-Length: 10\r\n", 0);
+    checkText(ref theory, ref got, "malformed");
+  }
+
+  let test theory: Case = t.asserts("a zero-length body is a message") {
+    disposable got: Text = firstBody("Content-Length: 0\r\n\r\n");
+    checkText(ref theory, ref got, "");
+  }
+}
+
+suite function writesTheContentLengthFraming(): void {
+  let test theory: Case = t.asserts("a written frame is a header, a blank line and the body") {
+    disposable got: Text = frameMessage(intr.stringAsBytes("{\"a\":1}"));
+    checkText(ref theory, ref got, "Content-Length: 7\r\n\r\n{\"a\":1}");
+  }
+
+  let test theory: Case = t.asserts("what is written reads back as what went in") {
+    const body = "{\"jsonrpc\":\"2.0\",\"method\":\"exit\"}";
+    disposable wire: Text = frameMessage(intr.stringAsBytes(body));
+    disposable back: Text = firstBody(text.view(ref wire));
+    checkText(ref theory, ref back, body);
+  }
+}
+
+// ----- positions -----------------------------------------------------------
+
+suite function convertsCompilerLocationsToEditorPositions(): void {
+  let test theory: Case = t.asserts("the first line is line 0, and its first byte is character 0") {
+    const p = positionOfByte(intr.stringAsBytes("abc\ndef"), 0);
+    theory.isSuccessful = p.line == 0 && p.character == 0;
+    theory.detail = `got ${p.line}:${p.character}`;
+  }
+
+  let test theory: Case = t.asserts("a byte on the first line keeps its own offset") {
+    // The compiler's own `SourceLocation.column` is 0-based here and 1-based
+    // on every line below, which is exactly why this file recomputes from the
+    // byte offset instead of reading it.
+    const p = positionOfByte(intr.stringAsBytes("abc\ndef"), 2);
+    theory.isSuccessful = p.line == 0 && p.character == 2;
+    theory.detail = `got ${p.line}:${p.character}`;
+  }
+
+  let test theory: Case = t.asserts("the byte after a newline is character 0 of the next line") {
+    const p = positionOfByte(intr.stringAsBytes("abc\ndef"), 4);
+    theory.isSuccessful = p.line == 1 && p.character == 0;
+    theory.detail = `got ${p.line}:${p.character}`;
+  }
+
+  let test theory: Case = t.asserts("a third line counts from zero like every other") {
+    const p = positionOfByte(intr.stringAsBytes("a\nbb\nccc"), 7);
+    theory.isSuccessful = p.line == 2 && p.character == 2;
+    theory.detail = `got ${p.line}:${p.character}`;
+  }
+
+  let test theory: Case = t.asserts("a CRLF terminator costs no column") {
+    const p = positionOfByte(intr.stringAsBytes("ab\r\ncd"), 5);
+    theory.isSuccessful = p.line == 1 && p.character == 1;
+    theory.detail = `got ${p.line}:${p.character}`;
+  }
+
+  let test theory: Case = t.asserts("a two-byte codepoint is ONE UTF-16 unit") {
+    // "<U+00E9>x" - the x is at byte 2 and at character 1.
+    disposable src: Text = text.make(8);
+    text.pushChar(ref src, 233);
+    text.push(ref src, "x");
+    const p = positionOfByte(text.bytes(ref src), 2);
+    theory.isSuccessful = p.line == 0 && p.character == 1;
+    theory.detail = `got ${p.line}:${p.character}, wanted 0:1`;
+  }
+
+  let test theory: Case = t.asserts("a codepoint above the BMP is TWO UTF-16 units") {
+    // "<U+1F600>x" - the x is at byte 4 and at character 2, because an editor
+    // counts the emoji as a surrogate pair.
+    disposable src: Text = text.make(8);
+    text.pushChar(ref src, 128512);
+    text.push(ref src, "x");
+    const p = positionOfByte(text.bytes(ref src), 4);
+    theory.isSuccessful = p.line == 0 && p.character == 2;
+    theory.detail = `got ${p.line}:${p.character}, wanted 0:2`;
+  }
+
+  let test theory: Case = t.asserts("an offset past the end clamps to the end") {
+    const p = positionOfByte(intr.stringAsBytes("ab\ncd"), 999);
+    theory.isSuccessful = p.line == 1 && p.character == 2;
+    theory.detail = `got ${p.line}:${p.character}`;
+  }
+
+  let test theory: Case = t.asserts("a span becomes a range of the right width") {
+    const r = rangeOfSpan(intr.stringAsBytes("let nope = 1;"), 4, 4);
+    theory.isSuccessful = r.start.line == 0 && r.start.character == 4
+      && r.end.line == 0 && r.end.character == 8;
+    theory.detail = `got ${r.start.character}..${r.end.character}, wanted 4..8`;
+  }
+
+  let test theory: Case = t.asserts("a zero-width span is widened to one character") {
+    // A range whose start equals its end draws nothing in most editors, which
+    // reads as a missing diagnostic rather than a precise one.
+    const r = rangeOfSpan(intr.stringAsBytes("abc"), 1, 0);
+    theory.isSuccessful = r.start.character == 1 && r.end.character == 2;
+    theory.detail = `got ${r.start.character}..${r.end.character}, wanted 1..2`;
+  }
+}
+
+// ----- URIs ----------------------------------------------------------------
+
+suite function turnsAUriIntoAPath(): void {
+  let test theory: Case = t.asserts("a plain file URI is its path") {
+    disposable got: Text = uriToPath("file:///home/a/b.yoop");
+    checkText(ref theory, ref got, "/home/a/b.yoop");
+  }
+
+  let test theory: Case = t.asserts("percent escapes are decoded") {
+    disposable got: Text = uriToPath("file:///home/a%20b/c%2Bd.yoop");
+    checkText(ref theory, ref got, "/home/a b/c+d.yoop");
+  }
+
+  let test theory: Case = t.asserts("an authority is skipped") {
+    disposable got: Text = uriToPath("file://localhost/tmp/x.yoop");
+    checkText(ref theory, ref got, "/tmp/x.yoop");
+  }
+
+  let test theory: Case = t.asserts("a stray percent is a literal percent") {
+    disposable got: Text = uriToPath("file:///tmp/100%.yoop");
+    checkText(ref theory, ref got, "/tmp/100%.yoop");
+  }
+
+  let test theory: Case = t.asserts("something that is not a file URI is passed through") {
+    disposable got: Text = uriToPath("/tmp/plain.yoop");
+    checkText(ref theory, ref got, "/tmp/plain.yoop");
+  }
+}
+
+// ----- the document store --------------------------------------------------
+
+suite function tracksWhatTheEditorIsHolding(): void {
+  let test theory: Case = t.asserts("an opened document is found by its URI and carries its path") {
+    disposable s: DocumentStore = storeNew();
+    const slot = storeUpsert(ref s, "file:///tmp/a.yoop", intr.stringAsBytes("xy"), 3);
+    let d: Document = storeGet(ref s, slot);
+    theory.isSuccessful = slot == 1
+      && storeIndexOf(ref s, "file:///tmp/a.yoop") == 1
+      && storeIndexOf(ref s, "file:///tmp/b.yoop") == 0
+      && text.equals(text.view(ref d.path), "/tmp/a.yoop")
+      && d.version == 3
+      && d.content.len == 2;
+    theory.detail = `slot=${slot} path="${text.view(ref d.path)}" len=${d.content.len}`;
+  }
+
+  let test theory: Case = t.asserts("a second edit replaces the text rather than appending") {
+    disposable s: DocumentStore = storeNew();
+    const _a = storeUpsert(ref s, "file:///tmp/a.yoop", intr.stringAsBytes("first"), 1);
+    const slot = storeUpsert(ref s, "file:///tmp/a.yoop", intr.stringAsBytes("second one"), 2);
+    let d: Document = storeGet(ref s, slot);
+    disposable got: Text = text.fromBytes(vec.vecAsArray(ref d.content));
+    theory.isSuccessful = slot == 1 && d.version == 2
+      && text.equals(text.view(ref got), "second one");
+    theory.detail = `content is "${text.view(ref got)}" at version ${d.version}`;
+  }
+
+  let test theory: Case = t.asserts("an edited document is pending until it is published") {
+    disposable s: DocumentStore = storeNew();
+    const slot = storeUpsert(ref s, "file:///tmp/a.yoop", intr.stringAsBytes("x"), 1);
+    const before = storeNextPending(ref s);
+    storeMarkPublished(ref s, slot);
+    const after = storeNextPending(ref s);
+    theory.isSuccessful = before == slot && after == 0;
+    theory.detail = `pending was ${before}, then ${after}`;
+  }
+
+  let test theory: Case = t.asserts("a closed document is no longer pending") {
+    disposable s: DocumentStore = storeNew();
+    const _slot = storeUpsert(ref s, "file:///tmp/a.yoop", intr.stringAsBytes("x"), 1);
+    const closed = storeClose(ref s, "file:///tmp/a.yoop");
+    theory.isSuccessful = closed == 1 && storeNextPending(ref s) == 0
+      && storeClose(ref s, "file:///tmp/never.yoop") == 0;
+    theory.detail = `close answered ${closed}`;
+  }
+}
+
+// ----- the messages --------------------------------------------------------
+
+suite function buildsTheMessagesTheProtocolExpects(): void {
+  let test theory: Case = t.asserts("the initialize result advertises only what is built") {
+    disposable req: JsonDoc = parseOrEmpty("{\"id\":1}");
+    disposable out: JsonDoc = json.docNew();
+    const _r = buildInitializeResponse(ref out, ref req, json.member(ref req, req.root, "id"));
+    disposable got: Text = rendered(ref out);
+    checkText(ref theory, ref got,
+      "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"capabilities\":{\"textDocumentSync\":{\"openClose\":true,\"change\":1,\"save\":{\"includeText\":false}}},\"serverInfo\":{\"name\":\"yoopiler_boot\"}}}");
+  }
+
+  let test theory: Case = t.asserts("a STRING request id comes back as the same string") {
+    // The protocol allows either, and a response whose id is not identical to
+    // the request's is one the client throws away.
+    disposable req: JsonDoc = parseOrEmpty("{\"id\":\"abc-1\"}");
+    disposable out: JsonDoc = json.docNew();
+    const _r = buildNullResponse(ref out, ref req, json.member(ref req, req.root, "id"));
+    disposable got: Text = rendered(ref out);
+    checkText(ref theory, ref got, "{\"jsonrpc\":\"2.0\",\"id\":\"abc-1\",\"result\":null}");
+  }
+
+  let test theory: Case = t.asserts("an error response carries the code and the reason") {
+    disposable req: JsonDoc = parseOrEmpty("{\"id\":9}");
+    disposable out: JsonDoc = json.docNew();
+    const _r = buildErrorResponse(ref out, ref req, json.member(ref req, req.root, "id"),
+                                  ERR_METHOD_NOT_FOUND, "nope");
+    disposable got: Text = rendered(ref out);
+    checkText(ref theory, ref got,
+      "{\"jsonrpc\":\"2.0\",\"id\":9,\"error\":{\"code\":-32601,\"message\":\"nope\"}}");
+  }
+
+  let test theory: Case = t.asserts("a diagnostic renders with a zero-based range") {
+    disposable diags: Vec<LspDiagnostic> = vec.vecNew(2);
+    let d: LspDiagnostic = {
+      message: "unknown name \"nope\"",
+      code: "",
+      severity: 1,
+      range: { start: { line: 1, character: 19 }, end: { line: 1, character: 23 } },
+    };
+    vec.vecPush(ref diags, d);
+    disposable out: JsonDoc = json.docNew();
+    const _p = buildPublishDiagnostics(ref out, "file:///tmp/a.yoop", 4, ref diags);
+    disposable got: Text = rendered(ref out);
+    checkText(ref theory, ref got,
+      "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/publishDiagnostics\",\"params\":{\"uri\":\"file:///tmp/a.yoop\",\"version\":4,\"diagnostics\":[{\"range\":{\"start\":{\"line\":1,\"character\":19},\"end\":{\"line\":1,\"character\":23}},\"severity\":1,\"source\":\"yoopiler\",\"message\":\"unknown name \\\"nope\\\"\"}]}}");
+  }
+
+  let test theory: Case = t.asserts("a warning carries severity 2 and its code") {
+    disposable diags: Vec<LspDiagnostic> = vec.vecNew(2);
+    let d: LspDiagnostic = {
+      message: "unused",
+      code: "unhandled-disposable",
+      severity: 2,
+      range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } },
+    };
+    vec.vecPush(ref diags, d);
+    disposable out: JsonDoc = json.docNew();
+    const _p = buildPublishDiagnostics(ref out, "file:///x", 0, ref diags);
+    disposable got: Text = rendered(ref out);
+    checkText(ref theory, ref got,
+      "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/publishDiagnostics\",\"params\":{\"uri\":\"file:///x\",\"version\":0,\"diagnostics\":[{\"range\":{\"start\":{\"line\":0,\"character\":0},\"end\":{\"line\":0,\"character\":1}},\"severity\":2,\"code\":\"unhandled-disposable\",\"source\":\"yoopiler\",\"message\":\"unused\"}]}}");
+  }
+
+  let test theory: Case = t.asserts("an empty list is still published, because that is what clears squiggles") {
+    disposable diags: Vec<LspDiagnostic> = vec.vecNew(2);
+    disposable out: JsonDoc = json.docNew();
+    const _p = buildPublishDiagnostics(ref out, "file:///x", 1, ref diags);
+    disposable got: Text = rendered(ref out);
+    checkText(ref theory, ref got,
+      "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/publishDiagnostics\",\"params\":{\"uri\":\"file:///x\",\"version\":1,\"diagnostics\":[]}}");
+  }
+}
+
+// ----- the compiler's answer ----------------------------------------------
+
+suite function reportsWhatTheCompilerSaysAboutTheBuffer(): void {
+  let test theory: Case = t.asserts("a syntax error in the buffer is reported where it is") {
+    // The buffer, not the file: nothing is written to disk here and the path
+    // below does not exist. A syntax error is caught by parsing the bytes the
+    // editor sent, which is why this half is live for every document.
+    disposable s: DocumentStore = storeNew();
+    const slot = storeUpsert(ref s, "file:///tmp/nonexistent_lsp_probe.yoop",
+      intr.stringAsBytes("function main(): int32 {\n  return 1\n}\n"), 1);
+    let doc: Document = storeGet(ref s, slot);
+    disposable diags: Vec<LspDiagnostic> = vec.vecNew(4);
+    collectDiagnostics(ref doc, "", ref diags);
+    const first = vec.vecGet(ref diags, 0);
+    theory.isSuccessful = diags.len == 1 && first.severity == 1
+      && first.range.start.line == 2;
+    theory.detail = `got ${diags.len} diagnostic(s), first at line ${first.range.start.line}: ${first.message}`;
+  }
+
+  let test theory: Case = t.asserts("a buffer that parses produces no syntax diagnostic") {
+    // The graph load below it FAILS (nothing resolves against an empty std
+    // root), so what this asserts is that the parse half said nothing and the
+    // whole-file fallback is what spoke.
+    disposable s: DocumentStore = storeNew();
+    const slot = storeUpsert(ref s, "file:///tmp/nonexistent_lsp_probe.yoop",
+      intr.stringAsBytes("function main(): int32 {\n  return 1;\n}\n"), 1);
+    let doc: Document = storeGet(ref s, slot);
+    disposable diags: Vec<LspDiagnostic> = vec.vecNew(4);
+    collectDiagnostics(ref doc, "", ref diags);
+    let sawSyntaxDiagnostic: bool = false;
+    let i: usize = 0;
+    while (i < diags.len) {
+      const d = vec.vecGet(ref diags, i);
+      if (d.range.start.line > 0) {
+        sawSyntaxDiagnostic = true;
+      }
+      i += 1;
+    }
+    theory.isSuccessful = !sawSyntaxDiagnostic;
+    theory.detail = `a well formed buffer produced a diagnostic past line 0`;
+  }
+}
+
+function parseOrEmpty(src: string): JsonDoc propagates<disposable> {
+  switch (json.parseString(src)) {
+    case ParseResult.Err { error: e }: {
+      return json.docNew();
+    }
+    case ParseResult.Ok { value: parsed }: {
+      return parsed;
+    }
+  }
+}

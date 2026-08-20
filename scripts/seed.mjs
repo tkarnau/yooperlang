@@ -36,18 +36,21 @@ import { fileURLToPath } from "node:url";
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 // The release that can compile this tree. See the note above before changing it.
-export const SEED_TAG = "v0.1.0";
-export const SEED_VERSION = "0.1.0";
+export const SEED_TAG = "v0.2.0";
+export const SEED_VERSION = "0.2.0";
 
 const EXE = process.platform === "win32" ? ".exe" : "";
 
-// The platform slug the release archives are named by, matching what
-// scripts/package_bootstrap.mjs writes.
+// The platform slug the release archives are named by.
+//
+// This is `${process.platform}-${process.arch}` because that is LITERALLY what
+// scripts/package_bootstrap.mjs builds its `target` from. Deriving it any other
+// way is how the two drift: this function used to map win32 to "windows" and
+// collapse every arch to x64, so a Windows or 32-bit host asked the release for
+// an archive nobody had ever uploaded and got a 404 instead of a seed. The two
+// names have to come from one expression, and this is it.
 function platformSlug() {
-  const arch = process.arch === "arm64" ? "arm64" : "x64";
-  if (process.platform === "darwin") return `darwin-${arch}`;
-  if (process.platform === "win32") return `windows-${arch}`;
-  return `linux-${arch}`;
+  return `${process.platform}-${process.arch}`;
 }
 
 const cacheRoot = path.join(repoRoot, ".seed", SEED_VERSION);

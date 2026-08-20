@@ -39,17 +39,20 @@ that never reached a handler.
 
 ## Run it
 
-Locally:
+Locally, from the repository root, where `node scripts/seed.mjs` prints the path
+of a compiler:
 
 ```sh
-node ./src/yoopiler.js examples/playground/counter_server/main.yoop -o counter_server
+YOOP_STD_ROOT=$PWD/std YOOP_RUNTIME_ROOT=$PWD/runtime \
+  $(node scripts/seed.mjs) examples/playground/counter_server/main.yoop -o counter_server
 ./counter_server                # 0.0.0.0:8080, one worker per core
 ./counter_server 9000           # port
 ./counter_server 9000 4         # port, worker count
 ```
 
-In Docker, from the repo root (the build context has to include `src/`,
-`std/` and `runtime/`):
+In Docker, from the repo root. [Dockerfile](Dockerfile) builds the program with
+a compiler that is not in this tree, so this path does not work as written; the
+local build above does:
 
 ```sh
 DF=examples/playground/counter_server/Dockerfile

@@ -141,7 +141,7 @@ case "$mode" in
     script='
       npm ci
       node --test --test-reporter=spec src/runtimeC.test.js
-      node src/yoopiler.js bootstrap/src/main.yoop -o /tmp/stage1
+      $(node scripts/seed.mjs) bootstrap/src/main.yoop -o /tmp/stage1
       /tmp/stage1 bootstrap/tests/slice/hello.yoop -o /tmp/hello
       /tmp/hello
     '
@@ -152,7 +152,8 @@ case "$mode" in
       clang --version
       node --version
       npm ci
-      node src/yoopiler.js --test bootstrap/src
+      $(node scripts/seed.mjs) --test bootstrap/src
+      $(node scripts/seed.mjs) --test modules
       npm test
     '
     ;;

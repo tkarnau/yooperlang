@@ -1,14 +1,15 @@
 // Builds the SELF-HOSTED bootstrap compiler and bundles it into one tarball.
 // Run with `node scripts/package_bootstrap.mjs [--version 0.2.0]`.
 //
-// This is the bootstrap's counterpart to package_release.mjs, which packages
+// This packages
 // the JS reference. The two produce different things on purpose: that one ships
 // a node binary with the reference compiler injected into it, this one ships a
 // native executable the bootstrap compiled from its own source.
 //
 // What it does, in order:
 //
-//   1. Builds three stages. stage1 is the bootstrap built by the JS reference,
+//   1. Builds three stages. stage1 is the bootstrap built by the SEED - a
+//      previously released yoopiler_boot, see scripts/seed.mjs -
 //      stage2 is the bootstrap built by stage1, stage3 is the bootstrap built
 //      by stage2.
 //   2. Asserts stage2 and stage3 are byte-identical, IR and binary both. Same
@@ -33,6 +34,7 @@
 // compiler, not the toolchain underneath it.
 
 import { execFileSync } from "node:child_process";
+import { seedCompiler } from "./seed.mjs";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -109,8 +111,8 @@ for (const s of ["s1", "s2", "s3"]) {
 }
 const bootSrc = path.join(repoRoot, "bootstrap", "src", "main.yoop");
 
-step("stage1: the JS reference builds the bootstrap");
-run(process.execPath, [path.join(repoRoot, "src", "yoopiler.js"), bootSrc, "-o", stage.s1]);
+step("stage1: the released seed builds the bootstrap");
+run(seedCompiler(), [bootSrc, "-o", stage.s1]);
 
 step("stage2: the bootstrap builds itself");
 run(stage.s1, [bootSrc, "-o", stage.s2]);

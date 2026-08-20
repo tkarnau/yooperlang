@@ -1,12 +1,11 @@
 # Self-hosted Yooperlang compiler
 
-The Yooperlang compiler, written in Yooperlang. It compiles itself, and each of
-its layer boundaries is cross-checked against the JavaScript reference in
-[../src/](../src/).
+The Yooperlang compiler, written in Yooperlang. It is the only Yooperlang
+compiler in the tree, and it compiles itself.
 
-The JS version is a REFERENCE, not something to transcribe. The point of doing
-it again is clearer boundaries and less code, by leaning on language features
-the JS version cannot use.
+That last part is the first thing to know about working here: building it needs
+a Yoop compiler that already exists, so a build starts from a SEED - a
+previously released `yoopiler_boot` binary. See "Running it" below.
 
 ## Layers
 
@@ -16,6 +15,10 @@ the JS version cannot use.
 4. Bytecode generator -> bytecode IR (not built; the numbering keeps its place)
 5. Code generator -> LLVM IR
 6. Clang -> executable
+
+`@precompile` evaluation sits between 3 and 5, in `src/comptime/`: it needs pass
+D's resolved types, and what it produces is an AST the code generator then walks
+without knowing an evaluator ran.
 
 ## Layout
 
@@ -65,6 +68,14 @@ a shared header file.
                        this statement", for the handler form of `?`, for the
                        unreachable-code warning, and for the rule that a
                        function declaring a return type returns on every path
+      comptime/        `@precompile`: an interpreter over the typechecked AST.
+                       It evaluates an initializer at BUILD time and puts a
+                       LITERAL back in its place, so const inlinability, const
+                       materialization and codegen each read the answer the
+                       ordinary way and none of them learns an evaluator
+                       exists. externs.yoop is the whitelist of what a fold may
+                       call - the pure subset, plus the logging trio a
+                       `@precompile` block was written to use
       codegen/         layer 5: typed AST -> LLVM IR text (see the rules below)
       link/            layer 6: IR -> executable, by shelling out to clang;
                        also where the runtime's C sources are found, which glue
@@ -73,17 +84,33 @@ a shared header file.
       test_mode/       `--test`: discovering `*.test.yoop` files, collecting
                        their suites, generating the entry module that hands the
                        table to std/test.yoop, and running what comes out
+      lsp/             `--lsp`: the language server. transport.yoop is the
+                       Content-Length framing, documents.yoop what the editor
+                       is holding, position.yoop the ONE place a
+                       SourceLocation becomes an editor position,
+                       diagnose.yoop the compile, protocol.yoop the messages,
+                       server.yoop the loop. It reads and writes JSON through
+                       modules/json, which is the compiler's one dependency
+                       outside std/
       utils/           sort and iteration helpers with no home in std yet, plus
                        float bit access - which lives here because BOTH lex (the
-                       parity dump) and codegen (constants) need it, and utils
+                       token dump) and codegen (constants) need it, and utils
                        is the one module below both
     tools/             small entry points (dump_tokens)
-    tests/parity/      corpus for the layer-1 parity harness
+    examples/          hello.yoop and single_module.yoop - the programs
+                       `npm run package:boot` compiles and runs with the
+                       PACKAGED binary to prove the shipped layout works
     tests/slice/       programs that compile all the way to an executable
     tests/graph/       import structures the source_graph tests load
     tests/testmode/    a small tree for the `--test` discovery tests: two
                        `*.test.yoop` files, a nested one, and a `.yoop` that is
                        not a test
+    tests/testmode_bad/
+                       one file named like a test module that does not declare
+                       `import.test;`, which collection has to refuse BY NAME
+    tests/debug/       frames.yoop, the program src/debug.test.js steps through
+                       in a debugger to check the DWARF against the line the
+                       fixture says it should have stopped on
     tests/codegen/     multi-MODULE programs the codegen tests emit but never
                        run - one `declare` per symbol is a property of the whole
                        LLVM module, so a single-file source literal cannot pose
@@ -106,30 +133,72 @@ where in the source a problem is.
 
 ## Running it
 
-Build it, and point it at a file:
+The compiler is written in Yoop, so building it needs a Yoop compiler that
+already exists. That is the SEED: a previously released `yoopiler_boot` binary.
+[../scripts/seed.mjs](../scripts/seed.mjs) is the source of truth for which
+release and where it comes from. Run it to print the path; the first run
+downloads the archive with `gh release download` into the repo's gitignored
+`.seed/` and unpacks it there.
 
-    node ../src/yoopiler.js src/main.yoop -o /tmp/yoopiler_boot
-    /tmp/yoopiler_boot tests/slice/hello.yoop -o /tmp/hello
+Resolution order, first hit wins: `$YOOP_SEED`, then a previous download under
+`.seed/<version>/`, then the GitHub release. `SEED_TAG` in that file names the
+release that can compile THIS source, so a checkout of an old commit still knows
+its own seed; raising it is a deliberate edit, made when the compiler starts
+using a language feature the old seed does not have, and the pull request that
+raises it is the one that has to prove the new seed builds the tree.
+
+The seed compiles TODAY's source, so it is pointed at this tree's std and C
+runtime rather than at the ones packaged beside it. From the repository root:
+
+    node scripts/seed.mjs                     # the path, downloaded if needed
+    export YOOP_STD_ROOT=$PWD/std
+    export YOOP_RUNTIME_ROOT=$PWD/runtime
+    $(node scripts/seed.mjs) bootstrap/src/main.yoop -o /tmp/yoopiler_boot
+    /tmp/yoopiler_boot bootstrap/tests/slice/hello.yoop -o /tmp/hello
     /tmp/hello
+
+The cost of the seed, stated plainly: the chain has to start SOMEWHERE, so a
+first-time builder with no network and no prior binary cannot bootstrap.
+`YOOP_SEED=/path/to/yoopiler_boot` is the way out for anyone who already has a
+binary - a cached one in CI, or a stage they just built.
 
 The whole command line:
 
-    yoopiler_boot <entry.yoop> [-o <out>] [--emit-ir]
+    yoopiler_boot <entry.yoop> [-o <out>] [--emit-ir] [--track-heap]
     yoopiler_boot --test <dir-or-file> [filter...]
+    yoopiler_boot --lsp
+    yoopiler_boot --list-attributes
 
-    -o <out>    where the executable goes. The IR is always written beside it,
-                as <out>.ll. Defaults to a.out.
-    --emit-ir   stop after writing <out>.ll. No clang, no executable.
-    --test      run the yoop test harness over a directory or one file, with
-                any extra positionals as suite-name filters.
+    -o <out>            where the executable goes. The IR is always written
+                        beside it, as <out>.ll. Defaults to a.out.
+    --emit-ir           stop after writing <out>.ll. No clang, no executable.
+    --test              run the yoop test harness over a directory or one file,
+                        with any extra positionals as suite-name filters.
+    --lsp               speak the Language Server Protocol over stdio instead
+                        of compiling anything named on the line. Answered at
+                        the top of main() because in that mode STDOUT IS THE
+                        TRANSPORT. See src/lsp/.
+    --track-heap        emit the allocation and free counters around the heap
+                        intrinsics. A no-op in an ordinary build, so a program
+                        pays nothing for the flag it did not pass.
+    --warn-disposable   report the unhandled-disposable warning, which is
+                        silent otherwise.
+    --warn-std          report warnings found in files under the std root,
+                        which are silenced otherwise so a program's own
+                        diagnostics are what the build prints.
+    --dump-ast-json <p> stop after PARSE and write the tree as JSON. It
+                        describes what the parser built, so typechecking it
+                        would only add ways to fail at something the caller
+                        did not ask about.
+    --list-attributes   print the attributes this compiler knows and exit,
+                        without looking for an input file. Editor tooling and
+                        documentation read it, and so does whoever just typed
+                        an `@` by mistake.
 
 Flags may stand anywhere in the line, and an unrecognized option is refused BY
-NAME rather than taken for an input file. `--emit-ir` is the bootstrap's own
-spelling, not the reference's: the reference has `--keep-ir`, which keeps a temp
-copy of the IR and still links, and there is no reference flag that stops before
-clang. It exists
-because most of what compiles a corpus file only wants to know whether codegen
-succeeded, and the link is the expensive half - see the probe note below.
+NAME rather than taken for an input file. `--emit-ir` exists because most of
+what compiles a corpus file only wants to know whether codegen succeeded, and
+the link is the expensive half - see the probe note below.
 
 **`--test` is a DRIVER mode, not a language feature**, and `src/test_mode/` is
 all of it: glob `**/*.test.yoop` below the path, collect each file's
@@ -145,54 +214,58 @@ order and an unsorted walk would renumber the TAP output between runs.
 
 ### Running the tests
 
-    node ../src/yoopiler.js --test bootstrap/src            # all 965, one build
-    node ../src/yoopiler.js --test bootstrap/src/typecheck  # one module
-    npm run test:slice                                      # executables
-    npm run test:parity                                     # layer dumps vs JS
-    npm run test:selfhost                                   # the three stages
+    $(node scripts/seed.mjs) --test bootstrap/src            # all 1390, one build
+    $(node scripts/seed.mjs) --test bootstrap/src/typecheck  # one module
+    npm run test:slice        # 205, executables built, run and asserted
+    npm run test:pass         # 247, the example program corpus
+    npm run test:fail         # 77, programs that have to be REFUSED
+    npm run test:selfhost     # 6, the three stages and the fixpoint
+    npm run test:debug        # 3, a debugger reading the DWARF
+    npm test                  # all 460 Node-driven tests
+
+The two `--test` lines need `YOOP_STD_ROOT` and `YOOP_RUNTIME_ROOT` exported, as
+above; the npm suites set them for themselves through `scripts/seed.mjs`.
 
 **Prefer the whole-tree form.** `--test bootstrap/src` builds the module graph
-ONCE and runs every module's suite out of one binary; the five per-module
-commands build it five times, and measured on a 14-core M-series machine that is
-8.2 seconds against 14.9. Reach for the per-module form when you are iterating
-on one module and want the shorter feedback loop, not as the default.
+ONCE and runs every module's suite out of one binary; the per-module commands
+build it again each time, so running all of them one by one costs several builds
+of the same graph. Reach for the per-module form when you are iterating on one
+module and want the shorter feedback loop, not as the default.
 
 ## It compiles itself
 
 Point it at its own source and it builds a compiler, and that compiler builds an
 identical one:
 
-    node ../src/yoopiler.js src/main.yoop -o /tmp/stage1     # the JS reference
-    /tmp/stage1 src/main.yoop -o /tmp/s2/yoopiler            # itself
-    /tmp/s2/yoopiler src/main.yoop -o /tmp/s3/yoopiler       # itself again
-    cmp /tmp/s2/yoopiler /tmp/s3/yoopiler                    # byte-identical
+    $(node scripts/seed.mjs) bootstrap/src/main.yoop -o /tmp/stage1   # the seed
+    /tmp/stage1 bootstrap/src/main.yoop -o /tmp/s2/yoopiler           # itself
+    /tmp/s2/yoopiler bootstrap/src/main.yoop -o /tmp/s3/yoopiler      # again
+    cmp /tmp/s2/yoopiler /tmp/s3/yoopiler                             # identical
 
 stage2 and stage3 are byte-identical, as binaries and as emitted `.ll`. That is
 the FIXPOINT: both were built by a compiler whose source is the same, so any
 difference between them would mean stage1 and stage2 disagree about how to
-compile something. `src/selfhost.test.js` runs the whole three-stage build on
-every `npm test`, in about 16 seconds.
+compile something. It is also what makes the seed safe to lean on: stage1 comes
+from an OLD released compiler, so stage2 and stage3 agreeing says this tree's
+own source decided the output and the seed only got the chain started.
+`src/selfhost.test.js` runs the whole three-stage build on every `npm test`, as
+six tests.
 
 The two stages go to different DIRECTORIES with the same BASENAME on purpose:
 clang embeds the output path in the Mach-O and in the code signature covering
 it, so `-o stage2` versus `-o stage3` differ in 49 bytes that say nothing about
 the compiler.
 
-Working rather than merely byte-stable, checked three ways. The whole slice
-suite runs through stage3 (`YOOP_BOOT_COMPILER=<path> npm run test:slice`). The
-surface probe produces a byte-identical report from stage1 and stage3 - the same
-files with a `main`, the same no-main libraries, the same refusal sites, the
-same messages in the same order. So does the PROGRAM probe:
-`scripts/probe_programs.sh` builds every example entry point with both
-compilers, runs both binaries, and its stage1 and stage3 reports are
-byte-identical line for line, which is a stronger statement than the surface
-one because these programs RUN.
+Working rather than merely byte-stable, checked two ways. The whole slice suite
+runs through stage3 (`YOOP_BOOT_COMPILER=/tmp/s3/yoopiler npm run test:slice`),
+and the surface probe produces a byte-identical report from stage1 and stage3 -
+the same files with a `main`, the same no-main libraries, the same refusal
+sites, the same messages in the same order.
 
 The fixpoint is what catches a miscompile the rest of the tree cannot reach: a
 disagreement between stage1 and stage2 about how to compile something shows up
 as a byte difference and as nothing else. A variant-typed struct FIELD compiled
-as a variant CONSTRUCTOR, and a max-value `usize` sentinel the JS reference
-wraps to zero, are two such - see the invariants below.
+as a variant CONSTRUCTOR is one such - see the invariants below.
 
 ## What it can compile today
 
@@ -219,9 +292,9 @@ yet", "unsupported extern ABI" - rather than mis-compiled.
     The iterator is SPILLED to a slot, because `next` takes `ref self` and there
     is nothing to borrow from a loaded value, so the walk advances a COPY: a
     `DirIter` does not care (its state is behind a handle) and a `MapIter` does
-    (its cursor is inline, so the local the loop was given is left at 0). Same
-    as the reference. A `next` that does not return a two-case `Yield`/`Done`
-    variant is refused BY NAME.
+    (its cursor is inline, so the local the loop was given is left at 0). A
+    `next` that does not return a two-case `Yield`/`Done` variant is refused BY
+    NAME.
   * `kind` declarations and the declarations that carry one:
 
         kind c_layout { appliesTo type; layout { abi "C"; }; }
@@ -259,13 +332,12 @@ yet", "unsupported extern ABI" - rather than mis-compiled.
     frames down back up to the task body, and it is why the runtime only ever
     holds one handle per task rather than tracking the interior of a call chain.
 
-    Three COLORING rules, the reference's unchanged, and between them they are
-    what makes a suspend safe: `await` only inside a function carrying a
-    pausable kind; its operand must be a CALL to one; and such a function must
-    be called through `await`. So there is no way to reach an async function
-    except from inside another one. A `task` CALL is carved out of the third
-    rule, because a task's call site is a spawn rather than a drive - the
-    reference makes the same carve-out.
+    Three COLORING rules, and between them they are what makes a suspend safe:
+    `await` only inside a function carrying a pausable kind; its operand must be
+    a CALL to one; and such a function must be called through `await`. So there
+    is no way to reach an async function except from inside another one. A
+    `task` CALL is carved out of the third rule, because a task's call site is a
+    spawn rather than a drive.
 
     Asyncness rides on the FUNC TYPE rather than in a side table, which is what
     makes it work cross-module and through a method table, and being part of
@@ -302,9 +374,9 @@ yet", "unsupported extern ABI" - rather than mis-compiled.
         ;   0 thunk   8 state   9 pad(cancel,park)   12 refcount   16 mutex
         ;  24 cond   32 coro handle   40 allocator ctx   48 result   56+ args
 
-    One struct per task FUNCTION rather than per result type, matching the
-    reference: the arguments ride in the handle, so two tasks returning `int32`
-    with different parameters are two layouts.
+    One struct per task FUNCTION rather than per result type: the arguments
+    ride in the handle, so two tasks returning `int32` with different
+    parameters are two layouts.
 
     Each task also gets a THUNK - what a worker thread actually calls, since
     the body is a coroutine whose arguments live in the handle. It hands the
@@ -327,9 +399,9 @@ yet", "unsupported extern ABI" - rather than mis-compiled.
 
     Refused BY NAME, each because emitting it would compile and then be wrong: a
     CROSS-MODULE spawn (the handle layout and the thunk belong to the module
-    that declared the task, and the reference refuses it in the same place), a
-    task call outside a handle binding (`worker(1);` on its own would run the
-    body on this thread), copying a handle into a second binding
+    that declared the task), a task call outside a handle binding (`worker(1);`
+    on its own would run the body on this thread), copying a handle into a
+    second binding
     (`pooled b = a;` needs a refcount retain, and one without it is a
     use-after-free), `wait` inside a TASK body (it would block a worker, which
     is the thing coroutines exist to avoid - `await` is the in-task form, and a
@@ -350,18 +422,16 @@ yet", "unsupported extern ABI" - rather than mis-compiled.
     uses, which is why NONE of the four needed a special case in the
     typechecker: `waitUntil<T>(h: Task<T>, deadline_ns: uint64): WaitResult<T>`
     infers T from the handle and instantiates `WaitResult<T>` like any other
-    generic variant. The reference has a hand-written resolver per intrinsic
-    instead; the one thing missing here was a `Task<T>` case in `inferTypeArgs`,
-    beside the ones for `T[]` and `ref T`.
+    generic variant. `inferTypeArgs` carries a `Task<T>` case beside the ones
+    for `T[]` and `ref T`, and that is the whole of it.
 
     `waitUntil` is the only one with shape. The runtime answers with an i32 -
     0 done, 1 timed out, 2 cancelled - and the language hands back a three-case
     variant, so the lowering is a jump table with one arm per case; only the
     `Done` arm reads the task's result, out of byte 48 of the handle exactly as
     `wait` does. The DEFAULT arm lands on `Cancelled` rather than on an
-    unreachable block, matching the reference: an outcome the runtime grows
-    later reads as "this task is not going to produce a value", which is the
-    safe reading of any extension.
+    unreachable block: an outcome the runtime grows later reads as "this task is
+    not going to produce a value", which is the safe reading of any extension.
 
     An intrinsic NAME is an ordinary identifier, so being one somewhere in the
     graph does not make every call to it one. `std/tls/ffi.yoop` exports an
@@ -415,7 +485,7 @@ yet", "unsupported extern ABI" - rather than mis-compiled.
     to a coroutine, driven by the same loop a direct `await` uses. Asyncness
     rides on the slot rather than on the `=>` annotation - a `=>` type is never
     written `async`, so the TRAIT is stamped onto the slot in pass C and the two
-    sides cannot drift. That is the reference's rule and its reason.
+    sides cannot drift.
 
     Both `VTableName.method(ref vt, ...)` and `Trait.method(ref vt, ...)`
     dispatch, and they are the same call: a function handed a `Reader` and
@@ -426,11 +496,10 @@ yet", "unsupported extern ABI" - rather than mis-compiled.
     ORDER, which is what both the builder and the dispatch read. A vtable is
     `%vtable.mod__Name` in the IR, its own namespace rather than `%struct.`.
 
-    One DIVERGENCE from the reference, and it is unobservable. The slot ORDER is
-    the VTABLE's own declaration order and not the trait's: the reference can
-    use the trait because a JS Map iterates in insertion order, and the
-    bootstrap's `Map` is a hash table with no order to read. A vtable value
-    never leaves the program that built it, so nothing can tell.
+    The slot ORDER is the VTABLE's own declaration order and not the trait's:
+    the trait's method table is a hash `Map` with no insertion order to read
+    back. A vtable value never leaves the program that built it, so nothing can
+    observe the choice.
 
     Every slot is checked against the trait's method
     of the same name with `ref self` stripped: a missing slot, an extra one, a
@@ -448,8 +517,7 @@ yet", "unsupported extern ABI" - rather than mis-compiled.
     operand's integer type, lets an expectation flow down into an untyped
     literal (`let w: uint8 = ~0` is 255), and takes an int-backed value ENUM as
     the integer it is (`~Flags.A` is a Flags). A bool, a float, a string, a
-    struct and a string-backed enum are refused with the reference's own
-    message, word for word.
+    struct and a string-backed enum are each refused BY NAME.
   * `unsafe_ptr.cast<T>(p)`, `.toInt(p)`, `.fromInt<T>(n)` and
     `.toArray<T>(p, n)`, and pointer ARITHMETIC. `unsafe_ptr` is a TYPE NAME
     rather than a namespace, so the four are recognized by TEXT - there is
@@ -474,15 +542,15 @@ yet", "unsupported extern ABI" - rather than mis-compiled.
   * kind prefixes on a METHOD (`async handle(ref self, ...)`) and on a
     PARAMETER (`function use(scoped h: ref FileHandle)`). A method takes any
     number and may write the `function` keyword alongside them; a parameter
-    takes exactly ONE, which is the reference's rule.
+    takes exactly ONE.
   * a kind prefix BESIDE the `function` keyword at TOP LEVEL, not only instead
     of it:
 
         async fetch(u: string): string { ... }        the prefix REPLACES it
         suite function addsNumbers(): void { ... }     both, which is also legal
 
-    Three spellings and all three are the reference's - the third is how every
-    `*.test.yoop` in this tree declares a suite. Both the top level and a type's
+    Three spellings, all legal - the third is how every `*.test.yoop` in this
+    tree declares a suite. Both the top level and a type's
     member run go through ONE prefix-run parser (`parse/kind_prefix.yoop`),
     which is what keeps them from drifting: they had, and `suite function f()`
     was "unexpected token at top level: IDENT" on a perfectly well formed
@@ -497,9 +565,8 @@ yet", "unsupported extern ABI" - rather than mis-compiled.
     `YOOP_LIB_PATH` / `YOOP_INCLUDE_PATH` first, then the conventional install
     prefixes, then the KEG-ONLY OpenSSL ones by name - which is the only way an
     https program finds libssl on macOS, since Homebrew refuses to shadow the
-    system LibreSSL. The reference branches on `process.platform` and
-    `process.arch`; the bootstrap has neither, so every candidate from every
-    platform is offered and `fs.exists` decides.
+    system LibreSSL. There is no branch on the host platform or architecture:
+    every candidate from every platform is offered, and `fs.exists` decides.
     A program that named `ssl` or `crypto` also gets `yoop_tls.c` compiled into
     it - it is excluded from the set every program gets, because it includes
     `<openssl/ssl.h>` and putting it in would make OpenSSL a build requirement
@@ -593,17 +660,17 @@ yet", "unsupported extern ABI" - rather than mis-compiled.
     declaration and have no access to its arena. ONE kind is recorded, not a
     list: `propagates<disposable, tainted>` keeps only the first, mirroring the
     "first prefix that asks wins" rule the binding side already has.
-    Two refusals BY NAME, both where the reference emits a call to a symbol that
-    does not exist: a field whose type propagates the kind but has no such
-    METHOD (chaining through a second level is a real feature and is not built),
-    and a propagating type with NO qualifying field at all (the clause promised
-    a cleanup that would emit nothing, which is a leak that compiles).
+    Two refusals BY NAME: a field whose type propagates the kind but has no
+    such METHOD, where the emitted call would name a symbol nothing defines
+    (chaining through a second level is a real feature and is not built), and a
+    propagating type with NO qualifying field at all, where the clause promised
+    a cleanup that would emit nothing - a leak that compiles.
   * module-level `let` - a MUTABLE GLOBAL, with a literal initializer. Distinct
     from a module `const`, which is inlined and has no storage to write to.
   * a function value held in a LOCAL, called through its name
   * `break` and `continue`, and a SWITCH is a breakable scope exactly as a loop
-    is. The two are NOT symmetric, which is the reference's rule and the reason
-    two counters and two frame kinds exist: `break` leaves the innermost
+    is. The two are NOT symmetric, and that is the reason two counters and two
+    frame kinds exist: `break` leaves the innermost
     breakable thing, a switch or a loop, and `continue` looks straight past any
     switch to the enclosing LOOP and is refused with none. A `break` at the end
     of an arm is decorative - arms do not fall through - and legal.
@@ -633,8 +700,8 @@ yet", "unsupported extern ABI" - rather than mis-compiled.
     and over a BOOL - which is its own scrutinee kind rather than a one-bit
     integer, because two values means `case true` beside `case false` covers
     everything and the default arm becomes optional. A default BESIDE both
-    cases is allowed (the opposite of the variant rule, and the reference's
-    behaviour). The two spellings do not mix in either direction: `case 1:`
+    cases is allowed, which is the opposite of the variant rule. The two
+    spellings do not mix in either direction: `case 1:`
     against a bool and `case true:` against an int32 are both refused
   * structs as VALUES: `{ x: 1 }` literals, field read and write, passing and
     returning by value
@@ -674,9 +741,9 @@ yet", "unsupported extern ABI" - rather than mis-compiled.
     may be written SHORTHAND - `case Shape.Circle { r }:` is `{ r: r }` - and
     the two spellings land in the arena identically.
 
-    `==` and `!=` on two variants compare TAGS and nothing else, matching the
-    reference: two `Circle`s with different radii are equal, and a structural
-    comparison is what `switch` is for.
+    `==` and `!=` on two variants compare TAGS and nothing else: two `Circle`s
+    with different radii are equal, and a structural comparison is what `switch`
+    is for.
   * value `enum` decls, their cases and their switch patterns:
 
         enum Severity { ERROR, WARNING }
@@ -700,13 +767,11 @@ yet", "unsupported extern ABI" - rather than mis-compiled.
     int-backed enum is exhaustive-checked, and over a string-backed one is
     refused by name.
 
-    A FOURTH DIVERGENCE, measured by the program probe: the reference DOES
-    coerce an enum to its underlying primitive at an ARGUMENT position.
-    `SDL_Init(flags)` against `function SDL_Init(flags: uint32);` with
-    `flags: InitFlags` compiles there and is refused here by name, `argument 1
-    of "SDL_Init" is uint32, not enum InitFlags`. Left refused, because refusing
-    is the safe direction - a program the bootstrap accepts means the same thing
-    on both sides - and one playground file wants it.
+    An ARGUMENT position is no exception, and that is worth saying because it
+    is the one place a coercion would read as harmless: `SDL_Init(flags)`
+    against `function SDL_Init(flags: uint32);` with `flags: InitFlags` is
+    refused by name, `argument 1 of "SDL_Init" is uint32, not enum InitFlags`.
+    Write the cast.
   * `trait` decls, `implements` clauses, and methods, with STATIC dispatch:
 
         trait Shape { function area(ref self): int; }
@@ -776,16 +841,14 @@ yet", "unsupported extern ABI" - rather than mis-compiled.
     `extern "C"` does from the opposite direction, so it gets the same answer:
     the name is recorded per MODULE, which is what makes a SIBLING file of a
     directory module emit the same unmangled symbol the declaring file does.
-    A cross-module CALL to one still mangles and fails to link, exactly as it
-    does in the reference. `export "intrinsic" function` is refused by name.
+    A cross-module CALL to one still mangles and fails to link.
+    `export "intrinsic" function` is refused by name.
   * `type FILE;` inside an `extern` block - an OPAQUE type, which is a struct
     with an EMPTY field list. Not a placeholder: a type with no fields is
     precisely a type nothing can read a field out of. Every use is behind a
     `ref`, and `ref` on something that IS one is a RE-borrow rather than a
     second one - `let fp: ref FILE = fopen(...); fclose(ref fp);` hands over one
-    address, because `ref ref T` is not a type. The reference accepts `ref r`
-    and a bare `r` into the same slot and writes through to the same object
-    either way.
+    address, because `ref ref T` is not a type.
   * `export function` / `export type`, and every import form but one:
 
         import { add, scale as times, Point } from "./lib/mathx.yoop";
@@ -838,12 +901,11 @@ yet", "unsupported extern ABI" - rather than mis-compiled.
     error propagates outward. The `WithContext` call also does the CONVERSION,
     so a `?` between two different Err types needs no separate `Into` when a
     context is written - the clause SUBSUMES `Into` rather than composing with
-    it, matching the reference. The context expression is evaluated in the
+    it. The context expression is evaluated in the
     FAILURE branch and nowhere else, so an interpolated one costs the success
-    path nothing. Only the two LITERAL token forms may follow the `?`, which is
-    the reference's rule and its reason: a general expression would make
-    `f()? -x` ambiguous with a subtraction, while a string can never continue an
-    expression.
+    path nothing. Only the two LITERAL token forms may follow the `?`, and the
+    reason is decidability: a general expression would make `f()? -x` ambiguous
+    with a subtraction, while a string can never continue an expression.
   * `expr? e { ... }` - HANDLING the failure at the `?` instead of propagating
     it. `e` names the Err payload for the block's extent, as a const. The
     enclosing function need NOT return a fallible variant, which is the whole
@@ -858,25 +920,29 @@ yet", "unsupported extern ABI" - rather than mis-compiled.
     appropriate to ITS exit.
   * `import.unsafe;` / `import.test;` - module-level FLAGS rather than imports,
     which is what the `.` distinguishes.
-  * module-level `const NAME: T = <literal>;`, INLINED at every use rather than
-    emitted as a global - which is what makes an imported one cost nothing, and
-    why the initializer has to be something there IS to inline. Four shapes
-    qualify: a number (int or float, at any width), a bool, a string, and an
-    ARRAY of those. A string inlines as the module-level string constant it
-    already is; an array inlines as a constant aggregate
-    `{ ptr @.arr.0, i64 4 }` over a module-level payload, so it costs no
-    instructions at a use either. Anything else is refused BY NAME, and a CALL
-    gets its own message - the reference FOLDS one at compile time, so the
-    missing piece is a comptime interpreter rather than anything about the line.
+  * module-level `const NAME: T = <expr>;`. `const` means IMMUTABLE rather than
+    "inlined", and one spelling has two lowerings behind it. Four shapes INLINE
+    at every use and have no storage at all: a number (int or float, at any
+    width), a bool, a string, and an ARRAY of those. A string inlines as the
+    module-level string constant it already is; an array inlines as a constant
+    aggregate `{ ptr @.arr.0, i64 4 }` over a module-level payload, so it costs
+    no instructions at a use either, and an imported one costs nothing.
+    Anything else - a call result, a struct literal - is backed by a real
+    GLOBAL whose initializer runs in the module's init function before `main`
+    does, in the graph's topological order. The two are indistinguishable from a
+    body, and `mutable: false` is what still refuses `NAME = ...` either way.
+    `@precompile` is how the first lowering is had for an initializer that needs
+    work done: the fold happens at build time and the literal it produced is
+    what every layer below sees.
   * `_` in a pattern (`case Res.Err { code: c, detail: _ }`) - names a payload
     field without binding it. Still NAMED, so a case that grows a field breaks
     its patterns loudly.
   * `ref` at a call site (`vec.vecPush(ref out, x)`) - a BORROW. Writing it is
     required, not inferred: a `ref v: T` parameter is `ref T` in the signature,
     so passing a bare `v` is a type error and the reader can see at the call
-    which arguments the callee may write through. ONE exception, and it is the
-    one the reference makes too: a name that ARRIVED as a `ref` parameter may be
-    forwarded into another `ref` slot with no second `ref` written, because
+    which arguments the callee may write through. ONE exception: a name that
+    ARRIVED as a `ref` parameter may be forwarded into another `ref` slot with
+    no second `ref` written, because
     `ref ref T` is not a thing and forwarding creates no aliasing the caller's
     signature did not already declare. All three of `inner(v)`, `inner(ref v)`
     and `byVal(v)` work on one.
@@ -892,16 +958,14 @@ yet", "unsupported extern ABI" - rather than mis-compiled.
     module. A global has one definition, in the module that declared it, so a
     cross-module read names THAT module's symbol.
   * kind prefixes in an annotation (`owned string`), parsed and RECORDED. No
-    kind is enforced, so nothing reads them; the limitation is "not
-    enforced" rather than "not parsed", and the JS reference additionally checks
-    the kind was imported, which the bootstrap has no kind table to do.
-  * `@name(args?) target` attributes, with the reference's SYNTAX: zero or more
-    expression arguments, and a target that is a block, a `let`/`const` decl, a
-    `type` or `variant` (optionally exported), or a bare `;`. Per-attribute
-    rules are checked separately, the way the reference splits parser from
-    registry - what an attribute may decorate is a property of that attribute,
-    not of `@`. Unknown names are refused listing the known ones, and every
-    `@derive` diagnostic matches the reference word for word.
+    kind is enforced, so nothing reads them; the limitation is "not enforced"
+    rather than "not parsed".
+  * `@name(args?) target` attributes: zero or more expression arguments, and a
+    target that is a block, a `let`/`const` decl, a `type` or `variant`
+    (optionally exported), or a bare `;`. Per-attribute rules are checked
+    separately from the syntax, so what an attribute may decorate is a property
+    of that attribute and not of `@`. Unknown names are refused listing the
+    known ones, which is the same list `--list-attributes` prints.
   * `@derive(display)` - EXPANDED. The attribute generates a `toString` from the
     field annotations, and a decorated declaration is indistinguishable from one
     whose author wrote the method out:
@@ -916,9 +980,9 @@ yet", "unsupported extern ABI" - rather than mis-compiled.
     with `parseInto`, and spliced onto the end of the declaration's member run;
     `Display` is merged into its `implements` clause, and every source location
     in the grafted subtree is restamped onto the declaration so a diagnostic
-    from generated code lands on the line the user wrote. Same design as the
-    reference (src/jsyoopderive/expand.js), and worth keeping: the method is
-    ordinary code, so anything the parser learns later is inherited for free.
+    from generated code lands on the line the user wrote. Generating SOURCE
+    rather than nodes is what makes that cheap: the method is ordinary code, so
+    anything the parser learns later is inherited for free.
 
     Five strategies, per field: a scalar or a type with its own `toString`
     interpolates directly; an array, a `Vec<T>` and a `Map<K, V>` of those each
@@ -929,24 +993,28 @@ yet", "unsupported extern ABI" - rather than mis-compiled.
     autoloaded std/core/traits.yoop. Refused BY NAME: a GENERIC type or variant,
     a transparent alias, a declaration that already writes `toString`, and a
     graph with no `Display` in it at all. Those four are LOAD errors rather than
-    accumulated diagnostics, which is where the expansion runs and is the one
-    thing about it that is not the reference's - see parse/derive.yoop.
+    accumulated diagnostics, because the load is where the expansion runs - see
+    parse/derive.yoop.
 
-    One DIVERGENCE in the rendering, and it is a reference BUG: its `classify`
-    for a `Map<K, V>` field checks only the KEY (`classify(annot.typeArgs[1] ===
-    "inline")` classifies a boolean, whose answer is truthy), so a map whose
-    VALUES are not printable generates `${value}` on a type with no `toString`.
-    The bootstrap checks both and prints `<map>` when either fails.
-
-    A related finding, which is a reference bug rather than a divergence: the
-    two compilers disagree about MAP ITERATION ORDER, because
-    `std/core/strings.yoop`'s FNV-1a offset basis is above int64 max and the JS
-    reference loses precision reading it. The bootstrap's hashes are the correct
-    ones. No fixture may depend on map order.
-  * `@precompile` parses and is REFUSED by name - the one deliberate divergence
-    here. The reference folds its initializer at compile time; the bootstrap has
-    no comptime interpreter, and emitting the decl unfolded would compile and
-    silently do the work at run time, which is the thing it exists to avoid.
+    A `Map<K, V>` field is classified on BOTH halves: a map whose keys print
+    and whose values do not renders `<map>`, not `${value}` on a type with no
+    `toString`.
+  * `@precompile` - EVALUATED at build time, by the interpreter in
+    `src/comptime/`. On a module-level `const` the initializer is run and a
+    LITERAL is put back in its place, so const inlinability, const
+    materialization and codegen each read the answer the ordinary way and none
+    of them learns an evaluator exists. On a BLOCK it runs statements and writes
+    each module-level `let` it touched back as that decl's initializer, so the
+    program STARTS with the value. A fold that cannot be done is a hard build
+    error naming the call, never a quiet fallback: the point of the attribute is
+    usually that the work must NOT happen at startup, so a fallback would be a
+    semantics change rather than a mercy. Only WHITELISTED externs may be
+    called - the PURE subset (`sqrt`, `strlen`, ...), plus `printf` and the
+    `yoop_log_*` trio, whose output is marked `[comptime]` and belongs to the
+    build rather than to the program's stdout, which does not exist yet.
+    `yoop_now_ns` and `yoop_errno_get` are refused by name: one folds the
+    build's clock into the binary and the other reads the compiler's own
+    errno.
   * `ns.Type` in an ANNOTATION (`fs.DirIter`, `vec.Vec<int>[]`) - a type reached
     through an imported namespace, resolved against that module's exports. The
     qualified spelling and a named import reach the SAME type. A qualified
@@ -975,12 +1043,10 @@ yet", "unsupported extern ABI" - rather than mis-compiled.
     turning that into an error would make the autoload a new way for a compile
     to fail.
 
-    The reference autoloads two MORE, `std/core/format.yoop` and
-    `std/core/strings.yoop`, because its codegen lowers an interpolated template
-    literal into a call to `stringConcatAll`. The bootstrap emits its own string
-    builder inline and calls libc, so it would be paying for two modules nothing
-    reads. A deliberate divergence, and an invisible one - no program can tell
-    whether a module it never named was loaded.
+    Those two and no more. An interpolated template literal is lowered to an
+    inline string builder over libc rather than to a call into
+    `std/core/format.yoop`, so nothing drags a third module into a graph that
+    never named one.
 
 NOT SUPPORTED: an INDIRECT async call through a function-typed FIELD or a local
 holding a function value. A vtable SLOT is the other indirect shape and works;
@@ -994,19 +1060,17 @@ refcount retain, and one without it is a use-after-free rather than a leak, so
 it is refused BY NAME.
 Also `ns.CONSTANT`, `ns.Variant.Case` and `ns.Enum.Case` (a namespace reaches
 types and calls, and nothing else), kind prefixes in a type argument,
-a module-level `const` FOLDED through a call (`sortedDefs([...])`) or holding a
-struct or variant literal, or an ARRAY of either - the reference evaluates all
-of those at compile time and there is no comptime interpreter here, so the
-refusal names that rather than the spelling. The bootstrap's own lexer wants two
-of them and builds its tables at RUNTIME instead; see the `LexTables` note
-below,
+a module-level ARRAY literal with a non-literal ELEMENT (an array of struct
+literals, say) - the payload of one is a module DATUM and only a constant can go
+in one, so the refusal names that rather than the spelling. The bootstrap's own
+lexer wants two such tables and builds them at RUNTIME instead; see the
+`LexTables` note below,
 a compound assignment on an INDEX whose SUBSCRIPT is not a name or an integer
 literal (`xs[g()] += 1`) - the compound forms desugar to
 `target = target <op> value`, which names the target twice, so a subscript that
 could observe being read twice is refused rather than evaluated twice,
 and a CROSS-MODULE call to an `export "C"` function, which mangles the name and
-fails to link. That one is not a bootstrap gap: the reference does the same, and
-nothing in the corpus writes one.
+fails to link. Nothing in the corpus writes one.
 
 **Most of std compiles.** Of the probe corpus (every non-test `.yoop` under
 `std/`, `examples/pass/` and `bootstrap/src/`), nearly every file either
@@ -1016,12 +1080,10 @@ module the compiler itself imports, the whole of `std/net/`, `std/tls/`,
 `std/core/concurrency.yoop`, `std/http/` and `std/https/`. Nothing in the corpus
 produces invalid IR.
 
-What stops earlier stops at one of the refusals above, and `@precompile` is the
-largest single one - deliberately out of scope, since comptime comes back
-self-hosted. `scripts/probe_surface.sh` prints the current breakdown, site by
-site.
+What stops earlier stops at one of the refusals above.
+`scripts/probe_surface.sh` prints the current breakdown, site by site.
 
-Integer widths do NOT mix, matching the JS reference: `xs[0] + xs.len` is
+Integer widths do NOT mix: `xs[0] + xs.len` is
 `int32 + usize` and is an error. Write the cast. Neither do FLOAT widths, and
 neither does a float with an int - `a + n` on a float64 and an int32 is an
 error, and so is `a + 2`, because an untyped INT literal does not pin to a
@@ -1052,8 +1114,7 @@ The rules the layers lean on, each easy to break and each expensive when it is:
   auto-upgrades the old spelling on read - but only cleanly when nothing names
   the result. With a `%tN =` in front, the upgrade rewrites the call to void and
   leaves the assignment dangling, and the module fails verification with "Broken
-  module found". Discarding is legal in both worlds. Same line, same reason, as
-  the reference.
+  module found". Discarding is legal in both worlds.
 - **The task handle's BYTE OFFSETS are a contract with C, and nothing else in
   the tree would notice them being wrong.** `runtime/yoop_runtime.c` reaches the
   prefix through `(char*)h + 16` and friends, so an inserted or reordered field
@@ -1066,9 +1127,8 @@ The rules the layers lean on, each easy to break and each expensive when it is:
 - **`wait` reads the result at byte 48 ALWAYS, never through a typed gep.** The
   prefix layout is universal, and a `wait` may be handed a `Task<T>` whose
   originating task function the site cannot name (a parameter, a handle passed
-  along), so one path that is right everywhere beats two that agree. The
-  reference has both and falls back to this one.
-- **A live RUNTIME RACE, not a codegen one, and both compilers have it.**
+  along), so one path that is right everywhere beats two that agree.
+- **A live RUNTIME RACE, and it is in the C runtime rather than in codegen.**
   `yoop_task_settle` flips a handle's state byte and broadcasts before
   `run_task_step` is done with the handle - it still reads the allocator-context
   slot at byte 40 afterwards. A waiter that reuses the handle (a `joined`
@@ -1078,18 +1138,14 @@ The rules the layers lean on, each easy to break and each expensive when it is:
   roughly eight workers or more to show up at all. Neither slice fixture reaches
   it.
 - **The scheduler prologue in `main` is emitted only for a program that HAS a
-  task**, which is a deliberate divergence: the reference emits init, the
-  coroutine trampolines and shutdown unconditionally. The bootstrap already
-  links the runtime's C sources on demand, and making every hello-world compile
-  fourteen C files to install a worker pool it never uses is a real cost for no
-  observable difference. The trampolines keep EXTERNAL linkage for the
-  reference's reason - nothing inside the IR calls them, so a discardable
-  linkage gets all three deleted by globaldce and the link fails.
-- **A `wait` folds into a binary expression here and returns immediately in the
-  reference**, so `wait a + wait b` compiles here and is a parse error there.
-  The bootstrap's `ref x` has had the same shape for as long as it has existed;
-  it is a superset either way. It does mean a slice fixture has to spell the
-  joins one per statement - `task_spawn.yoop` says so where it does.
+  task.** The runtime's C sources are already linked on demand, and making every
+  hello-world compile fourteen C files to install a worker pool it never uses is
+  a real cost for no observable difference. The trampolines keep EXTERNAL
+  linkage: nothing inside the IR calls them, so a discardable linkage gets all
+  three deleted by globaldce and the link fails.
+- **`wait` is a PREFIX operator over an expression, not a statement form,** so
+  it folds into a binary expression: `wait a + wait b` is the sum of two joins.
+  Same shape as `ref x`.
 - **One terminator per block.** `emitBlock` / `emitStatement` report whether the
   path definitely `terminated` - a `ret`, but also a `break` or `continue` -
   so no `br` follows one. An `if` whose both arms return emits no join block at
@@ -1115,16 +1171,15 @@ The rules the layers lean on, each easy to break and each expensive when it is:
 - **An array is a `{ ptr, i64 }` descriptor** - data plus length - and a
   literal's storage is a hoisted `alloca [N x T]` that the descriptor points
   into. So a literal BORROWS the enclosing function's stack: returning one hands
-  back a dangling pointer. The JS reference has the same property; a
-  heap-allocating form is a separate feature.
+  back a dangling pointer. A heap-allocating form is a separate feature.
 - **Structural types must intern to one TypeId.** Type equality is `id == id`,
   so two `int[]` annotations that interned separately would compare unequal.
   `internArray` / `internRef` scan before inserting.
 - **A float CONSTANT is spelled as 64 bits of hex, at both widths.** LLVM takes
   an arbitrary decimal for a `double` but not for a `float` - `float 1.3` is
   "floating point constant invalid for type", because 1.3 does not round-trip
-  through 32 bits - so the hex form is the only spelling that works for both,
-  and it is what the reference emits for both. The two widths differ in which
+  through 32 bits - so the hex form is the only spelling that works for both.
+  The two widths differ in which
   VALUE was measured, not in how it is printed: a float32 constant is the bits
   of the value after rounding to float precision and widening back, which is
   also what makes an out-of-range float32 literal come out as an infinity rather
@@ -1139,26 +1194,25 @@ The rules the layers lean on, each easy to break and each expensive when it is:
   the obvious loop (accumulate in a float64, then multiply or divide by ten
   once per place) rounds at every step, and comes out wrong by an ulp or two for
   a quarter of the literals it is given - 2.718281828459045 as
-  2.7182818284590446. The parity token dump COMPARES float values, as the bit
-  pattern rather than as a decimal rendering, which is the one form of a float
-  with no formatting question in it and the only thing that catches this.
+  2.7182818284590446. `lex/lex.test.yoop` asserts the decoded BIT PATTERN rather
+  than a decimal rendering, which is the one form of a float with no formatting
+  question in it and the only thing that catches an ulp.
 - **An exponent may be `e` or `E`.** A scan accepting only the lowercase one
-  lexes `1E5` as an int `1` followed by an identifier `E5` - a silent
-  difference, since both sides still produce tokens. No file in the corpus uses
-  the uppercase form, so a parity run over the corpus cannot catch it;
-  `tests/parity/literals.yoop` carries one for that reason.
-- **Float comparison uses the ORDERED predicates** (`oeq`, `one`, `olt`, ...),
-  matching the reference. The two families differ only on a NaN, where an
-  ordered predicate is false - so `x != x` is FALSE for a NaN here, which is C's
-  answer and not Rust's or JS's. Picking `une` for `!=` is a one-character
-  change that disagrees with the reference on exactly one input.
+  lexes `1E5` as an int `1` followed by an identifier `E5` - silent, since it
+  still produces tokens. No file in the corpus uses the uppercase form, so only
+  a unit test can catch it; `lex/lex.test.yoop` asserts `1E5` and `1e5` decode
+  to the same bits.
+- **Float comparison uses the ORDERED predicates** (`oeq`, `one`, `olt`, ...).
+  The two families differ only on a NaN, where an ordered predicate is false -
+  so `x != x` is FALSE for a NaN here, which is C's answer and not Rust's or
+  JS's. Picking `une` for `!=` is a one-character change that shows up on
+  exactly one input.
 - **Unary minus on a float is `fneg`, not a subtraction from zero.** `0.0 - 0.0`
   is +0.0 and `fneg 0.0` is -0.0.
-- **The bitwise family on floats is refused BY NAME, which is a deliberate
-  divergence.** The reference is inconsistent there: `a | b` on two float64s is
-  a typecheck error, while `a & b` passes typecheck and crashes its codegen with
-  "unknown binary op amp for type prim/float64". One rule and one diagnostic
-  here, covering `& | ^ << >>` together.
+- **The bitwise family on floats is refused BY NAME, in typecheck, as a
+  family.** One rule and one diagnostic covering `& | ^ << >>` together. Refused
+  one operator at a time, the family grows a hole that reaches codegen and
+  crashes it with "unknown binary op amp for type prim/float64".
 - **`floatBitWidth` is deliberately NOT folded into `primBitWidth`.** That one
   answers "how wide is this INTEGER", and three callers read a zero from it as
   "not an integer, leave it alone" - vararg promotion, the cast opcode, and
@@ -1175,11 +1229,9 @@ The rules the layers lean on, each easy to break and each expensive when it is:
   fall-through would read as "nothing to promote".
   Promotion starts at the callee's FIXED parameter count, not at index 1: a
   declared parameter has a type and is passed as it, and only the tail is
-  promoted. The JS reference promotes at a `printf` call and nowhere else, so an
-  `int8` handed to a declared `snprintf` there is passed as `i8`; the bootstrap
-  promotes at every variadic call, which is a deliberate divergence and the
-  reason `variadic.yoop` keeps its narrow arguments on the printf side (a slice
-  fixture has to run identically under both compilers).
+  promoted. EVERY variadic call promotes, not only `printf` - an `int8` handed
+  to a declared `snprintf` is passed as an `i32`, which is what C's own rule
+  says and what the callee reads.
 - **`...` is a MARKER on the signature, not a parameter.** It produces no PARAM
   node, so `childB` holds exactly the fixed parameters and every later pass
   counts them without knowing varargs exist. It rides on the
@@ -1193,11 +1245,10 @@ The rules the layers lean on, each easy to break and each expensive when it is:
   why the fixed types are read off the Func type rather than off the arguments -
   `printf("%d")` and `printf("%d", 1, 2)` are one callee and must spell one type.
 - **`printf` is a BUILTIN only when nothing declared it.** Pass D looks the name
-  up first and falls back to the builtin on a miss, which is the reference's
-  precedence, established by probing it: declaring a non-variadic `printf` there
-  makes `printf("a %d\n", 3)` an arity error. Checking the builtin FIRST would
-  make the 158 files that declare their own printf immune to their own
-  declaration.
+  up first and falls back to the builtin on a miss, so a module that declares a
+  non-variadic `printf` gets an arity error for `printf("a %d\n", 3)` - which is
+  the point. Checking the builtin FIRST would make the 158 files that declare
+  their own printf immune to their own declaration.
 - **A `declare` is emitted once per SYMBOL for the whole module, and all four
   sources share one table.** An extern is not exported and does not travel
   through an import, so every file that calls `printf` declares it again - that
@@ -1216,9 +1267,9 @@ The rules the layers lean on, each easy to break and each expensive when it is:
   the ABI - `usize` and `uint64` are both `i64`, `string` and
   `unsafe_ptr<void>` are both `ptr` - and a compatible re-declaration REUSES the
   line rather than emitting a second one. Two that disagree are refused BY NAME,
-  quoting both LLVM spellings, which is a deliberate divergence: the reference
-  emits both lines and lets clang say "invalid redefinition of function
-  'malloc'", which names neither declaration and no source file. The comparison
+  quoting both LLVM spellings - emitting both lines instead leaves clang to say
+  "invalid redefinition of function 'malloc'", which names neither declaration
+  and no source file. The comparison
   is on the LLVM spelling rather than on the Func TypeIds because two identical
   signatures intern to different ids (see the `typeAccepts` note below).
 - **User externs are declared FIRST, before any body is walked.** That ordering
@@ -1227,7 +1278,7 @@ The rules the layers lean on, each easy to break and each expensive when it is:
   source location a reader can go and fix.
 - **An INTRINSIC block emits no `declare`.** There is no symbol - codegen lowers
   the call to instructions - so a `declare` for one names something nothing
-  defines. The reference skips intrinsic blocks for the same reason.
+  defines.
 - **A `switch` allocates every arm's label before emitting any of them**, because
   the jump table names them all up front. That is the one structural difference
   from `if`. It also pushes a SWITCH frame on the jump stack around the arm
@@ -1264,19 +1315,17 @@ The rules the layers lean on, each easy to break and each expensive when it is:
 - **The module header is read by LEXING three tokens, not by parsing.** The
   graph cannot parse a file until it knows which module owns it (that is which
   arena it goes in), and it cannot know that without the header - so
-  `parse/header.yoop` answers the question without an AST. That is what the JS
-  reference needs a parse cache for.
+  `parse/header.yoop` answers the question without an AST, and without parsing
+  the file twice.
 - **The lexer's two scan tables are BUILT AT RUNTIME and threaded, not reached
   as module globals.** `lexTablesNew` fills the punctuation table and the
   keyword table and sorts the first longest-spelling-first; `lexNext` takes a
   `ref LexTables`, and `tokenize`, `dumpTokens`, `moduleHeaderName` and
   `parseInto` each own one for the length of their walk (ParserState BORROWS
   the one `parseInto` made). Two reasons, and the second is the one that decides
-  the shape. FIRST, neither table can BE a module-level array: an array of
-  STRUCTS has no static spelling to inline, so even the plain
-  `const KEYWORD_LIST = [ ... ]` was refused, and the punctuation table
-  additionally went through a CALL (`sortedDefs([ ... ])`) that the reference
-  FOLDS with its comptime interpreter. Comptime is deliberately out of scope, and
+  the shape. FIRST, neither table can BE a module-level array: a module-level
+  array literal's payload is a module DATUM and only a constant can go in one, so
+  `const KEYWORD_LIST: KeywordDefinition[] = [ ... ]` is refused by name - and
   those two lines gate every file whose import closure runs through `lex`, which
   is most of the corpus. SECOND, the longest-first ORDER is a correctness requirement rather
   than a formatting preference - `...` scans as three DOTs without it - and
@@ -1284,17 +1333,17 @@ The rules the layers lean on, each easy to break and each expensive when it is:
   check for a comment.
   Costs two table builds per source FILE (the header peek and the parse), each
   85 vector pushes and one 41-element quicksort, which is not measurable against
-  a compile. REVERSIBLE - a self-hosted comptime interpreter would let
-  `lexTablesNew` become a module const with no change to anything that reads it.
+  a compile. REVERSIBLE - a constant spelling for an array of structs would let
+  `lexTablesNew` become a module const with no change to anything that reads
+  it.
 - **A variant is `{ i32 tag, [N x i8] payload }`,** with one payload STRUCT per
   case that carries something (`%variantc.m__Shape__Circle`). LLVM has no union,
   so N is the largest case's naturally-aligned size and every case reads the same
-  bytes as a different struct. The sizes come from `typecheck/layout.yoop`, which
-  matches the JS reference case for case - the two compilers never link together,
-  but a payload-size disagreement would show up as a corrupted field rather than
-  as an error, so it is worth being able to diff. The tag is i32 for the same
-  reason, which means an 8-byte payload field sits at offset 4; that matches the
-  reference and is fine on every target the compiler supports.
+  bytes as a different struct. The sizes come from `typecheck/layout.yoop` and
+  nowhere else, because a payload-size mistake shows up as a corrupted field
+  rather than as an error and a second copy of the rule would drift. The tag is
+  i32, which means an 8-byte payload field sits at offset 4; that is fine on
+  every target the compiler supports.
 - **A variant is a VALUE, and both directions go through a stack slot.** The
   payload is addressed as whichever case struct the tag names, and only an
   ADDRESS can be reinterpreted that way - a loaded value has none. Same
@@ -1349,9 +1398,8 @@ The rules the layers lean on, each easy to break and each expensive when it is:
   / `calleeReceiver` / `calleeInstance` are all keyed by NodeId with one entry
   per node, and it moves every diagnostic from the declaration the author can
   fix to each call site that happens to trip over it. That is the C++ template
-  failure mode, and the reference does not do it either (a bounded body is
-  checked at its decl even when nothing ever instantiates it - established by
-  probing).
+  failure mode. A bounded body is checked at its DECL even when nothing ever
+  instantiates it.
 - **A bound's methods are reached through the BOUND, and `self` is rewritten to
   the parameter.** A trait method's signature annotates `self` with the trait's
   own name (`parseMethodSig` passes 0 for the owner's type params on purpose),
@@ -1378,10 +1426,9 @@ The rules the layers lean on, each easy to break and each expensive when it is:
 - **A trait's `implementsTraits` records WHICH application, and a bound is
   checked against it.** `implements Comparable<Token>` and `implements
   Comparable<int32>` are different promises, and comparing only the trait NAME
-  makes a `T implements Comparable<T>` bound accept the wrong one. The reference
-  compares names only and emits IR clang rejects ("defined with type %N but
-  expected i32"); the bootstrap refuses by name, which is a deliberate
-  divergence.
+  makes a `T implements Comparable<T>` bound accept the wrong one. Comparing
+  names only gets as far as IR that clang rejects ("defined with type %N but
+  expected i32"), so the mismatch is refused BY NAME instead.
 - **`extends` is a FLAT parent list plus a lookup fall-through, not a merge.**
   `collectImplementedTraits` expands each parent's own extends chain as it
   builds the list, so `Type.Trait.extendsTraits` is already transitive and
@@ -1423,17 +1470,13 @@ The rules the layers lean on, each easy to break and each expensive when it is:
   happens to work. A bounded body dispatches a METHOD on `T`, the receiver never
   resolves, and the symbol comes out as `@mod____a`.
 - **Reserved index 0 is the sentinel, everywhere.** SymbolId, DeclId and the
-  function-instance index all burn slot 0 on a dead entry. Use the idiom: a
-  max-value constant in its place silently WRAPS to 0 in the stage the JS
-  reference builds, because the JS REFERENCE wraps an integer literal above
-  int64 to zero - so `const FIELD_NONE: usize = 18446744073709551615;` is 0
-  there and is itself in every stage after that. A sentinel that compares equal
-  to a real index is a silent miscompile: the first monomorphization in a
-  program emitted as ordinary code under the generic's bare name with its
-  parameters unresolved, or field 0 read as "no field". When 0 CANNOT be the
-  sentinel - propagated disposal, where index 0 is an ordinary answer - use a
-  separate BOOL, not a bigger number. The bootstrap gets the literal right, and
-  a codegen assertion keeps it that way.
+  function-instance index all burn slot 0 on a dead entry. Use that idiom rather
+  than a max-value constant in its place: a sentinel that compares equal to a
+  real index is a silent miscompile - the first monomorphization in a program
+  emitted as ordinary code under the generic's bare name with its parameters
+  unresolved, or field 0 read as "no field". When 0 CANNOT be the sentinel -
+  propagated disposal, where index 0 is an ordinary answer - use a separate
+  BOOL, not a bigger number.
 - **A struct FIELD whose own type is a VARIANT is a field READ, and the base is
   what says so.** `a.value` where `value: Operand` and `Shape.Empty` are the
   same node kind with the same expression TYPE, so testing the whole expression
@@ -1447,8 +1490,7 @@ The rules the layers lean on, each easy to break and each expensive when it is:
   `field_variant.yoop` is the fixture.
 - **`>>` is one token, and closing a nested type-argument list splits it.**
   `Vec<Map<string, TypeId>>` ends in a right-shift, so `consumeClosingGt`
-  consumes it and remembers that one `>` is still owed. Same trick, same reason,
-  as the JS reference's `pendingGtFromRshift`.
+  consumes it and remembers that one `>` is still owed.
 - **A pending `>` CLOSES the list, so nothing may peek past it.** While one is
   owed the cursor already sits beyond the whole annotation, so
   `parseTypeArgList` must break on `ps.pendingGt` BEFORE it looks for a comma.
@@ -1461,8 +1503,9 @@ The rules the layers lean on, each easy to break and each expensive when it is:
   `loadModuleGraph` takes it as a parameter rather than probing for it, so a
   caller that already knows its root - a test pointing at a stub, or an editor
   server - never touches the filesystem probing in `std_root.yoop`. The
-  discovery rule honours `YOOP_STD_ROOT`, which is what the JS reference honours
-  too, so one variable retargets both compilers at the same tree.
+  discovery rule honours `YOOP_STD_ROOT`, which is what points a compiler built
+  somewhere else - the seed, or a stage in a temp directory - at THIS tree's
+  std.
 - **The `modules/` root is the opposite shape, and deliberately so.** `std/`
   belongs to the COMPILER and is found once beside the executable; `modules/`
   belongs to whoever is being compiled and is answered per IMPORT, by walking UP
@@ -1475,13 +1518,12 @@ The rules the layers lean on, each easy to break and each expensive when it is:
 - **A module under a modules root may NOT carry a root of its own, and that is
   enforced.** Two copies of one module at two paths get distinct mangled symbols
   and LINK FINE, then fail on the first value passed between them as "Value is
-  not assignable to Value". The bootstrap walks UP from the target to the root
-  where the reference walks DOWN; same directories, no path split needed, but the
-  target directory ITSELF has to be checked first, since `modules/math` resolving
-  to `<root>/math` makes `<root>/math/modules` the exact case this catches. A
-  DIVERGENCE where the bootstrap is better: the reference throws an uncaught
-  JavaScript `Error` for this, so its user gets a stack trace. One case not
-  built: a `modules` directory at the FILESYSTEM ROOT is not consulted.
+  not assignable to Value". The walk goes UP from the target to the root, which
+  needs no path split, but the target directory ITSELF has to be checked first,
+  since `modules/math` resolving to `<root>/math` makes `<root>/math/modules`
+  the exact case this catches. It is refused BY NAME, because a stack trace or a
+  link-time surprise is no help to whoever vendored the second copy. One case
+  not built: a `modules` directory at the FILESYSTEM ROOT is not consulted.
 - **A borrow costs no instructions.** Every local already lives in an alloca, so
   `ref x` is the ADDRESS of storage that exists; and a `ref` parameter arrives
   as that pointer, so it gets no alloca and no spill - the incoming pointer IS
@@ -1503,8 +1545,7 @@ The rules the layers lean on, each easy to break and each expensive when it is:
   The rule is keyed on how the name ARRIVED and not on its type, which is what
   keeps it honest: a `ref` parameter is already a borrow, so forwarding it
   creates no aliasing the caller's own signature did not already declare. A
-  PLAIN local still has to write `ref` at the call, and the reference refuses it
-  there too (probed).
+  PLAIN local still has to write `ref` at the call.
   Binding the parameter as `ref T` instead is a one-line change with at least
   five special cases behind it - `emitLocalRead` would have to stop loading,
   `checkRefExpr` would have to stop double-wrapping, assigning to the name by
@@ -1520,13 +1561,13 @@ The rules the layers lean on, each easy to break and each expensive when it is:
   signedness, exactly as `llvmIntOp` already did for `sdiv`/`udiv` and
   `ashr`/`lshr`. `eq` and `ne` take no sign - two identical bit patterns are
   equal under either reading.
-  A DELIBERATE DIVERGENCE falls out of it: an int-backed value ENUM is the
-  integer it aliases, unsigned backing and all, so `Flags.HIGH > Flags.LOW` on
-  an `enum<uint8>` with cases 200 and 10 is TRUE here. The reference compares it
-  signed and says false - its `binaryInstruction` asks `isUnsignedIntPrim` and a
-  value enum is not a prim, so the override never fires. `unsigned_compare.yoop`
-  covers the rest of the family end to end and leaves that one case to a codegen
-  IR assertion, since a slice fixture is asserted against both compilers.
+  It reaches value ENUMS too, and that is the case easiest to get wrong: an
+  int-backed enum IS the integer it aliases, unsigned backing and all, so
+  `Flags.HIGH > Flags.LOW` on an `enum<uint8>` with cases 200 and 10 is TRUE.
+  A signedness test that asks "is this an unsigned int PRIM" answers no for an
+  enum and quietly emits the signed predicate. `unsigned_compare.yoop` covers
+  the family end to end, and the enum case is pinned by a codegen IR
+  assertion.
 - **A borrow held as a VALUE opens at the USE, never at the binding.** A `ref T`
   FIELD keeps its type for as long as anything holds it - unlike a parameter,
   which `bindParams` unwraps once - so `const s = h.src` is still a `ref uint8[]`
@@ -1552,7 +1593,6 @@ The rules the layers lean on, each easy to break and each expensive when it is:
   in the same slot is accepted. The whole reason writing `ref` is required is
   that the reader can see at the call which arguments the callee may write
   through, and quietly undoing it would make `f(ref n)` and `f(n)` one call.
-  Same rule in the reference, established by probing.
 - **A METHOD IS A FUNCTION whose first parameter is `ref self`.** The source
   omits the annotation because there is only one type it could be, so the PARSER
   fills it in from the enclosing type's name (`parse/traits.yoop`). Everything
@@ -1601,25 +1641,21 @@ The rules the layers lean on, each easy to break and each expensive when it is:
   opposite of the variant rule, and it is not an oversight: an enum's values are
   integers, so a value naming no case is representable and the default is never
   provably dead. It is also why an OPEN enum - one whose case was derived with a
-  bitwise operator - REQUIRES a default even with every case covered. Both rules
-  were established by probing the reference.
+  bitwise operator - REQUIRES a default even with every case covered.
 - **Two cases may share a VALUE, but a switch may not match both.** Declaring
-  `{ Red 1, Crimson 1 }` is legal on both sides; matching both in one switch
-  emits a jump table naming `1` twice, which clang rejects with "duplicate case
-  value in switch" and no source line. The bootstrap refuses it by name, which
-  is a deliberate divergence - the reference emits the invalid IR.
-- **An enum method is reachable through `Trait.method(ref e)` here and not in
-  the reference,** which refuses an enum receiver ("requires a struct
-  receiver"). This falls out of putting the method table on `Type.ValueEnum`
-  rather than being added; blocking it would take extra code to make an enum
-  less of a type than it is. Interpolation (`${lvl}`) works on both sides and is
-  the form the reference intends.
+  `{ Red 1, Crimson 1 }` is legal; matching both in one switch would emit a jump
+  table naming `1` twice, which clang rejects with "duplicate case value in
+  switch" and no source line, so it is refused BY NAME instead.
+- **An enum method is reachable through `Trait.method(ref e)`.** It falls out
+  of the method table living on `Type.ValueEnum` rather than being bolted on;
+  refusing an enum receiver would take extra code to make an enum less of a type
+  than it is. Interpolation (`${lvl}`) reaches the same method.
 - **An enum case value is folded in pass C, not parsed as a grammar.** The
   parser takes an ordinary expression after the case name, and
-  `typecheck/enum_values.yoop` decides whether it could be a constant. That is
-  the reference's split too, and it is what makes `Red { r: int32 }` report
-  "unsupported expression form in enum case value" rather than "expected comma" -
-  a payload is a struct literal to a parser.
+  `typecheck/enum_values.yoop` decides whether it could be a constant. That
+  split is what makes `Red { r: int32 }` report "unsupported expression form in
+  enum case value" rather than "expected comma" - a payload is a struct literal
+  to a parser.
 - **`function` terminates a case's value expression.** A comma before a method
   is optional, so `Blue\n function toString(...)` would otherwise read the
   keyword as the start of Blue's value.
@@ -1643,13 +1679,12 @@ The rules the layers lean on, each easy to break and each expensive when it is:
 - **An array const's payload is `internal global`, not `private constant`.**
   Constness is about the BINDING, so `A[0] = 9` through a const is allowed the
   same way it is for a local, and read-only storage turns that into a crash at
-  run time. The reference DOES crash there.
-- **A method's kind prefixes are RESOLVED, and the reference's are not.** An
-  unknown kind on a method is refused by name here, and a PAUSABLE one marks the
-  method a coroutine so codegen refuses to emit it. The reference checks neither
-  - a typo'd prefix silently produces an ordinary method there, and an `async`
-  one is emitted as a function that never suspends. Deliberate divergence, and
-  the same reason the function-level refusal exists.
+  run time.
+- **A method's kind prefixes are RESOLVED.** An unknown kind on a method is
+  refused by name, and a PAUSABLE one marks the method a coroutine, which
+  codegen then refuses to emit. Leaving them unresolved is worse than either: a
+  typo'd prefix silently produces an ordinary method, and an `async` one a
+  function that never suspends. Same reason the function-level refusal exists.
 - **A pausable METHOD is keyed by NodeId, not by name.** `pausableNames` is a
   name table and a method's name is not unique in a module: two types may each
   declare `read`, and a plain function may be called `read` as well.
@@ -1663,17 +1698,17 @@ The rules the layers lean on, each easy to break and each expensive when it is:
   other kind position uses is not enough here, and neither is "the run ends at
   `(`" on its own - an enum case may be `AB A | B`.
 - **A PARAMETER takes exactly one kind prefix, and it comes before `ref`.** The
-  count is the reference's rule rather than the grammar's ("a parameter may
-  carry at most one kind prefix"), and refusing it here means the two compilers
-  agree on what a program MEANS and not only on what it looks like. The
-  position is what keeps the lookahead decidable: an identifier followed by
+  count is a rule about what a parameter MEANS rather than about the grammar ("a
+  parameter may carry at most one kind prefix"), so a second one is refused
+  rather than recorded and ignored. The position is what keeps the lookahead
+  decidable: an identifier followed by
   another identifier OR by `ref` cannot be the parameter's own name, because a
   name is always followed by `:`.
 - **`library` is CONTEXTUAL and the two `from` spellings mean different
   things.** `from "stdio.h"` is a HEADER name read by nobody; `from library "m"`
   is a LINK instruction that lowers to `-lm` on the clang line. `library` lexes
-  as an ordinary IDENT on both sides, so it is recognized by TEXT the way `kind`
-  and `propagates` are, and `operator == LIBRARY` on the EXTERN_BLOCK is what
+  as an ordinary IDENT, so it is recognized by TEXT the way `kind` and
+  `propagates` are, and `operator == LIBRARY` on the EXTERN_BLOCK is what
   tells the link step which spelling was written. Guessing from the name instead
   would make every `from "stdio.h"` into `-lstdio.h`.
 - **Link libraries are collected for the GRAPH, not per module.** One clang
@@ -1685,7 +1720,7 @@ The rules the layers lean on, each easy to break and each expensive when it is:
   `disposable reg: T = expr { ... }` puts the name in a scope of its own: it is
   visible inside the block, gone after it, and the scope-end call fires at the
   closing brace rather than at the end of the function. That is not "a binding
-  followed by a block" - reading the name afterwards is an error on both sides.
+  followed by a block" - reading the name afterwards is an error.
   `emitScopedBinding` is the named twin of `emitKindRegion` and differs in one
   thing: the subject has a name, so it goes in an ordinary local slot the block
   can read instead of an anonymous one. It also pushes a LOCALS scope, which the
@@ -1708,29 +1743,28 @@ The rules the layers lean on, each easy to break and each expensive when it is:
   construction.
 - **Reverse declaration order.** A later binding may hold a borrow of an earlier
   one - a `Text` built into an arena has to go before the arena.
-- **Disposing on `break` is a DELIBERATE divergence.** The JS reference leaks
-  there. `dispose_break.yoop` asserts the bootstrap alone, via a
-  `<stem>.bootonly` marker that skips the parity bonus and carries the reason.
+- **A `break` or a `continue` DISPOSES what the scopes it leaves owe.** An
+  early exit that skips the unwind is a leak that compiles and that no
+  happy-path test can see. `dispose_break.yoop` is the fixture.
 - **A scope-end call already made BY HAND is not made again.**
   `Disposable.dispose(ref c)` on a `disposable` binding answers the obligation and
-  the closing brace emits nothing, which is what the reference does too. The
-  answer is per EXIT SITE rather than per binding, because a `return` placed
+  the closing brace emits nothing. The answer is per EXIT SITE rather than per
+  binding, because a `return` placed
   before the manual call still owes it while the brace past it does not. The
   satisfied-set is a `uint64` bitmask in `typecheck/discharge.yoop`, snapshotted
   at a branch and INTERSECTED at the join; codegen only skips.
-- **An ASSIGNMENT REARMS that obligation - a DELIBERATE divergence.**
+- **An ASSIGNMENT REARMS that obligation.**
   `Disposable.dispose(ref s); s = next;` is what std/core/kinds.yoop documents as
-  the informed opt-in for a mutable kinded binding, and the reference never clears
-  its satisfied flag, so it emits no scope-end call there at all and never
-  disposes the value the binding ends up holding. Reproducing a leak on the
-  language's own recommended idiom is not parity worth having.
-  `tests/slice/dispose_rebind.yoop` is `.bootonly` for that reason.
-- **An ARRAY of unions works here and is an internal error in the reference**
-  (`arrayElemLlvmName: unsupported elem type "union"`). Representational: the
-  reference names one `%yoop_array.T` per element type and has no spelling for a
-  union, while the bootstrap uses one anonymous `{ ptr, i64 }` descriptor for
-  every element type. The slice fixture avoids the shape so its `.expected` stays
-  assertable against both.
+  the informed opt-in for a mutable kinded binding: the manual call answers for
+  the value the binding HELD, and the value it holds next owes its own. A
+  satisfied flag that is never cleared emits no scope-end call at all and leaks
+  whatever the binding ends up with, which is a leak on the language's own
+  recommended idiom. `tests/slice/dispose_rebind.yoop` is the fixture.
+- **An ARRAY of unions works, and it works because an array descriptor is not
+  named after its element type.** One anonymous `{ ptr, i64 }` descriptor serves
+  every element type, so a union needs no `%yoop_array.T` spelling of its own -
+  and there is no element type that has to be given one before an array of it
+  can exist.
 - **A union is addressed, never extracted.** Structs here are SSA aggregates, so a
   read is a load plus `extractvalue` and there is nothing to reinterpret one as. A
   union field read is the union's own ADDRESS loaded at the field's type - the
@@ -1751,19 +1785,16 @@ The rules the layers lean on, each easy to break and each expensive when it is:
   in a module DATUM rather than an alloca, because the init function's frame is
   gone the moment it returns; a non-literal ELEMENT is refused by name rather than
   lowered into a dangling pointer.
-- **`_` is not a reserved word here.** The JS lexer's keyword table maps `_` to
-  `discard`, so the reference reports `let _ = 1;` as `"_" is a reserved word`
-  and accepts `_` as a struct-literal or pattern FIELD name. The bootstrap leaves
-  `_` out of the reserved set: it reports the pre-existing `expected IDENT, got
-  DISCARD` for a binding, and still refuses `{ _: 1 }` and `case Ev.type { _ }`.
-  `_` is punctuation the lexer happens to spell as a word, and nothing that
-  wanted a C name ever wanted it.
+- **`_` is not a reserved word; it is PUNCTUATION the lexer happens to spell as
+  a word.** It is left out of the reserved set, so `let _ = 1;` reports the
+  ordinary `expected IDENT, got DISCARD` rather than a reserved-word complaint,
+  and `{ _: 1 }` and `case Ev.type { _ }` are still refused. Nothing that wanted
+  a C name ever wanted it.
 - **A member spelled `function` is still a METHOD.** In a struct, variant or enum
-  body the bootstrap dispatches on the `function` keyword alone; the reference
-  disambiguates a struct FIELD from a method by the trailing colon, so
-  `type T { function: int32 }` compiles there and is refused here. Every other
-  reserved word works in those positions, and an extern parameter named
-  `function` is fine, since nothing there is ambiguous.
+  body the dispatch is on the `function` keyword alone, so
+  `type T { function: int32 }` is refused rather than read as a field wearing a
+  trailing colon. Every other reserved word works in those positions, and an
+  extern parameter named `function` is fine, since nothing there is ambiguous.
 - **A field supplies a propagated kind by EITHER spelling: its own type
   propagates the kind, or its annotation carries the kind by PREFIX**
   (`handle: disposable FileHandle`). `Type.Field.carriedKind` holds the second,
@@ -1772,15 +1803,11 @@ The rules the layers lean on, each easy to break and each expensive when it is:
   `ownerType: field.fieldType`, so both spellings emit the same call. Only a
   plain type name carries one; a prefix on an array or a `ref` is not read,
   because the call would then be on the WRAPPER.
-- **`appliesTo` is NOT enforced on a field prefix, and the reference's version of
-  that check is broken anyway.** The bootstrap records a kind's clauses by their
-  leading word and never reads the site list, so any declared kind may prefix a
-  field. The reference requires `appliesTo field` - but it only populates that
-  set for an IMPORTED kind, so a kind declared in the same module as the field
-  that carries it reads back as `appliesTo: (none)` and the field is refused.
-  That is why `examples/pass/propagates_full/io.yoop` declares its own
-  `disposable` in a second file, and why `tests/slice/lib/carried.yoop` exists.
-  The bootstrap is a superset here, so nothing the reference accepts breaks.
+- **`appliesTo` is NOT enforced on a field prefix.** A kind's clauses are
+  recorded by their leading word and the site list is never read, so any declared
+  kind may prefix a field. `tests/slice/lib/carried.yoop` and
+  `examples/pass/propagates_full/io.yoop` are where a carried kind is declared in
+  one file and worn by a field in another.
 - **A returned VALUE is computed before anything is disposed.** It may read a
   binding that is about to go.
 - **`?` IS a return, so it unwinds like one.** Its error path calls the same
@@ -1790,8 +1817,8 @@ The rules the layers lean on, each easy to break and each expensive when it is:
   fails. `try_op.yoop` in the slice fixtures runs each `?` function twice, once
   down each path, and the two runs print the same disposals in the same order.
 - **A FALLIBLE type is exactly two cases named `Ok` and `Err`, each with at most
-  one field.** Every clause is load-bearing and every one was established by
-  PROBING the reference. A third case, or a two-field payload on either case,
+  one field.** Every clause is load-bearing. A third case, or a two-field
+  payload on either case,
   makes it non-fallible - and so `Option<T>` is not fallible either, which is
   the one most likely to be assumed. `fallibleShapeOf` in
   `typecheck/fallible.yoop` is the single answer; do not re-derive it by looking
@@ -1848,13 +1875,10 @@ The rules the layers lean on, each easy to break and each expensive when it is:
   to keep up to date. `yoop_` is the runtime's symbol prefix as well as its file
   prefix, so a header named that way and not being the runtime is not a thing.
   The LIBRARY spelling is deliberately excluded: `from library "yoop_runtime"`
-  stays `-lyoop_runtime` and fails to find an archive, which is what the
-  reference does with it too (probed).
-  Worth knowing: the REFERENCE ignores the `from` name entirely and links the
-  whole runtime into every program, hello-world included - probed, and 197
-  `yoop_` symbols end up in a program that calls none of them. So the bootstrap
-  links a strict SUBSET, and a program that works there works here as long as it
-  names the runtime, which every file in the corpus that uses it does.
+  stays `-lyoop_runtime` and fails to find an archive. A library name is a link
+  instruction about an ARCHIVE, and the runtime is a set of C sources compiled
+  into the program, so reading one as the other would put 197 `yoop_` symbols
+  into a hello-world that calls none of them.
 - **The WHOLE runtime set gets linked, not what is used.** `yoop_runtime.c`
   calls `yoop_net_startup` and `yoop_io_shutdown`; that dependency graph belongs
   to the C files, and tracking it here would mean keeping a second copy correct.
@@ -1927,7 +1951,7 @@ The rules the layers lean on, each easy to break and each expensive when it is:
   they canonicalize on the id they are HANDED - so two different Func ids give
   two different `Func[]` ids and two different `ref Func[]` ids, and a
   top-level-only compare reported that an array of functions was not an array of
-  functions, quoting the same spelling on both sides. So the compare recurses,
+  functions, quoting the same spelling on each side. So the compare recurses,
   through every STRUCTURAL wrapper: `Ref`, `Array`, `Task`, `UnsafePtr`, a Func's
   own parameters and its return, and `FuncPtr`.
 - **It stops at every NOMINAL type, and that is both the right answer and the
@@ -1947,8 +1971,7 @@ The rules the layers lean on, each easy to break and each expensive when it is:
   inside a wrapper. `ref unsafe_ptr<uint8>` into a `ref unsafe_ptr` is refused,
   and so is `unsafe_ptr<uint8>[]` into `unsafe_ptr[]`, because the callee could
   store an opaque pointer through either and break the promise the caller still
-  holds. Both halves match the reference, established by probing it. The split
-  is two functions in `typecheck/type_eq.yoop`: `sameTypeStructurally` is the
+  holds. The split is two functions in `typecheck/type_eq.yoop`: `sameTypeStructurally` is the
   equivalence, `typeAccepts` is that plus the two widenings. Do not reach for
   `==` when a Func can be anywhere on either side.
 - **A type in a diagnostic has to READ as the type.** `formatType` answering
@@ -1978,7 +2001,7 @@ The rules the layers lean on, each easy to break and each expensive when it is:
   without the other emits a call to a symbol nothing defines.
 - **An intrinsic extern is implicitly EXPORTED; a C extern is not.** There is
   nowhere to write `export` - the block is the declaration - and every std
-  module reaches them through `import * as intr`. The reference does the same.
+  module reaches them through `import * as intr`.
 - **A generic intrinsic registers as an ordinary generic decl.** Call sites then
   infer `T` through the path every generic function already uses. What differs
   is that there is no body to monomorphize, and codegen never looks for one
@@ -2004,8 +2027,7 @@ The rules the layers lean on, each easy to break and each expensive when it is:
 - **Kinds are AMBIENT, reached by name from `Program.kinds`.** A kind prefix is
   not imported - `async fetch(...)` in std/http names a kind declared in
   std/core/kinds.yoop with nothing linking the two files - so it resolves
-  against a graph-wide registry. The JS reference has the same registry for the
-  same reason.
+  against a graph-wide registry.
 - **Kind prefixes resolve in pass C, not pass A.** Pass A REGISTERS the kinds,
   and a file may declare one below the function carrying it. Resolving in the
   walk that registers would make declaration order matter, which it does
@@ -2027,12 +2049,12 @@ The rules the layers lean on, each easy to break and each expensive when it is:
   loop's counter, and PARAMETERS including `ref` ones - a parameter is a local
   copy and a borrow exists to be written through.
 - **Constness is about the BINDING, not the value behind it.** `p.x = 2` and
-  `xs[0] = 9` through a `const` are allowed, matching the reference. Deep
-  immutability would be a different feature, not a stricter version of this one.
+  `xs[0] = 9` through a `const` are allowed. Deep immutability would be a
+  different feature, not a stricter version of this one.
 - **The compound forms desugar to a plain assignment in the PARSER,** so one
-  check covers `a = 2` and `a += 2` both. The JS reference checks somewhere that
-  the desugaring bypasses, so it refuses the first and allows the second on the
-  same binding; the bootstrap deliberately does not copy that.
+  check covers `a = 2` and `a += 2` both. A mutability check placed where the
+  desugaring bypasses it refuses the first and allows the second on the same
+  binding, which is the failure this ordering exists to prevent.
 - **Desugaring names the target TWICE, so it is gated on the target being a
   PLACE** - a name, or a path of fields reaching one. Those cost nothing to read
   a second time. `xs[f()] += 1` would call `f` once to read and again to write,
@@ -2060,9 +2082,8 @@ The rules the layers lean on, each easy to break and each expensive when it is:
 - **An interpolation ends where its EXPRESSION ends, not at a matching brace.**
   `parseTemplateLiteral` repositions into the same source buffer at the byte
   after `${` and parses an ordinary expression; wherever that stops IS the
-  closing brace. Brace matching gets `${g({ x: 1 })}` and `${g("}")}` wrong -
-  the JS reference matches braces and cannot lex the second one at all. Do not
-  "simplify" this into a scan.
+  closing brace. Brace matching gets `${g({ x: 1 })}` wrong and cannot lex
+  `${g("}")}` at all. Do not "simplify" this into a scan.
 - **The template parser must not lex PAST the closing brace.** The bytes after
   it are template text, not code, so the brace is PEEKED and never consumed, and
   the cursor is repositioned for whatever comes next. Consuming it lexes one
@@ -2080,26 +2101,23 @@ The rules the layers lean on, each easy to break and each expensive when it is:
   half of the feature (interpolating anything but a named binding) would have to
   be refused.
 - **A built string is libc, not std** - `strlen` / `malloc` / `memcpy` /
-  `sprintf`, all in `codegen/instr_str.yoop`. The JS reference routes through
-  std's `stringConcatAll` and `format.intToString`, which the bootstrap cannot
-  reach until a 9-file slice of std compiles. Both bottom out in a raw malloc
-  plus byte copying, so the observable result is the same, including that a
-  built string ignores the allocator context. `codegen/template.yoop` is the one
-  place that changes when std becomes reachable. An interpolated FLOAT is
-  `sprintf` with `%g`, which is exactly what the reference's runtime helper
-  `yoop_float_to_string` is - so `${1.5}` is "1.5" and `${4.0}` is "4", with no
-  decimal point on a whole number.
-- **A template literal handed DIRECTLY to `printf` as its FORMAT renders
-  differently in the two compilers, and it is not about floats.** The reference
-  has a printf special case that turns a template in format position into
-  `printf("x=%f", x)` - C's own conversions - while the bootstrap builds the
-  string first and passes the result as the format. So a float prints as
-  "3.140000" there and "3.14" here, and a bool as "1" there and "true" here.
-  Route it through a `%s` and a template ARGUMENT instead and both agree, which
-  is what every slice fixture does; six programs in `examples/pass/` do not, and
-  print differently under the two compilers. Note the bootstrap's version is
-  also unsafe in a way the reference's is not: a built string containing a `%`
-  becomes a conversion specifier.
+  `sprintf`, all in `codegen/instr_str.yoop`. Routing it through std's own
+  `stringConcatAll` and `format.intToString` instead would put a 9-file slice of
+  std in the import closure of every program that interpolates anything. It
+  bottoms out in a raw malloc plus byte copying, which is also why a built
+  string ignores the allocator context. `codegen/template.yoop` is the one place
+  that would change. An interpolated FLOAT goes through `sprintf` with `%g`, so
+  `${1.5}` is "1.5" and `${4.0}` is "4", with no decimal point on a whole number
+  and no trailing zeros nobody asked for.
+- **A template literal handed DIRECTLY to `printf` as its FORMAT is a BUILT
+  STRING, not a format.** The template is built first and the result is passed
+  as the format, so the values are rendered by the interpolation rules - a float
+  as `3.14`, a bool as `true` - rather than by C's conversions. With no varargs
+  the call is rewritten to `printf("%s", <it>)`, which is what keeps a `%` in the
+  built text from being read as a conversion; a call WITH varargs is left alone,
+  so a `%` in a template used as a format there still is one. Routing a value
+  through a `%s` and a template ARGUMENT is what every slice fixture does, and
+  it is the spelling to prefer.
 - **A diagnostic carries the FILE it was found in.** `Program.currentFile` is
   ambient, set by each pass as it starts a file, because the alternative is a
   path parameter on forty `reportError` call sites that all want the same
@@ -2123,9 +2141,8 @@ The rules the layers lean on, each easy to break and each expensive when it is:
   `vec` twenty times in codegen. Re-binding it to the SAME module is the same
   import written again and is a no-op; binding it to a DIFFERENT module under
   one name is a real collision and stays refused, as does importing over a
-  declaration. Imports are NOT file-scoped, here or in the reference; both
-  halves were established by probing it. Note the asymmetry in how sameness is
-  tested: a namespace compares by MODULE INDEX, because every `import * as ns`
+  declaration. Imports are NOT file-scoped. Note the asymmetry in how sameness
+  is tested: a namespace compares by MODULE INDEX, because every `import * as ns`
   interns its own `Symbol.Namespace` and two identical imports never share an
   id, while a named import compares by SymbolId, because it binds the source
   module's own. Check membership BEFORE interning, or a duplicate leaves a dead
@@ -2149,31 +2166,6 @@ A program whose emitted IR calls nothing in the yoop runtime links only libc,
 which keeps the link step a single clang invocation. The runtime's C sources go
 on the line only for a program that needs them - see `link_flags.yoop`.
 
-## Parity with the JS reference
-
-Each layer boundary gets a deterministic dump that both implementations emit in
-the same format, and a harness that diffs them. Layer 1 has one:
-
-    npm run test:parity
-
-It compiles `tools/dump_tokens.yoop`, then diffs its output against
-`src/dumpTokens.js` over `tests/parity/` plus every `.yoop` file in `std/`,
-`bootstrap/` and `examples/`. To eyeball one file:
-
-    diff <(node ../src/yoopiler.js FILE --dump-tokens) <(/tmp/dump_tokens FILE)
-
-Two things the token dump deliberately does not compare, both documented in
-src/dumpTokens.js: int literals past 2^53, and non-ASCII spans. Float VALUES are
-compared, as the 64-bit pattern rather than as a decimal rendering, which is
-what makes them comparable at all.
-
-**There is no layer 2 (AST) parity.** The two ASTs are not the same shape: this
-side wraps variable-arity children in NODE_LIST nodes and makes type annotations
-real AST nodes, while the JS parser uses plain arrays and a separate annotation
-object. A parse dump would have to normalize both into one tree before anything
-could be diffed.
-
-
 ## Codegen readability rules
 
 Bootstrap-specific, not general Yoop style. Codegen is the layer that turns
@@ -2188,21 +2180,41 @@ the whole IR surface in one place, so it grows by entries rather than splitting.
 **Separate DECIDING from EMITTING.** Three layers, and a function belongs to
 exactly one:
 
+    codegen.yoop            the entry point: the walk over modules and functions
     expr.yoop / stmt.yoop   walk the AST, decide what should happen
     flow.yoop               the same, for `if` (block discipline lives here)
     loop.yoop               the same, for `while` / `for` / `for ... in`
+    loop_iter.yoop          the OTHER `for ... in`, over an `Iterable<T>`
     loop_stack.yoop         where break/continue jump
     array.yoop              array literals, indexing, `.len`
     call.yoop               call expressions
+    printf_format.yoop      the one call site that is REWRITTEN: a `printf`
+                            whose format is a string the program built
     switch.yoop             `switch` -> a jump table
     struct.yoop             struct literals, field read and write
+    union.yoop              the literal, the field read, and the address every
+                            field shares
     variant.yoop            variant constructors, tags, pattern bindings
+    vtable.yoop             BUILDING a vtable value - the erasure
+    vtable_call.yoop        calling THROUGH one - the indirect half
+    unsafe_ptr_ops.yoop     `cast`, `toInt`, `fromInt`, `toArray`, and pointer
+                            arithmetic
     typedefs.yoop           the module-level struct type definitions
+    module_init.yoop        a module-level `let` whose value is not fixed at
+                            compile time, and the init function that stores it
+    strings.yoop            string literals, as private module-level constants
     instr.yoop              emit one LLVM instruction
     instr_mem.yoop          the same, for aggregates and computed addresses
     instr_flow.yoop         the same, for branches, labels, the jump table
+    instr_ptr.yoop          the same, for the two raw-pointer conversions
+    instr_union.yoop        the same, for a union's three lines
+    instr_vtable.yoop       the same, for the shim and the indirect call
     vocab.yoop              which opcode/predicate an operator lowers to
+    emit.yoop               the IR text buffers, and TypeId -> LLVM type
     context.yoop            the Cx, and the raw text appenders
+    operand.yoop            what an expression evaluates to, as a VALUE rather
+                            than as a built string
+    locals.yoop             where a local or a parameter lives
     query.yoop              THE typecheck boundary - everything codegen asks
     mangle.yoop             what a symbol is CALLED in the emitted module
     template.yoop           template literals: parts -> one built string
@@ -2217,6 +2229,8 @@ exactly one:
     extern_table.yoop       ONE `declare` per symbol, shared by all four
                             things that declare one
     try_op.yoop             `expr?`: a tag test, an early return, an unwrap
+    try_forms.yoop          the two other things a `?` can be, both of them in
+                            its failure branch
     instr_str.yoop          the libc calls a built string is made of
     coro.yoop               the coroutine FRAME an `async` function opens
     instr_coro.yoop         the same, one function per `llvm.coro.*`
@@ -2226,6 +2240,11 @@ exactly one:
     task_thunk.yoop         the per-task thunk, and the coro trampolines
     task_wait.yoop          `wait`, and what a handle binding owes its scope
     instr_task.yoop         the same, one function per runtime call
+    task_intr.yoop          the four `Task<T>` intrinsics
+    debug_info.yoop         the DWARF metadata a debugger reads: a backtrace, a
+                            file and line, a source-line breakpoint
+    debug_types.yoop        the DWARF description of a type - the layout codegen
+                            ACTUALLY emits, not the one the source writes
 
 There is no traits.yoop here, and that is the point: a method is an ordinary
 function by the time codegen sees it, so it emits through the same path. All
@@ -2295,15 +2314,14 @@ return means pass D let something through, never that the user made a mistake.
 ## Tests
 
 Three levels, and the rule in ../CLAUDE.md says every change adds to whichever
-fits. The point is that they survive the JS compiler being retired.
+fits. Between them they are the whole of what stands between a change and a
+silent regression, so a change that adds none is a change nothing is checking.
 
-    node ../src/yoopiler.js --test src/lex        # yoop unit tests
-    node ../src/yoopiler.js --test src/parse
-    node ../src/yoopiler.js --test src/source_graph
-    node ../src/yoopiler.js --test src/typecheck
-    node ../src/yoopiler.js --test src/codegen
-    npm run test:slice                            # end-to-end executables
-    npm run test:parity                           # layer dumps vs the JS side
+    $(node scripts/seed.mjs) --test bootstrap/src            # every yoop unit test
+    $(node scripts/seed.mjs) --test bootstrap/src/typecheck  # one module
+    npm run test:slice                                       # executables
+    npm run test:pass                                        # the program corpus
+    npm run test:fail                                        # programs to REFUSE
 
 A yoop unit test lives beside the module it covers as `*.test.yoop`, which is
 excluded from the module's file list, so it reaches its module through the same
@@ -2313,51 +2331,63 @@ all of them refusals, plus the `tests/slice/imports.yoop` diamond read back for
 its topological order.
 
 A slice fixture is a program plus a hand-written `.expected` holding its stdout
-and an `exit=N` line. The `.expected` is the source of truth: it is asserted
-against the BOOTSTRAP first, and the JS reference is checked against the same
-file as a bonus. Never capture one from compiler output.
+and an `exit=N` line. The `.expected` is the SOURCE OF TRUTH: it is written by
+reading the program and working out what it should print, and the assertion is
+compiler-output equals expected. Never capture one from compiler output - a
+captured file asserts that today's behaviour equals today's behaviour, and
+silently blesses whatever bug is being captured.
 
-Beside them are two PROBES, which are measurements rather than tests - nothing
-fails, they print a report:
+The program corpus outside this directory works the same way. `examples/pass/`
+and `examples/tour/` carry `.expected` files in that same format
+(`src/pass.test.js`), and `examples/fail/` carries `.expected-errors` files
+naming a line, a column and a substring of the diagnostic
+(`src/fail.test.js`). Anything checkable without producing a binary belongs in
+a `*.test.yoop` instead; anything that has to reach an executable belongs in a
+fixture.
+
+Beside them is a PROBE, which is a measurement rather than a test - nothing
+fails, it prints a report:
 
     scripts/probe_surface.sh    every non-test file under std/, examples/pass/
                                 and bootstrap/src/, compiled to IR and no
                                 further. Says whether codegen HANDLED the file
-    scripts/probe_programs.sh   every entry point under examples/ that declares
-                                a `main`, built with BOTH compilers and RUN,
-                                stdout and exit code compared. Says whether the
-                                program WORKS
 
-Run both after a change, and run each with stage1 and stage3. They cover
-different sets on purpose and neither may move the other's numbers.
+Run it after a change, and run it with stage1 and with stage3: the two reports
+have to be byte-identical, and a line that moved is either the change or a
+miscompile.
 
-## Layer 6 parity
+## Behaviour the bootstrap defines
 
-`npm run test:slice` compiles every program in `tests/slice/` with BOTH
-compilers and asserts identical stdout and exit code. It exercises every layer
-at once.
+`npm run test:slice` compiles every program in `tests/slice/`, runs it, and
+asserts its stdout and exit code against that hand-written `.expected`. It
+exercises every layer at once, which is what makes it the place these rules are
+pinned.
 
-Five divergences, worth knowing because the bootstrap is the one that is right
-in all five - and worth WRITING DOWN, because once the reference is gone there
-is nothing left to notice them against.
+Five of them are worth writing down, because each is a place where a different
+answer would also have been defensible and the reason for this one is not
+visible from the code:
 
-  * `printf("%d", 2 + 3)` is an error in the JS reference ("this expression
-    still has an unpinned literal type"). The bootstrap's pass D defaults an
-    unconstrained untyped int literal to int32.
-  * `n += 1` ON A `ref` SCALAR PARAMETER. The reference emits `add ptr %n, 1`,
-    never opening the borrow, and clang refuses the module; `n = n + 1` on the
-    same parameter is fine. The bootstrap compiles both.
-  * `n += 1` ON A `ref` SCALAR PARAMETER. The reference emits `add ptr %n, 1`,
-    never opening the borrow, and clang refuses the module; `n = n + 1` on the
-    same parameter is fine, which is what makes it easy to hit and easy to miss.
-    The bootstrap compiles both.
-  * INT LITERALS PAST 2^53. The reference carries them as JS numbers and rounds
-    them in the lexer; nothing downstream can recover the value. This is not a
-    curiosity: the FNV-1a offset basis in std/core/strings.yoop is one, so under
-    the reference every string in every program hashes wrong and a Map iterates
-    in an order that follows. `tests/slice/wide_int_literals.yoop` pins it.
-  * `${x}` ON A uint64 renders SIGNED under the reference. Same fixture.
-  * `${b}` ON A bool renders `1` / `0` under the reference and `true` / `false`
-    here; `${f}` on a float renders `3.500000` there and `3.5` here. Between
-    them these account for 22 of the 23 lines `scripts/probe_programs.sh`
-    reports as DIFFER.
+  * AN UNCONSTRAINED UNTYPED INT LITERAL DEFAULTS TO int32, in pass D. So
+    `printf("%d", 2 + 3)` compiles: there is no parameter to pin the literals
+    to, and refusing an arithmetic expression for having no context is a worse
+    answer than the obvious default. A wider one is had by annotating.
+  * `n += 1` ON A `ref` SCALAR PARAMETER OPENS THE BORROW, exactly as
+    `n = n + 1` on the same parameter does. The compound forms desugar to the
+    plain one in the parser, so the two spellings cannot come apart; adding to
+    the POINTER instead emits `add ptr %n, 1`, which clang refuses outright.
+  * INT LITERALS ARE EXACT PAST 2^53, up to the width they are declared at.
+    They are decoded and carried as 64-bit integers and never through floating
+    point. That is not a curiosity: the FNV-1a offset basis in
+    `std/core/strings.yoop` is such a literal, so a lexer that rounds it makes
+    every string in every program hash wrong and every `Map` iterate in an order
+    that follows. `tests/slice/wide_int_literals.yoop` pins it.
+  * `${x}` ON A uint64 RENDERS UNSIGNED. Interpolation reads the operand's own
+    signedness instead of widening everything into a signed i64, so a value
+    above int64 max prints as itself rather than as a negative number. Same
+    fixture.
+  * `${b}` ON A bool RENDERS `true` / `false`, AND `${f}` ON A FLOAT RENDERS
+    THROUGH `%g` - `3.5` rather than `3.500000`, and `4` for `4.0`.
+    Interpolation exists for a human reading a line of output: `1` for a bool is
+    C's representation leaking through, and six trailing zeros are noise nobody
+    asked for. A program that wants C's own rendering has `printf` and a format
+    string, which is the whole difference between the two features.

@@ -39,11 +39,8 @@ jobs:
       # times slower, so a timeout here would read as a hang rather than as a
       # slow machine. These raise the deadlines without disabling them.
       YOOP_SELFHOST_TIMEOUT_MS: "900000"
-      YOOP_E2E_CLANG_TIMEOUT_MS: "300000"
-      YOOP_E2E_RUN_TIMEOUT_MS: "90000"
       YOOP_SLICE_COMPILE_TIMEOUT_MS: "300000"
       YOOP_SLICE_RUN_TIMEOUT_MS: "60000"
-      YOOP_PARITY_DUMP_TIMEOUT_MS: "90000"
     steps:
       - uses: actions/checkout@v4
 
@@ -62,16 +59,39 @@ jobs:
 
       - run: npm ci
 
-      # The bootstrap's own Yoop tests. NOT part of `npm test` (that globs
-      # src/**/*.test.js, which is the JS side), and they are the tests that
-      # outlive the JS reference, so CI runs them first and on their own.
-      - name: Bootstrap Yoop unit tests
-        run: node src/yoopiler.js --test bootstrap/src
+      # The compiler is self-hosted, so the build starts from a previously
+      # released binary. Fetching it first makes a download failure its own
+      # red step rather than a confusing failure inside the tests.
+      - name: Fetch the bootstrap seed
+        run: node scripts/seed.mjs
+        env:
+          GH_TOKEN: ${{ github.token }}
 
-      # Everything on the JS side: unit, e2e, slice fixtures, layer parity, and
-      # the three-stage self-hosting fixpoint.
-      - name: JS suite
+      # The bootstrap's own Yoop tests - 1435 of them, and the largest single
+      # body of coverage in the tree. Run first and on their own because they
+      # need nothing but a compiler, so a failure here is unambiguous.
+      - name: Bootstrap Yoop unit tests
+        run: $(node scripts/seed.mjs) --test bootstrap/src
+        env:
+          YOOP_STD_ROOT: ${{ github.workspace }}/std
+          YOOP_RUNTIME_ROOT: ${{ github.workspace }}/runtime
+
+      # The modules the compiler depends on but does not contain. Separate
+      # because `--test` takes one tree, and separate in the log for the same
+      # reason as the step above.
+      - name: Module Yoop unit tests
+        run: $(node scripts/seed.mjs) --test modules
+        env:
+          YOOP_STD_ROOT: ${{ github.workspace }}/std
+          YOOP_RUNTIME_ROOT: ${{ github.workspace }}/runtime
+
+      # The harnesses that drive the bootstrap from Node: the program corpus,
+      # the diagnostic fixtures, the slice fixtures, and the three-stage
+      # self-hosting fixpoint.
+      - name: Test suites
         run: npm test
+        env:
+          GH_TOKEN: ${{ github.token }}
 
       # A suite that wedged and got killed should not leave a clang or a stage
       # binary behind. If this ever prints anything, the deadline or the tree

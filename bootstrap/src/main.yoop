@@ -34,8 +34,9 @@ import { codegenProgram, CodegenOptions, defaultCodegenOptions } from "./codegen
 import { runPrecompilePass } from "./comptime";
 import { linkExecutable, writeIrFile } from "./link";
 import { TestPlan, planTestRun, testBinaryPath, runTestBinary, removeTestArtifacts } from "./test_mode";
+import { runLanguageServer } from "./lsp";
 
-const USAGE: string = "usage: yoopiler_boot <entry.yoop> [-o <out>] [--emit-ir] [--track-heap]\n       yoopiler_boot --test <dir-or-file> [filter...]\n       yoopiler_boot --list-attributes";
+const USAGE: string = "usage: yoopiler_boot <entry.yoop> [-o <out>] [--emit-ir] [--track-heap]\n       yoopiler_boot --test <dir-or-file> [filter...]\n       yoopiler_boot --lsp\n       yoopiler_boot --list-attributes";
 
 function main(): int {
   // Extra positionals are suite-name FILTERS in a test run and an error in an
@@ -58,6 +59,16 @@ function main(): int {
   // Where `std/...` resolves. Discovered once here and handed to the graph, so
   // the layer that RESOLVES paths never has to probe for a directory.
   const stdRoot = discoverStdRoot(env.argAt(0));
+
+  // `--lsp` takes over the process: stdin and stdout become the protocol's
+  // transport rather than a terminal, so it is answered here, before anything
+  // else in the driver runs. Nothing below this point would write to stdout
+  // either (every note the compiler makes goes through std/log, which is
+  // stderr), but the flag being handled first is what keeps that true when
+  // something later grows a `printf`.
+  if (cli.lsp) {
+    return runLanguageServer(stdRoot);
+  }
 
   // Not `disposable`: on a test run the plan's source bytes are MOVED into the
   // graph, which keeps them for as long as the AST's spans point into them.
@@ -258,6 +269,7 @@ type CliArgs {
   // was not given. A PATH rather than stdout, matching the reference, because
   // the caller is a generator that wants a file to read back.
   astJsonOut: string,
+  lsp: bool,
   warnDisposable: bool,
   warnStd: bool,
   error: string,
@@ -282,7 +294,7 @@ type CliArgs {
 function parseCommandLine(ref extras: Vec<string>): CliArgs {
   let args: CliArgs = {
     entry: "", out: "a.out", emitIr: false, test: false,
-    trackHeap: false, listAttributes: false, astJsonOut: "",
+    trackHeap: false, listAttributes: false, astJsonOut: "", lsp: false,
     warnDisposable: false, warnStd: false, error: ""
   };
   const argc = env.argCount();
@@ -309,6 +321,9 @@ function parseCommandLine(ref extras: Vec<string>): CliArgs {
       }
       args.astJsonOut = env.argAt(i + 1);
       i += 2;
+    } else if (str.stringEq(a, "--lsp")) {
+      args.lsp = true;
+      i += 1;
     } else if (str.stringEq(a, "--warn-disposable")) {
       args.warnDisposable = true;
       i += 1;
@@ -338,8 +353,10 @@ function parseCommandLine(ref extras: Vec<string>): CliArgs {
     return args;
   }
   // `--test` with no path means the current directory, so only an ordinary
-  // compile needs one named - and `--list-attributes` needs none at all.
-  if (!args.test && !args.listAttributes && args.entry.len == 0) {
+  // compile needs one named - and `--list-attributes` and `--lsp` need none at
+  // all: one answers about the compiler and the other is handed its files by
+  // an editor.
+  if (!args.test && !args.listAttributes && !args.lsp && args.entry.len == 0) {
     args.error = "no input file";
   }
   return args;

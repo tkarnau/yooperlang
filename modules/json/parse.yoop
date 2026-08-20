@@ -1,0 +1,459 @@
+module json;
+
+/*
+  A recursive-descent JSON reader, over bytes.
+
+  It is a REFUSING parser, not a lenient one: no comments, no trailing commas,
+  no single quotes, no unescaped control characters inside a string, no
+  trailing input after the top-level value. Everything it will not accept comes
+  back as `ParseResult.Err` with a byte offset, and nothing it will not accept
+  crashes - which is the property that matters here, because the input is
+  whatever an editor sent down a pipe.
+
+  Nesting is bounded by MAX_DEPTH. The parser recurses, so an input of ten
+  thousand `[` is a stack overflow rather than a diagnostic unless something
+  counts, and a counter is the whole of what that costs.
+*/
+
+import { Text }, * as text from "std/core/text.yoop";
+import { Disposable, disposable } from "std/core/kinds.yoop";
+import * as intr from "std/core/intrinsics.yoop";
+
+// `atof` rather than `strtod`, because strtod's `endptr` would drag
+// `import.unsafe` into this file for a value the caller already knows: the
+// number's extent is scanned here before anything is converted. Both read the
+// C locale's decimal point, and nothing in this tree calls `setlocale`.
+extern "C" from "stdlib.h" {
+  function atof(s: string): float64;
+}
+
+export variant ParseResult {
+  Ok { value: JsonDoc },
+  Err { error: string },
+}
+
+const MAX_DEPTH: usize = 128;
+
+// The Unicode replacement character, U+FFFD. An unpaired surrogate escape is
+// substituted rather than refused: it is what a lone `\uD800` MEANS in every
+// mainstream reader, and a hard refusal there would reject messages an editor
+// legitimately sends.
+const REPLACEMENT: uint32 = 65533;
+
+type Parser {
+  src: uint8[],
+  pos: usize,
+  depth: usize,
+  // "" while the parse is still going. The first thing to set it wins, and
+  // every function below returns immediately once it is non-empty, which is
+  // what keeps the recursion from reporting a cascade.
+  error: string,
+}
+
+export function parseString(s: string): ParseResult {
+  return parseBytes(intr.stringAsBytes(s));
+}
+
+export function parseBytes(src: uint8[]): ParseResult {
+  let d: JsonDoc = docNew();
+  let p: Parser = { src: src, pos: 0, depth: 0, error: "" };
+  const root = parseValue(ref p, ref d);
+  if (p.error.len == 0) {
+    skipWs(ref p);
+    if (p.pos < p.src.len) {
+      p.error = `json: unexpected trailing input at byte ${p.pos}`;
+    }
+  }
+  if (p.error.len > 0) {
+    Disposable.dispose(ref d);
+    return ParseResult.Err { error: p.error };
+  }
+  d.root = root;
+  return ParseResult.Ok { value: d };
+}
+
+// ----- scanning ------------------------------------------------------------
+
+function skipWs(ref p: Parser): void {
+  while (p.pos < p.src.len) {
+    const c = p.src[p.pos];
+    // The four JSON whitespace bytes, and only those. A vertical tab or a form
+    // feed is not whitespace here.
+    if (c == ' ' || c == '\t' || c == '\n' || c == '\r') {
+      p.pos += 1;
+    } else {
+      return;
+    }
+  }
+}
+
+function atEnd(ref p: Parser): bool {
+  return p.pos >= p.src.len;
+}
+
+function peekByte(ref p: Parser): uint8 {
+  if (p.pos >= p.src.len) {
+    return 0;
+  }
+  return p.src[p.pos];
+}
+
+// True (and consumes) when the bytes at the cursor spell `word`.
+function matchWord(ref p: Parser, word: string): bool {
+  const w = intr.stringAsBytes(word);
+  if (p.pos + w.len > p.src.len) {
+    return false;
+  }
+  let i: usize = 0;
+  while (i < w.len) {
+    if (p.src[p.pos + i] != w[i]) {
+      return false;
+    }
+    i += 1;
+  }
+  p.pos += w.len;
+  return true;
+}
+
+// ----- values --------------------------------------------------------------
+
+function parseValue(ref p: Parser, ref d: JsonDoc): JsonId {
+  if (p.error.len > 0) {
+    return 0;
+  }
+  if (p.depth >= MAX_DEPTH) {
+    p.error = `json: nesting deeper than ${MAX_DEPTH} at byte ${p.pos}`;
+    return 0;
+  }
+  skipWs(ref p);
+  if (atEnd(ref p)) {
+    p.error = "json: unexpected end of input";
+    return 0;
+  }
+  const c = peekByte(ref p);
+  if (c == '{') {
+    return parseObject(ref p, ref d);
+  }
+  if (c == '[') {
+    return parseArray(ref p, ref d);
+  }
+  if (c == '"') {
+    return parseStringValue(ref p, ref d);
+  }
+  if (c == 't') {
+    if (matchWord(ref p, "true")) { return addBool(ref d, true); }
+    p.error = `json: expected "true" at byte ${p.pos}`;
+    return 0;
+  }
+  if (c == 'f') {
+    if (matchWord(ref p, "false")) { return addBool(ref d, false); }
+    p.error = `json: expected "false" at byte ${p.pos}`;
+    return 0;
+  }
+  if (c == 'n') {
+    if (matchWord(ref p, "null")) { return addNull(ref d); }
+    p.error = `json: expected "null" at byte ${p.pos}`;
+    return 0;
+  }
+  if (c == '-' || (c >= '0' && c <= '9')) {
+    return parseNumber(ref p, ref d);
+  }
+  p.error = `json: unexpected byte at ${p.pos}`;
+  return 0;
+}
+
+function parseObject(ref p: Parser, ref d: JsonDoc): JsonId {
+  p.pos += 1;              // the '{'
+  p.depth += 1;
+  const obj = addObject(ref d);
+  skipWs(ref p);
+  if (peekByte(ref p) == '}') {
+    p.pos += 1;
+    p.depth -= 1;
+    return obj;
+  }
+  let done: bool = false;
+  while (!done) {
+    skipWs(ref p);
+    if (peekByte(ref p) != '"') {
+      p.error = `json: expected a member name at byte ${p.pos}`;
+      return 0;
+    }
+    // The key lives only long enough to be interned into the document, so it
+    // is a scoped Text rather than another entry in the string table.
+    disposable key: Text = text.make(16);
+    parseStringInto(ref p, ref key);
+    if (p.error.len > 0) {
+      return 0;
+    }
+    skipWs(ref p);
+    if (peekByte(ref p) != ':') {
+      p.error = `json: expected ':' after a member name at byte ${p.pos}`;
+      return 0;
+    }
+    p.pos += 1;
+    const v = parseValue(ref p, ref d);
+    if (p.error.len > 0) {
+      return 0;
+    }
+    objectSet(ref d, obj, text.view(ref key), v);
+    skipWs(ref p);
+    const sep = peekByte(ref p);
+    if (sep == ',') {
+      p.pos += 1;
+    } else if (sep == '}') {
+      p.pos += 1;
+      done = true;
+    } else {
+      p.error = `json: expected ',' or '}' at byte ${p.pos}`;
+      return 0;
+    }
+  }
+  p.depth -= 1;
+  return obj;
+}
+
+function parseArray(ref p: Parser, ref d: JsonDoc): JsonId {
+  p.pos += 1;              // the '['
+  p.depth += 1;
+  const arr = addArray(ref d);
+  skipWs(ref p);
+  if (peekByte(ref p) == ']') {
+    p.pos += 1;
+    p.depth -= 1;
+    return arr;
+  }
+  let done: bool = false;
+  while (!done) {
+    const v = parseValue(ref p, ref d);
+    if (p.error.len > 0) {
+      return 0;
+    }
+    arrayPush(ref d, arr, v);
+    skipWs(ref p);
+    const sep = peekByte(ref p);
+    if (sep == ',') {
+      p.pos += 1;
+    } else if (sep == ']') {
+      p.pos += 1;
+      done = true;
+    } else {
+      p.error = `json: expected ',' or ']' at byte ${p.pos}`;
+      return 0;
+    }
+  }
+  p.depth -= 1;
+  return arr;
+}
+
+function parseStringValue(ref p: Parser, ref d: JsonDoc): JsonId {
+  disposable s: Text = text.make(32);
+  parseStringInto(ref p, ref s);
+  if (p.error.len > 0) {
+    return 0;
+  }
+  // The BYTES rather than a view: a decoded string may hold a nul, which a
+  // `string` would silently cut it off at.
+  return addStringBytes(ref d, text.bytes(ref s));
+}
+
+// ----- strings -------------------------------------------------------------
+
+// Decode the string literal at the cursor into `out`. The cursor is on the
+// opening quote on entry and past the closing quote on success.
+function parseStringInto(ref p: Parser, ref out: Text): void {
+  p.pos += 1;              // the opening '"'
+  while (true) {
+    if (atEnd(ref p)) {
+      p.error = "json: unterminated string";
+      return;
+    }
+    const c = p.src[p.pos];
+    if (c == '"') {
+      p.pos += 1;
+      return;
+    }
+    if (c == '\\') {
+      p.pos += 1;
+      parseEscape(ref p, ref out);
+      if (p.error.len > 0) {
+        return;
+      }
+    } else if (c < 32) {
+      // A raw control byte in a string is invalid JSON. Refusing it is what
+      // keeps a framing bug from being read as a value.
+      p.error = `json: unescaped control byte in a string at ${p.pos}`;
+      return;
+    } else {
+      // Anything at or above 0x20 is passed through as its own byte, which is
+      // correct for UTF-8: JSON is defined over text, and re-encoding a
+      // multi-byte sequence would only make the value bigger.
+      text.pushByte(ref out, c);
+      p.pos += 1;
+    }
+  }
+}
+
+function parseEscape(ref p: Parser, ref out: Text): void {
+  if (atEnd(ref p)) {
+    p.error = "json: unterminated escape";
+    return;
+  }
+  const e = p.src[p.pos];
+  p.pos += 1;
+  if (e == '"') { text.pushByte(ref out, '"'); return; }
+  if (e == '\\') { text.pushByte(ref out, '\\'); return; }
+  if (e == '/') { text.pushByte(ref out, '/'); return; }
+  if (e == 'b') { text.pushByte(ref out, 8); return; }
+  if (e == 'f') { text.pushByte(ref out, 12); return; }
+  if (e == 'n') { text.pushByte(ref out, '\n'); return; }
+  if (e == 'r') { text.pushByte(ref out, '\r'); return; }
+  if (e == 't') { text.pushByte(ref out, '\t'); return; }
+  if (e == 'u') {
+    parseUnicodeEscape(ref p, ref out);
+    return;
+  }
+  p.error = `json: unknown escape at byte ${p.pos - 1}`;
+}
+
+// `\uXXXX`, with the UTF-16 surrogate pair joined back into one codepoint. The
+// cursor is just past the `u` on entry.
+function parseUnicodeEscape(ref p: Parser, ref out: Text): void {
+  const hi = readHex4(ref p);
+  if (p.error.len > 0) {
+    return;
+  }
+  if (hi >= 55296 && hi <= 56319) {         // 0xD800..0xDBFF, a high surrogate
+    if (p.pos + 1 < p.src.len && p.src[p.pos] == '\\' && p.src[p.pos + 1] == 'u') {
+      p.pos += 2;
+      const lo = readHex4(ref p);
+      if (p.error.len > 0) {
+        return;
+      }
+      if (lo >= 56320 && lo <= 57343) {     // 0xDC00..0xDFFF, a low surrogate
+        const cp = 65536 + ((hi - 55296) << 10) + (lo - 56320);
+        text.pushChar(ref out, cp);
+        return;
+      }
+      // A high surrogate followed by something that is not a low one: both
+      // halves are unpaired, so both are replaced.
+      text.pushChar(ref out, REPLACEMENT);
+      text.pushChar(ref out, REPLACEMENT);
+      return;
+    }
+    text.pushChar(ref out, REPLACEMENT);
+    return;
+  }
+  if (hi >= 56320 && hi <= 57343) {         // a low surrogate with no high one
+    text.pushChar(ref out, REPLACEMENT);
+    return;
+  }
+  text.pushChar(ref out, hi);
+}
+
+function readHex4(ref p: Parser): uint32 {
+  if (p.pos + 4 > p.src.len) {
+    p.error = "json: truncated \\u escape";
+    return 0;
+  }
+  let v: uint32 = 0;
+  let i: usize = 0;
+  while (i < 4) {
+    const nib = hexValue(p.src[p.pos + i]);
+    if (nib > 15) {
+      p.error = `json: bad hex digit in a \\u escape at byte ${p.pos + i}`;
+      return 0;
+    }
+    v = (v << 4) | nib;
+    i += 1;
+  }
+  p.pos += 4;
+  return v;
+}
+
+// 16 or more means "not a hex digit", which is what the caller tests.
+function hexValue(b: uint8): uint32 {
+  if (b >= '0' && b <= '9') { return uint32(b - '0'); }
+  if (b >= 'a' && b <= 'f') { return uint32(b - 'a') + 10; }
+  if (b >= 'A' && b <= 'F') { return uint32(b - 'A') + 10; }
+  return 255;
+}
+
+// ----- numbers -------------------------------------------------------------
+
+/*
+  JSON has one number type; this parser records which SPELLING it saw.
+
+  An integer with no fraction and no exponent is kept as an int64, so a request
+  id survives a round trip exactly. Everything else, and any integer too long
+  to be certain of, goes through `atof` into a float64. Eighteen digits is the
+  cutoff because 10^18 is the last power of ten that fits in an int64 with
+  room to spare, so the accumulate loop below cannot overflow.
+*/
+function parseNumber(ref p: Parser, ref d: JsonDoc): JsonId {
+  const start = p.pos;
+  let isFloat: bool = false;
+
+  if (peekByte(ref p) == '-') {
+    p.pos += 1;
+  }
+  const digitsStart = p.pos;
+  while (!atEnd(ref p) && p.src[p.pos] >= '0' && p.src[p.pos] <= '9') {
+    p.pos += 1;
+  }
+  if (p.pos == digitsStart) {
+    p.error = `json: expected a digit at byte ${p.pos}`;
+    return 0;
+  }
+  const intDigits = p.pos - digitsStart;
+  if (!atEnd(ref p) && p.src[p.pos] == '.') {
+    isFloat = true;
+    p.pos += 1;
+    const fracStart = p.pos;
+    while (!atEnd(ref p) && p.src[p.pos] >= '0' && p.src[p.pos] <= '9') {
+      p.pos += 1;
+    }
+    if (p.pos == fracStart) {
+      p.error = `json: expected a digit after '.' at byte ${p.pos}`;
+      return 0;
+    }
+  }
+  if (!atEnd(ref p) && (p.src[p.pos] == 'e' || p.src[p.pos] == 'E')) {
+    isFloat = true;
+    p.pos += 1;
+    if (!atEnd(ref p) && (p.src[p.pos] == '+' || p.src[p.pos] == '-')) {
+      p.pos += 1;
+    }
+    const expStart = p.pos;
+    while (!atEnd(ref p) && p.src[p.pos] >= '0' && p.src[p.pos] <= '9') {
+      p.pos += 1;
+    }
+    if (p.pos == expStart) {
+      p.error = `json: expected a digit in the exponent at byte ${p.pos}`;
+      return 0;
+    }
+  }
+
+  if (!isFloat && intDigits <= 18) {
+    let mag: int64 = 0;
+    let i: usize = digitsStart;
+    while (i < digitsStart + intDigits) {
+      mag = mag * 10 + int64(p.src[i] - '0');
+      i += 1;
+    }
+    if (p.src[start] == '-') {
+      mag = 0 - mag;
+    }
+    return addInt(ref d, mag);
+  }
+
+  // `atof` wants a nul-terminated string, so the token is copied out. Only a
+  // real float pays for this; the integer path above allocates nothing.
+  disposable tok: Text = text.make(p.pos - start);
+  let j: usize = start;
+  while (j < p.pos) {
+    text.pushByte(ref tok, p.src[j]);
+    j += 1;
+  }
+  return addFloat(ref d, atof(text.view(ref tok)));
+}

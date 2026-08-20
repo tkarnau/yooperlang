@@ -270,7 +270,7 @@
       "patterns": [
         {
           "name": "support.type.primitive.yoop",
-          "comment": "The `c_*` half is the C-portable integer aliases (C_ALIASES_LP64 in src/jsyooptypecheck/types.js). They resolve to primitives for every downstream purpose, and every `extern \"C\"` block in the tree is written in them, so they belong here rather than reading as plain identifiers.",
+          "comment": "The `c_*` half is the C-portable integer aliases (the LP64 aliases the typechecker resolves). They resolve to primitives for every downstream purpose, and every `extern \"C\"` block in the tree is written in them, so they belong here rather than reading as plain identifiers.",
           "match": "\\b(int8|int16|int32|int64|uint8|uint16|uint32|uint64|float32|float64|usize|isize|int|float|bool|char|string|void|c_short|c_ushort|c_int|c_uint|c_long|c_ulong|c_size_t|c_ssize_t)\\b"
         },
         {

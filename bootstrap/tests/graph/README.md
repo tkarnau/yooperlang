@@ -34,4 +34,4 @@ the same fixtures from different angles.
 Fixtures are found by PATH. The test tries the repository root first and then
 `bootstrap/`, so either working directory works:
 
-    node src/yoopiler.js --test bootstrap/src/source_graph
+    $(node scripts/seed.mjs) --test bootstrap/src/source_graph

@@ -1,0 +1,269 @@
+module lsp;
+
+/*
+  The language server: read a message, do what it says, publish diagnostics.
+
+  WHAT IS BUILT: the lifecycle (`initialize`, `initialized`, `shutdown`,
+  `exit`), full-text document sync (`didOpen`, `didChange`, `didSave`,
+  `didClose`), and `textDocument/publishDiagnostics`. Nothing else. A request
+  for anything else is answered with method-not-found rather than ignored, so a
+  client is never left waiting.
+
+  STDOUT IS THE TRANSPORT. Nothing in this file or anything it calls may print
+  to stdout - `std/log.yoop` writes to stderr, which is why every note below
+  goes through it, and why `--lsp` is handled in main.yoop before the driver
+  does anything else.
+
+  WHEN IT RECOMPILES. A compile is a compile of the whole import closure, so
+  doing one per keystroke would be visibly bad. What is built instead is the
+  cheapest debounce that needs no timer and no second thread: an edit only
+  MARKS the document, and the compile happens at the top of the loop when the
+  reader has no complete message already buffered. So a burst of edits that
+  arrives together costs one compile rather than five, and a pause of any
+  length costs one immediately. It does not help when the editor sends each
+  keystroke in its own write and the compile is slower than the typing. What
+  would is a real deadline - poll(2) on stdin with a timeout, compiling when it
+  expires - and that needs a `pollfd` binding nothing in this tree has.
+*/
+
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { Text }, * as text from "std/core/text.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import * as log from "std/log.yoop";
+import * as str from "std/core/strings.yoop";
+import * as json from "modules/json";
+import { JsonDoc, JsonId, ParseResult } from "modules/json";
+
+type ServerState {
+  initialized: bool,
+  running: bool,
+  // What the process exits with. 1 until `shutdown` has been seen, which is
+  // what the protocol asks of a server told to `exit` without one.
+  exitCode: int,
+}
+
+/*
+  Run until stdin ends or `exit` arrives. The return value is the process's.
+
+  `stdRoot` is where `std/...` resolves and is discovered once by the driver,
+  so a compile in here never probes the filesystem for it.
+*/
+export function runLanguageServer(stdRoot: string): int {
+  log.info("lsp: listening on stdio");
+  disposable reader: FrameReader = frameReaderNew(STDIN_FD);
+  disposable body: Vec<uint8> = vec.vecNew(8192);
+  disposable docs: DocumentStore = storeNew();
+  disposable diags: Vec<LspDiagnostic> = vec.vecNew(32);
+  let state: ServerState = {
+    initialized: false, running: true, exitCode: 1,
+  };
+
+  while (state.running) {
+    // The deferred compile. See the note at the top: an edit marks, and this
+    // is where the mark is paid, once the editor has stopped talking.
+    const pending = storeNextPending(ref docs);
+    if (pending > 0 && !hasBufferedMessage(ref reader)) {
+      publishFor(ref docs, pending, stdRoot, ref diags);
+    } else {
+      switch (readFrame(ref reader, ref body)) {
+        case FrameStatus.ENDED: {
+          state.running = false;
+        }
+        case FrameStatus.MALFORMED: {
+          log.error(`lsp: ${reader.error}`);
+          state.running = false;
+        }
+        case FrameStatus.MESSAGE: {
+          handleMessage(vec.vecAsArray(ref body), ref docs, ref state, stdRoot, ref diags);
+        }
+      }
+    }
+  }
+  return state.exitCode;
+}
+
+function handleMessage(
+  raw: uint8[],
+  ref docs: DocumentStore,
+  ref state: ServerState,
+  stdRoot: string,
+  ref diags: Vec<LspDiagnostic>
+): void {
+  switch (json.parseBytes(raw)) {
+    case ParseResult.Err { error: e }: {
+      // Nothing to answer: without a parse there is no id to answer TO, and a
+      // response with a null id is only meaningful for a request the client
+      // can match, which this is not.
+      log.error(`lsp: ignoring an unparseable message: ${e}`);
+    }
+    case ParseResult.Ok { value: parsed }: {
+      disposable msg: JsonDoc = parsed;
+      dispatch(ref msg, ref docs, ref state, stdRoot, ref diags);
+    }
+  }
+}
+
+function dispatch(
+  ref msg: JsonDoc,
+  ref docs: DocumentStore,
+  ref state: ServerState,
+  stdRoot: string,
+  ref diags: Vec<LspDiagnostic>
+): void {
+  const root = msg.root;
+  const method = json.memberString(ref msg, root, "method");
+  const idNode = json.member(ref msg, root, "id");
+  // A REQUEST carries an id and is owed exactly one response; a NOTIFICATION
+  // carries none and must never be answered.
+  const isRequest = idNode != 0;
+  const params = json.member(ref msg, root, "params");
+
+  if (str.stringEq(method, "initialize")) {
+    state.initialized = true;
+    disposable out: JsonDoc = json.docNew();
+    const _r = buildInitializeResponse(ref out, ref msg, idNode);
+    const _sent = sendMessage(ref out);
+    return;
+  }
+  if (str.stringEq(method, "initialized")) {
+    return;
+  }
+  if (str.stringEq(method, "shutdown")) {
+    state.exitCode = 0;
+    disposable out: JsonDoc = json.docNew();
+    const _r = buildNullResponse(ref out, ref msg, idNode);
+    const _sent = sendMessage(ref out);
+    return;
+  }
+  if (str.stringEq(method, "exit")) {
+    state.running = false;
+    return;
+  }
+
+  if (!state.initialized) {
+    if (isRequest) {
+      replyError(ref msg, idNode, ERR_NOT_INITIALIZED, "the server has not been initialized");
+    }
+    return;
+  }
+
+  if (str.stringEq(method, "textDocument/didOpen")) {
+    const td = json.member(ref msg, params, "textDocument");
+    const uri = json.memberString(ref msg, td, "uri");
+    if (uri.len == 0) {
+      return;
+    }
+    const contents = json.member(ref msg, td, "text");
+    const slot = storeUpsert(ref docs, uri, json.asBytes(ref msg, contents),
+                             json.memberInt(ref msg, td, "version", 0));
+    // Published immediately rather than deferred. The debounce below exists
+    // for the keystroke storm a `didChange` run is; an open is one discrete
+    // thing a user did, and waiting for a pause to answer it would leave a
+    // freshly opened file blank for as long as the editor kept talking.
+    publishFor(ref docs, slot, stdRoot, ref diags);
+    return;
+  }
+
+  if (str.stringEq(method, "textDocument/didChange")) {
+    const td = json.member(ref msg, params, "textDocument");
+    const uri = json.memberString(ref msg, td, "uri");
+    if (uri.len == 0) {
+      return;
+    }
+    // Full sync, so the LAST change carries the whole document. Reading the
+    // last rather than the first is what makes a client that batched several
+    // edits into one notification still work.
+    const changes = json.member(ref msg, params, "contentChanges");
+    const last = lastChild(ref msg, changes);
+    if (last == 0) {
+      return;
+    }
+    const contents = json.member(ref msg, last, "text");
+    // Only MARKED. This is the one message that arrives per keystroke, so it
+    // is the only one the debounce at the top of the loop is for.
+    const _slot = storeUpsert(ref docs, uri, json.asBytes(ref msg, contents),
+                              json.memberInt(ref msg, td, "version", 0));
+    return;
+  }
+
+  if (str.stringEq(method, "textDocument/didSave")) {
+    // `includeText` is false in the advertised capabilities, so a save carries
+    // no text: the buffer this server already has IS what was saved. Marking
+    // it is what makes a save recompute even when nothing changed since the
+    // last publish, which is what a user pressing save expects.
+    const td = json.member(ref msg, params, "textDocument");
+    const uri = json.memberString(ref msg, td, "uri");
+    const slot = storeIndexOf(ref docs, uri);
+    if (slot > 0) {
+      storeMarkPending(ref docs, slot);
+      publishFor(ref docs, slot, stdRoot, ref diags);
+    }
+    return;
+  }
+
+  if (str.stringEq(method, "textDocument/didClose")) {
+    const td = json.member(ref msg, params, "textDocument");
+    const uri = json.memberString(ref msg, td, "uri");
+    const slot = storeClose(ref docs, uri);
+    if (slot > 0) {
+      // Clear whatever was showing. A closed document's squiggles otherwise
+      // stay in the editor's problem list forever.
+      vec.vecClear(ref diags);
+      publishEmpty(uri, ref diags);
+    }
+    return;
+  }
+
+  if (isRequest) {
+    replyUnimplemented(ref msg, idNode, method);
+  }
+}
+
+// A `Text` and not a template literal. A client that ignores the advertised
+// capabilities can send an unimplemented request per mouse move, and every
+// template literal is a malloc nothing frees - see docs/writing_yoop.md 3.1.
+function replyUnimplemented(ref msg: JsonDoc, idNode: JsonId, method: string): void {
+  disposable why: Text = text.make(48);
+  text.push(ref why, "unimplemented method \"");
+  text.push(ref why, method);
+  text.pushByte(ref why, '"');
+  replyError(ref msg, idNode, ERR_METHOD_NOT_FOUND, text.view(ref why));
+}
+
+// The last element of an array node, or 0.
+function lastChild(ref d: JsonDoc, arr: JsonId): JsonId {
+  let cur: JsonId = json.firstChild(ref d, arr);
+  let seen: JsonId = 0;
+  while (cur != 0) {
+    seen = cur;
+    cur = json.nextSibling(ref d, cur);
+  }
+  return seen;
+}
+
+function replyError(ref msg: JsonDoc, idNode: JsonId, code: int64, why: string): void {
+  disposable out: JsonDoc = json.docNew();
+  const _r = buildErrorResponse(ref out, ref msg, idNode, code, why);
+  const _sent = sendMessage(ref out);
+}
+
+// Compile the document in `slot` and publish what came out.
+function publishFor(
+  ref docs: DocumentStore,
+  slot: usize,
+  stdRoot: string,
+  ref diags: Vec<LspDiagnostic>
+): void {
+  let doc: Document = storeGet(ref docs, slot);
+  collectDiagnostics(ref doc, stdRoot, ref diags);
+  disposable out: JsonDoc = json.docNew();
+  const _p = buildPublishDiagnostics(ref out, text.view(ref doc.uri), doc.version, ref diags);
+  const _sent = sendMessage(ref out);
+  storeMarkPublished(ref docs, slot);
+}
+
+function publishEmpty(uri: string, ref diags: Vec<LspDiagnostic>): void {
+  disposable out: JsonDoc = json.docNew();
+  const _p = buildPublishDiagnostics(ref out, uri, 0, ref diags);
+  const _sent = sendMessage(ref out);
+}
