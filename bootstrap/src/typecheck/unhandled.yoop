@@ -60,8 +60,16 @@ type Candidate {
 export function reportUnhandledDisposables(ref prog: Program, ref tm: TypedModule, m: Module): void {
   let f: usize = 0;
   while (f < m.files.len) {
-    const root = vec.vecGet(ref m.files, f).root;
-    const programNode = nodeAt(ref m.ast, root);
+    const sf = vec.vecGet(ref m.files, f);
+    // Announce the file, the way every pass that iterates `m.files` does.
+    // Without it each warning here is stamped with whatever `currentFile` pass
+    // D happened to finish on - the module's LAST file - so a warning about
+    // one file of a directory module is reported against a different one, at a
+    // line number that may not even exist there. Invisible in a build, where
+    // the warning is off by default and a reader skims the message; loud in an
+    // editor, which draws it on whatever line the number lands on.
+    beginFile(ref prog, sf.absPath);
+    const programNode = nodeAt(ref m.ast, sf.root);
     let i: usize = 0;
     while (i < programNode.childCount) {
       const declId = declOf(ref m.ast, childAt(ref m.ast, programNode, i));

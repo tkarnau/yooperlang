@@ -1,0 +1,156 @@
+module lsp;
+
+/*
+  What is IN this file, for the editor's outline and its symbol jump.
+
+  The only query here that needs no position and no types: it is the file's own
+  top level, one entry per declaration, with a type's members nested under it.
+  So it is answered off the AST alone - which matters, because a file the user
+  is halfway through editing still has an outline as long as it PARSES, and a
+  reader looking for a name in it is doing that most often exactly when the
+  file does not yet typecheck.
+
+  ONE LEVEL of nesting, and it is the level that exists: fields, methods and
+  cases belong to the type that declares them, and nothing below those is a
+  thing anybody navigates to. Locals are deliberately absent - an outline of a
+  function's `let`s is a list of everything, which is a list of nothing.
+
+  Both ranges an entry carries are the declaration's NAME token, because that
+  is the whole extent a node records - see ast/node.yoop. The protocol wants a
+  `range` that covers the declaration and a `selectionRange` inside it, and
+  giving it the same span twice is legal and lands the cursor on the name,
+  which is where a reader wants it anyway.
+*/
+
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import { AST, ASTNodeKind, NodeId, childAt, childSlots, declOf, nodeAt } from "../ast";
+
+// The LSP `SymbolKind` numbers this server produces. Integers on the wire, so
+// naming them is the only thing an enum would add - and they are a fixed part
+// of the protocol rather than anything this compiler decides.
+const SYMBOL_NAMESPACE: int64 = 3;
+const SYMBOL_METHOD: int64 = 6;
+const SYMBOL_FIELD: int64 = 8;
+const SYMBOL_ENUM: int64 = 10;
+const SYMBOL_INTERFACE: int64 = 11;
+const SYMBOL_FUNCTION: int64 = 12;
+const SYMBOL_VARIABLE: int64 = 13;
+const SYMBOL_CONSTANT: int64 = 14;
+const SYMBOL_STRUCT: int64 = 23;
+const SYMBOL_ENUM_MEMBER: int64 = 22;
+
+// One entry of the outline. `depth` is 0 for a top-level declaration and 1 for
+// a member of one; the tree is built at serialization time from that, which is
+// what keeps this a flat Vec that a walk can push onto.
+export type OutlineEntry {
+  name: string,
+  kind: int64,
+  range: Range,
+  depth: usize,
+}
+
+/*
+  Every declaration in the document's own file, in source order.
+
+  Source order and not sorted: an outline that reorders a file is an outline of
+  a different file, and every editor that shows one offers its own sort.
+*/
+export function collectOutline(
+  ref ast: AST,
+  root: NodeId,
+  src: uint8[],
+  ref out: Vec<OutlineEntry>
+): void {
+  vec.vecClear(ref out);
+  const program = nodeAt(ref ast, root);
+  disposable members: Vec<NodeId> = vec.vecNew(16);
+  let i: usize = 0;
+  while (i < program.childCount) {
+    const entryId = declOf(ref ast, childAt(ref ast, program, i));
+    const entry = nodeAt(ref ast, entryId);
+    const kind = symbolKindOf(entry.kind);
+    if (kind != 0 && entry.name.len > 0) {
+      vec.vecPush(ref out, {
+        name: entry.name,
+        kind: kind,
+        range: rangeOfSpan(src, entry.sourceLoc.pos, entry.sourceLoc.length),
+        depth: 0,
+      });
+      pushMembers(ref ast, entryId, src, ref members, ref out);
+    }
+    i += 1;
+  }
+}
+
+// The members of a type-like declaration, one level down.
+//
+// `childSlots` rather than the kind's own slots, for the reason it exists: a
+// member is reached through a different slot on a struct, a trait and a
+// variant, and what this wants is every child regardless of which slot held
+// it. The kind filter below is what keeps a type annotation or a body out.
+function pushMembers(
+  ref ast: AST,
+  declId: NodeId,
+  src: uint8[],
+  ref scratch: Vec<NodeId>,
+  ref out: Vec<OutlineEntry>
+): void {
+  const decl = nodeAt(ref ast, declId);
+  childSlots(ref ast, decl, ref scratch);
+  // Copied out before the walk: `childSlots` clears the buffer it is given,
+  // and a NODE_LIST below needs it again.
+  disposable direct: Vec<NodeId> = vec.vecNew(scratch.len + 1);
+  vec.vecExtendFrom(ref direct, vec.vecAsArray(ref scratch));
+  let i: usize = 0;
+  while (i < direct.len) {
+    const childId = vec.vecGet(ref direct, i);
+    const child = nodeAt(ref ast, childId);
+    // A list node is the parser's indirection for a second variable-arity run,
+    // so its own children are the members rather than it being one.
+    if (child.kind == ASTNodeKind.NODE_LIST) {
+      pushMembers(ref ast, childId, src, ref scratch, ref out);
+      i += 1;
+      continue;
+    }
+    const kind = memberSymbolKindOf(child.kind);
+    if (kind != 0 && child.name.len > 0) {
+      vec.vecPush(ref out, {
+        name: child.name,
+        kind: kind,
+        range: rangeOfSpan(src, child.sourceLoc.pos, child.sourceLoc.length),
+        depth: 1,
+      });
+    }
+    i += 1;
+  }
+}
+
+// 0 means "not something the outline shows".
+function symbolKindOf(kind: ASTNodeKind): int64 {
+  switch (kind) {
+    case ASTNodeKind.FUNCTION_DECL: { return SYMBOL_FUNCTION; }
+    case ASTNodeKind.EXTERN_FUNCTION_DECL: { return SYMBOL_FUNCTION; }
+    case ASTNodeKind.TYPE_DECL: { return SYMBOL_STRUCT; }
+    case ASTNodeKind.EXTERN_TYPE_DECL: { return SYMBOL_STRUCT; }
+    case ASTNodeKind.UNION_DECL: { return SYMBOL_STRUCT; }
+    case ASTNodeKind.TRAIT_DECL: { return SYMBOL_INTERFACE; }
+    case ASTNodeKind.VTABLE_DECL: { return SYMBOL_INTERFACE; }
+    case ASTNodeKind.KIND_DECL: { return SYMBOL_NAMESPACE; }
+    case ASTNodeKind.VARIANT_DECL: { return SYMBOL_ENUM; }
+    case ASTNodeKind.ENUM_DECL: { return SYMBOL_ENUM; }
+    case ASTNodeKind.CONST_DECL: { return SYMBOL_CONSTANT; }
+    case ASTNodeKind.LET_DECL: { return SYMBOL_VARIABLE; }
+    default: { return 0; }
+  }
+}
+
+function memberSymbolKindOf(kind: ASTNodeKind): int64 {
+  switch (kind) {
+    case ASTNodeKind.METHOD_DECL: { return SYMBOL_METHOD; }
+    case ASTNodeKind.FIELD_DECL: { return SYMBOL_FIELD; }
+    case ASTNodeKind.VARIANT_CASE: { return SYMBOL_ENUM_MEMBER; }
+    case ASTNodeKind.ENUM_CASE: { return SYMBOL_ENUM_MEMBER; }
+    default: { return 0; }
+  }
+}

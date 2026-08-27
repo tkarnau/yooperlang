@@ -45,6 +45,9 @@ type Loader propagates<disposable> {
   // is read exactly once and then moved into the module it seeds.
   entrySrc: Vec<uint8>,
   entryFromSource: bool,
+  // One path answered from memory rather than from disk, for an editor holding
+  // an unsaved buffer. Off for every ordinary compile. See overlay.yoop.
+  overlay: SourceOverlay,
 }
 
 // A loaded module's index in `Loader.modules`, or the error that stopped us.
@@ -63,7 +66,37 @@ export function loadModuleGraph(entryPath: string, stdRoot: string): LoadGraphRe
     return LoadGraphResult.Err { error: `unable to identify a canonical path from ${entryPath}` };
   }
   let noSource: Vec<uint8> = vec.vecNew(0);
-  return loadGraphFrom(entryAbs, entryPath, stdRoot, noSource, false);
+  return loadGraphFrom(entryAbs, entryPath, stdRoot, noSource, false, noOverlay());
+}
+
+/*
+  The same walk, with ONE file read from `overlay` instead of from disk.
+
+  This is what a language server loads through. Unlike
+  `loadModuleGraphFromSource` it seeds no module: the entry is found and read
+  exactly as always, and the overlaid path is answered from the buffer wherever
+  it turns up - as the entry itself for a single-file module, or as one file of
+  the directory module it belongs to. See overlay.yoop for why that distinction
+  is the whole point.
+
+  `entryPath` still has to EXIST. The overlay stands in for a file's contents,
+  not for a file: which module owns the path, and whether that module is a
+  directory, are both answered off the filesystem before any source is read.
+*/
+export function loadModuleGraphWithOverlay(
+  entryPath: string,
+  stdRoot: string,
+  overlay: SourceOverlay
+): LoadGraphResult {
+  if (!fs.exists(entryPath)) {
+    return LoadGraphResult.Err { error: `entry file not found: ${entryPath}` };
+  }
+  const entryAbs = fs.normalizePath(entryPath);
+  if (entryAbs.len == 0) {
+    return LoadGraphResult.Err { error: `unable to identify a canonical path from ${entryPath}` };
+  }
+  let noSource: Vec<uint8> = vec.vecNew(0);
+  return loadGraphFrom(entryAbs, entryPath, stdRoot, noSource, false, overlay);
 }
 
 /*
@@ -87,7 +120,7 @@ export function loadModuleGraphFromSource(
   entryPath: string,
   stdRoot: string
 ): LoadGraphResult {
-  return loadGraphFrom(entryPath, entryPath, stdRoot, entrySource, true);
+  return loadGraphFrom(entryPath, entryPath, stdRoot, entrySource, true, noOverlay());
 }
 
 function loadGraphFrom(
@@ -95,7 +128,8 @@ function loadGraphFrom(
   blamePath: string,
   stdRoot: string,
   entrySrc: Vec<uint8>,
-  entryFromSource: bool
+  entryFromSource: bool,
+  overlay: SourceOverlay
 ): LoadGraphResult {
   // Annotated locals rather than inline construction: `V` is not inferable from
   // `stringKeyOps()` alone and there is no turbofish. The struct COPIES them,
@@ -110,6 +144,7 @@ function loadGraphFrom(
     stdRoot: stdRoot,
     entrySrc: entrySrc,
     entryFromSource: entryFromSource,
+    overlay: overlay,
   };
 
   // The std autoloads go in BEFORE the entry, so they sit early in the
@@ -244,7 +279,7 @@ function loadEntryOrOwningModule(
     // same as every other module's.
     return moduleFromSource("", absPath, st.entrySrc);
   }
-  return loadOwningModule(absPath, blamePath, isEntry);
+  return loadOwningModule(absPath, blamePath, isEntry, ref st.overlay);
 }
 
 // What the module's id is derived from: the DIRECTORY for a directory module,

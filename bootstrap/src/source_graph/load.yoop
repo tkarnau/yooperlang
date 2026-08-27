@@ -44,7 +44,17 @@ export variant LoadModuleResult {
 // Read one file's bytes. "" in the error slot means success.
 type ReadResult = Result<Vec<uint8>, string>;
 
-function readSource(absPath: string): ReadResult propagates<disposable> {
+// THE ONE PLACE a path becomes bytes, which is why the overlay is checked
+// here and nowhere else. See overlay.yoop.
+function readSource(absPath: string, ref overlay: SourceOverlay): ReadResult propagates<disposable> {
+  if (overlayCovers(ref overlay, absPath)) {
+    // Copied rather than handed on: the buffer belongs to whoever built the
+    // overlay, and what comes back from here is MOVED into a Module that then
+    // owns it for as long as the graph lives.
+    let held: Vec<uint8> = vec.vecNew(overlay.src.len + 1);
+    vec.vecExtendFrom(ref held, overlay.src);
+    return Result.Ok { value: held };
+  }
   if (!fs.exists(absPath)) {
     return Result.Err { error: `source file not found: ${absPath}` };
   }
@@ -134,13 +144,18 @@ function addFile(ref mod: Module, absPath: string, srcBuf: Vec<uint8>): string {
 // module. As an entry that is fine and means "compile the module this file
 // belongs to". As an IMPORT it is refused, because the module is the unit and
 // naming a file of it suggests you get only that file.
-function loadOwningModule(absPath: string, blamePath: string, isEntry: bool): LoadModuleResult {
+function loadOwningModule(
+  absPath: string,
+  blamePath: string,
+  isEntry: bool,
+  ref overlay: SourceOverlay
+): LoadModuleResult {
   if (fs.statPath(absPath).isDir) {
-    return loadDirectoryModule(absPath, blamePath);
+    return loadDirectoryModule(absPath, blamePath, ref overlay);
   }
 
   let srcBuf: Vec<uint8>;
-  switch (readSource(absPath)) {
+  switch (readSource(absPath, ref overlay)) {
     case Result.Err { error: e }: { return LoadModuleResult.Err { error: e }; }
     case Result.Ok { value: buf }: { srcBuf = buf; }
   }
@@ -154,7 +169,7 @@ function loadOwningModule(absPath: string, blamePath: string, isEntry: bool): Lo
       error: `import of "${absPath}" from ${blamePath} names one source file of module "${declaredName}" - import the module itself instead (drop the file name and the .yoop extension)`
     };
   }
-  return loadDirectoryModule(fs.dirName(absPath), blamePath);
+  return loadDirectoryModule(fs.dirName(absPath), blamePath, ref overlay);
 }
 
 // Every `.yoop` file directly in `dir`, as one module.
@@ -162,7 +177,11 @@ function loadOwningModule(absPath: string, blamePath: string, isEntry: bool): Lo
 // The declared name comes from the first file and every other must agree.
 // Identity is the DIRECTORY, so a disagreement cannot quietly split one
 // directory into two modules - it is simply an error.
-function loadDirectoryModule(dir: string, blamePath: string): LoadModuleResult {
+function loadDirectoryModule(
+  dir: string,
+  blamePath: string,
+  ref overlay: SourceOverlay
+): LoadModuleResult {
   disposable names: Vec<string> = listModuleSourceFiles(dir);
   if (names.len == 0) {
     return LoadModuleResult.Err {
@@ -182,7 +201,7 @@ function loadDirectoryModule(dir: string, blamePath: string): LoadModuleResult {
   while (i < names.len) {
     const absPath = fs.pathJoin([dir, vec.vecGet(ref names, i)]);
     let srcBuf: Vec<uint8>;
-    switch (readSource(absPath)) {
+    switch (readSource(absPath, ref overlay)) {
       case Result.Err { error: e }: { return LoadModuleResult.Err { error: e }; }
       case Result.Ok { value: buf }: { srcBuf = buf; }
     }

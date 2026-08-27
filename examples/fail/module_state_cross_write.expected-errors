@@ -3,4 +3,4 @@
 # the declaring module keeps about it.
 #
 # A DIRECTORY fixture: the harness builds `module_state_cross_write/main.yoop`.
-4:13: written only inside the module that declares it
+4:5: written only inside the module that declares it

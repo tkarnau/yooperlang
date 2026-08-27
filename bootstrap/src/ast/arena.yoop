@@ -75,6 +75,40 @@ export function nodeAt(ref ast: AST, id: NodeId): ASTNode {
   return vec.vecGet(ref ast.nodes, id);
 }
 
+/*
+  Every child a node names, in one list: the six named slots that are filled,
+  then the node's own child run.
+
+  Deliberately KIND-BLIND. What childA means depends on the kind and is what
+  slots.yoop is for; a walk that only needs to REACH every node under a root -
+  the language server locating what is under a cursor, a whole-file outline -
+  wants the edges and not their meanings, and asking it to switch over ninety
+  kinds to find them would be ninety chances to miss one.
+
+  `out` is cleared first and is the caller's buffer, so a walk reuses one.
+*/
+export function childSlots(ref ast: AST, node: ASTNode, ref out: Vec<NodeId>): void {
+  vec.vecClear(ref out);
+  noteChild(ref out, node.childA);
+  noteChild(ref out, node.childB);
+  noteChild(ref out, node.childC);
+  noteChild(ref out, node.childD);
+  noteChild(ref out, node.childE);
+  noteChild(ref out, node.childF);
+  let i: usize = 0;
+  while (i < node.childCount) {
+    noteChild(ref out, childAt(ref ast, node, i));
+    i += 1;
+  }
+}
+
+// 0 is the reserved "none" sentinel, so an empty slot contributes nothing.
+function noteChild(ref out: Vec<NodeId>, id: NodeId): void {
+  if (id != 0) {
+    vec.vecPush(ref out, id);
+  }
+}
+
 // The DECL a top-level PROGRAM child names, looking through an `export` and
 // through an ATTRIBUTE.
 //

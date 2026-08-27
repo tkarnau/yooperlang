@@ -91,11 +91,16 @@ a shared header file.
       lsp/             `--lsp`: the language server. transport.yoop is the
                        Content-Length framing, documents.yoop what the editor
                        is holding, position.yoop the ONE place a
-                       SourceLocation becomes an editor position,
-                       diagnose.yoop the compile, protocol.yoop the messages,
-                       server.yoop the loop. It reads and writes JSON through
-                       modules/json, which is the compiler's one dependency
-                       outside std/
+                       SourceLocation becomes an editor position and back,
+                       diagnose.yoop the compile, analysis.yoop the compile it
+                       KEEPS (one, keyed by uri and version, so a hover after a
+                       publish costs nothing), locate.yoop what is under a
+                       cursor, decls.yoop where a name was declared, query.yoop
+                       the three position questions, signature.yoop a
+                       declaration as one line, outline.yoop what is in a file,
+                       protocol.yoop the messages, server.yoop the loop. It
+                       reads and writes JSON through modules/json, which is the
+                       compiler's one dependency outside std/
       utils/           sort and iteration helpers with no home in std yet, plus
                        float bit access - which lives here because BOTH lex (the
                        token dump) and codegen (constants) need it, and utils

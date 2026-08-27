@@ -33,6 +33,7 @@ import * as log from "std/log.yoop";
 import * as str from "std/core/strings.yoop";
 import * as json from "modules/json";
 import { JsonDoc, JsonId, ParseResult } from "modules/json";
+import { Module, SourceFile } from "../source_graph";
 
 type ServerState {
   initialized: bool,
@@ -53,7 +54,10 @@ export function runLanguageServer(stdRoot: string): int {
   disposable reader: FrameReader = frameReaderNew(STDIN_FD);
   disposable body: Vec<uint8> = vec.vecNew(8192);
   disposable docs: DocumentStore = storeNew();
-  disposable diags: Vec<LspDiagnostic> = vec.vecNew(32);
+  // ONE compile, kept between messages. Every request that needs a typechecked
+  // program goes through it, so the publish pays for the compile and the hover
+  // that follows is a lookup. See analysis.yoop.
+  disposable an: Analysis = analysisNew();
   let state: ServerState = {
     initialized: false, running: true, exitCode: 1,
   };
@@ -63,7 +67,7 @@ export function runLanguageServer(stdRoot: string): int {
     // is where the mark is paid, once the editor has stopped talking.
     const pending = storeNextPending(ref docs);
     if (pending > 0 && !hasBufferedMessage(ref reader)) {
-      publishFor(ref docs, pending, stdRoot, ref diags);
+      publishFor(ref docs, pending, stdRoot, ref an);
     } else {
       switch (readFrame(ref reader, ref body)) {
         case FrameStatus.ENDED: {
@@ -74,7 +78,7 @@ export function runLanguageServer(stdRoot: string): int {
           state.running = false;
         }
         case FrameStatus.MESSAGE: {
-          handleMessage(vec.vecAsArray(ref body), ref docs, ref state, stdRoot, ref diags);
+          handleMessage(vec.vecAsArray(ref body), ref docs, ref state, stdRoot, ref an);
         }
       }
     }
@@ -87,7 +91,7 @@ function handleMessage(
   ref docs: DocumentStore,
   ref state: ServerState,
   stdRoot: string,
-  ref diags: Vec<LspDiagnostic>
+  ref an: Analysis
 ): void {
   switch (json.parseBytes(raw)) {
     case ParseResult.Err { error: e }: {
@@ -98,7 +102,7 @@ function handleMessage(
     }
     case ParseResult.Ok { value: parsed }: {
       disposable msg: JsonDoc = parsed;
-      dispatch(ref msg, ref docs, ref state, stdRoot, ref diags);
+      dispatch(ref msg, ref docs, ref state, stdRoot, ref an);
     }
   }
 }
@@ -108,7 +112,7 @@ function dispatch(
   ref docs: DocumentStore,
   ref state: ServerState,
   stdRoot: string,
-  ref diags: Vec<LspDiagnostic>
+  ref an: Analysis
 ): void {
   const root = msg.root;
   const method = json.memberString(ref msg, root, "method");
@@ -160,7 +164,7 @@ function dispatch(
     // for the keystroke storm a `didChange` run is; an open is one discrete
     // thing a user did, and waiting for a pause to answer it would leave a
     // freshly opened file blank for as long as the editor kept talking.
-    publishFor(ref docs, slot, stdRoot, ref diags);
+    publishFor(ref docs, slot, stdRoot, ref an);
     return;
   }
 
@@ -196,7 +200,11 @@ function dispatch(
     const slot = storeIndexOf(ref docs, uri);
     if (slot > 0) {
       storeMarkPending(ref docs, slot);
-      publishFor(ref docs, slot, stdRoot, ref diags);
+      // The version does not change on a save and the buffer does not either,
+      // so the held compile would otherwise be reused - and the whole point of
+      // recompiling on save is that a SIBLING may have changed on disk.
+      analysisInvalidate(ref an);
+      publishFor(ref docs, slot, stdRoot, ref an);
     }
     return;
   }
@@ -208,15 +216,188 @@ function dispatch(
     if (slot > 0) {
       // Clear whatever was showing. A closed document's squiggles otherwise
       // stay in the editor's problem list forever.
-      vec.vecClear(ref diags);
-      publishEmpty(uri, ref diags);
+      publishEmpty(uri);
+      // And drop its compile: a closed document is the one thing that will not
+      // be asked about again, and it is the largest thing this server holds.
+      if (analysisIsFor(ref an, uri, storeGet(ref docs, slot).version)) {
+        analysisInvalidate(ref an);
+      }
     }
+    return;
+  }
+
+  if (str.stringEq(method, "textDocument/hover")) {
+    answerHover(ref msg, idNode, ref docs, ref an, params, stdRoot);
+    return;
+  }
+
+  if (str.stringEq(method, "textDocument/definition")) {
+    answerDefinition(ref msg, idNode, ref docs, ref an, params, stdRoot);
+    return;
+  }
+
+  if (str.stringEq(method, "textDocument/documentSymbol")) {
+    answerDocumentSymbol(ref msg, idNode, ref docs, ref an, params, stdRoot);
     return;
   }
 
   if (isRequest) {
     replyUnimplemented(ref msg, idNode, method);
   }
+}
+
+// ----- the position queries -------------------------------------------------
+//
+// All three start the same way: find the document the request names and make
+// sure the analysis holds a compile of it. `prepare` is that shared half, and
+// each answer below is what is left.
+//
+// A request naming a document this server has never been told about is
+// answered with `null` rather than with an error. It is the ordinary race - an
+// editor can send a hover for a buffer whose `didOpen` is still in flight -
+// and a client that gets an error for one shows the user a red banner about
+// something that fixed itself.
+
+// The document slot a request's `params.textDocument.uri` names, or 0.
+function requestDocument(ref msg: JsonDoc, ref docs: DocumentStore, params: JsonId): usize {
+  const td = json.member(ref msg, params, "textDocument");
+  const uri = json.memberString(ref msg, td, "uri");
+  if (uri.len == 0) {
+    return 0;
+  }
+  return storeIndexOf(ref docs, uri);
+}
+
+// `params.position`, as the two numbers the protocol sends: 0-based line, and
+// character in UTF-16 code units. `byteOfPosition` is what turns them into an
+// offset; see position.yoop for why nothing else may.
+function requestLine(ref msg: JsonDoc, params: JsonId): usize {
+  const pos = json.member(ref msg, params, "position");
+  return usize(json.memberInt(ref msg, pos, "line", 0));
+}
+
+function requestCharacter(ref msg: JsonDoc, params: JsonId): usize {
+  const pos = json.member(ref msg, params, "position");
+  return usize(json.memberInt(ref msg, pos, "character", 0));
+}
+
+function answerHover(
+  ref msg: JsonDoc,
+  idNode: JsonId,
+  ref docs: DocumentStore,
+  ref an: Analysis,
+  params: JsonId,
+  stdRoot: string
+): void {
+  const slot = requestDocument(ref msg, ref docs, params);
+  if (slot == 0) {
+    replyNull(ref msg, idNode);
+    return;
+  }
+  let doc: Document = storeGet(ref docs, slot);
+  ensureAnalysis(ref an, ref doc, stdRoot);
+  const q = queryAt(ref an, requestLine(ref msg, params), requestCharacter(ref msg, params));
+  if (!q.ok) {
+    replyNull(ref msg, idNode);
+    return;
+  }
+  disposable body: Text = buildHoverText(ref an, ref q);
+  if (text.isEmpty(ref body)) {
+    replyNull(ref msg, idNode);
+    return;
+  }
+  const src = vec.vecAsArray(ref doc.content);
+  disposable out: JsonDoc = json.docNew();
+  const _r = buildHoverResponse(ref out, ref msg, idNode, text.view(ref body),
+                                rangeOfSpan(src, q.node.pos, q.node.length));
+  const _sent = sendMessage(ref out);
+}
+
+function answerDefinition(
+  ref msg: JsonDoc,
+  idNode: JsonId,
+  ref docs: DocumentStore,
+  ref an: Analysis,
+  params: JsonId,
+  stdRoot: string
+): void {
+  const slot = requestDocument(ref msg, ref docs, params);
+  if (slot == 0) {
+    replyNull(ref msg, idNode);
+    return;
+  }
+  let doc: Document = storeGet(ref docs, slot);
+  ensureAnalysis(ref an, ref doc, stdRoot);
+  const q = queryAt(ref an, requestLine(ref msg, params), requestCharacter(ref msg, params));
+  if (!q.ok || !q.site.found) {
+    replyNull(ref msg, idNode);
+    return;
+  }
+  // The range is computed against the DECLARING file's bytes, which are not
+  // the document's whenever the answer is in another module. That is the whole
+  // reason a DeclSite carries them - see decls.yoop.
+  //
+  // An answer inside the document itself is named with the URI the CLIENT
+  // sent, not with one rebuilt from the path. The compiler knows files by the
+  // canonical path it opened them at, and on a filesystem with a symlinked
+  // directory in it that is a different spelling of the same file - which an
+  // editor opens as a second tab beside the one the user is already looking
+  // at. Every other answer has no better name available than the real path.
+  disposable built: Text = pathToUri(q.site.absPath);
+  let uri: string = text.view(ref built);
+  if (str.stringEq(q.site.absPath, canonicalOr(text.view(ref doc.path)))) {
+    uri = text.view(ref doc.uri);
+  }
+  disposable out: JsonDoc = json.docNew();
+  const _r = buildLocationResponse(ref out, ref msg, idNode, uri,
+                                   rangeOfSpan(q.site.src, q.site.pos, q.site.length));
+  const _sent = sendMessage(ref out);
+}
+
+/*
+  The outline.
+
+  The only query that does not need a typecheck: it is answered off the parsed
+  file. It still goes through `ensureAnalysis`, because that is what parses the
+  file and because a document being asked for an outline is one about to be
+  asked everything else - but it answers even when the compile did not reach a
+  typed program, which is the state a file being edited spends most of its time
+  in.
+*/
+function answerDocumentSymbol(
+  ref msg: JsonDoc,
+  idNode: JsonId,
+  ref docs: DocumentStore,
+  ref an: Analysis,
+  params: JsonId,
+  stdRoot: string
+): void {
+  const slot = requestDocument(ref msg, ref docs, params);
+  if (slot == 0) {
+    replyNull(ref msg, idNode);
+    return;
+  }
+  let doc: Document = storeGet(ref docs, slot);
+  ensureAnalysis(ref an, ref doc, stdRoot);
+  if (!an.typed) {
+    replyNull(ref msg, idNode);
+    return;
+  }
+  let mod: Module = analysisModule(ref an);
+  let sf: SourceFile = analysisFile(ref an);
+  disposable entries: Vec<OutlineEntry> = vec.vecNew(64);
+  collectOutline(ref mod.ast, sf.root, vec.vecAsArray(ref sf.src), ref entries);
+  disposable out: JsonDoc = json.docNew();
+  const _r = buildDocumentSymbolResponse(ref out, ref msg, idNode, ref entries);
+  const _sent = sendMessage(ref out);
+}
+
+// "I looked, and there is nothing there" - which is a successful answer to a
+// hover over whitespace, and the protocol's own way of saying it.
+function replyNull(ref msg: JsonDoc, idNode: JsonId): void {
+  disposable out: JsonDoc = json.docNew();
+  const _r = buildNullResponse(ref out, ref msg, idNode);
+  const _sent = sendMessage(ref out);
 }
 
 // A `Text` and not a template literal. A client that ignores the advertised
@@ -252,18 +433,19 @@ function publishFor(
   ref docs: DocumentStore,
   slot: usize,
   stdRoot: string,
-  ref diags: Vec<LspDiagnostic>
+  ref an: Analysis
 ): void {
   let doc: Document = storeGet(ref docs, slot);
-  collectDiagnostics(ref doc, stdRoot, ref diags);
+  ensureAnalysis(ref an, ref doc, stdRoot);
   disposable out: JsonDoc = json.docNew();
-  const _p = buildPublishDiagnostics(ref out, text.view(ref doc.uri), doc.version, ref diags);
+  const _p = buildPublishDiagnostics(ref out, text.view(ref doc.uri), doc.version, ref an.diags);
   const _sent = sendMessage(ref out);
   storeMarkPublished(ref docs, slot);
 }
 
-function publishEmpty(uri: string, ref diags: Vec<LspDiagnostic>): void {
+function publishEmpty(uri: string): void {
+  disposable none: Vec<LspDiagnostic> = vec.vecNew(0);
   disposable out: JsonDoc = json.docNew();
-  const _p = buildPublishDiagnostics(ref out, uri, 0, ref diags);
+  const _p = buildPublishDiagnostics(ref out, uri, 0, ref none);
   const _sent = sendMessage(ref out);
 }

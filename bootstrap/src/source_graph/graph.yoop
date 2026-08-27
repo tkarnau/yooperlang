@@ -17,7 +17,7 @@ module source_graph;
 // entry by INDEX rather than keeping a second copy, which would double-own it.
 
 import { Vec }, * as vec from "std/core/vec.yoop";
-import { Map } from "std/collections/map.yoop";
+import { Map }, * as map from "std/collections/map.yoop";
 import { Disposable, disposable } from "std/core/kinds.yoop";
 import { AST, NodeId } from "../ast";
 
@@ -49,6 +49,20 @@ export type ModuleGraph propagates<disposable> {
   modules: Vec<Module>,            // topo-ordered, leaves first; the entry is IN this list
   entryIndex: usize,               // index of the entry module in `modules` (not a copy)
   autoLoadModuleIds: Map<string, string>,
+}
+
+// A graph holding no modules.
+//
+// It exists so a caller can hold the SLOT for a graph before it has one - the
+// language server keeps the last compile in a field, and a struct field has to
+// be initialized with something. `disposeModuleGraph` walks it correctly: the
+// loops it runs simply run zero times.
+export function emptyModuleGraph(): ModuleGraph propagates<disposable> {
+  return {
+    modules: vec.vecNew(0),
+    entryIndex: 0,
+    autoLoadModuleIds: map.mapNew(0, map.stringKeyOps()),
+  };
 }
 
 /*

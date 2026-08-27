@@ -78,6 +78,13 @@ export function buildInitializeResponse(ref d: JsonDoc, ref req: JsonDoc, idNode
   json.objectSet(ref d, sync, "save", save);
   json.objectSet(ref d, caps, "textDocumentSync", sync);
 
+  // The three POSITION-and-file queries. Each is a plain `true` rather than an
+  // options object, because none of them has an option this server implements:
+  // there is no work-done progress to report and no partial-result streaming.
+  json.objectSetBool(ref d, caps, "hoverProvider", true);
+  json.objectSetBool(ref d, caps, "definitionProvider", true);
+  json.objectSetBool(ref d, caps, "documentSymbolProvider", true);
+
   json.objectSet(ref d, result, "capabilities", caps);
 
   const info = json.addObject(ref d);
@@ -135,10 +142,7 @@ export function buildPublishDiagnostics(
   while (i < diags.len) {
     const dg = vec.vecGet(ref diags, i);
     const item = json.addObject(ref d);
-    const range = json.addObject(ref d);
-    json.objectSet(ref d, range, "start", buildPosition(ref d, dg.range.start));
-    json.objectSet(ref d, range, "end", buildPosition(ref d, dg.range.end));
-    json.objectSet(ref d, item, "range", range);
+    json.objectSet(ref d, item, "range", buildRange(ref d, dg.range));
     json.objectSetInt(ref d, item, "severity", dg.severity);
     // Written only when the compiler gave one. Most diagnostics have no code,
     // and an empty string reads in an editor as a code named "".
@@ -152,6 +156,115 @@ export function buildPublishDiagnostics(
   }
   json.objectSet(ref d, params, "diagnostics", arr);
   return params;
+}
+
+/*
+  `textDocument/hover`.
+
+  `contents` is the MarkupContent form (`{kind, value}`) rather than the two
+  deprecated shapes, and `range` is the span the answer is about - which is
+  what makes an editor highlight the whole name while the tooltip is up
+  instead of guessing at a word boundary.
+*/
+export function buildHoverResponse(
+  ref d: JsonDoc,
+  ref req: JsonDoc,
+  idNode: JsonId,
+  markdown: string,
+  range: Range
+): JsonId {
+  const root = beginResponse(ref d, ref req, idNode);
+  const result = json.addObject(ref d);
+  const contents = json.addObject(ref d);
+  json.objectSetString(ref d, contents, "kind", "markdown");
+  json.objectSetString(ref d, contents, "value", markdown);
+  json.objectSet(ref d, result, "contents", contents);
+  json.objectSet(ref d, result, "range", buildRange(ref d, range));
+  json.objectSet(ref d, root, "result", result);
+  json.setRoot(ref d, root);
+  return root;
+}
+
+/*
+  `textDocument/definition`, as a single `Location`.
+
+  The protocol allows an array and allows several, and this server answers with
+  one or with null: a name in this language resolves to exactly one declaration,
+  and handing back a one-element array would only make every client unpack it.
+*/
+export function buildLocationResponse(
+  ref d: JsonDoc,
+  ref req: JsonDoc,
+  idNode: JsonId,
+  uri: string,
+  range: Range
+): JsonId {
+  const root = beginResponse(ref d, ref req, idNode);
+  const result = json.addObject(ref d);
+  json.objectSetString(ref d, result, "uri", uri);
+  json.objectSet(ref d, result, "range", buildRange(ref d, range));
+  json.objectSet(ref d, root, "result", result);
+  json.setRoot(ref d, root);
+  return root;
+}
+
+/*
+  `textDocument/documentSymbol`, as the nested `DocumentSymbol[]` form.
+
+  The entries arrive FLAT with a depth on each (see outline.yoop), and the
+  nesting is rebuilt here: a depth-0 entry starts a new top-level symbol and
+  every depth-1 entry that follows goes into its `children`. That works because
+  the list is in source order, which is the same order the tree is written in.
+
+  `range` and `selectionRange` are the same span. The protocol requires the
+  second to be inside the first, which is satisfied trivially, and a node
+  records only its name token anyway.
+*/
+export function buildDocumentSymbolResponse(
+  ref d: JsonDoc,
+  ref req: JsonDoc,
+  idNode: JsonId,
+  ref entries: Vec<OutlineEntry>
+): JsonId {
+  const root = beginResponse(ref d, ref req, idNode);
+  const arr = json.addArray(ref d);
+  // The symbol a depth-1 entry attaches to, and its children array. 0 means
+  // there is no open parent, which happens when a file starts with a member -
+  // it cannot, but a malformed tree must not push into a node that is not there.
+  let openChildren: JsonId = 0;
+  let i: usize = 0;
+  while (i < entries.len) {
+    const e = vec.vecGet(ref entries, i);
+    const item = buildDocumentSymbol(ref d, e);
+    if (e.depth == 0) {
+      const children = json.addArray(ref d);
+      json.objectSet(ref d, item, "children", children);
+      openChildren = children;
+      json.arrayPush(ref d, arr, item);
+    } else if (openChildren != 0) {
+      json.arrayPush(ref d, openChildren, item);
+    }
+    i += 1;
+  }
+  json.objectSet(ref d, root, "result", arr);
+  json.setRoot(ref d, root);
+  return root;
+}
+
+function buildDocumentSymbol(ref d: JsonDoc, e: OutlineEntry): JsonId {
+  const item = json.addObject(ref d);
+  json.objectSetString(ref d, item, "name", e.name);
+  json.objectSetInt(ref d, item, "kind", e.kind);
+  json.objectSet(ref d, item, "range", buildRange(ref d, e.range));
+  json.objectSet(ref d, item, "selectionRange", buildRange(ref d, e.range));
+  return item;
+}
+
+function buildRange(ref d: JsonDoc, r: Range): JsonId {
+  const o = json.addObject(ref d);
+  json.objectSet(ref d, o, "start", buildPosition(ref d, r.start));
+  json.objectSet(ref d, o, "end", buildPosition(ref d, r.end));
+  return o;
 }
 
 function buildPosition(ref d: JsonDoc, p: Position): JsonId {

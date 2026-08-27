@@ -1,0 +1,101 @@
+module lsp;
+
+/*
+  A declaration, as ONE LINE, taken from the source that declares it.
+
+  This is what hover shows over a function, a type or a trait, and it is read
+  out of the file rather than rebuilt from the typechecker's tables on purpose:
+  what a reader wants to see is what somebody WROTE - the parameter names, the
+  `export`, the kind prefix, the `propagates<disposable>` - and a Type knows
+  none of that. `formatType` renders `(int32, int32) => int32`, which answers a
+  different question and answers it worse.
+
+  WHERE IT STARTS is the beginning of the line the name is on, so the keyword
+  and any modifier in front of the name come with it.
+
+  WHERE IT ENDS is the body's opening brace, or the `;` that ends a declaration
+  with no body - whichever comes first. Parentheses and angle brackets are
+  counted on the way, so a `{` inside a default value or a generic argument
+  does not end the signature early. A declaration that runs past the cap ends
+  in an ellipsis rather than filling the tooltip.
+
+  Newlines inside the span collapse to single spaces, because a signature
+  wrapped over four lines in the source is still one line of answer.
+*/
+
+import { Text }, * as text from "std/core/text.yoop";
+import { disposable } from "std/core/kinds.yoop";
+
+// Long enough for any signature in this tree, short enough that a pathological
+// one does not become the whole tooltip.
+const SIGNATURE_CAP: usize = 200;
+
+export function signatureLine(src: uint8[], pos: usize): Text propagates<disposable> {
+  let out: Text = text.make(96);
+  if (pos >= src.len) {
+    return out;
+  }
+  let i: usize = lineStartOf(src, pos);
+  let depth: usize = 0;
+  // A run of whitespace becomes AT MOST one space, and whether it becomes one
+  // at all is decided when the next real byte arrives - which is what keeps a
+  // signature broken over several lines from reading as `f( a, b )`.
+  let pendingSpace: bool = false;
+  let truncated: bool = false;
+  while (i < src.len) {
+    const c = src[i];
+    if (c == '\n' || c == '\r' || c == '\t' || c == ' ') {
+      pendingSpace = out.len > 0;
+      i += 1;
+      continue;
+    }
+    if (c == '(' || c == '[' || c == '<') {
+      depth += 1;
+    } else if (c == ')' || c == ']' || c == '>') {
+      if (depth > 0) {
+        depth -= 1;
+      }
+    } else if (depth == 0 && (c == '{' || c == ';')) {
+      break;
+    }
+    if (out.len >= SIGNATURE_CAP) {
+      truncated = true;
+      break;
+    }
+    if (pendingSpace && wantsSpaceBefore(ref out, c)) {
+      text.pushByte(ref out, ' ');
+    }
+    pendingSpace = false;
+    text.pushByte(ref out, c);
+    i += 1;
+  }
+  if (truncated) {
+    text.push(ref out, " ...");
+  }
+  return out;
+}
+
+// Whether a space that was written in the source survives in front of `c`.
+//
+// It does not directly after an opener or directly before a closer or a comma,
+// which is the whole difference between a signature that reads as one line and
+// one that reads as a wrapped line with its indentation flattened.
+function wantsSpaceBefore(ref out: Text, c: uint8): bool {
+  if (out.len == 0) {
+    return false;
+  }
+  if (c == ')' || c == ']' || c == ',' || c == ';') {
+    return false;
+  }
+  const last = text.bytes(ref out)[out.len - 1];
+  return last != '(' && last != '[';
+}
+
+// The offset of the first byte of the line `pos` is on.
+function lineStartOf(src: uint8[], pos: usize): usize {
+  let i: usize = pos;
+  while (i > 0 && src[i - 1] != '\n') {
+    i -= 1;
+  }
+  return i;
+}

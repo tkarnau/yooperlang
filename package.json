@@ -25,6 +25,7 @@
     "node": ">=22"
   },
   "scripts": {
+    "setup": "node scripts/setup.mjs",
     "test": "node --test --test-reporter=spec \"src/**/*.test.js\"",
     "test:unit": "node --test --test-reporter=spec \"src/**/!(selfhost|fail|pass|slice|debug|lsp).test.js\"",
     "test:e2e": "node --test --test-reporter=spec src/slice.test.js src/fail.test.js src/pass.test.js src/selfhost.test.js src/lsp.test.js",

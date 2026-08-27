@@ -28,6 +28,39 @@ that is what git history and the issue at hand are for.
 
 ---
 
+## Setting up a machine
+
+`npm run setup` ([scripts/setup.mjs](scripts/setup.mjs)) takes a fresh clone to a
+working loop: it reports what has to be installed, resolves the seed, builds a
+development compiler out of the tree into `build/dev/bin/yoopiler_boot`, and
+proves that binary can compile and run a program. It is idempotent, it touches
+nothing outside the repo, and no test depends on it - a suite builds its own
+compiler, so a stale setup can never make a test lie.
+
+Hard requirement: **clang**. Conditionally hard: **gh**, which is only how the
+seed is downloaded, so it matters on a machine with no `.seed/` cache and no
+`YOOP_SEED`.
+
+**The editor runs TWO language servers, and which one answers is decided by the
+folder that is open.** This checkout gets the compiler built from it, forced to
+read this tree's `std/` and `runtime/`; any other Yoop project gets a RELEASED
+compiler and the std packaged with it. That split is the point: working on a
+compiler means breaking it, and a broken working tree must not break the editor
+for a program somebody is writing in the language. It is resolved per workspace
+folder in [editors/vscode/extension.js](editors/vscode/extension.js)
+(`resolveServer`), checked in [src/extension.test.js](src/extension.test.js),
+and the status bar says which mode the file in front of you is getting.
+
+A checkout with no build yet falls back to the SEED rather than to nothing, so a
+fresh clone has a working server before anything is built - answering as the
+previous release, which the log says out loud.
+
+**After rebuilding the compiler, run "Yoopiler: Restart Language Server".** A
+server is spawned once and held, so a fresh binary on disk is not picked up
+until it is.
+
+---
+
 ## Where to look
 
 This file is a router. It stays short on purpose; the detail lives in the docs
@@ -144,7 +177,7 @@ check on a change, and say so when you do.
 
 ## Run / test
 
-- `npm test` - every Node-driven suite. 468 tests, about two minutes. Needs
+- `npm test` - every Node-driven suite. 482 tests, about two minutes. Needs
   `clang` and a seed.
 - `npm run test:unit` - fast, needs no seed: the C runtime's own tests, the std
   index check, and the stage comparison the fixpoint is decided by. The last of
@@ -214,14 +247,29 @@ check on a change, and say so when you do.
 - `yoopiler_boot --test <dir>` runs the Yoop-level test harness (filters ride as
   extra positionals).
 - `yoopiler_boot --lsp` runs the LANGUAGE SERVER over stdio instead of
-  compiling: `initialize`/`shutdown`/`exit`, full-text document sync, and
-  `textDocument/publishDiagnostics`. Nothing else is implemented and nothing
-  else is advertised. **In that mode stdout IS the protocol's transport**, so
-  the flag is answered at the top of `main()` and nothing on the path may
-  `printf` - `std/log.yoop` writes to stderr, which is why every note the
-  compiler makes is safe. It lives in
-  [bootstrap/src/lsp/](bootstrap/src/lsp/); the JSON it speaks is
-  [modules/json/](modules/json/).
+  compiling: `initialize`/`shutdown`/`exit`, full-text document sync,
+  `textDocument/publishDiagnostics`, and the three position-and-file queries -
+  `hover`, `definition`, `documentSymbol`. Nothing else is implemented and
+  nothing else is advertised (no references, no rename, no completion). **In
+  that mode stdout IS the protocol's transport**, so the flag is answered at
+  the top of `main()` and nothing on the path may `printf` - `std/log.yoop`
+  writes to stderr, which is why every note the compiler makes is safe. It
+  lives in [bootstrap/src/lsp/](bootstrap/src/lsp/); the JSON it speaks is
+  [modules/json/](modules/json/). Two things about it are worth knowing before
+  changing anything there:
+  - **The buffer is what gets compiled, including one file of a DIRECTORY
+    module.** The editor's unsaved text goes in as an OVERLAY over the loader's
+    single `readSource` (`SourceOverlay` in
+    [bootstrap/src/source_graph/overlay.yoop](bootstrap/src/source_graph/overlay.yoop)),
+    so the module loads whole and only the open file comes from memory. That is
+    what makes the server usable on this compiler's own source, all of which is
+    directory modules.
+  - **One compile is KEPT**, keyed by (uri, version), in
+    [bootstrap/src/lsp/analysis.yoop](bootstrap/src/lsp/analysis.yoop). A
+    document's closure is 20ms for a small program and about three seconds for
+    one file of the compiler, and a hover is something a mouse does by
+    accident - so the publish pays for the compile and every request after it
+    is a lookup.
 - `--warn-disposable` opts a BUILD into the `unhandled-disposable` warning
   (silent otherwise). It finds real leaks but has two known false positives -
   see [docs/writing_yoop.md](docs/writing_yoop.md) section 4. `unreachable-code`
@@ -233,7 +281,7 @@ check on a change, and say so when you do.
   emits; SKIPS when neither is on PATH). `YOOP_SLICE_CONCURRENCY`,
   `YOOP_PASS_CONCURRENCY` and `YOOP_FAIL_CONCURRENCY` override how many fixtures
   those suites run at once.
-- Every Yoop unit test at once, 1436 of them, in ONE build of the graph:
+- Every Yoop unit test at once, 1453 of them, in ONE build of the graph:
 
       YOOP_STD_ROOT=$PWD/std YOOP_RUNTIME_ROOT=$PWD/runtime \
         $(node scripts/seed.mjs) --test bootstrap/src

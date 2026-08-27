@@ -1,0 +1,208 @@
+module lsp;
+
+/*
+  WHAT IS UNDER THE CURSOR.
+
+  Every editor question that carries a position starts here: an offset into the
+  document's bytes goes in, and the AST node the offset sits on comes out.
+
+  THE SMALLEST SPAN WINS, and that is not the same rule as "descend while the
+  span contains the offset". A node's `sourceLoc` is ONE TOKEN - the token the
+  parser was looking at when it built the node - and not the extent of
+  everything below it, so a child is routinely outside its parent's span and a
+  containment descent would stop at the root. See ast/node.yoop.
+
+  So the walk visits every node under the file's root and keeps the narrowest
+  span that covers the offset. On a tie the node visited LATER wins, and the
+  walk is breadth-first, so that is the deeper of the two - which is the one a
+  reader is pointing at when an expression was built at the same token as its
+  operand.
+
+  ONE FILE, not one module. A directory module's files share an arena, so
+  NodeIds are unique across the module while byte offsets are only unique
+  within a file - a walk over the whole arena would match a sibling's node at
+  the same offset. Starting from the file's own PROGRAM root is what keeps that
+  from happening.
+*/
+
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import { AST, ASTNode, ASTNodeKind, NodeId, childAt, childSlots, declOf, nodeAt } from "../ast";
+import * as str from "std/core/strings.yoop";
+
+// The node an offset landed on. `found` is false when the offset is on
+// whitespace, a comment, or anything else the parser kept no node for.
+export type Located {
+  found: bool,
+  nodeId: NodeId,
+  kind: ASTNodeKind,
+  name: string,
+  pos: usize,
+  length: usize,
+}
+
+export function locateNode(ref ast: AST, root: NodeId, offset: usize): Located {
+  let best: Located = {
+    found: false, nodeId: 0, kind: ASTNodeKind.PROGRAM, name: "", pos: 0, length: 0,
+  };
+  // A worklist with a read cursor rather than recursion: an expression nests as
+  // deep as the source says it does, and a language server is handed whatever
+  // somebody typed. Growing the list while reading it is what makes this a
+  // breadth-first walk, which is what the tie-break above relies on.
+  disposable work: Vec<NodeId> = vec.vecNew(256);
+  disposable kids: Vec<NodeId> = vec.vecNew(8);
+  vec.vecPush(ref work, root);
+  let at: usize = 0;
+  while (at < work.len) {
+    const id = vec.vecGet(ref work, at);
+    at += 1;
+    const node = nodeAt(ref ast, id);
+    if (coversOffset(node, offset) && atLeastAsNarrow(ref best, node)) {
+      best = {
+        found: true,
+        nodeId: id,
+        kind: node.kind,
+        name: node.name,
+        pos: node.sourceLoc.pos,
+        length: node.sourceLoc.length,
+      };
+    }
+    childSlots(ref ast, node, ref kids);
+    let i: usize = 0;
+    while (i < kids.len) {
+      vec.vecPush(ref work, vec.vecGet(ref kids, i));
+      i += 1;
+    }
+  }
+  return best;
+}
+
+// A zero-length span covers nothing, which is right: it is a node the parser
+// built at a position it had no token for, and there is nothing there to point
+// at.
+function coversOffset(node: ASTNode, offset: usize): bool {
+  if (node.sourceLoc.length == 0) {
+    return false;
+  }
+  if (offset < node.sourceLoc.pos) {
+    return false;
+  }
+  return offset < node.sourceLoc.pos + node.sourceLoc.length;
+}
+
+// `<=` and not `<`, so that a later node with an identical span replaces an
+// earlier one. See the tie-break note at the top.
+function atLeastAsNarrow(ref best: Located, node: ASTNode): bool {
+  if (!best.found) {
+    return true;
+  }
+  return node.sourceLoc.length <= best.length;
+}
+
+/*
+  The top-level declaration an offset is inside, or 0.
+
+  What it is for is LOCAL names. A parameter and a `let` are in no table a
+  query can look them up in, so finding where one was declared means searching
+  the declaration that could have declared it, and this is what bounds that
+  search to one instead of to the file.
+
+  "Smallest span wins" cannot answer this - a declaration's span is its own
+  name token, which encloses nothing - so it walks the top level and takes the
+  LAST entry starting at or before the offset. Entries are parsed in source
+  order, so that is the one the offset is in.
+
+  Every top-level KIND, not just functions: a method body is inside the
+  TYPE_DECL that declares it, and a search of that subtree reaches it.
+*/
+export function enclosingDecl(ref ast: AST, root: NodeId, offset: usize): NodeId {
+  const program = nodeAt(ref ast, root);
+  let best: NodeId = 0;
+  let bestPos: usize = 0;
+  let i: usize = 0;
+  while (i < program.childCount) {
+    const entry = declOf(ref ast, childAt(ref ast, program, i));
+    const node = nodeAt(ref ast, entry);
+    if (node.sourceLoc.pos <= offset) {
+      if (best == 0 || node.sourceLoc.pos >= bestPos) {
+        best = entry;
+        bestPos = node.sourceLoc.pos;
+      }
+    }
+    i += 1;
+  }
+  return best;
+}
+
+/*
+  The declaration of a LOCAL name visible at `offset`, or 0.
+
+  A parameter, a `let`, a `const`, a `for` counter, a destructured binding, a
+  switch-case binding: all of them are nodes carrying the name they bind, and
+  none of them is in a table. So this walks the subtree of the declaration the
+  offset is in and takes the last binding of that name written at or before the
+  offset, which is what shadowing means when the walk is in source order.
+
+  It is an APPROXIMATION of lexical scope and says so: a binding in a sibling
+  block that closed before the offset is still a candidate here, where a real
+  scope walk would have dropped it. Getting that exactly right means pass D's
+  scope stack, which exists only while a body is being checked and is gone by
+  the time an editor asks. The failure mode is jumping to the wrong `x` in a
+  function with two of them, which is a wrong answer to a question with a right
+  one - not a crash, and not a wrong answer for any name that is unique in its
+  function, which is nearly all of them.
+*/
+export function locateLocalBinding(
+  ref ast: AST,
+  declRoot: NodeId,
+  name: string,
+  offset: usize
+): Located {
+  let best: Located = {
+    found: false, nodeId: 0, kind: ASTNodeKind.PROGRAM, name: "", pos: 0, length: 0,
+  };
+  if (declRoot == 0 || name.len == 0) {
+    return best;
+  }
+  disposable work: Vec<NodeId> = vec.vecNew(128);
+  disposable kids: Vec<NodeId> = vec.vecNew(8);
+  vec.vecPush(ref work, declRoot);
+  let at: usize = 0;
+  while (at < work.len) {
+    const id = vec.vecGet(ref work, at);
+    at += 1;
+    const node = nodeAt(ref ast, id);
+    if (bindsName(node, name) && node.sourceLoc.pos <= offset) {
+      if (!best.found || node.sourceLoc.pos >= best.pos) {
+        best = {
+          found: true,
+          nodeId: id,
+          kind: node.kind,
+          name: node.name,
+          pos: node.sourceLoc.pos,
+          length: node.sourceLoc.length,
+        };
+      }
+    }
+    childSlots(ref ast, node, ref kids);
+    let i: usize = 0;
+    while (i < kids.len) {
+      vec.vecPush(ref work, vec.vecGet(ref kids, i));
+      i += 1;
+    }
+  }
+  return best;
+}
+
+// The node kinds that INTRODUCE a name into a body. A FIELD_DECL is not one:
+// it names a member of a type, which is reached through the type rather than
+// by being in scope.
+function bindsName(node: ASTNode, name: string): bool {
+  if (!str.stringEq(node.name, name)) {
+    return false;
+  }
+  return node.kind == ASTNodeKind.PARAM
+    || node.kind == ASTNodeKind.LET_DECL
+    || node.kind == ASTNodeKind.CONST_DECL
+    || node.kind == ASTNodeKind.DESTRUCTURE_DECL;
+}
