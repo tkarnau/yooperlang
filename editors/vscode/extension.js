@@ -12,7 +12,7 @@ const path = require("path");
 const fs = require("fs");
 const cp = require("child_process");
 const vscode = require("vscode");
-const { LanguageClient, TransportKind } = require("vscode-languageclient/node");
+const { LanguageClient } = require("vscode-languageclient/node");
 
 // One entry per RUNNING server, keyed by what makes two of them the same. See
 // resolveServer() for why there can be more than one.
@@ -328,6 +328,28 @@ function syncClients(context) {
   updateStatus();
 }
 
+// How the server process is launched: the binary, its arguments, its
+// environment.
+//
+// NO `transport` FIELD, and that is the whole point of this being its own
+// function. vscode-languageclient appends a flag of its own for every
+// transport kind it is told about - `--stdio` for TransportKind.stdio - on the
+// assumption that the server is a library that parses one. This server is the
+// COMPILER, whose CLI accepts `--lsp` and rejects everything it does not know
+// with a usage message and exit 2, so naming the transport makes the process
+// die before it reads a byte. Omitted, the client spawns the command and talks
+// over the child's stdin and stdout, which is what is wanted and is the same
+// code path minus the argument.
+//
+// The arguments here are checked in src/extension.test.js.
+function serverSpawn(server) {
+  return {
+    command: server.command,
+    args: ["--lsp"],
+    options: { env: { ...process.env, ...server.env } },
+  };
+}
+
 function startClient(context, key, want) {
   const { server, selector, names } = want;
   if (!server.command) {
@@ -346,12 +368,7 @@ function startClient(context, key, want) {
     log("  std     left to the binary to find beside itself");
   }
 
-  const spawn = {
-    command: server.command,
-    args: ["--lsp"],
-    transport: TransportKind.stdio,
-    options: { env: { ...process.env, ...server.env } },
-  };
+  const spawn = serverSpawn(server);
   const client = new LanguageClient(
     "yoopilerLsp",
     `Yoopiler LSP (${server.mode})`,
@@ -637,5 +654,5 @@ module.exports = {
   // file that is silently wrong when it is wrong - you get answers, they are
   // just from the wrong compiler - so it is checked in src/extension.test.js
   // rather than left to be noticed. Nothing at runtime reads this.
-  __test: { resolveServer, findCompilerCheckout, serverKey },
+  __test: { resolveServer, findCompilerCheckout, serverKey, serverSpawn },
 };

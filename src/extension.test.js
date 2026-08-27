@@ -70,7 +70,7 @@ Module._load = function (request, parent, isMain) {
 };
 
 const { __test } = require_(path.join(REPO, "editors", "vscode", "extension.js"));
-const { resolveServer, findCompilerCheckout, serverKey } = __test;
+const { resolveServer, findCompilerCheckout, serverKey, serverSpawn } = __test;
 
 Module._load = realLoad;
 
@@ -214,5 +214,42 @@ describe("the editor picks a compiler per folder", () => {
     assert.equal(server.env.YOOP_STD_ROOT, otherStd);
     // The one that was NOT overridden still comes from the checkout.
     assert.equal(server.env.YOOP_RUNTIME_ROOT, path.join(checkout, "runtime"));
+  });
+});
+
+// How the server is LAUNCHED, as opposed to which binary is chosen.
+//
+// This is a short list and it looks like it could not be wrong, but it was:
+// naming a transport kind makes vscode-languageclient append an argument of
+// its own, and the compiler exits 2 on an argument it does not know. The
+// server then dies before the handshake, so every symptom is a client-side
+// connection error and none of them name the flag that caused it.
+//
+// src/lsp.test.js spawns `--lsp` directly, so it cannot see a wrong argument
+// list here; this is the only thing asserting what the editor really passes.
+describe("the editor launches the server the way the compiler expects", () => {
+  const server = { command: "/somewhere/yoopiler_boot", env: { YOOP_STD_ROOT: "/somewhere/std" } };
+
+  it("passes the compiler exactly the flag it documents", () => {
+    // Every flag here has to appear in the compiler's usage text. `--lsp` is
+    // the whole of it: the server takes no options, and an extra one is fatal
+    // rather than ignored.
+    assert.deepEqual(serverSpawn(server).args, ["--lsp"]);
+  });
+
+  it("names no transport kind", () => {
+    // The client turns a transport kind into a command-line flag (`--stdio`
+    // for stdio) for a server that parses one. Leaving it undefined takes the
+    // same spawn-and-use-the-pipes path without the flag.
+    assert.ok(!("transport" in serverSpawn(server)));
+  });
+
+  it("hands the server its std roots on top of the ambient environment", () => {
+    // The environment is how a checkout's server is aimed at that checkout's
+    // std. Losing PATH along the way would break the clang the compiler shells
+    // out to, so it is an overlay rather than a replacement.
+    const env = serverSpawn(server).options.env;
+    assert.equal(env.YOOP_STD_ROOT, "/somewhere/std");
+    assert.equal(env.PATH, process.env.PATH);
   });
 });
