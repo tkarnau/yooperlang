@@ -33,15 +33,25 @@ export function parseVarDecl(ref ps: ParserState): ParsingResult {
     nodeKind = ASTNodeKind.LET_DECL;
   }
 
-  let node = SelfLexing.buildSourcedNode(ref ps, nodeKind);
   // `disposable ids: Vec<NodeId> = ...` - the kind prefix run, before the name.
   // Two identifiers in a row is what identifies one, the same test every other
   // kind position uses; the LAST identifier is the binding's name.
   //
   // A prefixed binding is CONST by default: shape (3) has no `let` to read, and
   // the resource is meant to be held rather than reassigned.
-  node.childC = parseKindPrefixes(ref ps)?;
-  node.name = parseIdentAsName(ref ps)?;
+  const prefixes = parseKindPrefixes(ref ps)?;
+
+  // The node is located at the NAME, and it is built here rather than above so
+  // that it can be. A prefix run sits between the `let` and the name and shape
+  // (3) has no `let` at all, so building before them puts a prefixed binding's
+  // span on `disposable` while an ordinary one's sits on its name - two
+  // spellings of the same declaration landing in different places, which is a
+  // squiggle on the wrong word and a hover that misses.
+  const nameTok = SelfLexing.peek(ref ps);
+  const name = parseIdentAsName(ref ps)?;
+  let node = SelfLexing.buildNodeAt(ref ps, nodeKind, nameTok);
+  node.childC = prefixes;
+  node.name = name;
 
   // type annotation is optional, when omitted, the typechecker infers
   // the binding's type from its initializer

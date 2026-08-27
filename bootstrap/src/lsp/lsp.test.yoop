@@ -27,9 +27,15 @@ import { Position, Range, positionOfByte, rangeOfSpan } from "../lsp";
 import { Document, DocumentStore, storeNew, storeUpsert, storeIndexOf,
          storeGet, storeClose, storeNextPending, storeMarkPublished,
          uriToPath } from "../lsp";
-import { LspDiagnostic, collectDiagnostics } from "../lsp";
+import { LspDiagnostic, Analysis, analysisNew, ensureAnalysis } from "../lsp";
+import { byteOfPosition, pathToUri, signatureLine } from "../lsp";
+import { Located, OutlineEntry, locateNode, collectOutline } from "../lsp";
 import { buildPublishDiagnostics, buildInitializeResponse, buildNullResponse,
-         buildErrorResponse, ERR_METHOD_NOT_FOUND } from "../lsp";
+         buildErrorResponse, buildHoverResponse, buildLocationResponse,
+         buildDocumentSymbolResponse, ERR_METHOD_NOT_FOUND } from "../lsp";
+import { Result } from "std/core/types.yoop";
+import { AST } from "../ast";
+import { parse } from "../parse";
 
 // ----- helpers -------------------------------------------------------------
 
@@ -378,8 +384,64 @@ suite function buildsTheMessagesTheProtocolExpects(): void {
     disposable out: JsonDoc = json.docNew();
     const _r = buildInitializeResponse(ref out, ref req, json.member(ref req, req.root, "id"));
     disposable got: Text = rendered(ref out);
+    // Four capabilities, and every one of them is answered: full-text sync
+    // with open/close and save, and the three position-and-file queries. A
+    // capability announced and not implemented is a client waiting forever on
+    // a reply, which is why this asserts the whole object rather than that the
+    // ones it names are present.
     checkText(ref theory, ref got,
-      "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"capabilities\":{\"textDocumentSync\":{\"openClose\":true,\"change\":1,\"save\":{\"includeText\":false}}},\"serverInfo\":{\"name\":\"yoopiler_boot\"}}}");
+      "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"capabilities\":{\"textDocumentSync\":{\"openClose\":true,\"change\":1,\"save\":{\"includeText\":false}},\"hoverProvider\":true,\"definitionProvider\":true,\"documentSymbolProvider\":true},\"serverInfo\":{\"name\":\"yoopiler_boot\"}}}");
+  }
+
+  let test theory: Case = t.asserts("a hover carries markdown and the span it is about") {
+    // The range is what makes an editor underline the whole name while the
+    // tooltip is up, instead of guessing at a word boundary.
+    disposable req: JsonDoc = parseOrEmpty("{\"id\":4}");
+    disposable out: JsonDoc = json.docNew();
+    let span: Range = {
+      start: { line: 2, character: 6 },
+      end: { line: 2, character: 11 },
+    };
+    const _r = buildHoverResponse(ref out, ref req, json.member(ref req, req.root, "id"),
+                                  "```yoop\ntwice\n```", span);
+    disposable got: Text = rendered(ref out);
+    checkText(ref theory, ref got,
+      "{\"jsonrpc\":\"2.0\",\"id\":4,\"result\":{\"contents\":{\"kind\":\"markdown\",\"value\":\"```yoop\\ntwice\\n```\"},\"range\":{\"start\":{\"line\":2,\"character\":6},\"end\":{\"line\":2,\"character\":11}}}}");
+  }
+
+  let test theory: Case = t.asserts("a definition is ONE location, not a list of one") {
+    // A name in this language resolves to exactly one declaration. The
+    // protocol would accept an array; handing one back would only make every
+    // client unpack it.
+    disposable req: JsonDoc = parseOrEmpty("{\"id\":5}");
+    disposable out: JsonDoc = json.docNew();
+    let span: Range = {
+      start: { line: 9, character: 9 },
+      end: { line: 9, character: 14 },
+    };
+    const _r = buildLocationResponse(ref out, ref req, json.member(ref req, req.root, "id"),
+                                     "file:///w/a.yoop", span);
+    disposable got: Text = rendered(ref out);
+    checkText(ref theory, ref got,
+      "{\"jsonrpc\":\"2.0\",\"id\":5,\"result\":{\"uri\":\"file:///w/a.yoop\",\"range\":{\"start\":{\"line\":9,\"character\":9},\"end\":{\"line\":9,\"character\":14}}}}");
+  }
+
+  let test theory: Case = t.asserts("a member follows its type into that type's children") {
+    // The entries go in FLAT with a depth; the nesting is rebuilt here. What
+    // this asserts is that a depth-1 entry lands inside the depth-0 entry
+    // before it rather than beside it.
+    disposable req: JsonDoc = parseOrEmpty("{\"id\":6}");
+    disposable out: JsonDoc = json.docNew();
+    disposable entries: Vec<OutlineEntry> = vec.vecNew(2);
+    let one: Range = { start: { line: 0, character: 5 }, end: { line: 0, character: 10 } };
+    let two: Range = { start: { line: 1, character: 2 }, end: { line: 1, character: 3 } };
+    vec.vecPush(ref entries, { name: "Point", kind: 23, range: one, depth: 0 });
+    vec.vecPush(ref entries, { name: "x", kind: 8, range: two, depth: 1 });
+    const _r = buildDocumentSymbolResponse(ref out, ref req,
+                                           json.member(ref req, req.root, "id"), ref entries);
+    disposable got: Text = rendered(ref out);
+    checkText(ref theory, ref got,
+      "{\"jsonrpc\":\"2.0\",\"id\":6,\"result\":[{\"name\":\"Point\",\"kind\":23,\"range\":{\"start\":{\"line\":0,\"character\":5},\"end\":{\"line\":0,\"character\":10}},\"selectionRange\":{\"start\":{\"line\":0,\"character\":5},\"end\":{\"line\":0,\"character\":10}},\"children\":[{\"name\":\"x\",\"kind\":8,\"range\":{\"start\":{\"line\":1,\"character\":2},\"end\":{\"line\":1,\"character\":3}},\"selectionRange\":{\"start\":{\"line\":1,\"character\":2},\"end\":{\"line\":1,\"character\":3}}}]}]}");
   }
 
   let test theory: Case = t.asserts("a STRING request id comes back as the same string") {
@@ -455,12 +517,12 @@ suite function reportsWhatTheCompilerSaysAboutTheBuffer(): void {
     const slot = storeUpsert(ref s, "file:///tmp/nonexistent_lsp_probe.yoop",
       intr.stringAsBytes("function main(): int32 {\n  return 1\n}\n"), 1);
     let doc: Document = storeGet(ref s, slot);
-    disposable diags: Vec<LspDiagnostic> = vec.vecNew(4);
-    collectDiagnostics(ref doc, "", ref diags);
-    const first = vec.vecGet(ref diags, 0);
-    theory.isSuccessful = diags.len == 1 && first.severity == 1
+    disposable an: Analysis = analysisNew();
+    ensureAnalysis(ref an, ref doc, "");
+    const first = vec.vecGet(ref an.diags, 0);
+    theory.isSuccessful = an.diags.len == 1 && first.severity == 1
       && first.range.start.line == 2;
-    theory.detail = `got ${diags.len} diagnostic(s), first at line ${first.range.start.line}: ${first.message}`;
+    theory.detail = `got ${an.diags.len} diagnostic(s), first at line ${first.range.start.line}: ${first.message}`;
   }
 
   let test theory: Case = t.asserts("a buffer that parses produces no syntax diagnostic") {
@@ -471,12 +533,12 @@ suite function reportsWhatTheCompilerSaysAboutTheBuffer(): void {
     const slot = storeUpsert(ref s, "file:///tmp/nonexistent_lsp_probe.yoop",
       intr.stringAsBytes("function main(): int32 {\n  return 1;\n}\n"), 1);
     let doc: Document = storeGet(ref s, slot);
-    disposable diags: Vec<LspDiagnostic> = vec.vecNew(4);
-    collectDiagnostics(ref doc, "", ref diags);
+    disposable an: Analysis = analysisNew();
+    ensureAnalysis(ref an, ref doc, "");
     let sawSyntaxDiagnostic: bool = false;
     let i: usize = 0;
-    while (i < diags.len) {
-      const d = vec.vecGet(ref diags, i);
+    while (i < an.diags.len) {
+      const d = vec.vecGet(ref an.diags, i);
       if (d.range.start.line > 0) {
         sawSyntaxDiagnostic = true;
       }
@@ -484,6 +546,214 @@ suite function reportsWhatTheCompilerSaysAboutTheBuffer(): void {
     }
     theory.isSuccessful = !sawSyntaxDiagnostic;
     theory.detail = `a well formed buffer produced a diagnostic past line 0`;
+  }
+
+  let test theory: Case = t.asserts("a second request against the same buffer reuses the compile") {
+    // The point of holding one: `ensureAnalysis` is the entry every request
+    // goes through, and only the first of them may pay. A recompile would
+    // CLEAR and refill `diags`, so a doubled list is what a cache miss would
+    // look like and an unchanged one is what a hit looks like.
+    disposable s: DocumentStore = storeNew();
+    const slot = storeUpsert(ref s, "file:///tmp/nonexistent_lsp_probe.yoop",
+      intr.stringAsBytes("function main(): int32 {\n  return 1\n}\n"), 7);
+    let doc: Document = storeGet(ref s, slot);
+    disposable an: Analysis = analysisNew();
+    ensureAnalysis(ref an, ref doc, "");
+    const afterFirst = an.diags.len;
+    ensureAnalysis(ref an, ref doc, "");
+    theory.isSuccessful = an.version == 7 && an.diags.len == afterFirst && afterFirst == 1;
+    theory.detail = `held version ${an.version}, ${afterFirst} diagnostic(s) then ${an.diags.len}`;
+  }
+}
+
+// ----- positions, both ways ------------------------------------------------
+
+suite function convertsBetweenOffsetsAndEditorPositions(): void {
+  let test theory: Case = t.asserts("an offset and a position name the same place, both ways") {
+    // `let a = 1;\nlet <e-acute> = naive;\n`, with the accented letter written
+    // as the two UTF-8 bytes it is: the lexer has no \u escape, and those two
+    // bytes ARE what the test is about. Line 1 then counts one unit for two
+    // bytes, so a byte offset and an editor column disagree from there on.
+    //
+    // `naive` starts at byte 20 - `let a = 1;\n` is 11, `let ` is 4, the
+    // letter is 2, and ` = ` is 3 - and at column 8, which counts the letter
+    // once.
+    disposable buf: Vec<uint8> = vec.vecNew(32);
+    vec.vecExtendFrom(ref buf, intr.stringAsBytes("let a = 1;\nlet "));
+    vec.vecPush(ref buf, 195);
+    vec.vecPush(ref buf, 169);
+    vec.vecExtendFrom(ref buf, intr.stringAsBytes(" = naive;\n"));
+    const src = vec.vecAsArray(ref buf);
+    const p = positionOfByte(src, 20);
+    const back = byteOfPosition(src, p.line, p.character);
+    theory.isSuccessful = p.line == 1 && p.character == 8 && back == 20;
+    theory.detail = `byte 20 is ${p.line}:${p.character}, and back again ${back}`;
+  }
+
+  let test theory: Case = t.asserts("a character past the end of a line stops at its terminator") {
+    // An editor may ask about a column that was there before the last edit.
+    // Landing on the newline is the end of what there is; running into the
+    // NEXT line would answer about a different line entirely.
+    const src = intr.stringAsBytes("ab\ncdef\n");
+    theory.isSuccessful = byteOfPosition(src, 0, 99) == 2;
+    theory.detail = `column 99 of a two-character line resolved to ${byteOfPosition(src, 0, 99)}`;
+  }
+
+  let test theory: Case = t.asserts("a line past the end of the file clamps to the end") {
+    const src = intr.stringAsBytes("ab\n");
+    theory.isSuccessful = byteOfPosition(src, 40, 0) == 3;
+    theory.detail = `line 40 of a one-line file resolved to ${byteOfPosition(src, 40, 0)}`;
+  }
+}
+
+// ----- a path and a URI ----------------------------------------------------
+
+suite function convertsBetweenPathsAndUris(): void {
+  let test theory: Case = t.asserts("a path with a space round-trips through a URI") {
+    disposable uri: Text = pathToUri("/home/a/b c.yoop");
+    disposable back: Text = uriToPath(text.view(ref uri));
+    theory.isSuccessful = text.equals(text.view(ref uri), "file:///home/a/b%20c.yoop")
+      && text.equals(text.view(ref back), "/home/a/b c.yoop");
+    theory.detail = `"${text.view(ref uri)}" -> "${text.view(ref back)}"`;
+  }
+
+  let test theory: Case = t.asserts("separators survive and a hash is escaped") {
+    // A `#` in a path is a FRAGMENT marker in a URI, so leaving it alone names
+    // a different file; a `/` is the one reserved character that has to stay.
+    disposable uri: Text = pathToUri("/a/b#c/d.yoop");
+    theory.isSuccessful = text.equals(text.view(ref uri), "file:///a/b%23c/d.yoop");
+    theory.detail = `got "${text.view(ref uri)}"`;
+  }
+}
+
+// ----- what is under the cursor --------------------------------------------
+
+// The offset of `needle` in `src`, so a test names a position by what is
+// written there rather than by a number nobody can check.
+function offsetOf(src: string, needle: string): usize {
+  return text.indexOf(src, needle);
+}
+
+const LOCATE_SRC: string = "type Point {\n  x: int32,\n}\n\nfunction twice(n: int32): int32 {\n  return n + n;\n}\n";
+
+suite function findsTheNodeUnderAnOffset(): void {
+  let test theory: Case = t.asserts("an offset inside a name finds the node that name is on") {
+    switch (parse(intr.stringAsBytes(LOCATE_SRC))) {
+      case Result.Err { error: e }: {
+        theory.isSuccessful = false;
+        theory.detail = `the fixture did not parse: ${e.rawMessage}`;
+      }
+      case Result.Ok { value: parsed }: {
+        disposable ast: AST = parsed;
+        // The `n` of `n + n`, which is the first one after `return `.
+        const at = offsetOf(LOCATE_SRC, "return n") + 7;
+        const found = locateNode(ref ast, ast.root, at);
+        theory.isSuccessful = found.found && text.equals(found.name, "n")
+          && found.pos == at && found.length == 1;
+        theory.detail = `offset ${at} found "${found.name}" at ${found.pos}+${found.length}`;
+      }
+    }
+  }
+
+  let test theory: Case = t.asserts("a declaration is found by its own name, not by its keyword") {
+    // The whole reason the parser locates a node at its NAME: an offset on
+    // `twice` has to reach the declaration, and one on `function` must not
+    // reach something else by being one token to the left.
+    switch (parse(intr.stringAsBytes(LOCATE_SRC))) {
+      case Result.Err { error: e }: {
+        theory.isSuccessful = false;
+        theory.detail = `the fixture did not parse: ${e.rawMessage}`;
+      }
+      case Result.Ok { value: parsed }: {
+        disposable ast: AST = parsed;
+        const at = offsetOf(LOCATE_SRC, "twice");
+        const found = locateNode(ref ast, ast.root, at);
+        theory.isSuccessful = found.found && text.equals(found.name, "twice")
+          && found.pos == at && found.length == 5;
+        theory.detail = `offset ${at} found "${found.name}" at ${found.pos}+${found.length}`;
+      }
+    }
+  }
+
+  let test theory: Case = t.asserts("an offset on whitespace finds nothing") {
+    switch (parse(intr.stringAsBytes(LOCATE_SRC))) {
+      case Result.Err { error: e }: {
+        theory.isSuccessful = false;
+        theory.detail = `the fixture did not parse: ${e.rawMessage}`;
+      }
+      case Result.Ok { value: parsed }: {
+        disposable ast: AST = parsed;
+        // The blank line between the type and the function.
+        const at = offsetOf(LOCATE_SRC, "\n\nfunction") + 1;
+        const found = locateNode(ref ast, ast.root, at);
+        theory.isSuccessful = !found.found;
+        theory.detail = `offset ${at} found "${found.name}" instead of nothing`;
+      }
+    }
+  }
+}
+
+// ----- the outline ---------------------------------------------------------
+
+suite function listsWhatIsInTheFile(): void {
+  let test theory: Case = t.asserts("top-level declarations come out in source order, with members under them") {
+    switch (parse(intr.stringAsBytes(LOCATE_SRC))) {
+      case Result.Err { error: e }: {
+        theory.isSuccessful = false;
+        theory.detail = `the fixture did not parse: ${e.rawMessage}`;
+      }
+      case Result.Ok { value: parsed }: {
+        disposable ast: AST = parsed;
+        disposable entries: Vec<OutlineEntry> = vec.vecNew(8);
+        collectOutline(ref ast, ast.root, intr.stringAsBytes(LOCATE_SRC), ref entries);
+        // Point (a struct, depth 0), its field x (depth 1), then twice (a
+        // function, depth 0). SymbolKind 23 is Struct, 8 is Field, 12 is
+        // Function - the protocol's numbers, not this compiler's.
+        const a = vec.vecGet(ref entries, 0);
+        const b = vec.vecGet(ref entries, 1);
+        const c = vec.vecGet(ref entries, 2);
+        theory.isSuccessful = entries.len == 3
+          && text.equals(a.name, "Point") && a.kind == 23 && a.depth == 0
+          && text.equals(b.name, "x") && b.kind == 8 && b.depth == 1
+          && text.equals(c.name, "twice") && c.kind == 12 && c.depth == 0;
+        theory.detail = `${entries.len} entries: ${a.name}/${a.kind}, ${b.name}/${b.kind}, ${c.name}/${c.kind}`;
+      }
+    }
+  }
+}
+
+// ----- a declaration as one line -------------------------------------------
+
+suite function rendersADeclarationAsOneLine(): void {
+  let test theory: Case = t.asserts("a signature stops at the body and keeps the whole line") {
+    const src = "export function twice(n: int32): int32 {\n  return n + n;\n}\n";
+    disposable got: Text = signatureLine(intr.stringAsBytes(src), text.indexOf(src, "twice"));
+    theory.isSuccessful = text.equals(text.view(ref got), "export function twice(n: int32): int32");
+    theory.detail = `got "${text.view(ref got)}"`;
+  }
+
+  let test theory: Case = t.asserts("a signature written over several lines collapses to one") {
+    // The shape half this compiler's own signatures are written in. Reading it
+    // back with the indentation left in would be a tooltip four lines tall.
+    const src = "function wide(\n  a: int32,\n  b: int32\n): int32 {\n  return a;\n}\n";
+    disposable got: Text = signatureLine(intr.stringAsBytes(src), text.indexOf(src, "wide"));
+    theory.isSuccessful = text.equals(text.view(ref got), "function wide(a: int32, b: int32): int32");
+    theory.detail = `got "${text.view(ref got)}"`;
+  }
+
+  let test theory: Case = t.asserts("a declaration with no body stops at its semicolon") {
+    const src = "type NodeId = usize;\n";
+    disposable got: Text = signatureLine(intr.stringAsBytes(src), text.indexOf(src, "NodeId"));
+    theory.isSuccessful = text.equals(text.view(ref got), "type NodeId = usize");
+    theory.detail = `got "${text.view(ref got)}"`;
+  }
+
+  let test theory: Case = t.asserts("a brace inside a generic argument does not end the signature") {
+    // `<` and `>` are counted, so the `{` that ends this one is the body's.
+    const src = "function pick(v: Vec<int32>): int32 {\n  return 0;\n}\n";
+    disposable got: Text = signatureLine(intr.stringAsBytes(src), text.indexOf(src, "pick"));
+    theory.isSuccessful = text.equals(text.view(ref got), "function pick(v: Vec<int32>): int32");
+    theory.detail = `got "${text.view(ref got)}"`;
   }
 }
 

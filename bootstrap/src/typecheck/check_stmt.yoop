@@ -324,14 +324,18 @@ function checkDisposableBinding(ref cx: Cx, stmt: ASTNode, typeId: TypeId): void
               reportError(
                 cx.prog,
                 `"${stmt.name}" is ${prefix.name} and ${formatType(cx.prog, typeId)} propagates it, but ${problem}`,
-                stmt.sourceLoc
+                // The PREFIX and not the binding: what is wrong is the kind
+                // that was asked for, and the binding is fine without it. The
+                // `unknown kind` case below already points there for the same
+                // reason.
+                prefix.sourceLoc
               );
             }
           } else {
             reportError(
               cx.prog,
               `"${stmt.name}" is ${prefix.name}, which requires a "${info.disposeMethod}" method, but ${formatType(cx.prog, typeId)} has none`,
-              stmt.sourceLoc
+              prefix.sourceLoc
             );
           }
         }
@@ -415,7 +419,7 @@ function checkKindRegion(ref cx: Cx, stmt: ASTNode, stmtId: NodeId): void {
           reportError(
             cx.prog,
             `"${prefix.name}" requires a "${info.disposeMethod}" method, but ${formatType(cx.prog, subjectType)} has none`,
-            stmt.sourceLoc
+            prefix.sourceLoc
           );
         }
       }

@@ -1,0 +1,322 @@
+module lsp;
+
+/*
+  The three questions an editor asks about a POSITION, answered.
+
+  Each one is the same three steps: turn the position into a byte offset, find
+  the node there, and say something about it. What differs is only the last
+  step, so the first two live at the top of this file and each answer is a
+  short function below it.
+
+  WHAT A NAMED NODE RESOLVES TO, in the order it is tried:
+
+    1. a LOCAL - a parameter or a binding in the declaration the cursor is in
+    2. a NAMESPACED name - `vec.vecNew`, where the base names a module
+    3. a MODULE-LEVEL name - declared here, or imported from where it was
+
+  That order is the language's own: a local shadows a module-level name, and a
+  namespaced name is not a plain name at all. It is the same precedence pass D
+  applies in check_expr.yoop, which is what keeps an editor's answer and the
+  compiler's answer the same answer.
+*/
+
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { Text }, * as text from "std/core/text.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import * as str from "std/core/strings.yoop";
+import { AST, ASTNodeKind, NodeId, kindName, nodeAt } from "../ast";
+import { Module, SourceFile } from "../source_graph";
+import { TYPE_ERROR_ID, TypeId, TypedModule, formatType } from "../typecheck";
+
+// Everything a position query resolved before it decided what to say. Built
+// once and read by hover and definition alike, because they disagree only
+// about what to do with it.
+export type PositionQuery {
+  ok: bool,
+  offset: usize,
+  node: Located,
+  // The type the typechecker gave the node, or TYPE_ERROR_ID. Only expression
+  // nodes carry one - `resolvedTypes` is pass D's decoration, and pass D walks
+  // bodies.
+  typeId: TypeId,
+  // The declaration the node's name resolves to, when it has one.
+  site: DeclSite,
+}
+
+/*
+  Resolve a (line, character) against the analysis, or hand back `ok: false`.
+
+  False means one of three things, and none of them is an error worth
+  reporting to a client: the document did not typecheck far enough to be found
+  in the graph, the position is on whitespace or a comment, or the node there
+  is one nothing can be said about.
+*/
+export function queryAt(ref an: Analysis, line: usize, character: usize): PositionQuery {
+  let out: PositionQuery = {
+    ok: false, offset: 0,
+    node: { found: false, nodeId: 0, kind: ASTNodeKind.PROGRAM, name: "", pos: 0, length: 0 },
+    typeId: TYPE_ERROR_ID, site: noDeclSite(),
+  };
+  if (!an.typed) {
+    return out;
+  }
+  let mod: Module = analysisModule(ref an);
+  let sf: SourceFile = analysisFile(ref an);
+  const src = vec.vecAsArray(ref sf.src);
+  out.offset = byteOfPosition(src, line, character);
+  out.node = locateNode(ref mod.ast, sf.root, out.offset);
+  if (!out.node.found) {
+    return out;
+  }
+  out.ok = true;
+  out.typeId = resolvedTypeOf(ref an, out.node.nodeId);
+  out.site = resolveNodeDecl(ref an, ref mod.ast, sf.root, ref out.node, out.offset);
+  return out;
+}
+
+// The type pass D recorded for a node, or TYPE_ERROR_ID.
+//
+// `resolvedTypes` is dense but only as long as the module's arena was when
+// pass D ran, and the `@precompile` pass appends nodes afterwards - so the
+// bound is checked rather than assumed.
+function resolvedTypeOf(ref an: Analysis, nodeId: NodeId): TypeId {
+  let tm: TypedModule = analysisTypedModule(ref an);
+  if (nodeId >= tm.resolvedTypes.len) {
+    return TYPE_ERROR_ID;
+  }
+  return vec.vecGet(ref tm.resolvedTypes, nodeId);
+}
+
+/*
+  Where the node's name was declared, following the precedence at the top.
+
+  A node with no name - a literal, an operator - resolves to nothing, which is
+  correct rather than a gap: there is no declaration of `3`.
+*/
+function resolveNodeDecl(
+  ref an: Analysis,
+  ref ast: AST,
+  root: NodeId,
+  ref node: Located,
+  offset: usize
+): DeclSite {
+  if (node.name.len == 0) {
+    return noDeclSite();
+  }
+
+  // A DECLARATION under the cursor is its own answer. Without this, clicking
+  // the name in `function twice(...)` searches for a local called `twice` and
+  // then for a module-level one, and lands back where it started by accident
+  // rather than on purpose.
+  if (isDeclNodeKind(node.kind)) {
+    let sf: SourceFile = analysisFile(ref an);
+    return {
+      found: true,
+      absPath: sf.absPath,
+      src: vec.vecAsArray(ref sf.src),
+      pos: node.pos,
+      length: node.length,
+      kind: node.kind,
+      nodeId: node.nodeId,
+      moduleIndex: an.moduleIndex,
+    };
+  }
+
+  const enclosing = enclosingDecl(ref ast, root, offset);
+  const localSite = locateLocalBinding(ref ast, enclosing, node.name, offset);
+  if (localSite.found) {
+    let sf: SourceFile = analysisFile(ref an);
+    return {
+      found: true,
+      absPath: sf.absPath,
+      src: vec.vecAsArray(ref sf.src),
+      pos: localSite.pos,
+      length: localSite.length,
+      kind: localSite.kind,
+      nodeId: localSite.nodeId,
+      moduleIndex: an.moduleIndex,
+    };
+  }
+
+  // `ns.member` and `ns.member(...)`: both put the base in a child slot and the
+  // member in `name`, which is what makes them one case here.
+  const baseId = qualifyingBase(ref ast, ref node);
+  if (baseId != 0) {
+    const base = nodeAt(ref ast, baseId);
+    if (base.kind == ASTNodeKind.IDENT) {
+      const nsSite = findNamespacedDecl(ref an, base.name, node.name);
+      if (nsSite.found) {
+        return nsSite;
+      }
+    }
+    // Not a namespace, so the base is a VALUE and `name` is a member of
+    // whatever it turned out to be - a field, or a method. Which needs two
+    // lookups and pass D already did the first: the base's type is sitting in
+    // the decoration, and the member is found inside that type's declaration.
+    const memberSite = findMemberDecl(ref an, resolvedTypeOf(ref an, baseId), node.name);
+    if (memberSite.found) {
+      return memberSite;
+    }
+  }
+
+  return findModuleLevelDecl(ref an, node.name);
+}
+
+/*
+  The node a qualified one was reached THROUGH, or 0.
+
+  A CALL_EXPRESSION written `ns.f(...)` keeps the base in childB and an
+  unqualified one leaves it empty; a FIELD_ACCESS keeps it in childA and always
+  has one. The parser cannot tell a namespace from a value there - that needs
+  name resolution - which is exactly why the caller tries both, in that order.
+*/
+function qualifyingBase(ref ast: AST, ref node: Located): NodeId {
+  const at = nodeAt(ref ast, node.nodeId);
+  if (node.kind == ASTNodeKind.CALL_EXPRESSION) {
+    return at.childB;
+  }
+  if (node.kind == ASTNodeKind.FIELD_ACCESS) {
+    return at.childA;
+  }
+  return 0;
+}
+
+// True for a node that IS a declaration rather than a use of one.
+function isDeclNodeKind(kind: ASTNodeKind): bool {
+  return kind == ASTNodeKind.FUNCTION_DECL
+    || kind == ASTNodeKind.METHOD_DECL
+    || kind == ASTNodeKind.TYPE_DECL
+    || kind == ASTNodeKind.TRAIT_DECL
+    || kind == ASTNodeKind.VARIANT_DECL
+    || kind == ASTNodeKind.UNION_DECL
+    || kind == ASTNodeKind.ENUM_DECL
+    || kind == ASTNodeKind.VTABLE_DECL
+    || kind == ASTNodeKind.KIND_DECL
+    || kind == ASTNodeKind.PARAM
+    || kind == ASTNodeKind.FIELD_DECL
+    || kind == ASTNodeKind.LET_DECL
+    || kind == ASTNodeKind.CONST_DECL;
+}
+
+// ----- hover ----------------------------------------------------------------
+
+/*
+  What to show over the cursor, as markdown, or an empty Text for "nothing".
+
+  Two parts, and the second is often absent:
+
+      ```yoop
+      export function vecNew<T>(initial_cap: usize): Vec<T>
+      ```
+      declared in /home/tom/dev/yooperlang/std/core/vec.yoop
+
+  The fence holds the ONE line worth reading, and which line that is depends on
+  what the name turned out to be:
+
+    a DECLARATION - a function, a type, a trait - shows its own source line,
+    because what a reader wants there is the signature somebody wrote, down to
+    the parameter names and the `export`. See signature.yoop.
+
+    a BINDING - a parameter, a `let`, a `const`, a field - shows `name: type`,
+    because its source line is an initializer that is usually longer and always
+    less informative than the type it produced.
+
+    anything else with a type shows `name: type`, and anything else at all
+    shows what kind of node it is, which for a literal is all there is.
+
+  The line under the fence is where the answer came from, and is written only
+  when that is another file: "declared in this file" over a name three lines up
+  is noise.
+*/
+export function buildHoverText(ref an: Analysis, ref q: PositionQuery): Text propagates<disposable> {
+  let out: Text = text.make(128);
+  if (!q.ok) {
+    return out;
+  }
+
+  text.push(ref out, "```yoop\n");
+  pushHoverSubject(ref out, ref an, ref q);
+  text.push(ref out, "\n```");
+
+  if (q.site.found && !sameFileAsDocument(ref an, q.site.absPath)) {
+    text.push(ref out, "\n\ndeclared in ");
+    text.push(ref out, q.site.absPath);
+  }
+  return out;
+}
+
+function pushHoverSubject(ref out: Text, ref an: Analysis, ref q: PositionQuery): void {
+  if (q.site.found && !isBindingKind(q.site.kind)) {
+    disposable sig: Text = signatureLine(q.site.src, q.site.pos);
+    if (!text.isEmpty(ref sig)) {
+      text.pushText(ref out, ref sig);
+      return;
+    }
+  }
+
+  if (q.node.name.len > 0) {
+    text.push(ref out, q.node.name);
+  } else {
+    // A node with no name still has a kind, and for a literal or an operator
+    // that is the only thing there is to say about it.
+    text.push(ref out, lowerKindLabel(q.node.kind));
+  }
+  if (q.typeId != TYPE_ERROR_ID) {
+    text.push(ref out, ": ");
+    text.push(ref out, formatType(ref an.prog, q.typeId));
+    return;
+  }
+  // No type and no signature: say what kind of thing it is, which is the last
+  // true thing available.
+  if (q.site.found) {
+    text.push(ref out, " - ");
+    text.push(ref out, lowerKindLabel(q.site.kind));
+  }
+}
+
+// A name that stands for a VALUE in a body rather than for a declaration
+// somebody would want the signature of.
+function isBindingKind(kind: ASTNodeKind): bool {
+  return kind == ASTNodeKind.PARAM
+    || kind == ASTNodeKind.LET_DECL
+    || kind == ASTNodeKind.CONST_DECL
+    || kind == ASTNodeKind.FIELD_DECL;
+}
+
+// A node kind as a reader would say it: "function", not "FUNCTION_DECL".
+//
+// Hand-written rather than derived from `kindName`, because the dump's
+// spelling is a contract with the AST dump and lowercasing it would produce
+// "function_decl" - which reads like a mistake in an editor tooltip.
+function lowerKindLabel(kind: ASTNodeKind): string {
+  switch (kind) {
+    case ASTNodeKind.FUNCTION_DECL: { return "function"; }
+    case ASTNodeKind.METHOD_DECL: { return "method"; }
+    case ASTNodeKind.EXTERN_FUNCTION_DECL: { return "extern function"; }
+    case ASTNodeKind.TYPE_DECL: { return "type"; }
+    case ASTNodeKind.EXTERN_TYPE_DECL: { return "extern type"; }
+    case ASTNodeKind.TRAIT_DECL: { return "trait"; }
+    case ASTNodeKind.VARIANT_DECL: { return "variant"; }
+    case ASTNodeKind.UNION_DECL: { return "union"; }
+    case ASTNodeKind.ENUM_DECL: { return "enum"; }
+    case ASTNodeKind.VTABLE_DECL: { return "vtable"; }
+    case ASTNodeKind.KIND_DECL: { return "kind"; }
+    case ASTNodeKind.PARAM: { return "parameter"; }
+    case ASTNodeKind.FIELD_DECL: { return "field"; }
+    case ASTNodeKind.LET_DECL: { return "let"; }
+    case ASTNodeKind.CONST_DECL: { return "const"; }
+    case ASTNodeKind.INT_LITERAL: { return "int literal"; }
+    case ASTNodeKind.FLOAT_LITERAL: { return "float literal"; }
+    case ASTNodeKind.STRING_LITERAL: { return "string literal"; }
+    case ASTNodeKind.BOOL_LITERAL: { return "bool literal"; }
+    case ASTNodeKind.TEMPLATE_LITERAL: { return "template literal"; }
+    case ASTNodeKind.STRING_PART: { return "string text"; }
+    case ASTNodeKind.EXPR_PART: { return "interpolation"; }
+    default: { return kindName(kind); }
+  }
+}
+
+function sameFileAsDocument(ref an: Analysis, absPath: string): bool {
+  let sf: SourceFile = analysisFile(ref an);
+  return str.stringEq(sf.absPath, absPath);
+}

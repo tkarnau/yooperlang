@@ -13,7 +13,7 @@ module typecheck;
 import { Vec }, * as vec from "std/core/vec.yoop";
 import { Option } from "std/core/types.yoop";
 import { Map }, * as map from "std/collections/map.yoop";
-import { disposable } from "std/core/kinds.yoop";
+import { Disposable, disposable } from "std/core/kinds.yoop";
 import { Diagnostic, SourceLocation, errorAt, warningAt } from "../diagnostics";
 import { NodeId } from "../ast";
 
@@ -164,8 +164,22 @@ export type TypedModule propagates<disposable> {
   // added as Map<NodeId, T> slots here when the checker needs them.
 }
 
+/*
+  `implements Disposable` and not only `propagates<disposable>`, because ONE
+  caller has to release a Program without a scope ending: the language server
+  holds the last compile so that a hover does not pay for a second one, and
+  drops it when the next compile replaces it. Propagated disposal is injected at
+  a scope end and there is no way to ask for it by hand.
+
+  The body is exactly what the propagation would have emitted - every container
+  field, once. It is deliberately NOT more than that: `modules` holds
+  TypedModules whose own maps a `Vec` disposal does not reach, and freeing those
+  here would be a real improvement AND a change of behaviour for every existing
+  `disposable prog: Program`, which is a separate change with its own way of
+  being wrong. See the note on TypedModule.
+*/
 @derive(display)
-export type Program propagates<disposable> {
+export type Program implements Disposable propagates<disposable> {
   types: Vec<Type>,             // interned; indexed by TypeId (low ids reserved for singletons)
   symbols: Vec<Symbol>,         // interned; indexed by SymbolId
   modules: Vec<TypedModule>,    // by ModuleId; parallel to the driver's modules
@@ -295,6 +309,24 @@ export type Program propagates<disposable> {
   retMarkerAll: uint64,
   retMarkerCount: usize,
   // registry: InstantiationRegistry - deferred until generics land in the bootstrap.
+
+  function dispose(ref self): void {
+    Disposable.dispose(ref self.types);
+    Disposable.dispose(ref self.symbols);
+    Disposable.dispose(ref self.modules);
+    Disposable.dispose(ref self.diagnostics);
+    Disposable.dispose(ref self.generics);
+    Disposable.dispose(ref self.instances);
+    Disposable.dispose(ref self.funcInstances);
+    Disposable.dispose(ref self.typeParams);
+    Disposable.dispose(ref self.kinds);
+    Disposable.dispose(ref self.derivedDisplay);
+    Disposable.dispose(ref self.intrinsics);
+    Disposable.dispose(ref self.taskSymbols);
+    Disposable.dispose(ref self.sigMarkers);
+    Disposable.dispose(ref self.sigParams);
+    Disposable.dispose(ref self.markerNames);
+  }
 }
 
 @derive(display)

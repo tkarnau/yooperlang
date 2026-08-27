@@ -1,0 +1,203 @@
+module lsp;
+
+/*
+  THE LAST COMPILE, kept.
+
+  Every question an editor asks about a document - what is wrong with it, what
+  type is this, where is this declared, what is in this file - is answered from
+  a typechecked program. Compiling one per question is what makes a language
+  server feel broken: an open document's closure is 20ms for a small program
+  and about three seconds for one file of the compiler itself, and a hover is
+  something a mouse does by accident.
+
+  So a compile is kept. ONE of them: the document under the cursor is the only
+  one being asked about, and the next compile of a different document replaces
+  it. The key is (uri, version), which is what an editor increments on every
+  edit - so a request that arrives against the buffer the cache was built from
+  is answered without compiling, and one that arrives after an edit recompiles
+  exactly once no matter how many requests follow it.
+
+  WHAT IT COSTS. A held graph is the ASTs and source bytes of the document's
+  whole import closure, and a held Program is the type and symbol arenas over
+  it. That is the same peak a single compile already reached; what changes is
+  that it is now steady rather than transient. In exchange, the second question
+  about a document is free, and there is always a second question.
+
+  `didSave` invalidates it by hand (see server.yoop): the version does not
+  change on a save, and a sibling file of a directory module may have.
+*/
+
+import { Text }, * as text from "std/core/text.yoop";
+import { Disposable, disposable } from "std/core/kinds.yoop";
+import { ModuleGraph, Module, SourceFile, emptyModuleGraph, disposeModuleGraph } from "../source_graph";
+import { Program, TypedModule, initProgram } from "../typecheck";
+import { Vec }, * as vec from "std/core/vec.yoop";
+
+export type Analysis implements Disposable propagates<disposable> {
+  // The document this holds a compile of. Empty until the first one, and
+  // rewritten in place rather than reallocated on every compile.
+  uri: Text,
+  path: Text,
+  version: int64,
+  // The two flags over `graph` and `prog`, and they are not the same question.
+  //
+  // `held` is about STORAGE: true when the two fields own a graph and a program
+  // that have to be released. False leaves them holding whatever they held
+  // last, which is freed, and nothing may read them.
+  //
+  // `typed` is about MEANING: true when what they hold is a compile the
+  // DOCUMENT was found in, so `moduleIndex` and `fileIndex` point at it and a
+  // query has something to walk. Every query tests this one.
+  held: bool,
+  typed: bool,
+  graph: ModuleGraph,
+  prog: Program,
+  // Where the document itself sits in the graph it was compiled as part of:
+  // its module, and its own file within that module. Both are only meaningful
+  // when `typed`, and both are what every query starts from - a query is
+  // always about THIS file, never about the closure behind it.
+  moduleIndex: usize,
+  fileIndex: usize,
+  // What the editor should draw for this document, in its own coordinates.
+  // Filled by the compile that filled `prog`, and held for the same reason
+  // everything else here is: a `didSave` republish and a reopen both want them
+  // again, and neither is a reason to typecheck the closure a second time.
+  //
+  // The messages are BORROWED from the compiler's own strings, which outlive
+  // the Program - see the note on LspDiagnostic in diagnose.yoop.
+  diags: Vec<LspDiagnostic>,
+
+  function dispose(ref self): void {
+    releaseCompile(ref self);
+    Disposable.dispose(ref self.diags);
+    Disposable.dispose(ref self.uri);
+    Disposable.dispose(ref self.path);
+  }
+}
+
+export function analysisNew(): Analysis propagates<disposable> {
+  return {
+    uri: text.make(64),
+    path: text.make(64),
+    version: 0 - 1,
+    // The placeholders are real storage, so they are `held` from the start and
+    // the first compile releases them like any other.
+    held: true,
+    typed: false,
+    graph: emptyModuleGraph(),
+    prog: initProgram(),
+    moduleIndex: 0,
+    fileIndex: 0,
+    diags: vec.vecNew(32),
+  };
+}
+
+/*
+  Drop the held compile, leaving the Analysis reusable.
+
+  Split out of `dispose` because the two callers want different halves: the
+  server disposes the whole thing once, at the end, and every recompile
+  releases just the compile and fills the same struct again.
+
+  Nothing is put back. Re-seeding the two fields with fresh placeholders would
+  be an allocation per keystroke whose only purpose is to be thrown away by the
+  compile that follows; `held` is what says they are not to be read instead.
+*/
+export function releaseCompile(ref a: Analysis): void {
+  if (a.held) {
+    // A ModuleGraph has no `dispose` of its own on purpose: propagated disposal
+    // would free the Vec of modules and leave every AST and every module's
+    // source bytes behind. See source_graph/graph.yoop.
+    disposeModuleGraph(ref a.graph);
+    Disposable.dispose(ref a.prog);
+    a.held = false;
+  }
+  a.typed = false;
+  a.moduleIndex = 0;
+  a.fileIndex = 0;
+}
+
+/*
+  True when this Analysis is a compile of exactly the buffer being asked about.
+
+  Deliberately not conditional on `typed`. A document that does not typecheck
+  is compiled once and answers every request until it is edited again; making
+  a failure recompile would turn the one state where the compiler is slowest -
+  a file mid-edit - into the one state where it runs most often.
+
+  The version sentinel is negative, so nothing matches a released Analysis.
+*/
+export function analysisIsFor(ref a: Analysis, uri: string, version: int64): bool {
+  if (a.version < 0) {
+    return false;
+  }
+  if (a.version != version) {
+    return false;
+  }
+  return text.equals(text.view(ref a.uri), uri);
+}
+
+// Forget whatever is held, so the next request recompiles. What `didSave` does.
+export function analysisInvalidate(ref a: Analysis): void {
+  releaseCompile(ref a);
+  text.clear(ref a.uri);
+  text.clear(ref a.path);
+  a.version = 0 - 1;
+}
+
+// Record which document a freshly built compile belongs to.
+export function analysisIdentify(ref a: Analysis, uri: string, path: string, version: int64): void {
+  text.clear(ref a.uri);
+  text.push(ref a.uri, uri);
+  text.clear(ref a.path);
+  text.push(ref a.path, path);
+  a.version = version;
+}
+
+// ----- reaching the document's own module and file --------------------------
+
+/*
+  Find the module and file the compiled document IS, by absolute path.
+
+  A query is always about one file, and a module may hold several, so both
+  indices are needed: the module owns the arena and the typecheck decoration,
+  and the file owns the PROGRAM root that bounds the walk and the source bytes
+  the spans are offsets into.
+
+  False means the path is not in the graph, which happens when the compile
+  failed before the document was reached.
+*/
+export function analysisLocateDocument(ref a: Analysis, path: string): bool {
+  let m: usize = 0;
+  while (m < a.graph.modules.len) {
+    let mod: Module = vec.vecGet(ref a.graph.modules, m);
+    let f: usize = 0;
+    while (f < mod.files.len) {
+      let sf: SourceFile = vec.vecGet(ref mod.files, f);
+      if (text.equals(sf.absPath, path)) {
+        a.moduleIndex = m;
+        a.fileIndex = f;
+        return true;
+      }
+      f += 1;
+    }
+    m += 1;
+  }
+  return false;
+}
+
+// The document's own module, its file, and the typecheck decoration for that
+// module. Three one-liners, so a query reads as what it is asking rather than
+// as two levels of `vecGet`.
+export function analysisModule(ref a: Analysis): Module {
+  return vec.vecGet(ref a.graph.modules, a.moduleIndex);
+}
+
+export function analysisFile(ref a: Analysis): SourceFile {
+  let mod: Module = analysisModule(ref a);
+  return vec.vecGet(ref mod.files, a.fileIndex);
+}
+
+export function analysisTypedModule(ref a: Analysis): TypedModule {
+  return vec.vecGet(ref a.prog.modules, a.moduleIndex);
+}

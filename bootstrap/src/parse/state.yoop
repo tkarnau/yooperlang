@@ -31,6 +31,7 @@ export trait SelfLexing {
   function expect(ref self, tag: TokenTags): Result<Token, ParsingError>;
   function createParsingError(ref self, message: string, length: Option<usize>): ParsingError;
   function buildSourcedNode(ref self, astNodeKind: ASTNodeKind): ASTNode;
+  function buildNodeAt(ref self, astNodeKind: ASTNodeKind, tok: Token): ASTNode;
   function pushNode(ref self, node: ASTNode): NodeId;
   function buildListNode(ref self, ref ids: Vec<NodeId>, loc: SourceLocation): NodeId;
   // function
@@ -128,6 +129,27 @@ export type ParserState implements SelfLexing propagates<disposable> {
         self.currentLex.token.start,
         usize(self.currentLex.token.length)
       )
+    );
+  }
+  /*
+    The same node, located at a token the parser has ALREADY consumed.
+
+    `buildSourcedNode` reads `currentLex`, which is the token the parser is
+    about to look at. That is the right answer when a node is built BEFORE its
+    own token is taken, and one token too far RIGHT when it is built after -
+    and some constructs cannot be built before, because the token is what says
+    which node to build: a name followed by `(` is a call and the same name
+    alone is an IDENT, so the name is read first either way.
+
+    Getting that wrong is nearly invisible in a compile and loud in an editor.
+    A diagnostic lands on the token after the one that is wrong (`unknown name
+    "zzz"` under the `;`), and every editor question keyed on a cursor position
+    - what is this, where is it declared - answers about the neighbour.
+  */
+  function buildNodeAt(ref self, astNodeKind: ASTNodeKind, tok: Token): ASTNode {
+    return createASTNode(
+      astNodeKind,
+      posToSourceLocation(self.src, tok.start, usize(tok.length))
     );
   }
   // Append a fully-built node to the arena and hand back its NodeId (its index).

@@ -30,16 +30,27 @@ under `bootstrap/tests/slice/`, `examples/pass/` and `examples/fail/`, and the
 three-stage self-hosting build. An `.expected` file is written by hand from what
 the program should do, never captured from what the compiler currently prints.
 
+## Getting set up
+
+```bash
+node scripts/setup.mjs   # or: npm run setup
+```
+
+It reports what has to be installed (clang is the hard one), resolves the
+bootstrap seed, builds a development compiler out of the tree, and checks that
+binary can compile and run a program. It touches nothing outside the repo, and
+it prints the two commands for the VS Code extension, which do.
+
 ## Running the tests
 
 ```bash
-npm test          # every Node-driven suite: 460 tests, needs clang
+npm test          # every Node-driven suite: 482 tests, needs clang
 npm run test:unit # fast, no clang
 npm run test:e2e  # the suites that build and run programs, needs clang
 ```
 
 The compiler's own tests are written in Yooperlang and run by the compiler
-itself - 1390 of them, and the largest body of coverage in the tree:
+itself - 1453 of them, and the largest body of coverage in the tree:
 
 ```bash
 YOOP_STD_ROOT=$PWD/std YOOP_RUNTIME_ROOT=$PWD/runtime \

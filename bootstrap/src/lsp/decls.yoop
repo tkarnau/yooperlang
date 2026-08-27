@@ -1,0 +1,334 @@
+module lsp;
+
+/*
+  WHERE A NAME WAS DECLARED.
+
+  The one question behind go-to-definition, and half of what hover wants to
+  say. It is answered against the compiled graph, so it works across modules:
+  the name the cursor is on is resolved the way the typechecker resolved it,
+  and the declaration is then found in the module that owns it.
+
+  WHY THE DECLARATION IS FOUND BY WALKING AN AST rather than read off the
+  Symbol. A `Symbol` records what a name MEANS - a type, a function, a
+  constant - and deliberately not where it was written: it is one entry per
+  module-level name in a whole-program arena, and it is read at every call site
+  in every pass. Nothing in a compile needs the location, so nothing carries
+  it. An editor is the first caller that does, and the module it names still
+  has its AST in the graph, so the declaration is one walk of that module's top
+  level away.
+
+  The alternative - a `declLoc` on every Symbol - is a change to the layer every
+  pass reads, in exchange for a walk that costs a few hundred nodes once per
+  keypress. It is the right change if a later feature needs the location of a
+  name nobody asked about; nothing does yet.
+*/
+
+import { Vec }, * as vec from "std/core/vec.yoop";
+import * as map from "std/collections/map.yoop";
+import { Option } from "std/core/types.yoop";
+import * as str from "std/core/strings.yoop";
+import * as intr from "std/core/intrinsics.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import { AST, ASTNodeKind, NodeId, childAt, childSlots, declOf, nodeAt } from "../ast";
+import { Module, SourceFile } from "../source_graph";
+import { Symbol, Type, TypeId, TypedModule, symbolAt, typeAt } from "../typecheck";
+
+// A declaration, located. `src` rides along because a span only becomes an
+// editor range against the bytes it is an offset into, and those are the
+// DECLARING file's - which is usually not the document being asked about.
+export type DeclSite {
+  found: bool,
+  absPath: string,
+  src: uint8[],
+  pos: usize,
+  length: usize,
+  // The kind of declaration found, so hover can say what it is without
+  // resolving the name a second time.
+  kind: ASTNodeKind,
+  // The declaration's own node, and the module whose arena it is in. Both are
+  // here so that a search can CONTINUE from a declaration into its members -
+  // finding a struct is the first half of finding a field of it.
+  nodeId: NodeId,
+  moduleIndex: usize,
+}
+
+export function noDeclSite(): DeclSite {
+  return {
+    found: false, absPath: "", src: intr.stringAsBytes(""),
+    pos: 0, length: 0, kind: ASTNodeKind.PROGRAM, nodeId: 0, moduleIndex: 0,
+  };
+}
+
+/*
+  Resolve `name` as it means it INSIDE the document's module, and find it.
+
+  The two cases are the whole of module-level name resolution as pass B left
+  it: a name the module imported, which is recorded in `importedFrom` together
+  with the spelling it has where it is DEFINED (`import { tag as mathTag }`
+  binds one name here and has to find the other there), and a name the module
+  declares itself.
+*/
+export function findModuleLevelDecl(ref an: Analysis, name: string): DeclSite {
+  let tm: TypedModule = analysisTypedModule(ref an);
+  switch (map.mapGet(ref tm.importedFrom, name)) {
+    case Option.Some { value: origin }: {
+      const owner = moduleIndexById(ref an, origin.moduleId);
+      if (owner == NO_MODULE) {
+        return noDeclSite();
+      }
+      return findDeclInModule(ref an, owner, origin.exportName);
+    }
+    case Option.None: {
+      return findDeclInModule(ref an, an.moduleIndex, name);
+    }
+  }
+}
+
+/*
+  Resolve `member` as a name inside the namespace `base` names, and find it.
+
+  `import * as vec from "std/core/vec.yoop"` binds `vec` to a MODULE rather
+  than to a value, so `vec.vecNew` is two lookups and neither is a field read.
+  A namespace is the one symbol whose payload is a module index, which is what
+  makes this a lookup rather than a search.
+*/
+export function findNamespacedDecl(ref an: Analysis, base: string, member: string): DeclSite {
+  let tm: TypedModule = analysisTypedModule(ref an);
+  switch (map.mapGet(ref tm.names, base)) {
+    case Option.Some { value: symId }: {
+      switch (symbolAt(ref an.prog, symId)) {
+        case Symbol.Namespace { module: m }: {
+          return findDeclInModule(ref an, m, member);
+        }
+        default: {
+          return noDeclSite();
+        }
+      }
+    }
+    case Option.None: {
+      return noDeclSite();
+    }
+  }
+}
+
+// No module has this index: `modules` is dense from 0, so a length is the one
+// value that can never be one.
+const NO_MODULE: usize = 0 - 1;
+
+// The graph index of the module whose mangling id is `moduleId`.
+//
+// `ImportOrigin` records the id rather than the index because an id is stable
+// and an index is a position in a list the loader builds. The two are the same
+// arithmetic here only because `Program.modules` is parallel to the graph's.
+function moduleIndexById(ref an: Analysis, moduleId: string): usize {
+  let i: usize = 0;
+  while (i < an.prog.modules.len) {
+    let tm: TypedModule = vec.vecGet(ref an.prog.modules, i);
+    if (str.stringEq(tm.moduleId, moduleId)) {
+      return i;
+    }
+    i += 1;
+  }
+  return NO_MODULE;
+}
+
+/*
+  The top-level declaration of `name` in one module, over all of its files.
+
+  Every file of a directory module is searched, because the module is the
+  namespace: a name declared in `parse/expressions.yoop` is visible in
+  `parse/statements.yoop` without an import, and an editor asking about it from
+  either has to reach the same declaration.
+
+  `declOf` is what looks through the wrappers - an `export`, an
+  `@derive(display)` - so a name is found whether or not it is exported and
+  whether or not it carries an attribute.
+*/
+export function findDeclInModule(ref an: Analysis, moduleIndex: usize, name: string): DeclSite {
+  if (moduleIndex >= an.graph.modules.len || name.len == 0) {
+    return noDeclSite();
+  }
+  let mod: Module = vec.vecGet(ref an.graph.modules, moduleIndex);
+  let f: usize = 0;
+  while (f < mod.files.len) {
+    let sf: SourceFile = vec.vecGet(ref mod.files, f);
+    let site = findDeclInFile(ref mod.ast, ref sf, name);
+    if (site.found) {
+      site.moduleIndex = moduleIndex;
+      return site;
+    }
+    f += 1;
+  }
+  return noDeclSite();
+}
+
+function findDeclInFile(ref ast: AST, ref sf: SourceFile, name: string): DeclSite {
+  const program = nodeAt(ref ast, sf.root);
+  let i: usize = 0;
+  while (i < program.childCount) {
+    const entryId = declOf(ref ast, childAt(ref ast, program, i));
+    const entry = nodeAt(ref ast, entryId);
+    if (isNamedDecl(entry.kind) && str.stringEq(entry.name, name)) {
+      return {
+        found: true,
+        absPath: sf.absPath,
+        src: vec.vecAsArray(ref sf.src),
+        pos: entry.sourceLoc.pos,
+        length: entry.sourceLoc.length,
+        kind: entry.kind,
+        nodeId: entryId,
+        // Filled in by the caller, which is the one that knows the index.
+        moduleIndex: 0,
+      };
+    }
+    i += 1;
+  }
+  return noDeclSite();
+}
+
+/*
+  The top-level kinds that DECLARE a name somebody can jump to.
+
+  An IMPORT_DECL is deliberately absent even though it carries a name: jumping
+  to the import that brought a name in, rather than to the declaration it names,
+  is the answer to a question nobody asked. `importedFrom` is what makes the
+  real answer reachable, and it is consulted before this is.
+*/
+function isNamedDecl(kind: ASTNodeKind): bool {
+  return kind == ASTNodeKind.FUNCTION_DECL
+    || kind == ASTNodeKind.TYPE_DECL
+    || kind == ASTNodeKind.TRAIT_DECL
+    || kind == ASTNodeKind.VARIANT_DECL
+    || kind == ASTNodeKind.UNION_DECL
+    || kind == ASTNodeKind.ENUM_DECL
+    || kind == ASTNodeKind.VTABLE_DECL
+    || kind == ASTNodeKind.KIND_DECL
+    || kind == ASTNodeKind.LET_DECL
+    || kind == ASTNodeKind.CONST_DECL
+    || kind == ASTNodeKind.EXTERN_FUNCTION_DECL
+    || kind == ASTNodeKind.EXTERN_TYPE_DECL;
+}
+
+// ----- members of a type ---------------------------------------------------
+
+/*
+  The declaration of `member` inside the type `ownerType` names, or nothing.
+
+  What a field access resolves to: `p.x` is not a name in any scope, it is a
+  member of whatever `p` turned out to be. So it takes TWO lookups - the type,
+  which pass D already answered and put in `resolvedTypes`, and then the member
+  inside that type's declaration.
+
+  A `ref T` is opened first. A borrow is the thing it borrows at every use, and
+  a field read is one of them.
+*/
+export function findMemberDecl(ref an: Analysis, ownerType: TypeId, member: string): DeclSite {
+  const owner = openBorrowedType(ref an, ownerType);
+  const declName = nominalNameOf(ref an, owner);
+  if (declName.len == 0 || member.len == 0) {
+    return noDeclSite();
+  }
+  // The type's own declaration, found the ordinary way: by name, in the module
+  // that declares it.
+  const typeSite = findDeclInModule(ref an, nominalModuleIndexOf(ref an, owner), declName);
+  if (!typeSite.found) {
+    return noDeclSite();
+  }
+  return findMemberInDecl(ref an, ref typeSite, member);
+}
+
+// One level below a type declaration, which is where its fields, methods and
+// cases are. `childSlots` rather than the kind's own slots, because a member
+// hangs off a different slot on a struct, a trait and a variant - and a
+// NODE_LIST in between is the parser's indirection rather than a member.
+function findMemberInDecl(ref an: Analysis, ref typeSite: DeclSite, member: string): DeclSite {
+  let mod: Module = vec.vecGet(ref an.graph.modules, typeSite.moduleIndex);
+  disposable work: Vec<NodeId> = vec.vecNew(32);
+  disposable kids: Vec<NodeId> = vec.vecNew(8);
+  vec.vecPush(ref work, typeSite.nodeId);
+  let at: usize = 0;
+  while (at < work.len) {
+    const id = vec.vecGet(ref work, at);
+    at += 1;
+    const node = nodeAt(ref mod.ast, id);
+    if (isMemberDecl(node.kind) && str.stringEq(node.name, member)) {
+      let out: DeclSite = typeSite;
+      out.pos = node.sourceLoc.pos;
+      out.length = node.sourceLoc.length;
+      out.kind = node.kind;
+      out.nodeId = id;
+      return out;
+    }
+    // Only the declaration and the lists inside it are walked. Descending into
+    // a method BODY would find a local that happens to share the field's name.
+    if (id == typeSite.nodeId || node.kind == ASTNodeKind.NODE_LIST) {
+      childSlots(ref mod.ast, node, ref kids);
+      let i: usize = 0;
+      while (i < kids.len) {
+        vec.vecPush(ref work, vec.vecGet(ref kids, i));
+        i += 1;
+      }
+    }
+  }
+  return noDeclSite();
+}
+
+function isMemberDecl(kind: ASTNodeKind): bool {
+  return kind == ASTNodeKind.FIELD_DECL
+    || kind == ASTNodeKind.METHOD_DECL
+    || kind == ASTNodeKind.VARIANT_CASE
+    || kind == ASTNodeKind.ENUM_CASE;
+}
+
+// `ref T` -> `T`, once. Nothing in this language nests borrows.
+function openBorrowedType(ref an: Analysis, id: TypeId): TypeId {
+  switch (typeAt(ref an.prog, id)) {
+    case Type.Ref { inner: i }: { return i; }
+    default: { return id; }
+  }
+}
+
+// The declared NAME of a nominal type, or "" for one that has no declaration
+// to jump to - a primitive, an array, a function type.
+function nominalNameOf(ref an: Analysis, id: TypeId): string {
+  switch (typeAt(ref an.prog, id)) {
+    case Type.Struct { decl: d, fields: f, methods: mm, implementsTraits: it, generic: g }: {
+      return d.name;
+    }
+    case Type.Variant { decl: d, cases: cs, methods: mm, implementsTraits: it, generic: g }: {
+      return d.name;
+    }
+    case Type.Union { decl: d, fields: f }: { return d.name; }
+    case Type.Trait { decl: d, methods: mm, typeParams: tp, extendsTraits: et }: {
+      return d.name;
+    }
+    case Type.ValueEnum { decl: d, underlying: u, cases: cs, isOpen: o,
+                          methods: mm, implementsTraits: it }: {
+      return d.name;
+    }
+    default: { return ""; }
+  }
+}
+
+// The module a nominal type was declared in. `NominalDecl.module` is a
+// ModuleId, which is an index into `Program.modules` - and that list is
+// parallel to the graph's, so it indexes both.
+function nominalModuleIndexOf(ref an: Analysis, id: TypeId): usize {
+  switch (typeAt(ref an.prog, id)) {
+    case Type.Struct { decl: d, fields: f, methods: mm, implementsTraits: it, generic: g }: {
+      return d.module;
+    }
+    case Type.Variant { decl: d, cases: cs, methods: mm, implementsTraits: it, generic: g }: {
+      return d.module;
+    }
+    case Type.Union { decl: d, fields: f }: { return d.module; }
+    case Type.Trait { decl: d, methods: mm, typeParams: tp, extendsTraits: et }: {
+      return d.module;
+    }
+    case Type.ValueEnum { decl: d, underlying: u, cases: cs, isOpen: o,
+                          methods: mm, implementsTraits: it }: {
+      return d.module;
+    }
+    default: { return 0; }
+  }
+}

@@ -212,3 +212,52 @@ function hexNibble(b: uint8): uint32 {
   if (b >= 'A' && b <= 'F') { return uint32(b - 'A') + 10; }
   return 255;
 }
+
+/*
+  `/home/a/b c.yoop` -> `file:///home/a/b%20c.yoop`.
+
+  The inverse of `uriToPath`, and it exists for one caller: an answer that
+  points at a DIFFERENT file than the one asked about - a definition in another
+  module - has to name that file the way the protocol does.
+
+  What gets escaped is the unreserved set's complement, conservatively: a path
+  is bytes and a URI is ASCII, so anything outside `A-Za-z0-9-._~/` goes out as
+  a percent triple. That is more escaping than strictly required and no client
+  can tell the difference, while under-escaping a space or a `#` produces a URI
+  that names a different file or none.
+*/
+export function pathToUri(path: string): Text propagates<disposable> {
+  let out: Text = text.make(path.len + 16);
+  text.push(ref out, "file://");
+  const b = intr.stringAsBytes(path);
+  let i: usize = 0;
+  while (i < b.len) {
+    const c = b[i];
+    if (isUnreservedUriByte(c)) {
+      text.pushByte(ref out, c);
+    } else {
+      text.pushByte(ref out, '%');
+      text.pushByte(ref out, hexDigit(c / 16));
+      text.pushByte(ref out, hexDigit(c % 16));
+    }
+    i += 1;
+  }
+  return out;
+}
+
+// `/` is in here as well as the unreserved set: it is the one reserved
+// character a path is allowed to keep, because it is the path separator the
+// URI is being built out of.
+function isUnreservedUriByte(c: uint8): bool {
+  if (c >= 'a' && c <= 'z') { return true; }
+  if (c >= 'A' && c <= 'Z') { return true; }
+  if (c >= '0' && c <= '9') { return true; }
+  return c == '-' || c == '.' || c == '_' || c == '~' || c == '/';
+}
+
+function hexDigit(v: uint8): uint8 {
+  if (v < 10) {
+    return '0' + v;
+  }
+  return 'A' + (v - 10);
+}

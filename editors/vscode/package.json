@@ -14,7 +14,9 @@
   ],
   "activationEvents": [
     "onLanguage:yoop",
-    "onCommand:yoopiler.debugCurrentFile"
+    "onCommand:yoopiler.debugCurrentFile",
+    "onCommand:yoopiler.restartServer",
+    "onCommand:yoopiler.showLog"
   ],
   "contributes": {
     "languages": [
@@ -46,7 +48,22 @@
         "yoopiler.binaryPath": {
           "type": "string",
           "default": "",
-          "description": "Full path to a standalone yoopiler binary. Only needed when this extension is installed outside a Yooperlang repo checkout and not alongside a distribution's bin/ directory. Leave empty to auto-detect."
+          "description": "Full path to a RELEASED yoopiler binary, used for folders that are not a Yooperlang compiler checkout. Leave empty to auto-detect: a binary shipped beside this extension, then yoopiler_boot on PATH."
+        },
+        "yoopiler.devBinaryPath": {
+          "type": "string",
+          "default": "",
+          "description": "Full path to the compiler used for a Yooperlang compiler CHECKOUT. Leave empty to auto-detect: build/dev/bin/yoopiler_boot in the checkout (what `npm run setup` builds), then the bootstrap seed in .seed/."
+        },
+        "yoopiler.stdRoot": {
+          "type": "string",
+          "default": "",
+          "description": "Directory holding the standard library's core/ (YOOP_STD_ROOT). Leave empty to use this extension's own checkout when it is in one, and otherwise to let the compiler find the std packaged beside it."
+        },
+        "yoopiler.runtimeRoot": {
+          "type": "string",
+          "default": "",
+          "description": "Directory holding the C runtime sources (YOOP_RUNTIME_ROOT). Leave empty for the same defaults as yoopiler.stdRoot."
         }
       }
     },
@@ -60,7 +77,17 @@
     "commands": [
       {
         "command": "yoopiler.debugCurrentFile",
-        "title": "Yoopiler: Debug Current File",
+        "title": "Debug Current File",
+        "category": "Yoopiler"
+      },
+      {
+        "command": "yoopiler.restartServer",
+        "title": "Restart Language Server",
+        "category": "Yoopiler"
+      },
+      {
+        "command": "yoopiler.showLog",
+        "title": "Show Extension Log",
         "category": "Yoopiler"
       }
     ],

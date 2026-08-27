@@ -1,32 +1,73 @@
 # Yooperlang VS Code extension
 
-Syntax highlighting, bracket matching, and comment toggling for `.yoop` files.
+Syntax highlighting, bracket matching, comment toggling, and a language server
+for `.yoop` files.
 
 ## State of it
 
-Highlighting works, and so do DIAGNOSTICS: the extension starts
-`yoopiler_boot --lsp`, which is the compiler itself speaking the Language
-Server Protocol, so the red squiggles are the errors a build would report. It
-recompiles on open, on save, and shortly after you stop typing.
+The extension starts `yoopiler_boot --lsp`, which is the compiler itself
+speaking the Language Server Protocol. So everything below is the compiler's
+own answer rather than a second implementation that can drift from it:
 
-Nothing else is implemented, and nothing else is advertised - no hovers, no
-go-to-definition, no references, no rename, no completion. The `yoop` debug type
-is still registered but launches a program that is not in this tree, so F5
-debugging does not work today.
+- **Diagnostics.** The red squiggles are the errors and warnings a build would
+  report, on the line and column they belong to. It recompiles on open, on
+  save, and shortly after you stop typing.
+- **Hover.** The declaration under the cursor, as one line, taken from the
+  source that declares it - so a function shows the signature somebody wrote,
+  parameter names and all. A local shows its inferred type instead, and a name
+  from another file says which file it came from.
+- **Go to definition.** Across files of the same module, across modules, and
+  into std. A parameter or a local resolves inside the function it is in.
+- **Outline** (the breadcrumb bar, and Ctrl-Shift-O / Cmd-Shift-O). Every
+  declaration in the file, with a type's fields and methods under it.
 
-**It needs a compiler to point at.** Set `yoopiler.binaryPath` to a
-`yoopiler_boot` binary, or install the extension out of a release, where it
-sits beside `bin/yoopiler_boot` and finds it on its own. From a checkout:
+What you are editing is what gets checked, even unsaved and even when it is one
+file of a directory module: the buffer is handed to the compiler in place of
+that one file while its siblings are read off the disk.
 
-```sh
-YOOP_STD_ROOT=$PWD/std YOOP_RUNTIME_ROOT=$PWD/runtime \
-  $(node scripts/seed.mjs) bootstrap/src/main.yoop -o /tmp/yoopiler_boot
-```
+Nothing else is implemented, and nothing else is advertised - no references, no
+rename, no completion, no formatting. The `yoop` debug type is still registered
+but launches a program that is not in this tree, so F5 debugging does not work
+today.
 
-then set `"yoopiler.binaryPath": "/tmp/yoopiler_boot"`. Without those two
-environment variables baked in some other way, that binary reads the std and
-runtime packaged beside it rather than this tree's - which is what you want for
-a released binary and not what you want for one built from a checkout.
+## Which compiler it talks to
+
+There are two kinds of Yoop folder on a machine that has this compiler on it,
+and they want opposite things from a language server. So the extension resolves
+one per WORKSPACE FOLDER:
+
+- a Yooperlang compiler CHECKOUT gets the compiler built from that checkout,
+  reading that checkout's own `std/` and `runtime/`.
+- any OTHER Yoop project gets a released compiler, reading the std packaged
+  with it.
+
+That split is the point. Working on a compiler means breaking it, and a broken
+working tree must not break the editor for a program you are writing in the
+language. Open both in one window and two servers run, one per folder.
+
+A folder is a compiler checkout when it has `bootstrap/src/main.yoop`, `std/core`
+and `runtime/` in it, looking upwards - so opening `bootstrap/src/lsp/` still
+counts. The status bar shows which mode the file in front of you is getting, and
+clicking it opens the log, which says which binary and why.
+
+**In a checkout** it looks for, in order: `yoopiler.devBinaryPath`, then
+`build/dev/bin/yoopiler_boot` (what `npm run setup` builds), then the bootstrap
+seed under `.seed/`. The seed fallback is what gives a fresh clone a working
+server before anything is built - it answers as the previous release, and the
+log says so.
+
+**Outside one** it looks for: `yoopiler.binaryPath`, then a binary shipped
+beside this extension inside a distribution, then `yoopiler_boot` on PATH. No
+std root is forced there, because a released compiler brings its own and handing
+it another one is how it ends up compiling against a std it was never built
+against.
+
+**After rebuilding the compiler, run "Yoopiler: Restart Language Server"** from
+the command palette. A server is spawned once and held, so a fresh binary on
+disk is not picked up until it is.
+
+From a checkout, `npm run setup` at the repo root builds the compiler this
+looks for and prints the two install commands below.
 
 ## Install locally
 

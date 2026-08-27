@@ -175,6 +175,10 @@ export function parseExpression(ref ps: ParserState, minPrecedence: int): Parsin
       node = parseTemplateLiteral(ref ps)?;
     }
     case TokenTags.IDENT: {
+      // Held before the name is consumed: what this node IS depends on the
+      // token AFTER the name, so by the time that is known the name's own
+      // token is no longer what the parser is looking at. See `buildNodeAt`.
+      const nameTok = SelfLexing.peek(ref ps);
       const name = parseIdentAsName(ref ps)?;
       // handle errno stuff...
       // `unsafe_ptr.cast<T>(p)` and its three siblings. `unsafe_ptr` is a TYPE
@@ -187,11 +191,11 @@ export function parseExpression(ref ps: ParserState, minPrecedence: int): Parsin
         break;
       }
       if (SelfLexing.peek(ref ps).tag == TokenTags.LPAREN) {
-        node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.CALL_EXPRESSION);
+        node = SelfLexing.buildNodeAt(ref ps, ASTNodeKind.CALL_EXPRESSION, nameTok);
         node.name = name;
         node.childA = parseCallArgs(ref ps)?;
       } else {
-        node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.IDENT);
+        node = SelfLexing.buildNodeAt(ref ps, ASTNodeKind.IDENT, nameTok);
         node.name = name;
       }
     }
@@ -307,6 +311,9 @@ export function parseExpression(ref ps: ParserState, minPrecedence: int): Parsin
       // Whether the base is a vtable, a namespace or a struct is pass D's to
       // answer; the parser cannot tell them apart, exactly as it cannot for
       // `ns.fn()`.
+      // The member's own token, for the reason the prefix case holds one: all
+      // three shapes below are told apart by what follows the member.
+      const memberTok = SelfLexing.peek(ref ps);
       const member = parseIdentOrKeywordAsName(ref ps)?;
 
       // `ns.fn(...)` is a QUALIFIED CALL, not a field read of a function value.
@@ -315,7 +322,7 @@ export function parseExpression(ref ps: ParserState, minPrecedence: int): Parsin
       // CALL_EXPRESSION carries the member in `name` exactly like an unqualified
       // call, plus the base it was reached through in `childB`.
       if (SelfLexing.peek(ref ps).tag == TokenTags.LPAREN) {
-        let callNode = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.CALL_EXPRESSION);
+        let callNode = SelfLexing.buildNodeAt(ref ps, ASTNodeKind.CALL_EXPRESSION, memberTok);
         callNode.name = member;
         callNode.childB = baseId;
         callNode.childA = parseCallArgs(ref ps)?;
@@ -329,7 +336,7 @@ export function parseExpression(ref ps: ParserState, minPrecedence: int): Parsin
       // out once names resolve.
       if (SelfLexing.peek(ref ps).tag == TokenTags.LCURLY &&
           (!ps.inForInIterExpr || looksLikeVariantPayload(ref ps))) {
-        let ctorNode = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.VARIANT_CONSTRUCTOR);
+        let ctorNode = SelfLexing.buildNodeAt(ref ps, ASTNodeKind.VARIANT_CONSTRUCTOR, memberTok);
         ctorNode.name = member;
         ctorNode.childB = baseId;
         ctorNode.childA = parseStructLiteralFields(ref ps)?;
@@ -337,7 +344,7 @@ export function parseExpression(ref ps: ParserState, minPrecedence: int): Parsin
         continue;
       }
 
-      let fieldNode = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.FIELD_ACCESS);
+      let fieldNode = SelfLexing.buildNodeAt(ref ps, ASTNodeKind.FIELD_ACCESS, memberTok);
       fieldNode.childA = baseId;
       fieldNode.name = member;
       node = fieldNode;

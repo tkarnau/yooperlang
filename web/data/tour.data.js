@@ -84,7 +84,7 @@ window.YOOP_DATA.tour = {
    "note": "The call is `Greeter.greet(ref g)`, always. Note the fix-it below is out of date: it points at the bare `greet(ref g)` form, which is itself rejected, with a better message that names the trait for you.",
    "file": "examples/fail/traits_method_call_sugar.yoop",
    "source": "extern \"C\" from \"stdio.h\" { function printf(fmt: string, ...): int32; }\n\ntrait Disposable {\n    function dispose(ref self): void;\n}\n\ntype FileHandle implements Disposable {\n    fd: int32,\n    function dispose(ref self): void {\n        printf(`disposing fd=${self.fd}\\n`);\n    }\n}\n\nfunction main(): int32 {\n    let h: FileHandle = { fd: 7 };\n    h.dispose();\n    return 0;\n}\n\n// Fails because `h.dispose()` uses method-call syntax, which is not supported.\n// Trait methods must be called in the free-function form: `dispose(ref h)`.\n// The typechecker detects that `dispose` is a method name (not a field) and\n// produces a specific error pointing to the correct call form.\n",
-   "diagnostic": "[error] examples/fail/traits_method_call_sugar.yoop:16:6: \"h\" is a local of type FileHandle, not an imported namespace - calling a method on a value is not supported by the bootstrap typechecker yet"
+   "diagnostic": "[error] examples/fail/traits_method_call_sugar.yoop:16:5: \"h\" is a local of type FileHandle, not an imported namespace - calling a method on a value is not supported by the bootstrap typechecker yet"
   },
   {
    "id": "generic_bound_unsatisfied",
@@ -93,7 +93,7 @@ window.YOOP_DATA.tour = {
    "note": "Bounds are checked at the call, against the concrete type. Monomorphization means there is no runtime dispatch to fall back on.",
    "file": "examples/fail/generic_bound_unsatisfied.yoop",
    "source": "trait Display {\n    function show(ref self): string;\n}\n\ntype Bare {\n    n: int32,\n}\n\nfunction describe<T implements Display>(ref x: T): void {\n    let s: string = Display.show(ref x);\n}\n\nfunction main(): int32 {\n    let b: Bare = { n: 1 };\n    describe(ref b);\n    return 0;\n}\n",
-   "diagnostic": "[error] examples/fail/generic_bound_unsatisfied.yoop:15:13: call to \"describe\": \"Bare\" does not satisfy the bound \"Display\" on type parameter \"T\""
+   "diagnostic": "[error] examples/fail/generic_bound_unsatisfied.yoop:15:5: call to \"describe\": \"Bare\" does not satisfy the bound \"Display\" on type parameter \"T\""
   },
   {
    "id": "kind_requires_trait",
@@ -111,7 +111,7 @@ window.YOOP_DATA.tour = {
    "note": "`mustNotEscape scope` is a clause with real teeth: it is enforced, and it is also what lets the compiler keep the binding in a stack slot.",
    "file": "examples/fail/scoped_escape_return.yoop",
    "source": "extern \"C\" from \"stdio.h\" {\n    function printf(fmt: string, ...): int32;\n}\n\ntrait Disposable {\n    function dispose(ref self): void;\n}\n\ntype FileHandle implements Disposable {\n    fd: int32,\n    function dispose(ref self): void {\n        printf(`disposing fd=${self.fd}\\n`);\n    }\n}\n\nkind scoped {\n    appliesTo binding parameter;\n    requires Disposable;\n    ownsBlock;\n    mustCall dispose beforeScopeEnd;\n    mustNotEscape scope;\n}\n\nfunction bad(): FileHandle {\n    scoped a: FileHandle = { fd: 1 };\n    return a;\n}\n\nfunction main(): int32 {\n    return 0;\n}\n\n// Fails: binding 'a' has kind 'scoped' which forbids escape via return\n",
-   "diagnostic": "[error] examples/fail/scoped_escape_return.yoop:26:13: \"a\" is bounded by the scope that declares it (mustNotEscape scope), so it cannot be returned out of one"
+   "diagnostic": "[error] examples/fail/scoped_escape_return.yoop:26:12: \"a\" is bounded by the scope that declares it (mustNotEscape scope), so it cannot be returned out of one"
   }
  ]
 };

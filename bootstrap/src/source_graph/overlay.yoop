@@ -1,0 +1,52 @@
+module source_graph;
+
+/*
+  One file answered from memory instead of from disk.
+
+  The loader reads source through exactly one function - `readSource` in
+  load.yoop - so an overlay is one check in one place. It exists for the
+  LANGUAGE SERVER, where the file the user is looking at is a buffer the editor
+  is holding and has not written down.
+
+  WHY IT IS NOT `loadModuleGraphFromSource`. That entry seeds the whole ENTRY
+  MODULE from bytes, which is right for the generated `--test` module and right
+  for a single-file program, and wrong for one file of a DIRECTORY module: the
+  module is the compilation unit there, so seeding it from one file's bytes
+  produces a module missing every declaration its siblings make. An overlay is
+  the other shape - the module loads normally, every sibling is read off the
+  disk as usual, and the ONE path the editor is holding is answered from the
+  buffer.
+
+  ONE ENTRY, not a map. A server has one document under the cursor at a time,
+  and the other buffers the editor holds do not change what that document
+  means until they are saved. A map is a later change with no new caller
+  waiting for it.
+
+  The bytes are BORROWED. An overlay lives for exactly one graph load and the
+  buffer it points at belongs to the document store, so nothing here owns or
+  frees anything: `readSource` copies out of it, the same way it copies the
+  bytes it reads off a file.
+*/
+
+import * as str from "std/core/strings.yoop";
+import * as intr from "std/core/intrinsics.yoop";
+
+// `path` is the ABSOLUTE path the bytes stand in for. An empty path means the
+// overlay is off, which is what every caller outside the server passes.
+export type SourceOverlay {
+  path: string,
+  src: uint8[],
+}
+
+// The overlay every ordinary compile uses: none.
+export function noOverlay(): SourceOverlay {
+  return { path: "", src: intr.stringAsBytes("") };
+}
+
+// True when `absPath` is the file this overlay stands in for.
+export function overlayCovers(ref o: SourceOverlay, absPath: string): bool {
+  if (o.path.len == 0) {
+    return false;
+  }
+  return str.stringEq(o.path, absPath);
+}

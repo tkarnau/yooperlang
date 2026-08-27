@@ -173,7 +173,9 @@ export function checkHandleKindHasTask(ref cx: Cx, stmt: ASTNode, typeId: TypeId
           reportError(
             cx.prog,
             `"${stmt.name}" is ${prefix.name}, which holds a refcounted Task<T> handle, but its initializer is ${formatType(cx.prog, typeId)} - there is nothing there to hold a count`,
-            stmt.sourceLoc
+            // The PREFIX, for the reason the same refusals in check_stmt.yoop
+            // point there: the binding is fine and the kind on it is not.
+            prefix.sourceLoc
           );
           return;
         }
