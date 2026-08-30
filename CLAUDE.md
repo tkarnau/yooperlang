@@ -306,6 +306,26 @@ check on a change, and say so when you do.
   clang; it builds a compiler from the seed and then compiles and runs every
   program it shows. Run it after changing `std/`, `examples/tour/`, the fixtures
   the break-it cards name, or any heading in `web/*.html`.
+- **A release covers three platforms and CI can only build one.** Pushing a
+  `v*` tag creates the GitHub release and attaches the LINUX archive. macOS
+  and Windows have no hosted runner here, so each is built on a real machine of
+  that kind and attached to the release the tag already made:
+
+      git checkout v0.3.0
+      npm run release:platform v0.3.0            # --dry-run builds without uploading
+
+  [scripts/release_platform.mjs](scripts/release_platform.mjs) is the same
+  script on both, because everything that varies is already inside
+  `package_bootstrap.mjs`. It refuses to upload from a tree that is not the
+  tag - the archive would carry a version it was not built from - or over an
+  asset somebody may already have seeded from; `--allow-dirty` and `--clobber`
+  are the explicit overrides. It needs `gh` authenticated.
+
+  **The seed is per-platform too.** `SEED_TAG` names one release, and a machine
+  can only build if THAT release carries an archive for its platform. Adding a
+  platform therefore means publishing a seed for it before anything else on
+  that platform can build, which is why `v0.2.0` carries a `win32-x64`
+  archive it was not originally released with.
 - `npm run package:boot` - builds the three stages, refuses to package unless
   stage2 and stage3 are byte-identical, stages `bin/` beside `lib/std` and
   `lib/runtime`, and proves the layout by compiling and running hello.yoop with
