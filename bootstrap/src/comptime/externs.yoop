@@ -26,6 +26,12 @@ module comptime;
 // depend on when it was built; `yoop_errno_get` reads a thread's errno, which
 // at compile time is the compiler's own. Neither is pure, and no program in the
 // corpus folds either.
+//
+// THE ONE CARVE-OUT: plugin builtins (plugin_externs.yoop), reachable only
+// while a build runs a `--plugin` hook. They are not pure and do not have to
+// be: a hook is build TOOLING, and nothing it computes folds into the
+// artifact - so the reproducibility the purity rule protects is untouched.
+// The gate is in evalCall; the dispatch line below is all this file knows.
 
 import.unsafe;
 
@@ -69,6 +75,12 @@ export function callWhitelistedExtern(
   resultTy: TypeId,
   loc: SourceLocation
 ): Result<ValueId, ComptimeError> {
+  // Plugin builtins take the whole call: their gate already ran in evalCall,
+  // and their answers come from the bridge rather than from anything pure.
+  if (isPluginExternName(name)) {
+    return callPluginExtern(ref cx, name, ref args, resultTy, loc);
+  }
+
   // `printf` at compile time writes to the BUILD's log rather than to the
   // program's output - the program is not running, and its stdout does not
   // exist yet. Marked `[comptime]` so a line that appears during a build is not

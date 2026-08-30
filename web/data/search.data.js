@@ -3231,6 +3231,72 @@ window.YOOP_DATA.search = {
    "text": "export type Uri"
   },
   {
+   "title": "std/plugin.yoop",
+   "where": "Standard library",
+   "href": "std.html#std%2Fplugin.yoop",
+   "text": ""
+  },
+  {
+   "title": "astJson",
+   "where": "function in std/plugin.yoop",
+   "href": "std.html#std%2Fplugin.yoop",
+   "text": "export function astJson(): string"
+  },
+  {
+   "title": "buildOk",
+   "where": "function in std/plugin.yoop",
+   "href": "std.html#std%2Fplugin.yoop",
+   "text": "export function buildOk(): int32"
+  },
+  {
+   "title": "diagnosticsJson",
+   "where": "function in std/plugin.yoop",
+   "href": "std.html#std%2Fplugin.yoop",
+   "text": "export function diagnosticsJson(): string"
+  },
+  {
+   "title": "entryPath",
+   "where": "function in std/plugin.yoop",
+   "href": "std.html#std%2Fplugin.yoop",
+   "text": "export function entryPath(): string"
+  },
+  {
+   "title": "ir",
+   "where": "function in std/plugin.yoop",
+   "href": "std.html#std%2Fplugin.yoop",
+   "text": "export function ir(): string"
+  },
+  {
+   "title": "log",
+   "where": "function in std/plugin.yoop",
+   "href": "std.html#std%2Fplugin.yoop",
+   "text": "export function log(s: string): void"
+  },
+  {
+   "title": "modulesJson",
+   "where": "function in std/plugin.yoop",
+   "href": "std.html#std%2Fplugin.yoop",
+   "text": "export function modulesJson(): string"
+  },
+  {
+   "title": "outPath",
+   "where": "function in std/plugin.yoop",
+   "href": "std.html#std%2Fplugin.yoop",
+   "text": "export function outPath(): string"
+  },
+  {
+   "title": "phase",
+   "where": "function in std/plugin.yoop",
+   "href": "std.html#std%2Fplugin.yoop",
+   "text": "export function phase(): string"
+  },
+  {
+   "title": "tokens",
+   "where": "function in std/plugin.yoop",
+   "href": "std.html#std%2Fplugin.yoop",
+   "text": "export function tokens(): string"
+  },
+  {
    "title": "std/runtime.yoop",
    "where": "Standard library",
    "href": "std.html#std%2Fruntime.yoop",

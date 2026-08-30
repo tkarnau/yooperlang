@@ -1,0 +1,42 @@
+// A deliberately bad-mannered program, written for the vizworld memory
+// lesson: run it through the visualizer and every mistake below burns,
+// floats or underlines itself in the world.
+//
+//     npm run viz:build
+//     yoopiler_boot examples/playground/leaky_demo.yoop -o /tmp/leaky \
+//       --plugin tools/vizworld/plugin.yoop
+//
+// The mistakes, on purpose (see docs/writing_yoop.md section 3.1):
+//   - template literals and stringConcat calls build raw malloc'd strings
+//     the allocator context never sees; the ones INSIDE the loop leak per
+//     iteration (red halos), the loose ones are one-shot mallocs (amber)
+//   - the Vec below is never disposed, so its cleanup obligation is
+//     unhandled - the violet sigil at its line
+
+import { Vec }, * as vec from "std/core/vec.yoop";
+import * as str from "std/core/strings.yoop";
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+function main(): int32 {
+  // One-shot heap smells: a cost, not yet a leak machine.
+  const banner = `leaky demo, ${3 + 4} sins\n`;
+  printf(banner);
+
+  // The leak machine: every round through this loop mallocs twice and
+  // frees nothing.
+  let i: int32 = 0;
+  while (i < 5) {
+    const wasted = str.stringConcat("round ", "again");
+    printf(`round ${i}: ${wasted}\n`);
+    i += 1;
+  }
+
+  // An unhandled disposable: the Vec's cleanup obligation lands nowhere.
+  let leaked: Vec<int32> = vec.vecNew(4);
+  vec.vecPush(ref leaked, 42);
+  printf(`kept ${vec.vecGet(ref leaked, 0)}\n`);
+  return 0;
+}

@@ -1,0 +1,183 @@
+// std/plugin.yoop - the compiler plugin API, for hooks a build runs under
+// --plugin. Interpret-only.
+//
+// A build run as `yoopiler_boot <entry> --plugin <plugin.yoop>` loads the
+// plugin as its own module graph and runs its hook functions on the comptime
+// evaluator at the build's phase boundaries. This module is how a hook reads
+// the build: import it namespaced -
+//
+//     import * as plug from "std/plugin.yoop";
+//
+//     export function onCodegen(): int32 {
+//       plug.log(`ir is ${plug.ir().len} bytes`);
+//       return 0;
+//     }
+//
+// The externs below are not C symbols. Each is answered by the compiler
+// itself, from the artifact snapshots it refreshes before firing a hook - so
+// a program that imports this module COMPILES but does not LINK (undefined
+// `yoop_plugin_*`), and outside a `--plugin` hook the evaluator refuses every
+// one of them by name. Both are deliberate: the module has exactly one home,
+// which is a hook's frame.
+//
+// The hooks a plugin may export, all optional:
+//
+//     onStart(entry: string, out: string): int32   before the graph loads
+//     onParse(): int32                             graph loaded and parsed
+//     onTypecheck(): int32                         typechecked, diagnostics ok
+//     onCodegen(): int32                           IR emitted, not yet linked
+//     onLink(): int32                              executable produced
+//     onFinish(ok: int32): void                    always, success or not
+//
+// Returning nonzero from a hook STOPS the build with that exit code. A hook
+// blocks the build for as long as it runs - which is the point: a plugin may
+// hold the pipeline at a boundary for as long as it has something to show.
+//
+// A hook runs on the comptime evaluator and is bound by its subset: strings,
+// ints, structs, arrays, variants, control flow, template literals, calls
+// into modules imported as namespaces. No Vec, no Text, no closures, no
+// pointers, no async. Anything outside the subset is refused by name with a
+// location in the plugin's own source.
+
+extern "C" from "stdio.h" {
+  function printf(fmt: string, ...): int32;
+}
+
+extern "C" from "yoop_plugin" {
+  function yoop_plugin_phase(): string;
+  function yoop_plugin_entry_path(): string;
+  function yoop_plugin_out_path(): string;
+  function yoop_plugin_tokens(): string;
+  function yoop_plugin_ast_json(): string;
+  function yoop_plugin_modules_json(): string;
+  function yoop_plugin_diagnostics_json(): string;
+  function yoop_plugin_ir(): string;
+  function yoop_plugin_build_ok(): int32;
+  function yoop_plugin_spawn(cmdline: string): int32;
+  function yoop_plugin_send_line(line: string): int32;
+  function yoop_plugin_send_artifact(kind: string): int32;
+  function yoop_plugin_recv_line(): string;
+  function yoop_plugin_child_alive(): int32;
+  function yoop_plugin_kill_child(): int32;
+  function yoop_plugin_sleep_ms(ms: int32): int32;
+}
+
+// Which boundary the current hook was fired at: "start", "parse",
+// "typecheck", "codegen", "link" or "finish".
+export function phase(): string {
+  return yoop_plugin_phase();
+}
+
+// The entry file the build was asked to compile, as it was written on the
+// command line.
+export function entryPath(): string {
+  return yoop_plugin_entry_path();
+}
+
+// Where the executable goes (`-o`, or the default).
+export function outPath(): string {
+  return yoop_plugin_out_path();
+}
+
+// The entry FILE's token stream, one token per line: `TAG <start> <length>`
+// plus a value for the literal tags - the dump_tokens format. "" before
+// onParse.
+export function tokens(): string {
+  return yoop_plugin_tokens();
+}
+
+// The entry FILE's parse tree as JSON, the --dump-ast-json payload:
+// {"filename":..., "source":..., "ast":...}. "" before onParse.
+export function astJson(): string {
+  return yoop_plugin_ast_json();
+}
+
+// The whole graph's module map: {"nodes":[{id,name,files,loc,entry}],
+// "edges":[{from,to}]}, one edge per import site. "" before onParse.
+export function modulesJson(): string {
+  return yoop_plugin_modules_json();
+}
+
+// Every diagnostic the build reported, as a JSON array of
+// {file,line,col,severity,code,message} - `code` names the warning class
+// ("unhandled-disposable"), "" for errors and plain warnings. The list is
+// UNFILTERED: it carries what the typechecker recorded, including the
+// warning classes the driver's own report hides without --warn-disposable
+// or --warn-std. Refreshed before the build decides
+// whether to stop on them, so a failing build's onFinish still sees why.
+// "" before onTypecheck.
+export function diagnosticsJson(): string {
+  return yoop_plugin_diagnostics_json();
+}
+
+// The emitted LLVM IR, whole. "" before onCodegen.
+export function ir(): string {
+  return yoop_plugin_ir();
+}
+
+// 1 when the build succeeded. Meaningful at onFinish; 0 before.
+export function buildOk(): int32 {
+  return yoop_plugin_build_ok();
+}
+
+// Say something in the build's log. Comptime printf takes one
+// already-formatted string and tags the line `[comptime]`, which keeps a
+// plugin's chatter apart from the compiler's own notes - and off the
+// program's stdout, which does not exist yet.
+export function log(s: string): void {
+  const ignored = printf(s);
+}
+
+/*
+  The plugin's one CHILD PROCESS: spawned with a shell command line, spoken
+  to over its stdin and stdout, one LINE per message each way. This is how a
+  plugin drives a tool that outlives any single hook - the handle lives on
+  the build's bridge, so a renderer spawned at onStart is still there at
+  onLink.
+
+  `recvLine` BLOCKS the build until the child answers. That is the point:
+  a plugin holds the pipeline at a phase boundary by waiting on it. An empty
+  line back means the child is gone; treat it as "stop waiting".
+*/
+
+// Start the child. 0 on success, -1 when it could not be spawned or one is
+// already held (kill it first; a plugin gets one).
+export function spawn(cmdline: string): int32 {
+  return yoop_plugin_spawn(cmdline);
+}
+
+// One line to the child's stdin, newline appended. 0, or -1 with no child
+// or a broken pipe - a dead renderer reads as failure, not as build death.
+export function sendLine(line: string): int32 {
+  return yoop_plugin_send_line(line);
+}
+
+// One whole artifact to the child, framed by the COMPILER: a `blob <kind>
+// <bytes>` header line, the payload verbatim (newlines and all), a closing
+// newline. `kind` is tokens, ast, modules, diagnostics or ir. This exists
+// because a hook has no string library to frame anything with itself.
+export function sendArtifact(kind: string): int32 {
+  return yoop_plugin_send_artifact(kind);
+}
+
+// One line from the child's stdout, without its newline, BLOCKING until it
+// arrives. "" when the child is gone or was never spawned.
+export function recvLine(): string {
+  return yoop_plugin_recv_line();
+}
+
+// 1 while the child runs, 0 once it exited (or never existed).
+export function childAlive(): int32 {
+  return yoop_plugin_child_alive();
+}
+
+// Stop the child: SIGTERM, a short grace, then SIGKILL. Releases the
+// handle, so a plugin may spawn again after.
+export function killChild(): int32 {
+  return yoop_plugin_kill_child();
+}
+
+// Hold the build here for `ms` milliseconds. The enforced-slowness knob.
+export function sleepMs(ms: int32): int32 {
+  return yoop_plugin_sleep_ms(ms);
+}

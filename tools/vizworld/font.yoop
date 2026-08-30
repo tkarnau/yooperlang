@@ -1,0 +1,163 @@
+// A 5x7 dot-matrix font: seven rows per glyph, the low five bits of each row
+// one dot each, bit 4 the LEFTMOST column, row 0 the TOP. Pure data plus
+// lookups - the draw side turns set bits into points, so everything about
+// what a label says is testable without a window.
+//
+// Uppercase, digits, and the handful of punctuation the world's labels use.
+// Lowercase input is folded to uppercase; anything unknown renders as the
+// empty glyph rather than a box of noise.
+
+import * as intr from "std/core/intrinsics.yoop";
+
+let ROWS_NONE: uint8[] = [0, 0, 0, 0, 0, 0, 0];
+
+let ROWS_A: uint8[] = [0x0E, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11];
+let ROWS_B: uint8[] = [0x1E, 0x11, 0x11, 0x1E, 0x11, 0x11, 0x1E];
+let ROWS_C: uint8[] = [0x0E, 0x11, 0x10, 0x10, 0x10, 0x11, 0x0E];
+let ROWS_D: uint8[] = [0x1C, 0x12, 0x11, 0x11, 0x11, 0x12, 0x1C];
+let ROWS_E: uint8[] = [0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x1F];
+let ROWS_F: uint8[] = [0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x10];
+let ROWS_G: uint8[] = [0x0E, 0x11, 0x10, 0x17, 0x11, 0x11, 0x0F];
+let ROWS_H: uint8[] = [0x11, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11];
+let ROWS_I: uint8[] = [0x0E, 0x04, 0x04, 0x04, 0x04, 0x04, 0x0E];
+let ROWS_J: uint8[] = [0x07, 0x02, 0x02, 0x02, 0x02, 0x12, 0x0C];
+let ROWS_K: uint8[] = [0x11, 0x12, 0x14, 0x18, 0x14, 0x12, 0x11];
+let ROWS_L: uint8[] = [0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x1F];
+let ROWS_M: uint8[] = [0x11, 0x1B, 0x15, 0x15, 0x11, 0x11, 0x11];
+let ROWS_N: uint8[] = [0x11, 0x19, 0x15, 0x13, 0x11, 0x11, 0x11];
+let ROWS_O: uint8[] = [0x0E, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E];
+let ROWS_P: uint8[] = [0x1E, 0x11, 0x11, 0x1E, 0x10, 0x10, 0x10];
+let ROWS_Q: uint8[] = [0x0E, 0x11, 0x11, 0x11, 0x15, 0x12, 0x0D];
+let ROWS_R: uint8[] = [0x1E, 0x11, 0x11, 0x1E, 0x14, 0x12, 0x11];
+let ROWS_S: uint8[] = [0x0F, 0x10, 0x10, 0x0E, 0x01, 0x01, 0x1E];
+let ROWS_T: uint8[] = [0x1F, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04];
+let ROWS_U: uint8[] = [0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E];
+let ROWS_V: uint8[] = [0x11, 0x11, 0x11, 0x11, 0x11, 0x0A, 0x04];
+let ROWS_W: uint8[] = [0x11, 0x11, 0x11, 0x15, 0x15, 0x1B, 0x11];
+let ROWS_X: uint8[] = [0x11, 0x11, 0x0A, 0x04, 0x0A, 0x11, 0x11];
+let ROWS_Y: uint8[] = [0x11, 0x11, 0x0A, 0x04, 0x04, 0x04, 0x04];
+let ROWS_Z: uint8[] = [0x1F, 0x01, 0x02, 0x04, 0x08, 0x10, 0x1F];
+
+let ROWS_0: uint8[] = [0x0E, 0x11, 0x13, 0x15, 0x19, 0x11, 0x0E];
+let ROWS_1: uint8[] = [0x04, 0x0C, 0x04, 0x04, 0x04, 0x04, 0x0E];
+let ROWS_2: uint8[] = [0x0E, 0x11, 0x01, 0x02, 0x04, 0x08, 0x1F];
+let ROWS_3: uint8[] = [0x1F, 0x02, 0x04, 0x02, 0x01, 0x11, 0x0E];
+let ROWS_4: uint8[] = [0x02, 0x06, 0x0A, 0x12, 0x1F, 0x02, 0x02];
+let ROWS_5: uint8[] = [0x1F, 0x10, 0x1E, 0x01, 0x01, 0x11, 0x0E];
+let ROWS_6: uint8[] = [0x06, 0x08, 0x10, 0x1E, 0x11, 0x11, 0x0E];
+let ROWS_7: uint8[] = [0x1F, 0x01, 0x02, 0x04, 0x08, 0x08, 0x08];
+let ROWS_8: uint8[] = [0x0E, 0x11, 0x11, 0x0E, 0x11, 0x11, 0x0E];
+let ROWS_9: uint8[] = [0x0E, 0x11, 0x11, 0x0F, 0x01, 0x02, 0x0C];
+
+let ROWS_DOT: uint8[] = [0x00, 0x00, 0x00, 0x00, 0x00, 0x0C, 0x0C];
+let ROWS_COLON: uint8[] = [0x00, 0x0C, 0x0C, 0x00, 0x0C, 0x0C, 0x00];
+let ROWS_DASH: uint8[] = [0x00, 0x00, 0x00, 0x1F, 0x00, 0x00, 0x00];
+let ROWS_SLASH: uint8[] = [0x01, 0x01, 0x02, 0x04, 0x08, 0x10, 0x10];
+let ROWS_UNDER: uint8[] = [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x1F];
+let ROWS_EQ: uint8[] = [0x00, 0x00, 0x1F, 0x00, 0x1F, 0x00, 0x00];
+let ROWS_GT: uint8[] = [0x08, 0x04, 0x02, 0x01, 0x02, 0x04, 0x08];
+let ROWS_LT: uint8[] = [0x02, 0x04, 0x08, 0x10, 0x08, 0x04, 0x02];
+
+export const GLYPH_ROWS: usize = 7;
+export const GLYPH_COLS: usize = 5;
+
+// The rows of a character's glyph, top first. ASCII letters fold to
+// uppercase; space and anything unmapped are the empty glyph.
+export function glyphRows(c: uint8): uint8[] {
+  let ch = c;
+  if (ch >= 97 && ch <= 122) {
+    ch = ch - 32;
+  }
+  if (ch >= 65 && ch <= 90) {
+    return letterRows(ch);
+  }
+  if (ch >= 48 && ch <= 57) {
+    return digitRows(ch);
+  }
+  if (ch == 46) { return ROWS_DOT; }
+  if (ch == 58) { return ROWS_COLON; }
+  if (ch == 45) { return ROWS_DASH; }
+  if (ch == 47) { return ROWS_SLASH; }
+  if (ch == 95) { return ROWS_UNDER; }
+  if (ch == 61) { return ROWS_EQ; }
+  if (ch == 62) { return ROWS_GT; }
+  if (ch == 60) { return ROWS_LT; }
+  return ROWS_NONE;
+}
+
+function letterRows(ch: uint8): uint8[] {
+  if (ch == 65) { return ROWS_A; }
+  if (ch == 66) { return ROWS_B; }
+  if (ch == 67) { return ROWS_C; }
+  if (ch == 68) { return ROWS_D; }
+  if (ch == 69) { return ROWS_E; }
+  if (ch == 70) { return ROWS_F; }
+  if (ch == 71) { return ROWS_G; }
+  if (ch == 72) { return ROWS_H; }
+  if (ch == 73) { return ROWS_I; }
+  if (ch == 74) { return ROWS_J; }
+  if (ch == 75) { return ROWS_K; }
+  if (ch == 76) { return ROWS_L; }
+  if (ch == 77) { return ROWS_M; }
+  if (ch == 78) { return ROWS_N; }
+  if (ch == 79) { return ROWS_O; }
+  if (ch == 80) { return ROWS_P; }
+  if (ch == 81) { return ROWS_Q; }
+  if (ch == 82) { return ROWS_R; }
+  if (ch == 83) { return ROWS_S; }
+  if (ch == 84) { return ROWS_T; }
+  if (ch == 85) { return ROWS_U; }
+  if (ch == 86) { return ROWS_V; }
+  if (ch == 87) { return ROWS_W; }
+  if (ch == 88) { return ROWS_X; }
+  if (ch == 89) { return ROWS_Y; }
+  return ROWS_Z;
+}
+
+function digitRows(ch: uint8): uint8[] {
+  if (ch == 48) { return ROWS_0; }
+  if (ch == 49) { return ROWS_1; }
+  if (ch == 50) { return ROWS_2; }
+  if (ch == 51) { return ROWS_3; }
+  if (ch == 52) { return ROWS_4; }
+  if (ch == 53) { return ROWS_5; }
+  if (ch == 54) { return ROWS_6; }
+  if (ch == 55) { return ROWS_7; }
+  if (ch == 56) { return ROWS_8; }
+  return ROWS_9;
+}
+
+// Is the dot at (col, row) of `c` set? Row 0 top, col 0 LEFT.
+export function glyphDot(c: uint8, col: usize, row: usize): bool {
+  if (col >= GLYPH_COLS || row >= GLYPH_ROWS) {
+    return false;
+  }
+  const rows = glyphRows(c);
+  return ((rows[row] >> uint8(GLYPH_COLS - 1 - col)) & 1) == 1;
+}
+
+// How many dots a whole string lights - what a test pins for a known word,
+// and what a draw budget can be estimated from.
+export function textDots(s: string): usize {
+  const bytes: uint8[] = stringBytes(s);
+  let dots: usize = 0;
+  let i: usize = 0;
+  while (i < bytes.len) {
+    const rows = glyphRows(bytes[i]);
+    let r: usize = 0;
+    while (r < GLYPH_ROWS) {
+      let bits = rows[r];
+      while (bits > 0) {
+        dots += usize(bits & 1);
+        bits = bits >> 1;
+      }
+      r += 1;
+    }
+    i += 1;
+  }
+  return dots;
+}
+
+function stringBytes(s: string): uint8[] {
+  return intr.stringAsBytes(s);
+}

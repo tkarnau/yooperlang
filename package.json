@@ -38,6 +38,9 @@
     "package:boot": "node scripts/package_bootstrap.mjs",
     "gen:index": "node scripts/gen_std_index.mjs",
     "gen:web": "node scripts/gen_web.mjs",
-    "release:platform": "node scripts/release_platform.mjs"
+    "release:platform": "node scripts/release_platform.mjs",
+    "visualize": "node tools/visualizer/visualize.mjs",
+    "viz:build": "node tools/vizworld/build.mjs",
+    "viz:test": "node tools/vizworld/build.mjs --test"
   }
 }

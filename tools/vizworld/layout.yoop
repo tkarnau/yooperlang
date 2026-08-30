@@ -1,0 +1,192 @@
+// Where everything stands: the road, the districts along it, and the
+// per-item positions inside each. Pure functions from indices and counts to
+// coordinates, so the world's shape is testable as arithmetic - the draw
+// side only ever asks "where is item i of n".
+//
+// The road runs along -z from the origin. One unit is roughly a stride; the
+// camera starts a few units up looking down the road.
+
+extern "C" from library "m" {
+  function sin(x: float64): float64;
+  function cos(x: float64): float64;
+}
+
+const PI: float64 = 3.14159265358979;
+
+// District anchors: the z each stands at, in walking order.
+export const Z_GATEHOUSE: float32 = 0.0;
+export const Z_TOKENS: float32 = 0.0 - 30.0;
+export const Z_AST: float32 = 0.0 - 75.0;
+export const Z_MODULES: float32 = 0.0 - 120.0;
+export const Z_DIAGNOSTICS: float32 = 0.0 - 160.0;
+export const Z_IR: float32 = 0.0 - 200.0;
+export const Z_FORGE: float32 = 0.0 - 245.0;
+
+export const ROAD_HALF_WIDTH: float32 = 3.0;
+
+export type Vec3 {
+  x: float32,
+  y: float32,
+  z: float32,
+}
+
+/*
+  The source wall: the entry file as a monument beside the road's start,
+  standing at x = WALL_X facing the road, its text running toward -z (which
+  is a reader's left-to-right when facing the wall) and its LAST line near
+  the ground - a short file sits low, a long one towers.
+
+  The mapping is invertible on purpose: wallCellPos places a character and
+  wallHit takes a ray's intersection point back to (line, col), which is
+  what turns "the player is looking at that character" into a byte offset
+  the artifacts can be searched by.
+*/
+export const WALL_X: float32 = 0.0 - 11.0;
+export const WALL_Z0: float32 = 6.0;
+export const WALL_CELL_W: float32 = 0.3;
+export const WALL_CELL_H: float32 = 0.44;
+export const WALL_MAX_LINES: usize = 60;
+export const WALL_MAX_COLS: usize = 96;
+
+export function wallCellPos(line: usize, col: usize, lineCount: usize): Vec3 {
+  return {
+    x: WALL_X,
+    y: 1.2 + float32(lineCount - line) * WALL_CELL_H,
+    z: WALL_Z0 - float32(col) * WALL_CELL_W,
+  };
+}
+
+// The cell under a point on the wall's plane, or false when the point is
+// off the text. The half-cell nudges center the test on the glyph rather
+// than its bottom-left corner.
+export function wallHit(y: float32, z: float32, lineCount: usize, ref line: usize, ref col: usize): bool {
+  // The line axis is nudged half a cell because a glyph is drawn UPWARD
+  // from its cell's base y; the column axis needs no nudge because a glyph
+  // advances INTO its own cell along -z.
+  const lineF = float32(lineCount) - (y - 1.2 - WALL_CELL_H * 0.5) / WALL_CELL_H;
+  const colF = (WALL_Z0 - z) / WALL_CELL_W;
+  if (lineF < 0.0 || colF < 0.0) {
+    return false;
+  }
+  const l = usize(lineF);
+  const c = usize(colF);
+  if (l >= lineCount || c >= WALL_MAX_COLS) {
+    return false;
+  }
+  line = l;
+  col = c;
+  return true;
+}
+
+// The token conveyor: a serpentine ribbon beside the road, TOKENS_PER_ROW
+// blocks to a row, alternating direction so the stream reads as one path.
+export const TOKENS_PER_ROW: usize = 48;
+
+export function tokenPos(i: usize): Vec3 {
+  const row = i / TOKENS_PER_ROW;
+  let col = i % TOKENS_PER_ROW;
+  if (row % 2 == 1) {
+    col = TOKENS_PER_ROW - 1 - col;
+  }
+  return {
+    x: 6.0 + float32(col) * 0.7,
+    y: 0.6,
+    z: Z_TOKENS - float32(row) * 1.4,
+  };
+}
+
+// The AST grove: a canopy over the road's left side. Depth is height; the
+// nodes of one depth share a ring, spread evenly. `slot` is the node's index
+// among its depth's `slots` nodes.
+export function astPos(depth: usize, slot: usize, slots: usize): Vec3 {
+  const r = 2.0 + float64(depth) * 1.6;
+  let angle = 0.0;
+  if (slots > 0) {
+    angle = (float64(slot) + 0.5) / float64(slots) * 2.0 * PI;
+  }
+  return {
+    x: 0.0 - 14.0 + float32(cos(angle) * r),
+    y: 1.0 + float32(depth) * 1.7,
+    z: Z_AST + float32(sin(angle) * r),
+  };
+}
+
+// The module archipelago: islands on a ring around the entry's island,
+// which floats at the center, nearer the ground.
+export function islandPos(i: usize, count: usize, isEntry: bool): Vec3 {
+  if (isEntry) {
+    return { x: 14.0, y: 3.0, z: Z_MODULES };
+  }
+  let angle = 0.0;
+  if (count > 0) {
+    angle = float64(i) / float64(count) * 2.0 * PI;
+  }
+  return {
+    x: 14.0 + float32(cos(angle) * 11.0),
+    y: 5.0 + float32(sin(angle * 3.0)) * 1.2,
+    z: Z_MODULES + float32(sin(angle) * 11.0),
+  };
+}
+
+// An island's radius grows with its line count, gently - log-ish via sqrt
+// so std/core/strings does not dwarf the map.
+export function islandRadius(loc: usize): float32 {
+  // Counted in steps rather than accumulated in float32: eight additions of
+  // 0.3 land just under or just over 3.0 depending on rounding, and "just
+  // under" is one extra doubling through the cap.
+  let steps: usize = 0;
+  let remaining = loc;
+  while (remaining >= 64 && steps < 8) {
+    steps += 1;
+    remaining = remaining / 2;
+  }
+  return 0.6 + float32(steps) * 0.3;
+}
+
+// The IR hall: functions in a grid of platforms right of the road, each
+// block of a function a tower on its platform.
+export const IR_FUNCS_PER_ROW: usize = 8;
+
+export function irFunctionPos(f: usize): Vec3 {
+  const row = f / IR_FUNCS_PER_ROW;
+  const col = f % IR_FUNCS_PER_ROW;
+  return {
+    x: 7.0 + float32(col) * 6.0,
+    y: 0.0,
+    z: Z_IR - float32(row) * 6.0,
+  };
+}
+
+export function irBlockPos(funcPos: Vec3, b: usize): Vec3 {
+  const row = b / 4;
+  const col = b % 4;
+  return {
+    x: funcPos.x - 1.8 + float32(col) * 1.2,
+    y: 0.0,
+    z: funcPos.z - float32(row) * 1.2,
+  };
+}
+
+// A block tower's height from its instruction count: every instruction is a
+// visible slab, capped so one giant block cannot pierce the sky.
+export function irTowerHeight(instructions: usize): float32 {
+  let n = instructions;
+  if (n > 120) {
+    n = 120;
+  }
+  return 0.3 + float32(n) * 0.12;
+}
+
+// How many items of `total` a district shows when its reveal has been
+// running for `elapsed` seconds at `perSecond` - the enforced-slowness
+// curve, one place, so pause and speed act on every district alike.
+export function revealedCount(elapsed: float32, perSecond: float32, total: usize): usize {
+  if (elapsed <= 0.0) {
+    return 0;
+  }
+  const shown = usize(elapsed * perSecond);
+  if (shown > total) {
+    return total;
+  }
+  return shown;
+}

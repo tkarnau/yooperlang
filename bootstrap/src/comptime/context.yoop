@@ -121,4 +121,8 @@ export type EvalCx {
   // type rather than just the value it was handed.
   fnRet: TypeId,
   depth: usize,
+  // The build's plugin bridge - see plugin_bridge.yoop. Inactive for every
+  // ordinary fold; the plugin host is the only thing that passes an active
+  // one, and `active` is what opens the plugin extern surface.
+  plugin: ref PluginBridge,
 }

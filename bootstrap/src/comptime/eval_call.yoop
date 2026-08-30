@@ -42,11 +42,21 @@ export function evalCall(ref cx: EvalCx, expr: ASTNode, exprId: NodeId): Result<
     return callFunction(ref cx, declId, expr, exprId);
   }
 
-  // An EXTERN has no body to walk, so it is either on the pure list or it is
-  // refused. The list is checked BEFORE the arguments are evaluated: the
-  // arguments to a call that cannot happen should not happen either.
+  // An EXTERN has no body to walk, so it is either on the pure list, a plugin
+  // builtin under an ACTIVE plugin, or it is refused. The lists are checked
+  // BEFORE the arguments are evaluated: the arguments to a call that cannot
+  // happen should not happen either.
   if (isExternHere(ref cx, expr.name) && isWhitelistedExtern(expr.name)) {
     return callExtern(ref cx, expr, exprId);
+  }
+  if (isExternHere(ref cx, expr.name) && isPluginExternName(expr.name)) {
+    if (cx.plugin.active) {
+      return callExtern(ref cx, expr, exprId);
+    }
+    return Result.Err { error: comptimeError(
+      `"${expr.name}" is a plugin builtin, and those exist only inside a hook a build runs with --plugin`,
+      expr.sourceLoc
+    )};
   }
   if (isExternHere(ref cx, expr.name)) {
     return Result.Err { error: comptimeError(
@@ -202,6 +212,7 @@ export function runFrame(
     prog: cx.prog, tm: ref tm, mod: ref m, ast: ref m.ast, graph: cx.graph,
     va: cx.va, scope: ref calleeScope, folded: cx.folded,
     fnRet: retTy, depth: cx.depth + 1,
+    plugin: cx.plugin,
   };
 
   disposable paramIds: Vec<NodeId> = paramNodeIdsIn(ref m.ast, decl);

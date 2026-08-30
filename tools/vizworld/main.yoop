@@ -1,0 +1,593 @@
+/*
+  The vizworld renderer: a native window onto a compilation in progress.
+
+  It is spawned BY the visualizer plugin (`--plugin tools/vizworld/
+  plugin.yoop`), speaks the line protocol on stdin/stdout - which is why
+  nothing here may ever print to stdout except wire.yoop - and holds the
+  BUILD hostage at each phase gate until the player waves it on. The build
+  is the game; the compiler is the one waiting on the loading screen.
+
+  Controls: WASD flies, mouse looks, SPACE rises, C sinks, LSHIFT sprints.
+  Click pins the pick under the crosshair so its arcs survive a walk; a
+  click on nothing releases it. P pauses every materialization, X nudges
+  them one step, MINUS and EQUALS change speed. G (or ENTER) opens the
+  pending gate and lets the build continue. ESCAPE or Q leaves - which
+  aborts a build still waiting.
+
+  Build and run:
+
+      npm run viz:build
+      yoopiler_boot file.yoop -o out --plugin tools/vizworld/plugin.yoop
+*/
+
+import { Disposable, disposable } from "std/core/kinds.yoop";
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { Text }, * as text from "std/core/text.yoop";
+import * as intr from "std/core/intrinsics.yoop";
+import * as log from "std/log.yoop";
+import * as sdl from "./sdl.yoop";
+import { Key, MOUSE_LEFT } from "./sdl.yoop";
+import { PROJECTION, MODELVIEW, DEPTH_TEST, BLEND }, * as gl from "./gl.yoop";
+import * as camera from "./camera.yoop";
+import { Camera } from "./camera.yoop";
+import * as wire from "./wire.yoop";
+import { Wire } from "./wire.yoop";
+import * as proto from "./protocol.yoop";
+import { Control, ControlKind, Phase, Artifact } from "./protocol.yoop";
+import * as scene from "./scene.yoop";
+import { Scene } from "./scene.yoop";
+import * as draw from "./draw.yoop";
+import * as shade from "./shade.yoop";
+import * as editor from "./editor.yoop";
+import { Shade } from "./shade.yoop";
+import { Pick, PickKind } from "./draw.yoop";
+import { WALL_X, WALL_MAX_LINES } from "./layout.yoop";
+import * as layout from "./layout.yoop";
+
+// The window's STARTING size; the compositor owns it from there (the
+// window is resizable, F11 toggles desktop fullscreen), and the frame loop
+// re-reads the drawable size every frame.
+const START_WIDTH: int32 = 1600;
+const START_HEIGHT: int32 = 900;
+
+function main(): int32 {
+  if (sdl.init() != 0) {
+    log.error(`vizworld: SDL init failed: ${sdl.lastError()}`);
+    return 1;
+  }
+  // NOT scope-disposables: their cleanup order against SDL_Quit is the
+  // whole point. A scope disposable runs AFTER the return, which put
+  // SDL_Quit FIRST - and SDL_Quit with a live window disconnects the
+  // Wayland display under it, which sdl2-compat answers with a segfault
+  // on every clean exit. Torn down by hand, in SDL's documented order:
+  // context, window, quit.
+  let win: sdl.Window = sdl.createWindow("yoop vizworld", START_WIDTH, START_HEIGHT);
+  let ctx: sdl.GlContext = sdl.createGlContext(ref win);
+  // A driver with no GL (SDL_VIDEODRIVER=dummy, a headless CI box) hands
+  // back a null context; refusing here beats faulting on the first glClear.
+  if (ctx.handle == null) {
+    log.error(`vizworld: no GL context: ${sdl.lastError()}`);
+    Disposable.dispose(ref win);
+    sdl.quit();
+    return 1;
+  }
+  sdl.setVsync(true);
+  sdl.setRelativeMouse(true);
+
+  let winW: int32 = 0;
+  let winH: int32 = 0;
+  sdl.drawableSize(ref win, ref winW, ref winH);
+  applyViewport(winW, winH);
+  gl.enable(DEPTH_TEST);
+  gl.enable(BLEND);
+  gl.blendAlpha();
+
+  // The dusk program restyles the whole world pass; a driver that cannot
+  // compile it logs why and the world draws plain.
+  let worldShade: Shade = shade.shadeInit();
+
+  disposable w: Wire = wire.wireOpen();
+  disposable world: Scene = scene.sceneNew();
+  disposable blob: Vec<uint8> = vec.vecNew(65536);
+  disposable line: Text = text.make(256);
+  disposable scratch: Text = text.make(64);
+  let cam: Camera = camera.cameraStart();
+
+  // The blob state machine: a header names the next artifact and how many
+  // raw bytes follow it; between headers the stream is one control line at
+  // a time.
+  let awaitingBlob = false;
+  let blobKind: Artifact = Artifact.NONE;
+  let blobSize: usize = 0;
+  // After a `file` line, the next two blobs belong to the STORE - the
+  // browsable closure - rather than to the live scene.
+  let storeBlobs: usize = 0;
+
+  // Edge detection for the toggle keys, so one press is one action.
+  let heldContinue = false;
+  let heldPause = false;
+  let heldStep = false;
+  let heldMinus = false;
+  let heldEquals = false;
+  let heldClick = false;
+  let heldOpen = false;
+  let heldEditor = false;
+  // The editor jump runs on a short fuse: the toast announces it first,
+  // then the fuse fires the actual jump - a beat of feedback before the
+  // editor takes the focus.
+  disposable openPath: Text = text.make(64);
+  let openLine: usize = 0;
+  let openCol: usize = 0;
+  let openDelay: float32 = 0.0;
+  disposable toastT: Text = text.make(64);
+  let toastClock: float32 = 0.0;
+  let lastOpenedModule: usize = 999999;
+  let lastOpenedNth: usize = 0;
+  let heldFullscreen = false;
+  let fullscreen = false;
+  let typecheckSeen = false;
+
+  // The input axes glide through these instead of snapping - flight, not
+  // teleport steps. See camera.approach.
+  let smAhead: float32 = 0.0;
+  let smStrafe: float32 = 0.0;
+  let smRise: float32 = 0.0;
+
+  // The frozen pick: a click pins what the crosshair found, so its arcs
+  // and highlights stay while the player flies off to look at the far end
+  // of them. A click on nothing releases it.
+  let pinned: Pick = draw.noPick();
+
+  let lastTicks = sdl.ticks();
+  let pulseClock: float32 = 0.0;
+
+  while (true) {
+    sdl.pumpEvents();
+    if (sdl.quitRequested()) {
+      break;
+    }
+
+    // ----- the wire ---------------------------------------------------------
+    wire.wirePump(ref w);
+    let progressed = true;
+    while (progressed) {
+      progressed = false;
+      if (awaitingBlob) {
+        if (wire.wireTakeBlob(ref w, blobSize, ref blob)) {
+          if (storeBlobs > 0) {
+            scene.sceneStoreFileBlob(ref world, blobKind, ref blob);
+            storeBlobs -= 1;
+          } else {
+            scene.applyBlob(ref world, blobKind, ref blob);
+          }
+          awaitingBlob = false;
+          progressed = true;
+        }
+      } else if (wire.wireTakeLine(ref w, ref line)) {
+        const c: Control = proto.parseControl(text.view(ref line));
+        if (c.kind == ControlKind.BLOB) {
+          awaitingBlob = true;
+          blobKind = c.artifact;
+          blobSize = c.size;
+        } else if (c.kind == ControlKind.FILE) {
+          scene.sceneStoreFilePath(ref world, c.modIdx, c.fileIdx,
+            text.view(ref line), c.pathAt);
+          storeBlobs = 2;
+        } else {
+          // The gate's verdict is drawable once typecheck's gate arrives -
+          // or once the build ENDS, which is how a failing build's shut
+          // gate still gets its red bar and its error count.
+          if (c.kind == ControlKind.DONE ||
+              (c.kind == ControlKind.PHASE && c.phase == Phase.TYPECHECK)) {
+            typecheckSeen = true;
+          }
+          scene.applyControl(ref world, c);
+        }
+        progressed = true;
+      }
+    }
+
+    // The compositor may have resized us since the last frame - fullscreen,
+    // a tiling layout change, a drag. The projection follows the drawable.
+    let nowW: int32 = 0;
+    let nowH: int32 = 0;
+    sdl.drawableSize(ref win, ref nowW, ref nowH);
+    if (nowW != winW || nowH != winH) {
+      winW = nowW;
+      winH = nowH;
+      applyViewport(winW, winH);
+    }
+
+    // ----- input ------------------------------------------------------------
+    let kbCount: int = 0;
+    const keys: uint8[] = sdl.keyboardState(ref kbCount);
+    if (keys[usize(Key.ESCAPE)] != 0 || keys[usize(Key.Q)] != 0) {
+      break;
+    }
+
+    const now = sdl.ticks();
+    let dt: float32 = float32(now - lastTicks) / 1000.0;
+    lastTicks = now;
+    if (dt > 0.1) {
+      dt = 0.1;
+    }
+    pulseClock += dt * 3.0;
+    if (pulseClock > 6.28318) {
+      pulseClock -= 6.28318;
+    }
+
+    let ahead: float32 = 0.0;
+    let strafe: float32 = 0.0;
+    let rise: float32 = 0.0;
+    if (keys[usize(Key.W)] != 0) { ahead += 1.0; }
+    if (keys[usize(Key.S)] != 0) { ahead -= 1.0; }
+    if (keys[usize(Key.D)] != 0) { strafe += 1.0; }
+    if (keys[usize(Key.A)] != 0) { strafe -= 1.0; }
+    if (keys[usize(Key.SPACE)] != 0 || keys[usize(Key.R)] != 0) { rise += 1.0; }
+    if (keys[usize(Key.C)] != 0) { rise -= 1.0; }
+    let speed: float32 = 9.0;
+    if (keys[usize(Key.LSHIFT)] != 0) {
+      speed = 28.0;
+    }
+    smAhead = camera.approach(smAhead, ahead, 10.0, dt);
+    smStrafe = camera.approach(smStrafe, strafe, 10.0, dt);
+    smRise = camera.approach(smRise, rise, 10.0, dt);
+    camera.moveCamera(ref cam, smAhead, smStrafe, smRise, dt, speed);
+    if (cam.y < 0.5) {
+      cam.y = 0.5;
+    }
+
+    let mx: int32 = 0;
+    let my: int32 = 0;
+    const buttons = sdl.relativeMouse(ref mx, ref my);
+    camera.turnCamera(ref cam, mx, my, 0.14);
+
+    const continueDown = keys[usize(Key.G)] != 0 || keys[usize(Key.ENTER)] != 0;
+    if (continueDown && !heldContinue && world.pendingPhase != Phase.NONE) {
+      wire.wireSendLine("continue");
+      scene.sceneGateOpened(ref world);
+    }
+    heldContinue = continueDown;
+
+    const pauseDown = keys[usize(Key.P)] != 0;
+    if (pauseDown && !heldPause) {
+      scene.sceneTogglePause(ref world);
+    }
+    heldPause = pauseDown;
+
+    const stepDown = keys[usize(Key.X)] != 0;
+    if (stepDown && !heldStep) {
+      scene.sceneStep(ref world);
+    }
+    heldStep = stepDown;
+
+    const minusDown = keys[usize(Key.MINUS)] != 0;
+    if (minusDown && !heldMinus) {
+      scene.sceneSpeedDown(ref world);
+    }
+    heldMinus = minusDown;
+    const equalsDown = keys[usize(Key.EQUALS)] != 0;
+    if (equalsDown && !heldEquals) {
+      scene.sceneSpeedUp(ref world);
+    }
+    heldEquals = equalsDown;
+
+    scene.sceneTick(ref world, dt);
+
+    // ----- the pick ray -----------------------------------------------------
+    // March the crosshair ray onto the source wall's plane; a hit on a
+    // character becomes a byte offset, and the offset finds the token and
+    // the deepest AST node it became. The districts draw the rest.
+    let pick: Pick = draw.noPick();
+    const ax = camera.aimX(cam.yaw, cam.pitch);
+    if (ax < 0.0 - 0.0001 && cam.x > WALL_X && world.source.len > 0) {
+      const t = (WALL_X - cam.x) / ax;
+      if (t > 0.0 && t < 80.0) {
+        const hy = cam.y + camera.aimY(cam.pitch) * t;
+        const hz = cam.z + camera.aimZ(cam.yaw, cam.pitch) * t;
+        let wallLines = scene.sceneLineCount(ref world);
+        if (wallLines > WALL_MAX_LINES) {
+          wallLines = WALL_MAX_LINES;
+        }
+        let hitLine: usize = 0;
+        let hitCol: usize = 0;
+        if (layout.wallHit(hy, hz, wallLines, ref hitLine, ref hitCol)) {
+          const offset = scene.sceneOffsetAt(ref world, hitLine, hitCol);
+          if (offset < world.source.len) {
+            pick.active = true;
+            pick.kind = PickKind.WALL;
+            pick.line = hitLine;
+            pick.col = hitCol;
+            pick.offset = offset;
+            pick.tokenIdx = scene.sceneTokenAt(ref world, offset);
+            pick.astIdx = scene.sceneAstNodeAt(ref world, offset);
+          }
+        }
+      }
+    }
+
+    // The WORLD pick: when the wall has nothing, try the things themselves
+    // - grove nodes, belt cubes, IR towers - and keep the nearest hit. A
+    // node or cube pick converges to the same source-coupled fields the
+    // wall fills, so the highlight and arcs simply run in reverse.
+    if (!pick.active) {
+      const ax2 = camera.aimX(cam.yaw, cam.pitch);
+      const ay2 = camera.aimY(cam.pitch);
+      const az2 = camera.aimZ(cam.yaw, cam.pitch);
+      let bestT: float32 = 70.0;
+
+      const shownAst = scene.sceneShownAst(ref world);
+      let ni: usize = 0;
+      while (ni < shownAst) {
+        const n = vec.vecGet(ref world.astItems, ni);
+        const p = layout.astPos(n.depth, n.slot, n.slots);
+        const t = camera.rayHit(cam.x, cam.y, cam.z, ax2, ay2, az2, p.x, p.y, p.z, 0.55);
+        if (t > 0.0 && t < bestT) {
+          bestT = t;
+          pick.active = true;
+          pick.kind = PickKind.NODE;
+          pick.astIdx = ni;
+          pick.offset = n.spanPos;
+          pick.line = scene.sceneLineOfOffset(ref world, n.spanPos);
+          pick.col = scene.sceneColOfOffset(ref world, n.spanPos);
+          pick.tokenIdx = scene.sceneTokenAt(ref world, n.spanPos);
+        }
+        ni += 1;
+      }
+
+      const shownTok = scene.sceneShownTokens(ref world);
+      let ti: usize = 0;
+      while (ti < shownTok) {
+        const p = layout.tokenPos(ti);
+        const t = camera.rayHit(cam.x, cam.y, cam.z, ax2, ay2, az2, p.x, p.y, p.z, 0.5);
+        if (t > 0.0 && t < bestT) {
+          bestT = t;
+          const tok = vec.vecGet(ref world.tokens, ti);
+          pick.active = true;
+          pick.kind = PickKind.TOKEN;
+          pick.tokenIdx = ti;
+          pick.offset = tok.pos;
+          pick.line = scene.sceneLineOfOffset(ref world, tok.pos);
+          pick.col = scene.sceneColOfOffset(ref world, tok.pos);
+          pick.astIdx = scene.sceneAstNodeAt(ref world, tok.pos);
+        }
+        ti += 1;
+      }
+
+      const shownIslands = scene.sceneShownIslands(ref world);
+      let ii: usize = 0;
+      while (ii < shownIslands) {
+        const isle = vec.vecGet(ref world.islands, ii);
+        const ip = layout.islandPos(ii, world.islands.len, isle.entry);
+        const t = camera.rayHit(cam.x, cam.y, cam.z, ax2, ay2, az2,
+          ip.x, ip.y, ip.z, layout.islandRadius(isle.loc) + 0.4);
+        if (t > 0.0 && t < bestT) {
+          bestT = t;
+          pick.active = true;
+          pick.kind = PickKind.ISLAND;
+          pick.irFunc = ii;
+          pick.offset = world.source.len;
+          pick.tokenIdx = world.tokens.len;
+          pick.astIdx = world.astItems.len;
+        }
+        ii += 1;
+      }
+
+      let di: usize = 0;
+      while (di < world.diagItems.len) {
+        const sp = draw.diagSigilPos(ref world, di, pulseClock * 6.0);
+        const t = camera.rayHit(cam.x, cam.y, cam.z, ax2, ay2, az2, sp.x, sp.y, sp.z, 0.5);
+        if (t > 0.0 && t < bestT) {
+          bestT = t;
+          const it = vec.vecGet(ref world.diagItems, di);
+          pick.active = true;
+          pick.kind = PickKind.DIAG;
+          pick.diagIdx = di;
+          // The sigil points at its line; the wall highlight follows it.
+          let dl = it.line;
+          if (dl > 0) {
+            dl -= 1;
+          }
+          pick.offset = scene.sceneOffsetAt(ref world, dl, 0);
+          pick.tokenIdx = world.tokens.len;
+          pick.astIdx = world.astItems.len;
+        }
+        di += 1;
+      }
+
+      const shownBlocks = scene.sceneShownBlocks(ref world);
+      let fi: usize = 0;
+      let seen: usize = 0;
+      while (fi < world.irFuncs.len && seen < shownBlocks) {
+        const fun = vec.vecGet(ref world.irFuncs, fi);
+        const fp = layout.irFunctionPos(fi);
+        let bi: usize = 0;
+        while (bi < fun.blockCount && seen < shownBlocks) {
+          const blk = vec.vecGet(ref world.irBlocks, fun.blockStart + bi);
+          const bp = layout.irBlockPos(fp, bi);
+          const h = layout.irTowerHeight(blk.instructions);
+          const t = camera.rayHit(cam.x, cam.y, cam.z, ax2, ay2, az2,
+            bp.x, 0.3 + h * 0.5, bp.z, 0.6 + h * 0.4);
+          if (t > 0.0 && t < bestT) {
+            bestT = t;
+            pick.active = true;
+            pick.kind = PickKind.IRBLOCK;
+            pick.irFunc = fi;
+            pick.irBlock = fun.blockStart + bi;
+            // No source coupling for a tower: the wall stays dark.
+            pick.offset = world.source.len;
+            pick.tokenIdx = world.tokens.len;
+            pick.astIdx = world.astItems.len;
+          }
+          bi += 1;
+          seen += 1;
+        }
+        fi += 1;
+      }
+    }
+
+    // The click: pin what the crosshair holds; on nothing, let go.
+    const clickDown = (buttons & MOUSE_LEFT) != 0;
+    if (clickDown && !heldClick) {
+      if (pick.active) {
+        pinned = pick;
+      } else {
+        pinned = draw.noPick();
+      }
+    }
+    heldClick = clickDown;
+
+    const openDown = keys[usize(Key.E)] != 0;
+    if (openDown && !heldOpen && pick.active && pick.kind == PickKind.ISLAND) {
+      const files = scene.sceneModuleFileCount(ref world, pick.irFunc);
+      if (files > 0) {
+        if (pick.irFunc == lastOpenedModule) {
+          lastOpenedNth = (lastOpenedNth + 1) % files;
+        } else {
+          lastOpenedNth = 0;
+          lastOpenedModule = pick.irFunc;
+        }
+        const entryIdx = scene.sceneFileEntryFor(ref world, pick.irFunc, lastOpenedNth);
+        const ignored = scene.sceneOpenFile(ref world, entryIdx);
+        pinned = draw.noPick();
+      }
+    }
+    heldOpen = openDown;
+
+    // O jumps the EDITOR to wherever the pick points: the current file for
+    // anything source-coupled, a diagnostic's own line, an island's first
+    // file. IR towers carry no source link (no !dbg parsing here yet).
+    const editorDown = keys[usize(Key.O)] != 0;
+    if (editorDown && !heldEditor && pick.active) {
+      let armed = false;
+      if (pick.kind == PickKind.WALL || pick.kind == PickKind.NODE ||
+          pick.kind == PickKind.TOKEN) {
+        text.clear(ref openPath);
+        text.push(ref openPath, world.entryFile);
+        openLine = pick.line + 1;
+        openCol = pick.col + 1;
+        armed = true;
+      } else if (pick.kind == PickKind.DIAG && pick.diagIdx < world.diagItems.len) {
+        const it = vec.vecGet(ref world.diagItems, pick.diagIdx);
+        text.clear(ref openPath);
+        text.push(ref openPath, world.entryFile);
+        openLine = it.line;
+        openCol = it.col;
+        armed = true;
+      } else if (pick.kind == PickKind.ISLAND) {
+        const entryIdx = scene.sceneFileEntryFor(ref world, pick.irFunc, 0);
+        if (entryIdx < world.fileEntries.len) {
+          scene.sceneFilePath(ref world, entryIdx, ref openPath);
+          openLine = 1;
+          openCol = 1;
+          armed = true;
+        }
+      }
+      if (armed) {
+        openDelay = 0.6;
+        toastClock = 2.6;
+        text.clear(ref toastT);
+        text.push(ref toastT, "opening ");
+        pushPathTail(ref toastT, text.view(ref openPath), 36);
+        text.push(ref toastT, " line ");
+        text.pushUint(ref toastT, uint64(openLine));
+        text.push(ref toastT, "...");
+      }
+    }
+    heldEditor = editorDown;
+
+    if (openDelay > 0.0) {
+      openDelay -= dt;
+      if (openDelay <= 0.0) {
+        editor.openInEditor(text.view(ref openPath), openLine, openCol, ref scratch);
+      }
+    }
+    if (toastClock > 0.0) {
+      toastClock -= dt;
+    }
+
+    const fullscreenDown = keys[usize(Key.F11)] != 0;
+    if (fullscreenDown && !heldFullscreen) {
+      fullscreen = !fullscreen;
+      sdl.setFullscreen(ref win, fullscreen);
+    }
+    heldFullscreen = fullscreenDown;
+
+    // What the frame shows: the live pick while the crosshair is on the
+    // wall, else whatever was pinned.
+    let shown: Pick = pick;
+    let usingPinned = false;
+    if (!pick.active && pinned.active) {
+      shown = pinned;
+      usingPinned = true;
+    }
+
+    // ----- the frame --------------------------------------------------------
+    gl.clearColor(0.16, 0.14, 0.30, 1.0);
+    gl.clearFrame();
+    draw.drawSky(float32(winW), float32(winH));
+    draw.applyCamera(ref cam);
+    shade.shadeBegin(ref worldShade);
+    draw.drawGround();
+    draw.drawGatehouse(ref world, ref cam, pulse(pulseClock));
+    draw.drawSourceWall(ref world, ref cam, ref shown, pulse(pulseClock));
+    draw.drawTokens(ref world, ref cam, ref shown, ref scratch);
+    draw.drawAst(ref world, ref cam, ref shown, pulseClock * 6.0, ref scratch);
+    draw.drawDiagSigils(ref world, ref cam, ref shown, pulseClock * 6.0);
+    draw.drawModules(ref world, ref cam, ref shown);
+    draw.drawGate(ref world, ref cam, typecheckSeen);
+    draw.drawIr(ref world, ref cam, ref shown, ref scratch);
+    draw.drawForge(ref world, ref cam);
+    shade.shadeEnd(ref worldShade);
+    let toastAlpha: float32 = toastClock / 0.8;
+    if (toastAlpha > 1.0) {
+      toastAlpha = 1.0;
+    }
+    draw.drawHud(ref world, ref shown, usingPinned, float32(winW), float32(winH),
+      text.view(ref toastT), toastAlpha, ref scratch);
+    sdl.swapWindow(ref win);
+  }
+
+  // Leaving tells the plugin its window is gone: a build still waiting at a
+  // gate sees the empty line and aborts rather than hanging.
+  wire.wireSendLine("bye");
+  Disposable.dispose(ref ctx);
+  Disposable.dispose(ref win);
+  sdl.quit();
+  return 0;
+}
+
+
+// Viewport plus projection for a drawable size - once at start, again on
+// every resize. Height zero (a minimized window) keeps the last shape
+// rather than dividing by it.
+function applyViewport(w: int32, h: int32): void {
+  if (h <= 0 || w <= 0) {
+    return;
+  }
+  gl.viewport(w, h);
+  gl.matrixMode(PROJECTION);
+  gl.loadIdentity();
+  gl.perspective(70.0, float64(w) / float64(h), 0.1, 600.0);
+  gl.matrixMode(MODELVIEW);
+}
+
+// The tail of a path - the identity end, not the shared repo prefix.
+function pushPathTail(ref out: Text, s2: string, keep: usize): void {
+  const bytes: uint8[] = intr.stringAsBytes(s2);
+  let start: usize = 0;
+  if (bytes.len > keep) {
+    start = bytes.len - keep;
+  }
+  text.pushBytes(ref out, intr.arraySlice(bytes, start, bytes.len));
+}
+
+function pulse(clock: float32): float32 {
+  // A triangle wave is pulse enough; no trig needed.
+  let t = clock / 6.28318;
+  t = t - float32(int32(t));
+  if (t > 0.5) {
+    return 2.0 - t * 2.0;
+  }
+  return t * 2.0;
+}

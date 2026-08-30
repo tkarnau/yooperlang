@@ -129,6 +129,12 @@ describe("runtime: C-level smoke tests", () => {
     assert.equal(stdout, "io_pipe: ok\n");
   });
 
+  it("proc_spawn: a child over line pipes round-trips, reports liveness, and dies on kill", async () => {
+    const { exitCode, stdout, stderr } = await buildAndRun("proc_spawn");
+    assert.equal(exitCode, 0, `stderr: ${stderr}`);
+    assert.match(stdout, /^proc_spawn: ok/);
+  });
+
   it("cancel_token: flags, deadlines, parent/child cascade, and the blocking helpers", async () => {
     const { exitCode, stdout, stderr } = await buildAndRun("cancel_token");
     assert.equal(exitCode, 0, `stderr: ${stderr}`);

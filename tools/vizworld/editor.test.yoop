@@ -1,0 +1,22 @@
+// The editor jump's one moving part: the exact shell line a pick becomes.
+// Pinned by reading buildEditorCmd - the env fallback, the quoted
+// file:line:col, the silenced background - so a quoting regression fails
+// here instead of as a mystery editor window.
+
+import.test;
+import * as t from "std/test.yoop";
+import { suite, test, Case } from "std/test.yoop";
+import * as str from "std/core/strings.yoop";
+import { Text }, * as text from "std/core/text.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import { buildEditorCmd } from "./editor.yoop";
+
+suite function thePickBecomesOneWellFormedShellLine(): void {
+  disposable cmd: Text = text.make(64);
+  buildEditorCmd("/a/b.yoop", 12, 5, ref cmd);
+  let test theory: Case = t.asserts("path, line and col land quoted behind the env fallback") {
+    theory.isSuccessful = str.stringEq(text.view(ref cmd),
+      "${YOOP_VIZWORLD_EDITOR:-code --goto} \"/a/b.yoop:12:5\" >/dev/null 2>&1 &");
+    theory.detail = `built: ${text.view(ref cmd)}`;
+  }
+}

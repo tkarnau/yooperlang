@@ -857,3 +857,225 @@ int64_t yoop_iop_end(void) {
     return iop_syscall(fd, buf, len, kind);
 #endif
 }
+
+// ----- child processes over line pipes --------------------------------------
+//
+// The `--plugin` host's channel to a spawned tool (a renderer, a fake one in
+// a test): one child per slot, stdin and stdout piped, one LINE per message
+// in each direction. Deliberately minimal - no argv arrays, no stderr
+// capture, no job control - because the caller is the comptime evaluator,
+// whose whole argument surface is ints and strings.
+//
+// POSIX only. Every entry point is a stub returning -1 (or "") on Windows,
+// which is what makes `--plugin`-with-a-child fail loudly there rather than
+// half-work; the CI platform story today is Linux x64.
+//
+// fork() in a process that owns a worker pool is safe here for one reason:
+// the child window between fork and exec calls only async-signal-safe
+// functions (dup2, close, execl, _exit), so a lock some pool thread held at
+// the fork can deadlock nothing the child runs.
+
+#ifndef _WIN32
+#include <signal.h>
+#include <sys/wait.h>
+
+#define YOOP_PROC_SLOTS 8
+
+typedef struct {
+    int   used;
+    int   exited;    // reaped by alive(); fds may still hold buffered lines
+    pid_t pid;
+    int   in_fd;     // parent writes, child's stdin
+    int   out_fd;    // parent reads, child's stdout
+} yoop_proc_slot_t;
+
+static yoop_proc_slot_t yoop_proc_slots[YOOP_PROC_SLOTS];
+
+static yoop_proc_slot_t* yoop_proc_at(int64_t h) {
+    if (h < 0 || h >= YOOP_PROC_SLOTS) return NULL;
+    yoop_proc_slot_t* s = &yoop_proc_slots[h];
+    return s->used ? s : NULL;
+}
+
+int64_t yoop_proc_spawn(const char* cmdline) {
+    // A dead child mid-conversation must surface as a failed write, never as
+    // this process's own death. Idempotent, so it is simply set every spawn.
+    signal(SIGPIPE, SIG_IGN);
+
+    int64_t h = -1;
+    for (int64_t i = 0; i < YOOP_PROC_SLOTS; i++) {
+        if (!yoop_proc_slots[i].used) { h = i; break; }
+    }
+    if (h < 0) return -1;
+
+    int to_child[2];
+    int from_child[2];
+    if (pipe(to_child) != 0) return -1;
+    if (pipe(from_child) != 0) {
+        close(to_child[0]); close(to_child[1]);
+        return -1;
+    }
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        close(to_child[0]); close(to_child[1]);
+        close(from_child[0]); close(from_child[1]);
+        return -1;
+    }
+    if (pid == 0) {
+        // Async-signal-safe window: rewire, drop, exec, nothing else.
+        dup2(to_child[0], 0);
+        dup2(from_child[1], 1);
+        close(to_child[0]); close(to_child[1]);
+        close(from_child[0]); close(from_child[1]);
+        execl("/bin/sh", "sh", "-c", cmdline, (char*)0);
+        _exit(127);
+    }
+
+    close(to_child[0]);
+    close(from_child[1]);
+    yoop_proc_slot_t* s = &yoop_proc_slots[h];
+    s->used = 1;
+    s->exited = 0;
+    s->pid = pid;
+    s->in_fd = to_child[1];
+    s->out_fd = from_child[0];
+    return h;
+}
+
+int yoop_proc_write_line(int64_t h, const char* line) {
+    yoop_proc_slot_t* s = yoop_proc_at(h);
+    if (!s || !line) return -1;
+    size_t len = strlen(line);
+    const char nl = '\n';
+    size_t sent = 0;
+    while (sent < len) {
+        ssize_t n = write(s->in_fd, line + sent, len - sent);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            return -1;
+        }
+        sent += (size_t)n;
+    }
+    for (;;) {
+        ssize_t n = write(s->in_fd, &nl, 1);
+        if (n == 1) return 0;
+        if (n < 0 && errno == EINTR) continue;
+        return -1;
+    }
+}
+
+// One line, blocking, without its newline. "" on EOF, error, or a bad handle
+// - the caller treats an empty line as "the child is gone".
+//
+// The string is malloc'd and never freed: the caller is the comptime
+// evaluator, which deliberately keeps every string it makes alive for the
+// fold's duration (see eval_template.yoop) - handing it a buffer that a later
+// call rewrites would alias two of its values instead. Lines here are
+// renderer COMMANDS, a few dozen bytes each; a build's worth is noise.
+const char* yoop_proc_read_line(int64_t h) {
+    yoop_proc_slot_t* s = yoop_proc_at(h);
+    if (!s) return "";
+    size_t cap = 256;
+    size_t len = 0;
+    char* buf = (char*)malloc(cap);
+    if (!buf) return "";
+    for (;;) {
+        char c;
+        ssize_t n = read(s->out_fd, &c, 1);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            free(buf);
+            return "";
+        }
+        if (n == 0) {
+            if (len == 0) { free(buf); return ""; }
+            break;
+        }
+        if (c == '\n') break;
+        if (len + 2 > cap) {
+            cap *= 2;
+            char* grown = (char*)realloc(buf, cap);
+            if (!grown) { free(buf); return ""; }
+            buf = grown;
+        }
+        buf[len++] = c;
+    }
+    buf[len] = 0;
+    return buf;
+}
+
+// A framed BLOB to the child: `blob <kind> <bytes>\n` then exactly that many
+// payload bytes and a closing newline. This exists because a plugin hook
+// cannot escape or split strings - its evaluator has no string library - so
+// anything multiline (IR, a token dump) must be framed by compiled code.
+int yoop_proc_write_blob(int64_t h, const char* kind, const char* payload) {
+    yoop_proc_slot_t* s = yoop_proc_at(h);
+    if (!s || !kind || !payload) return -1;
+    size_t len = strlen(payload);
+    char header[128];
+    int hn = snprintf(header, sizeof header, "blob %s %zu\n", kind, len);
+    if (hn <= 0 || (size_t)hn >= sizeof header) return -1;
+    const char* parts[3] = { header, payload, "\n" };
+    size_t sizes[3] = { (size_t)hn, len, 1 };
+    for (int p = 0; p < 3; p++) {
+        size_t sent = 0;
+        while (sent < sizes[p]) {
+            ssize_t n = write(s->in_fd, parts[p] + sent, sizes[p] - sent);
+            if (n < 0) {
+                if (errno == EINTR) continue;
+                return -1;
+            }
+            sent += (size_t)n;
+        }
+    }
+    return 0;
+}
+
+int yoop_proc_alive(int64_t h) {
+    yoop_proc_slot_t* s = yoop_proc_at(h);
+    if (!s) return 0;
+    if (s->exited) return 0;
+    int status = 0;
+    pid_t r = waitpid(s->pid, &status, WNOHANG);
+    if (r == 0) return 1;
+    s->exited = 1;
+    return 0;
+}
+
+int yoop_proc_kill(int64_t h) {
+    yoop_proc_slot_t* s = yoop_proc_at(h);
+    if (!s) return -1;
+    if (!s->exited) {
+        kill(s->pid, SIGTERM);
+        // A short grace, then the certain kill: a stuck child must never turn
+        // the compiler's own exit into a hang.
+        int reaped = 0;
+        for (int i = 0; i < 20; i++) {
+            int status = 0;
+            if (waitpid(s->pid, &status, WNOHANG) > 0) { reaped = 1; break; }
+            struct timespec ts = { 0, 10 * 1000 * 1000 };
+            nanosleep(&ts, NULL);
+        }
+        if (!reaped) {
+            kill(s->pid, SIGKILL);
+            int status = 0;
+            waitpid(s->pid, &status, 0);
+        }
+    }
+    close(s->in_fd);
+    close(s->out_fd);
+    s->used = 0;
+    return 0;
+}
+
+#else  // _WIN32
+
+int64_t yoop_proc_spawn(const char* cmdline) { (void)cmdline; return -1; }
+int yoop_proc_write_line(int64_t h, const char* line) { (void)h; (void)line; return -1; }
+int yoop_proc_write_blob(int64_t h, const char* kind, const char* payload) { (void)h; (void)kind; (void)payload; return -1; }
+const char* yoop_proc_read_line(int64_t h) { (void)h; return ""; }
+int yoop_proc_alive(int64_t h) { (void)h; return 0; }
+int yoop_proc_kill(int64_t h) { (void)h; return -1; }
+
+#endif

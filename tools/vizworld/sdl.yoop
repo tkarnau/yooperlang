@@ -1,0 +1,163 @@
+// SDL2, the slice the renderer needs: a window with a GL context, a pumped
+// keyboard, relative mouse motion, ticks and delay. The pattern is
+// examples/playground/nebula_arena/sdl.yoop's - externs contained here,
+// callers speak the wrappers - trimmed and renamed to the tree's naming
+// rules.
+
+import.unsafe;
+
+import { Disposable, disposable } from "std/core/kinds.yoop";
+
+extern "C" from library "SDL2" {
+  type SDL_Window;
+  type SDL_GLContext;
+
+  function SDL_Init(flags: uint32): int32;
+  function SDL_Quit(): void;
+  function SDL_GetError(): string;
+  // A borrowed `const Uint8 *` plus a count through `numKeys`. Raw pointer
+  // rather than uint8[] deliberately - see the nebula_arena note on the
+  // Win64 return ABI.
+  function SDL_GetKeyboardState(ref numKeys: int): unsafe_ptr<uint8>;
+  function SDL_PumpEvents(): void;
+  function SDL_HasEvent(kind: uint32): int32;
+  function SDL_FlushEvent(kind: uint32): void;
+  function SDL_GetTicks(): uint32;
+  function SDL_Delay(ms: uint32): void;
+
+  function SDL_CreateWindow(
+    title: string,
+    x: int32, y: int32,
+    w: int32, h: int32,
+    flags: uint32
+  ): ref SDL_Window;
+  function SDL_DestroyWindow(ref win: SDL_Window): void;
+
+  function SDL_SetRelativeMouseMode(enabled: int32): int32;
+  function SDL_GetRelativeMouseState(ref x: int32, ref y: int32): uint32;
+  function SDL_SetWindowFullscreen(ref win: SDL_Window, flags: uint32): int32;
+  function SDL_GL_GetDrawableSize(ref win: SDL_Window, ref w: int32, ref h: int32): void;
+
+  function SDL_GL_CreateContext(ref win: SDL_Window): unsafe_ptr<SDL_GLContext>;
+  function SDL_GL_DeleteContext(ctx: unsafe_ptr<SDL_GLContext>): void;
+  function SDL_GL_SetSwapInterval(interval: int32): int32;
+  function SDL_GL_SwapWindow(ref win: SDL_Window): void;
+}
+
+export const INIT_VIDEO: uint32 = 0x00000020;
+export const WINDOW_OPENGL: uint32 = 0x00000002;
+export const WINDOW_SHOWN: uint32 = 0x00000004;
+export const WINDOW_RESIZABLE: uint32 = 0x00000020;
+// SDL_WINDOW_FULLSCREEN_DESKTOP: borderless at the desktop's own size,
+// which is the fullscreen a compositor actually likes.
+export const FULLSCREEN_DESKTOP: uint32 = 0x00001001;
+export const WINDOWPOS_CENTERED: int32 = 0x2FFF0000;
+// The SDL_QUIT event type - what the window's close button posts.
+export const EVENT_QUIT: uint32 = 0x100;
+
+// Hardware-key scancodes (USB HID page 7, the SDL2 convention). Only the
+// keys the world responds to.
+export enum Key {
+  A 4,
+  C 6,
+  D 7,
+  E 8,
+  G 10,
+  O 18,
+  P 19,
+  Q 20,
+  F11 68,
+  R 21,
+  S 22,
+  W 26,
+  X 27,
+  ENTER 40,
+  ESCAPE 41,
+  SPACE 44,
+  MINUS 45,
+  EQUALS 46,
+  LSHIFT 225,
+}
+
+export type Window implements Disposable {
+  handle: ref SDL_Window,
+  function dispose(ref self): void { SDL_DestroyWindow(self.handle); }
+}
+
+export type GlContext implements Disposable {
+  handle: unsafe_ptr<SDL_GLContext>,
+  function dispose(ref self): void { SDL_GL_DeleteContext(self.handle); }
+}
+
+export function init(): int32 { return SDL_Init(INIT_VIDEO); }
+export function quit(): void { SDL_Quit(); }
+export function lastError(): string { return SDL_GetError(); }
+export function pumpEvents(): void { SDL_PumpEvents(); }
+export function quitRequested(): bool { return SDL_HasEvent(EVENT_QUIT) != 0; }
+export function ticks(): uint32 { return SDL_GetTicks(); }
+export function delay(ms: uint32): void { SDL_Delay(ms); }
+
+// Borrow SDL's key-state table as a bounds-carrying array; SDL fills the
+// count as a side effect, so the length exists only after the call.
+export function keyboardState(ref n: int): uint8[] {
+  let raw: unsafe_ptr<uint8> = SDL_GetKeyboardState(ref n);
+  return unsafe_ptr.toArray<uint8>(raw, usize(n));
+}
+
+export function setRelativeMouse(enabled: bool): void {
+  let flag: int32 = 0;
+  if (enabled) {
+    flag = 1;
+  }
+  const ignored = SDL_SetRelativeMouseMode(flag);
+}
+
+// SDL_BUTTON_LMASK: bit 0 of the state mask below.
+export const MOUSE_LEFT: uint32 = 1;
+
+// The mouse's movement since the last call, through the two refs, and the
+// button state mask back - bit 0 is the left button, held while set.
+export function relativeMouse(ref dx: int32, ref dy: int32): uint32 {
+  return SDL_GetRelativeMouseState(ref dx, ref dy);
+}
+
+// No GL attributes set on purpose: the default context is the COMPATIBILITY
+// one, and the whole renderer is immediate-mode GL - the fixed pipeline is
+// the least code between a scene graph in Yoop and pixels.
+export function createWindow(title: string, w: int32, h: int32): Window {
+  return {
+    handle: SDL_CreateWindow(title, WINDOWPOS_CENTERED, WINDOWPOS_CENTERED,
+      w, h, WINDOW_OPENGL | WINDOW_SHOWN | WINDOW_RESIZABLE),
+  };
+}
+
+// The framebuffer's CURRENT size in pixels - the compositor owns it now
+// that the window is resizable, and on a HiDPI display it is not the
+// window's logical size either. Polled per frame; the poll is a getter.
+export function drawableSize(ref win: Window, ref w: int32, ref h: int32): void {
+  SDL_GL_GetDrawableSize(win.handle, ref w, ref h);
+}
+
+export function setFullscreen(ref win: Window, on: bool): void {
+  let flags: uint32 = 0;
+  if (on) {
+    flags = FULLSCREEN_DESKTOP;
+  }
+  const ignored = SDL_SetWindowFullscreen(win.handle, flags);
+}
+
+export function createGlContext(ref win: Window): GlContext {
+  return { handle: SDL_GL_CreateContext(win.handle) };
+}
+
+export function setVsync(on: bool): void {
+  let interval: int32 = 0;
+  if (on) {
+    interval = 1;
+  }
+  const ignored = SDL_GL_SetSwapInterval(interval);
+}
+
+export function swapWindow(ref win: Window): void {
+  SDL_GL_SwapWindow(win.handle);
+}

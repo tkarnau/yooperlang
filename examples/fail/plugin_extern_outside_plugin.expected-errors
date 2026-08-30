@@ -1,0 +1,4 @@
+# Illegal: `yoop_plugin_phase` is a plugin builtin, and the bridge it reads
+# exists only while a build runs a hook under --plugin. In an ordinary build
+# the @precompile fold refuses it by name, pointing at the call.
+9:36: "yoop_plugin_phase" is a plugin builtin

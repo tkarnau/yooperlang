@@ -1,0 +1,67 @@
+// The wire's grammar, pinned line by hand-written line: these are exactly
+// the strings the plugin's hooks emit, so a drift on either side fails here
+// before it fails as a hung window.
+
+import.test;
+import * as t from "std/test.yoop";
+import { suite, test, Case } from "std/test.yoop";
+import { parseControl, Control, ControlKind, Phase, Artifact } from "./protocol.yoop";
+
+suite function controlLinesParseToTheirEnums(): void {
+  const gate = parseControl("phase parse");
+  let test theory: Case = t.asserts("a phase line names its gate") {
+    theory.isSuccessful = gate.kind == ControlKind.PHASE && gate.phase == Phase.PARSE;
+    theory.detail = "phase parse did not parse as PHASE/PARSE";
+  }
+
+  const header = parseControl("blob ir 57475");
+  let test theory: Case = t.asserts("a blob header carries its artifact and size") {
+    theory.isSuccessful = header.kind == ControlKind.BLOB &&
+      header.artifact == Artifact.IR && header.size == 57475;
+    theory.detail = `got size ${header.size}`;
+  }
+
+  const small = parseControl("blob diagnostics 2");
+  let test theory: Case = t.asserts("the longest artifact name still finds its size") {
+    theory.isSuccessful = small.artifact == Artifact.DIAGNOSTICS && small.size == 2;
+    theory.detail = `got size ${small.size}`;
+  }
+
+  const finished = parseControl("done 1");
+  let test theory: Case = t.asserts("done carries the build's verdict") {
+    theory.isSuccessful = finished.kind == ControlKind.DONE && finished.ok == 1;
+    theory.detail = `got ok ${finished.ok}`;
+  }
+}
+
+suite function fileLinesCarryTheirIndicesAndPath(): void {
+  const c = parseControl("file 3 12 /abs/dir with space/vec.yoop");
+  let test theory: Case = t.asserts("a file line parses its module, file and path start") {
+    // "file 3 12 " is ten bytes; the path (spaces and all) begins at 10.
+    theory.isSuccessful = c.kind == ControlKind.FILE && c.modIdx == 3 &&
+      c.fileIdx == 12 && c.pathAt == 10;
+    theory.detail = `m=${c.modIdx} f=${c.fileIdx} at=${c.pathAt}`;
+  }
+}
+
+suite function whatIsNotTheProtocolParsesToNothing(): void {
+  const oddPhase = parseControl("phase astral");
+  let test theory: Case = t.asserts("an unknown phase name is PHASE of NONE, not a crash") {
+    theory.isSuccessful = oddPhase.kind == ControlKind.PHASE && oddPhase.phase == Phase.NONE;
+    theory.detail = "an unknown phase did not degrade cleanly";
+  }
+
+  const oddBlob = parseControl("blob astral 5");
+  let test theory: Case = t.asserts("an unknown artifact refuses the whole header") {
+    theory.isSuccessful = oddBlob.kind == ControlKind.NONE;
+    theory.detail = "an unknown artifact still read as a blob";
+  }
+
+  // "ast" must match the word, never a prefix of a longer one - the header
+  // above is the case that would break.
+  const junk = parseControl("hello there");
+  let test theory: Case = t.asserts("an arbitrary line is NONE") {
+    theory.isSuccessful = junk.kind == ControlKind.NONE;
+    theory.detail = "junk parsed as something";
+  }
+}

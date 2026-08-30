@@ -1,0 +1,88 @@
+/*
+  The interactive visualizer plugin. Run a build through it:
+
+      npm run viz:build
+      yoopiler_boot file.yoop -o out --plugin tools/vizworld/plugin.yoop
+
+  The COMPILER interprets this file with its comptime evaluator, firing the
+  hooks at its phase boundaries. Each hook streams that phase's artifacts to
+  the spawned renderer (main.yoop, a compiled Yoop program with the SDL
+  window) and then BLOCKS the whole build on recvLine until the player walks
+  to the gate and presses G. The pipeline literally waits inside its own
+  interpreter while you wander the world it just built.
+
+  Written strictly inside the evaluator's subset: strings, ints, control
+  flow, template literals, and the std/plugin surface. No Vec, no Text, no
+  closures - if an edit here strays outside the subset, the refusal names it
+  with this file's own source location.
+
+  The renderer binary is found through the shell the spawn already uses:
+  $YOOP_VIZWORLD when set, else build/vizworld/vizworld (what viz:build
+  produces, relative to wherever the build runs).
+*/
+
+import * as plug from "std/plugin.yoop";
+
+export function onStart(entry: string, out: string): int32 {
+  if (plug.spawn("\"${YOOP_VIZWORLD:-build/vizworld/vizworld}\"") != 0) {
+    plug.log(`vizworld: could not spawn the renderer - run npm run viz:build, or set YOOP_VIZWORLD\n`);
+    return 1;
+  }
+  plug.log(`vizworld: compiling ${entry} with the world open\n`);
+  return 0;
+}
+
+export function onParse(): int32 {
+  if (plug.sendArtifact("tokens") != 0) {
+    return rendererGone();
+  }
+  const ignoredAst = plug.sendArtifact("ast");
+  const ignoredModules = plug.sendArtifact("modules");
+  return gate("parse");
+}
+
+export function onTypecheck(): int32 {
+  const ignored = plug.sendArtifact("diagnostics");
+  return gate("typecheck");
+}
+
+export function onCodegen(): int32 {
+  const ignored = plug.sendArtifact("ir");
+  return gate("codegen");
+}
+
+export function onLink(): int32 {
+  return gate("link");
+}
+
+export function onFinish(ok: int32): void {
+  // The failure path's diagnostics ride along here, so a build the
+  // typecheck stopped still shows its shut gate and its error count.
+  const ignoredDiag = plug.sendArtifact("diagnostics");
+  const ignoredDone = plug.sendLine(`done ${ok}`);
+  // The world stays up until the player leaves it - the build is over, so
+  // this blocks nothing but the compiler's exit, which is the point: the
+  // artifacts are worth wandering after the verdict.
+  const farewell = plug.recvLine();
+  const ignoredKill = plug.killChild();
+}
+
+// One gate: announce the phase, then hold the build until the renderer
+// answers. Any answer is a go; an EMPTY answer is the renderer gone, which
+// aborts the build rather than leaving it waiting on a closed window.
+function gate(name: string): int32 {
+  if (plug.sendLine(`phase ${name}`) != 0) {
+    return rendererGone();
+  }
+  const answer = plug.recvLine();
+  if (answer.len == 0) {
+    return rendererGone();
+  }
+  return 0;
+}
+
+function rendererGone(): int32 {
+  plug.log(`vizworld: the renderer window is gone - stopping the build\n`);
+  const ignored = plug.killChild();
+  return 3;
+}

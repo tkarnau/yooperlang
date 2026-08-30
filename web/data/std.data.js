@@ -59,6 +59,7 @@ window.YOOP_DATA.std = {
     "std/https",
     "std/log.yoop",
     "std/net",
+    "std/plugin.yoop",
     "std/runtime.yoop",
     "std/test.yoop",
     "std/time.yoop",
@@ -4546,6 +4547,108 @@ window.YOOP_DATA.std = {
    ]
   },
   {
+   "importPath": "std/plugin.yoop",
+   "name": "plugin",
+   "area": "std",
+   "isDirectoryModule": false,
+   "files": [
+    "std/plugin.yoop"
+   ],
+   "doc": "",
+   "exports": [
+    {
+     "name": "astJson",
+     "kind": "function",
+     "signature": "export function astJson(): string",
+     "doc": "The entry FILE's parse tree as JSON, the --dump-ast-json payload:\n{\"filename\":..., \"source\":..., \"ast\":...}. \"\" before onParse.",
+     "shape": null,
+     "file": "std/plugin.yoop",
+     "line": 85
+    },
+    {
+     "name": "buildOk",
+     "kind": "function",
+     "signature": "export function buildOk(): int32",
+     "doc": "1 when the build succeeded. Meaningful at onFinish; 0 before.",
+     "shape": null,
+     "file": "std/plugin.yoop",
+     "line": 109
+    },
+    {
+     "name": "diagnosticsJson",
+     "kind": "function",
+     "signature": "export function diagnosticsJson(): string",
+     "doc": "Every diagnostic the build reported, as a JSON array of\n{file,line,col,severity,message}. Refreshed before the build decides\nwhether to stop on them, so a failing build's onFinish still sees why.\n\"\" before onTypecheck.",
+     "shape": null,
+     "file": "std/plugin.yoop",
+     "line": 99
+    },
+    {
+     "name": "entryPath",
+     "kind": "function",
+     "signature": "export function entryPath(): string",
+     "doc": "The entry file the build was asked to compile, as it was written on the\ncommand line.",
+     "shape": null,
+     "file": "std/plugin.yoop",
+     "line": 67
+    },
+    {
+     "name": "ir",
+     "kind": "function",
+     "signature": "export function ir(): string",
+     "doc": "The emitted LLVM IR, whole. \"\" before onCodegen.",
+     "shape": null,
+     "file": "std/plugin.yoop",
+     "line": 104
+    },
+    {
+     "name": "log",
+     "kind": "function",
+     "signature": "export function log(s: string): void",
+     "doc": "Say something in the build's log. Comptime printf takes one\nalready-formatted string and tags the line `[comptime]`, which keeps a\nplugin's chatter apart from the compiler's own notes - and off the\nprogram's stdout, which does not exist yet.",
+     "shape": null,
+     "file": "std/plugin.yoop",
+     "line": 117
+    },
+    {
+     "name": "modulesJson",
+     "kind": "function",
+     "signature": "export function modulesJson(): string",
+     "doc": "The whole graph's module map: {\"nodes\":[{id,name,files,loc,entry}],\n\"edges\":[{from,to}]}, one edge per import site. \"\" before onParse.",
+     "shape": null,
+     "file": "std/plugin.yoop",
+     "line": 91
+    },
+    {
+     "name": "outPath",
+     "kind": "function",
+     "signature": "export function outPath(): string",
+     "doc": "Where the executable goes (`-o`, or the default).",
+     "shape": null,
+     "file": "std/plugin.yoop",
+     "line": 72
+    },
+    {
+     "name": "phase",
+     "kind": "function",
+     "signature": "export function phase(): string",
+     "doc": "Which boundary the current hook was fired at: \"start\", \"parse\",\n\"typecheck\", \"codegen\", \"link\" or \"finish\".",
+     "shape": null,
+     "file": "std/plugin.yoop",
+     "line": 61
+    },
+    {
+     "name": "tokens",
+     "kind": "function",
+     "signature": "export function tokens(): string",
+     "doc": "The entry FILE's token stream, one token per line: `TAG <start> <length>`\nplus a value for the literal tags - the dump_tokens format. \"\" before\nonParse.",
+     "shape": null,
+     "file": "std/plugin.yoop",
+     "line": 79
+    }
+   ]
+  },
+  {
    "importPath": "std/runtime.yoop",
    "name": "runtime",
    "area": "std",
@@ -5163,7 +5266,7 @@ window.YOOP_DATA.std = {
   }
  ],
  "counts": {
-  "modules": 32,
-  "exports": 522
+  "modules": 33,
+  "exports": 532
  }
 };

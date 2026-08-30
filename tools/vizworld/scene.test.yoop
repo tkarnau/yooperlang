@@ -1,0 +1,308 @@
+// The scene's parsers and its gating clock, fed hand-written payloads whose
+// shapes come from reading the emitters: dump_tokens' `TAG pos len` lines,
+// the host's modules JSON, textual LLVM IR.
+
+import.test;
+import * as t from "std/test.yoop";
+import { suite, test, Case } from "std/test.yoop";
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import * as intr from "std/core/intrinsics.yoop";
+import * as str from "std/core/strings.yoop";
+import { Text }, * as text from "std/core/text.yoop";
+import * as scene from "./scene.yoop";
+import { Scene } from "./scene.yoop";
+import { Artifact, Control, ControlKind, Phase, noControl } from "./protocol.yoop";
+
+function payloadOf(s: string): Vec<uint8> propagates<disposable> {
+  let buf: Vec<uint8> = vec.vecNew(s.len + 1);
+  vec.vecExtendFrom(ref buf, intr.stringAsBytes(s));
+  return buf;
+}
+
+suite function artifactsDigestIntoDrawableCounts(): void {
+  disposable world: Scene = scene.sceneNew();
+
+  disposable tokens: Vec<uint8> = payloadOf("FUNCTION 0 8\nIDENT 9 4\nLPAREN 13 1\nEOF 14 0\n");
+  scene.applyBlob(ref world, Artifact.TOKENS, ref tokens);
+  let test theory: Case = t.asserts("four dump lines are four belt tokens") {
+    theory.isSuccessful = world.tokens.len == 4;
+    theory.detail = `got ${world.tokens.len}`;
+  }
+
+  // Two modules, the entry importing the other; the edge resolves both ends.
+  disposable mods: Vec<uint8> = payloadOf(
+    "{\"nodes\":[{\"id\":\"a_0\",\"name\":\"\",\"files\":1,\"loc\":10,\"entry\":false},{\"id\":\"b_1\",\"name\":\"\",\"files\":1,\"loc\":20,\"entry\":true}],\"edges\":[{\"from\":\"b_1\",\"to\":\"a_0\"}]}");
+  scene.applyBlob(ref world, Artifact.MODULES, ref mods);
+  let test theory: Case = t.asserts("the module map lands as islands and one bridge") {
+    theory.isSuccessful = world.islands.len == 2 && world.edges.len == 1 &&
+      vec.vecGet(ref world.islands, 1).entry;
+    theory.detail = `islands ${world.islands.len}, edges ${world.edges.len}`;
+  }
+
+  // One function, an implicit entry block of two instructions and a labeled
+  // block of one - read straight off the lines below.
+  disposable ir: Vec<uint8> = payloadOf(
+    "define i32 @main() {\n  %a = add i32 1, 2\n  br label %next\nnext:\n  ret i32 %a\n}\ndeclare i32 @printf(ptr)\n");
+  scene.applyBlob(ref world, Artifact.IR, ref ir);
+  let test theory: Case = t.asserts("the IR scan finds one function of two blocks") {
+    theory.isSuccessful = world.irFuncs.len == 1 && world.irBlocks.len == 2 &&
+      vec.vecGet(ref world.irBlocks, 0).instructions == 2 &&
+      vec.vecGet(ref world.irBlocks, 1).instructions == 1;
+    theory.detail = `funcs ${world.irFuncs.len}, blocks ${world.irBlocks.len}`;
+  }
+
+  // Classification by reading the lines above: the add is arithmetic, the
+  // br and the ret are branches, nothing touches memory.
+  let test theory: Case = t.asserts("instructions classify into their op families") {
+    const entry = vec.vecGet(ref world.irBlocks, 0);
+    const next = vec.vecGet(ref world.irBlocks, 1);
+    theory.isSuccessful = entry.branches == 1 && entry.calls == 0 && entry.memOps == 0 &&
+      next.branches == 1;
+    theory.detail = `entry br=${entry.branches} call=${entry.calls} mem=${entry.memOps}, next br=${next.branches}`;
+  }
+
+  disposable blockLabel: Text = text.make(8);
+  scene.sceneIrBlockLabel(ref world, 1, ref blockLabel);
+  let test theory: Case = t.asserts("a labeled block keeps its label, the implicit one reads entry") {
+    const gotNext = str.stringEq(text.view(ref blockLabel), "next");
+    scene.sceneIrBlockLabel(ref world, 0, ref blockLabel);
+    theory.isSuccessful = gotNext && str.stringEq(text.view(ref blockLabel), "entry");
+    theory.detail = `labels were "${text.view(ref blockLabel)}" and the earlier read`;
+  }
+
+  disposable diags: Vec<uint8> = payloadOf(
+    "[{\"file\":\"x\",\"line\":3,\"col\":1,\"severity\":\"error\",\"message\":\"m\"},{\"file\":\"x\",\"line\":4,\"col\":1,\"severity\":\"warning\",\"message\":\"w\"}]");
+  scene.applyBlob(ref world, Artifact.DIAGNOSTICS, ref diags);
+  let test theory: Case = t.asserts("diagnostics split into their two counts") {
+    theory.isSuccessful = world.diagErrors == 1 && world.diagWarnings == 1;
+    theory.detail = `errors ${world.diagErrors}, warnings ${world.diagWarnings}`;
+  }
+}
+
+suite function thePickLookupsWalkOffsetToArtifacts(): void {
+  disposable world: Scene = scene.sceneNew();
+
+  // A two-line source riding a minimal AST payload, the way the real one
+  // rides --dump-ast-json: "ab cd\nef\n". Offsets by reading: a=0 b=1
+  // space c=3 d=4 newline e=6 f=7. The tree's two nodes point their spans
+  // at "ab" (the shallow one) and "cd" (the deeper one).
+  disposable ast: Vec<uint8> = payloadOf(
+    "{\"filename\":\"t.yoop\",\"source\":\"ab cd\\nef\\n\",\"ast\":{\"id\":1,\"kind\":\"PROGRAM\",\"loc\":{\"pos\":0,\"length\":2,\"line\":1,\"column\":1},\"children\":[{\"id\":2,\"kind\":\"CALL_EXPRESSION\",\"loc\":{\"pos\":3,\"length\":2,\"line\":1,\"column\":4},\"fields\":{\"name\":\"cd\"}}]}}");
+  scene.applyBlob(ref world, Artifact.AST, ref ast);
+  disposable toks: Vec<uint8> = payloadOf("IDENT 0 2\nIDENT 3 2\nIDENT 6 2\n");
+  scene.applyBlob(ref world, Artifact.TOKENS, ref toks);
+
+  let test theory: Case = t.asserts("the source and its line index came off the ast payload") {
+    theory.isSuccessful = scene.sceneLineCount(ref world) == 2 && world.source.len == 9;
+    theory.detail = `lines=${scene.sceneLineCount(ref world)} source.len=${world.source.len}`;
+  }
+
+  let test theory: Case = t.asserts("a second-line cell maps to its byte offset") {
+    theory.isSuccessful = scene.sceneOffsetAt(ref world, 1, 1) == 7;
+    theory.detail = `got ${scene.sceneOffsetAt(ref world, 1, 1)}`;
+  }
+
+  let test theory: Case = t.asserts("past a line's end is a miss, not the next line") {
+    theory.isSuccessful = scene.sceneOffsetAt(ref world, 0, 80) == world.source.len;
+    theory.detail = `got ${scene.sceneOffsetAt(ref world, 0, 80)}`;
+  }
+
+  let test theory: Case = t.asserts("an offset finds the token covering it") {
+    theory.isSuccessful = scene.sceneTokenAt(ref world, 4) == 1 &&
+      scene.sceneTokenAt(ref world, 2) == world.tokens.len;
+    theory.detail = `covered=${scene.sceneTokenAt(ref world, 4)} gap=${scene.sceneTokenAt(ref world, 2)}`;
+  }
+
+  let test theory: Case = t.asserts("an offset finds the DEEPEST covering node") {
+    theory.isSuccessful = scene.sceneAstNodeAt(ref world, 3) == 1 &&
+      scene.sceneAstNodeAt(ref world, 0) == 0;
+    theory.detail = `deep=${scene.sceneAstNodeAt(ref world, 3)} shallow=${scene.sceneAstNodeAt(ref world, 0)}`;
+  }
+
+  let test theory: Case = t.asserts("the picked node reads back its kind and name") {
+    theory.isSuccessful = str.stringEq(scene.sceneAstKind(ref world, 1), "CALL_EXPRESSION") &&
+      str.stringEq(scene.sceneAstName(ref world, 1), "cd");
+    theory.detail = `kind=${scene.sceneAstKind(ref world, 1)} name=${scene.sceneAstName(ref world, 1)}`;
+  }
+
+  disposable label: Text = text.make(8);
+  scene.sceneTokenText(ref world, 1, ref label);
+  let test theory: Case = t.asserts("a token's label is its own source text") {
+    theory.isSuccessful = str.stringEq(text.view(ref label), "cd");
+    theory.detail = `label was "${text.view(ref label)}"`;
+  }
+}
+
+suite function memoryMistakesAreFoundAndPlaced(): void {
+  disposable world: Scene = scene.sceneNew();
+
+  // A template literal INSIDE a while loop and one outside it: the loop
+  // one is the per-iteration leak (smell 2), the loose one a single raw
+  // malloc (smell 1). Shapes mirror the dump: statements wrap expressions.
+  disposable ast: Vec<uint8> = payloadOf(
+    "{\"filename\":\"leaky.yoop\",\"source\":\"while {\\n  tpl\\n}\\ntpl\\n\",\"ast\":{\"id\":1,\"kind\":\"PROGRAM\",\"loc\":{\"pos\":0,\"length\":5,\"line\":1,\"column\":1},\"children\":[{\"id\":2,\"kind\":\"WHILE_STATEMENT\",\"loc\":{\"pos\":0,\"length\":5,\"line\":1,\"column\":1},\"children\":[{\"id\":3,\"kind\":\"TEMPLATE_LITERAL\",\"loc\":{\"pos\":10,\"length\":3,\"line\":2,\"column\":3}}]},{\"id\":4,\"kind\":\"TEMPLATE_LITERAL\",\"loc\":{\"pos\":16,\"length\":3,\"line\":4,\"column\":1}}]}}");
+  scene.applyBlob(ref world, Artifact.AST, ref ast);
+
+  let test theory: Case = t.asserts("the loop malloc and the loose malloc classify apart") {
+    theory.isSuccessful = world.smellLoop == 1 && world.smellOnce == 1 &&
+      vec.vecGet(ref world.astItems, 2).smell == 2 &&
+      vec.vecGet(ref world.astItems, 3).smell == 1;
+    theory.detail = `loop=${world.smellLoop} once=${world.smellOnce}`;
+  }
+
+  // Diagnostics: one entry-file unhandled-disposable, one error from some
+  // OTHER file. Only the entry one takes a place; both still count.
+  disposable diags: Vec<uint8> = payloadOf(
+    "[{\"file\":\"/abs/path/leaky.yoop\",\"line\":7,\"col\":5,\"severity\":\"warning\",\"code\":\"unhandled-disposable\",\"message\":\"nothing disposes it\"},{\"file\":\"/elsewhere/other.yoop\",\"line\":2,\"col\":1,\"severity\":\"error\",\"code\":\"\",\"message\":\"boom\"}]");
+  scene.applyBlob(ref world, Artifact.DIAGNOSTICS, ref diags);
+
+  let test theory: Case = t.asserts("only the entry file's diagnostic takes a place in the world") {
+    theory.isSuccessful = world.diagItems.len == 1 && world.diagErrors == 1 &&
+      world.diagWarnings == 1;
+    theory.detail = `placed=${world.diagItems.len} errors=${world.diagErrors} warnings=${world.diagWarnings}`;
+  }
+
+  let test theory: Case = t.asserts("the placed leak knows what it is and what it says") {
+    const it = vec.vecGet(ref world.diagItems, 0);
+    disposable msg: Text = text.make(16);
+    scene.sceneDiagMsg(ref world, 0, ref msg);
+    theory.isSuccessful = it.leak && !it.error && it.line == 7 &&
+      str.stringEq(text.view(ref msg), "nothing disposes it");
+    theory.detail = `leak=${it.leak} line=${it.line} msg="${text.view(ref msg)}"`;
+  }
+}
+
+suite function theClosureStoresAndSwapsFiles(): void {
+  // Two streamed files; walking into the second swaps the stage: its
+  // tokens and source take over, the replay clocks restart, and the kept
+  // diagnostics re-place themselves against the NEW file.
+  disposable world: Scene = scene.sceneNew();
+
+  scene.sceneStoreFilePath(ref world, 0, 0, "file 0 0 /a/first.yoop", 9);
+  disposable tokA: Vec<uint8> = payloadOf("IDENT 0 2\n");
+  scene.sceneStoreFileBlob(ref world, Artifact.TOKENS, ref tokA);
+  disposable astA: Vec<uint8> = payloadOf(
+    "{\"filename\":\"/a/first.yoop\",\"source\":\"ab\",\"ast\":{\"id\":1,\"kind\":\"PROGRAM\",\"loc\":{\"pos\":0,\"length\":2,\"line\":1,\"column\":1}}}");
+  scene.sceneStoreFileBlob(ref world, Artifact.AST, ref astA);
+
+  scene.sceneStoreFilePath(ref world, 2, 0, "file 2 0 /b/second.yoop", 9);
+  disposable tokB: Vec<uint8> = payloadOf("IDENT 0 1\nIDENT 2 1\nIDENT 4 1\n");
+  scene.sceneStoreFileBlob(ref world, Artifact.TOKENS, ref tokB);
+  disposable astB: Vec<uint8> = payloadOf(
+    "{\"filename\":\"/b/second.yoop\",\"source\":\"a b c\",\"ast\":{\"id\":1,\"kind\":\"PROGRAM\",\"loc\":{\"pos\":0,\"length\":1,\"line\":1,\"column\":1}}}");
+  scene.sceneStoreFileBlob(ref world, Artifact.AST, ref astB);
+
+  disposable diags: Vec<uint8> = payloadOf(
+    "[{\"file\":\"/b/second.yoop\",\"line\":1,\"col\":1,\"severity\":\"warning\",\"code\":\"unhandled-disposable\",\"message\":\"leaks\"}]");
+  scene.applyBlob(ref world, Artifact.DIAGNOSTICS, ref diags);
+
+  let test theory: Case = t.asserts("the store indexes files by module") {
+    theory.isSuccessful = world.fileEntries.len == 2 &&
+      scene.sceneModuleFileCount(ref world, 2) == 1 &&
+      scene.sceneFileEntryFor(ref world, 2, 0) == 1;
+    theory.detail = `entries=${world.fileEntries.len}`;
+  }
+
+  let test theory: Case = t.asserts("the second file's diagnostic has no place before the swap") {
+    theory.isSuccessful = world.diagItems.len == 0;
+    theory.detail = `placed=${world.diagItems.len}`;
+  }
+
+  scene.sceneTick(ref world, 5.0);
+  const opened = scene.sceneOpenFile(ref world, 1);
+  let test theory: Case = t.asserts("walking into a file swaps the stage and restarts its replay") {
+    theory.isSuccessful = opened && world.tokens.len == 3 && world.source.len == 5 &&
+      world.tokensClock == 0.0 && scene.sceneLexing(ref world);
+    theory.detail = `tokens=${world.tokens.len} source=${world.source.len} clock=${world.tokensClock}`;
+  }
+
+  let test theory: Case = t.asserts("the kept diagnostics re-place onto the new file") {
+    theory.isSuccessful = world.diagItems.len == 1 &&
+      vec.vecGet(ref world.diagItems, 0).leak;
+    theory.detail = `placed=${world.diagItems.len}`;
+  }
+}
+
+suite function theReplayRunsOneAlgorithmAtATime(): void {
+  // Both artifacts present, the way the parse blob burst delivers them.
+  // The lexer must finish its whole file before the parser's clock moves -
+  // the sequencing that makes the wall color in FIRST and the grove grow
+  // SECOND. Two tokens at 24/s resolve in a twelfth of a second, so one
+  // half-second tick more than finishes lexing.
+  disposable world: Scene = scene.sceneNew();
+  disposable toks: Vec<uint8> = payloadOf("IDENT 0 2\nIDENT 3 2\n");
+  scene.applyBlob(ref world, Artifact.TOKENS, ref toks);
+  disposable ast: Vec<uint8> = payloadOf(
+    "{\"filename\":\"t.yoop\",\"source\":\"ab cd\",\"ast\":{\"id\":1,\"kind\":\"PROGRAM\",\"loc\":{\"pos\":0,\"length\":2,\"line\":1,\"column\":1}}}");
+  scene.applyBlob(ref world, Artifact.AST, ref ast);
+
+  let test theory: Case = t.asserts("with unresolved tokens, the scene is lexing and not parsing") {
+    theory.isSuccessful = scene.sceneLexing(ref world) && !scene.sceneParsing(ref world);
+    theory.detail = "the replay did not start at the lexer";
+  }
+
+  scene.sceneTick(ref world, 0.01);
+  let test theory: Case = t.asserts("the parser's clock holds still while the lexer runs") {
+    theory.isSuccessful = world.astClock == 0.0 && world.tokensClock > 0.0;
+    theory.detail = `ast ${world.astClock}, tokens ${world.tokensClock}`;
+  }
+
+  scene.sceneTick(ref world, 0.5);
+  scene.sceneTick(ref world, 0.01);
+  let test theory: Case = t.asserts("a finished lex hands the stage to the parser") {
+    theory.isSuccessful = !scene.sceneLexing(ref world) && scene.sceneParsing(ref world) &&
+      world.astClock > 0.0;
+    theory.detail = `lexing=${scene.sceneLexing(ref world)} ast ${world.astClock}`;
+  }
+
+  scene.sceneTick(ref world, 1.0);
+  let test theory: Case = t.asserts("a finished parse leaves nothing running") {
+    theory.isSuccessful = !scene.sceneParsing(ref world) && !scene.sceneMapping(ref world) &&
+      scene.sceneShownAst(ref world) == world.astItems.len;
+    theory.detail = `shown ${scene.sceneShownAst(ref world)} of ${world.astItems.len}`;
+  }
+}
+
+suite function theClockObeysPauseAndTheGateLatches(): void {
+  // Enough tokens that a small tick leaves the lex replay mid-run: pause
+  // and step only mean anything while an algorithm is on stage.
+  disposable world: Scene = scene.sceneNew();
+  disposable tokens: Vec<uint8> = payloadOf(
+    "IDENT 0 1\nIDENT 2 1\nIDENT 4 1\nIDENT 6 1\nIDENT 8 1\n");
+  scene.applyBlob(ref world, Artifact.TOKENS, ref tokens);
+
+  scene.sceneTick(ref world, 0.01);
+  let test theory: Case = t.asserts("a district with data runs its clock") {
+    theory.isSuccessful = world.tokensClock > 0.0 && scene.sceneLexing(ref world);
+    theory.detail = `clock ${world.tokensClock}`;
+  }
+
+  scene.sceneTogglePause(ref world);
+  const before = world.tokensClock;
+  scene.sceneTick(ref world, 1.0);
+  let test theory: Case = t.asserts("paused time does not pass") {
+    theory.isSuccessful = world.tokensClock == before;
+    theory.detail = "the clock ran while paused";
+  }
+
+  scene.sceneStep(ref world);
+  let test theory: Case = t.asserts("a step nudges the ACTIVE replay while paused") {
+    theory.isSuccessful = world.tokensClock > before;
+    theory.detail = "the step moved nothing";
+  }
+
+  let gate: Control = noControl();
+  gate.kind = ControlKind.PHASE;
+  gate.phase = Phase.CODEGEN;
+  scene.applyControl(ref world, gate);
+  let test theory: Case = t.asserts("a phase line parks the build at its gate") {
+    theory.isSuccessful = world.pendingPhase == Phase.CODEGEN;
+    theory.detail = "the pending phase did not latch";
+  }
+  scene.sceneGateOpened(ref world);
+  let test theory: Case = t.asserts("opening the gate clears it") {
+    theory.isSuccessful = world.pendingPhase == Phase.NONE;
+    theory.detail = "the gate stayed pending";
+  }
+}

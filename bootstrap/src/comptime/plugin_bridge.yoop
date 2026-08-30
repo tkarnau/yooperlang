@@ -1,0 +1,50 @@
+module comptime;
+
+// The bridge between a BUILD and the plugin being interpreted alongside it.
+//
+// A `--plugin` hook runs on this evaluator, against the plugin's own module
+// graph - so the evaluator cannot reach the program being compiled through
+// its usual refs, and must not: mixing one graph's Program with another
+// graph's modules misresolves silently (see eval_method.yoop's parallel
+// indexing). What a hook may see instead is THIS: snapshots the plugin host
+// refreshes at each phase boundary. Owned strings and one process handle,
+// never a ref into either compile.
+//
+// Every EvalCx carries one. An ordinary fold carries the inactive value,
+// whose `active: false` is what keeps the plugin extern surface closed
+// outside `--plugin` - the flag is data the evaluator reads, not a second
+// evaluator.
+
+export type PluginBridge {
+  active: bool,
+  // Which boundary the currently running hook was fired at: "start",
+  // "parse", "typecheck", "codegen", "link", "finish".
+  phase: string,
+  entryPath: string,
+  outPath: string,
+  // Phase artifacts, serialized by the HOST with the compiler's own
+  // serializers and empty until their phase has happened. A hook pulls them
+  // through the plugin externs; nothing pushes them into a hook's arguments.
+  // Each is a VIEW into a Text the host owns, which is what keeps every one
+  // of them alive for as long as the host - never into a build-local buffer
+  // a later hook would find freed.
+  tokensText: string,
+  astJson: string,
+  modulesJson: string,
+  diagnosticsJson: string,
+  irText: string,
+  // The one spawned child a plugin may hold across hook invocations, or -1.
+  // Everything else in an invocation dies with its ValueArena; this survives
+  // in the bridge so a renderer spawned at "start" is still there at "link".
+  procHandle: int64,
+  // Meaningful only at "finish": 1 when the build succeeded, else 0.
+  buildOk: int32,
+}
+
+export function pluginBridgeInactive(): PluginBridge {
+  return {
+    active: false, phase: "", entryPath: "", outPath: "",
+    tokensText: "", astJson: "", modulesJson: "", diagnosticsJson: "", irText: "",
+    procHandle: 0 - 1, buildOk: 0,
+  };
+}

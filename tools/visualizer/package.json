@@ -1,0 +1,9 @@
+{
+  "name": "yoop-visualizer",
+  "private": true,
+  "type": "module",
+  "description": "Interactive 3D visualization of the yoopiler compilation pipeline",
+  "dependencies": {
+    "three": "^0.185.1"
+  }
+}

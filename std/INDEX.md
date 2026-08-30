@@ -47,6 +47,7 @@ let padded: string = str.padStart(str.intToString(n), 4, "0");
 - `std/https` - the HTTP client over TLS.
 - `std/log.yoop` - leveled logging to stderr.
 - `std/net` - TCP sockets: listeners, streams, addresses, and URI parsing, over a runtime shim that presents the POSIX shape on every platform. One module across five files; import the DIRECTORY.
+- `std/plugin.yoop` - the compiler plugin API, for hooks a build runs under --plugin. Interpret-only.
 - `std/runtime.yoop` - the process and its worker pool, from the inside.
 - `std/test.yoop` - the test harness.
 - `std/time.yoop` - the wall clock and the calendar.
@@ -742,6 +743,29 @@ Exports:
 - `tcpConnect` - function
 - `Uri` - type
 - `parseUri` - function
+
+## `std/plugin.yoop`
+
+the compiler plugin API, for hooks a build runs under --plugin. Interpret-only.
+
+Exports:
+
+- `phase` - function
+- `entryPath` - function
+- `outPath` - function
+- `tokens` - function
+- `astJson` - function
+- `modulesJson` - function
+- `diagnosticsJson` - function
+- `ir` - function
+- `buildOk` - function
+- `log` - function
+- `spawn` - function
+- `sendLine` - function
+- `recvLine` - function
+- `childAlive` - function
+- `killChild` - function
+- `sleepMs` - function
 
 ## `std/runtime.yoop`
 

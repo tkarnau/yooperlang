@@ -204,6 +204,208 @@ describe("vertical slice: the bootstrap compiler produces working executables", 
       assert.match(r.stderr + r.stdout, /unknown option --bogus/);
     });
 
+    // `--plugin`: the plugin is ordinary Yoop source the compiler loads,
+    // typechecks and INTERPRETS at phase boundaries. The plugins here are
+    // written inline because each is a few lines and the assertion is about
+    // the driver's behaviour, not about a fixture worth naming.
+    //
+    // The plugin's own graph autoloads std, so these use testEnv() below
+    // rather than the fixture env.
+    describe("--plugin", () => {
+      const pluginEnv = () => ({
+        ...process.env,
+        YOOP_RUNTIME_ROOT: path.join(REPO, "runtime"),
+        YOOP_STD_ROOT: path.join(REPO, "std"),
+      });
+      const writePlugin = (name, source) => {
+        const p = path.join(work, name);
+        fs.writeFileSync(p, source);
+        return p;
+      };
+
+      it("--plugin needs a path", async () => {
+        const r = await runProc(boot, [hello, "--plugin"], { cwd: REPO, env: pluginEnv() });
+        assert.equal(r.code, 2);
+        assert.match(r.stderr, /--plugin needs a path/);
+      });
+
+      it("--plugin with --test is refused rather than ignored", async () => {
+        const r = await runProc(boot, ["--test", ".", "--plugin", "x.yoop"], { cwd: REPO, env: pluginEnv() });
+        assert.equal(r.code, 2);
+        assert.match(r.stderr, /--plugin only applies to an ordinary compile/);
+      });
+
+      it("a plugin that does not exist fails the build before it starts", async () => {
+        const r = await runProc(boot, [hello, "-o", path.join(work, "plug_none"), "--plugin", path.join(work, "no_such_plugin.yoop")], { cwd: REPO, env: pluginEnv() });
+        assert.equal(r.code, 1);
+        assert.match(r.stderr, /no_such_plugin\.yoop/);
+        assert.ok(!fs.existsSync(path.join(work, "plug_none")), "the build produced a binary anyway");
+      });
+
+      it("hooks fire at every phase, in pipeline order, and the build completes", async () => {
+        const plug = writePlugin("phases_plugin.yoop",
+          'extern "C" from "stdio.h" {\n' +
+          "  function printf(fmt: string, ...): int32;\n" +
+          "}\n" +
+          "export function onStart(entry: string, out: string): int32 { printf(`p:start\\n`); return 0; }\n" +
+          "export function onParse(): int32 { printf(`p:parse\\n`); return 0; }\n" +
+          "export function onTypecheck(): int32 { printf(`p:typecheck\\n`); return 0; }\n" +
+          "export function onCodegen(): int32 { printf(`p:codegen\\n`); return 0; }\n" +
+          "export function onLink(): int32 { printf(`p:link\\n`); return 0; }\n" +
+          "export function onFinish(ok: int32): void { printf(`p:finish ${ok}\\n`); }\n");
+        const out = path.join(work, "plug_phases");
+        const r = await runProc(boot, [hello, "-o", out, "--plugin", plug], { cwd: REPO, env: pluginEnv() });
+        assert.equal(r.code, 0, r.stderr);
+        assert.ok(fs.existsSync(out), "the plugged build produced no executable");
+        // Interpreted printf lands in the build log with the [comptime] tag,
+        // which is itself worth pinning: plugin output must never reach the
+        // compiler's stdout.
+        const order = ["p:start", "p:parse", "p:typecheck", "p:codegen", "p:link", "p:finish 1"];
+        let at = -1;
+        for (const mark of order) {
+          const found = r.stderr.indexOf(mark);
+          assert.ok(found > at, `${mark} missing or out of order in:\n${r.stderr}`);
+          at = found;
+        }
+        assert.equal(r.stdout, "", "plugin output leaked onto stdout");
+      });
+
+      it("a hook pulls real artifacts through std/plugin", async () => {
+        // The assertions are shapes, not sizes: hello.yoop's exact token
+        // count is not this test's business, but a build that parsed and
+        // emitted IR cannot honestly report either as empty.
+        const plug = writePlugin("inspect_plugin.yoop",
+          'import * as plug from "std/plugin.yoop";\n' +
+          "export function onParse(): int32 {\n" +
+          "  if (plug.tokens().len == 0) { return 41; }\n" +
+          "  if (plug.astJson().len == 0) { return 42; }\n" +
+          "  if (plug.modulesJson().len == 0) { return 43; }\n" +
+          "  plug.log(`inspect ok: ${plug.phase()}\\n`);\n" +
+          "  return 0;\n" +
+          "}\n" +
+          "export function onCodegen(): int32 {\n" +
+          "  if (plug.ir().len == 0) { return 44; }\n" +
+          "  return 0;\n" +
+          "}\n");
+        const out = path.join(work, "plug_inspect");
+        const r = await runProc(boot, [hello, "-o", out, "--plugin", plug], { cwd: REPO, env: pluginEnv() });
+        assert.equal(r.code, 0, r.stderr);
+        assert.match(r.stderr, /\[comptime\] inspect ok: parse/);
+        assert.ok(fs.existsSync(out));
+      });
+
+      it("a hook's nonzero return stops the build with that exit code", async () => {
+        const plug = writePlugin("refuse_plugin.yoop",
+          "export function onTypecheck(): int32 { return 7; }\n");
+        const out = path.join(work, "plug_refused");
+        const r = await runProc(boot, [hello, "-o", out, "--plugin", plug], { cwd: REPO, env: pluginEnv() });
+        assert.equal(r.code, 7, r.stderr);
+        assert.match(r.stderr, /onTypecheck stopped the build \(7\)/);
+        assert.ok(!fs.existsSync(out), "a refused build produced a binary anyway");
+      });
+
+      it("a hook with the wrong shape is refused when the plugin loads", async () => {
+        const plug = writePlugin("badshape_plugin.yoop",
+          'export function onParse(): string { return "no"; }\n');
+        const r = await runProc(boot, [hello, "-o", path.join(work, "plug_shape"), "--plugin", plug], { cwd: REPO, env: pluginEnv() });
+        assert.equal(r.code, 1);
+        assert.match(r.stderr, /onParse has the wrong return type/);
+      });
+
+      it("a plugin gates the build on a child process over pipes", async () => {
+        // The child is the fake renderer: it answers "go" to each line. The
+        // build must stream a line per phase, block on each answer, and
+        // complete - and the child's log must show the phases in order,
+        // which proves the pipe carried the conversation the plugin claims.
+        const child = path.join(work, "gate_child.sh");
+        const childLog = path.join(work, "gate_child.log");
+        fs.writeFileSync(child,
+          "#!/bin/sh\n" +
+          `while IFS= read -r line; do echo "$line" >> "${childLog}"; echo go; done\n`);
+        fs.chmodSync(child, 0o755);
+        const plug = writePlugin("gate_plugin.yoop",
+          'import * as plug from "std/plugin.yoop";\n' +
+          "export function onStart(entry: string, out: string): int32 {\n" +
+          `  if (plug.spawn("${child}") != 0) { return 91; }\n` +
+          "  return 0;\n" +
+          "}\n" +
+          "export function onParse(): int32 { return gate(); }\n" +
+          "export function onCodegen(): int32 { return gate(); }\n" +
+          // The recvLine between send and kill is load-bearing: kill lands
+          // as SIGTERM, and without the ack the child can die before it has
+          // read the line the pipe already holds.
+          "export function onFinish(ok: int32): void {\n" +
+          "  const ignored = plug.sendLine(`finish ${ok}`);\n" +
+          "  const ack = plug.recvLine();\n" +
+          "  const ignored2 = plug.killChild();\n" +
+          "}\n" +
+          "function gate(): int32 {\n" +
+          "  if (plug.sendLine(`at ${plug.phase()}`) != 0) { return 92; }\n" +
+          "  if (plug.recvLine().len == 0) { return 93; }\n" +
+          "  return 0;\n" +
+          "}\n");
+        const out = path.join(work, "plug_gated");
+        const r = await runProc(boot, [hello, "-o", out, "--plugin", plug], { cwd: REPO, env: pluginEnv() });
+        assert.equal(r.code, 0, r.stderr);
+        assert.ok(fs.existsSync(out), "the gated build produced no executable");
+        assert.equal(
+          fs.readFileSync(childLog, "utf8"),
+          "at parse\nat codegen\nfinish 1\n",
+          "the child did not see the phases in pipeline order",
+        );
+      });
+
+      it("the shipped vizworld plugin runs a whole build against the fake renderer", async () => {
+        // The real plugin (tools/vizworld/plugin.yoop), the shell stand-in
+        // for its window. What this pins: the plugin stays inside the
+        // interpreter's subset (any drift is a comptime refusal by name),
+        // the protocol leaves in pipeline order, and the build completes
+        // once every gate is answered.
+        const childLog = path.join(work, "vizworld_fake.log");
+        const out = path.join(work, "plug_vizworld");
+        const r = await runProc(boot,
+          [hello, "-o", out, "--plugin", path.join(REPO, "tools/vizworld/plugin.yoop")],
+          { cwd: REPO, env: {
+            ...pluginEnv(),
+            YOOP_VIZWORLD: path.join(REPO, "tools/vizworld/fake_renderer.sh"),
+            VIZWORLD_FAKE_LOG: childLog,
+          } });
+        assert.equal(r.code, 0, r.stderr);
+        assert.ok(fs.existsSync(out), "the vizworld-gated build produced no executable");
+        const seen = fs.readFileSync(childLog, "utf8").split("\n").filter(Boolean);
+        const gates = seen.filter((l) => l.startsWith("phase ") || l.startsWith("done "));
+        assert.deepEqual(
+          gates,
+          ["phase parse", "phase typecheck", "phase codegen", "phase link", "done 1"],
+          `the gates arrived wrong:\n${seen.join("\n")}`,
+        );
+        // The host streams the whole closure before the parse gate: one
+        // `file` line plus a tokens and an ast blob per file (hello plus
+        // its autoloaded std modules is at least two), and the plugin's
+        // own six entry blobs ride on top of the per-file pairs.
+        const files = seen.filter((l) => l.startsWith("file "));
+        assert.ok(files.length >= 2, `expected a streamed closure, saw:\n${seen.join("\n")}`);
+        const blobs = seen.filter((l) => l.startsWith("blob ")).map((l) => l.split(" ")[1]);
+        const count = (kind) => blobs.filter((b) => b === kind).length;
+        assert.equal(count("tokens"), files.length + 1, "one tokens blob per streamed file plus the entry's");
+        assert.equal(count("ast"), files.length + 1, "one ast blob per streamed file plus the entry's");
+        assert.equal(count("modules"), 1);
+        assert.equal(count("ir"), 1);
+        assert.equal(count("diagnostics"), 2);
+        // Every streamed path is absolute and lands with its indices.
+        assert.ok(files.every((l) => /^file \d+ \d+ \//.test(l)), `malformed file lines:\n${files.join("\n")}`);
+      });
+
+      it("a plugin that does not typecheck is refused with its own diagnostics", async () => {
+        const plug = writePlugin("broken_plugin.yoop",
+          "export function onParse(): int32 { return nowhere; }\n");
+        const r = await runProc(boot, [hello, "-o", path.join(work, "plug_broken"), "--plugin", plug], { cwd: REPO, env: pluginEnv() });
+        assert.equal(r.code, 1);
+        assert.match(r.stderr, /plugin: .*broken_plugin\.yoop/);
+        assert.match(r.stderr, /error\(s\)/);
+      });
+    });
+
     // `--test`: discovery, entry synthesis and the export wrapper, all the way
     // to a running test binary. Every expectation below is hand-written from
     // what the run SHOULD report, never captured - see the testing rule in
