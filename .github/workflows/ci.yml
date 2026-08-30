@@ -129,6 +129,14 @@ jobs:
 
       - run: npm ci
 
+      # Same as in the test job: stage1 starts from the released seed, and gh
+      # needs a token to download it. Fetched first so a download failure is
+      # its own red step rather than a failure inside the package script.
+      - name: Fetch the bootstrap seed
+        run: node scripts/seed.mjs
+        env:
+          GH_TOKEN: ${{ github.token }}
+
       - name: Version from the tag
         id: meta
         run: |
@@ -149,6 +157,7 @@ jobs:
       # ${{ }} interpolation, which would splice it into the script text.
       - name: Build, verify the fixpoint, and package
         env:
+          GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.meta.outputs.version }}
         run: node scripts/package_bootstrap.mjs --version "$VERSION"
 
