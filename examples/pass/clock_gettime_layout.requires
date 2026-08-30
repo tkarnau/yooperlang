@@ -1,0 +1,3 @@
+# Same reason as clock_gettime.requires: this one pins down the FIELD LAYOUT of
+# struct timespec as POSIX declares it, which is not a thing Windows has.
+posix

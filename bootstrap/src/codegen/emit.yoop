@@ -90,6 +90,20 @@ export type Emitter propagates<disposable> {
   // function have to share one define - a second is an invalid redefinition
   // rather than a duplicate. See instr_vtable.yoop.
   fromFnShims: Map<string, bool>,
+  // Every string constant already emitted, by CONTENT, so a second use of the
+  // same bytes reuses the first `@.str.N` instead of emitting a twin.
+  //
+  // This is what makes `==` on an `enum<string>` mean anything. That compare
+  // lowers to `icmp eq ptr` (see instr_binop.yoop), which is only correct when
+  // one case constant is one address - and `Label.Warm` written in the module
+  // that DECLARED the enum and in a module that imported it used to be two
+  // globals holding "warm". ELF and Mach-O merge those in the mergeable-string
+  // section and hid it; COFF does not, so on Windows `warm == Label.Warm` was
+  // false. See bootstrap/tests/slice/enum_modules.yoop.
+  //
+  // The constants are `unnamed_addr`, which is LLVM's word for "the address is
+  // not significant", so sharing one is what that declaration already promised.
+  strConstants: Map<string, usize>,
   // The `@<mod>__module_init<N>` functions this program owes, in the order
   // `main` has to call them. Filled by the globals pre-pass, which walks the
   // graph in TOPOLOGICAL order, so a module's globals are already stored by the
@@ -102,6 +116,7 @@ export function emitterNew(opts: CodegenOptions): Emitter propagates<disposable>
   // and there is no turbofish.
   let constOps: Map<uint64, Operand> = map.mapNew(0, map.uint64KeyOps());
   let fromFnShims: Map<string, bool> = map.mapNew(0, map.stringKeyOps());
+  let strConstants: Map<string, usize> = map.mapNew(0, map.stringKeyOps());
   let moduleInits: Vec<string> = vec.vecNew(0);
   return {
     globals: text.make(1024),
@@ -129,6 +144,7 @@ export function emitterNew(opts: CodegenOptions): Emitter propagates<disposable>
     hasTasks: false,
     usesTaskIntrinsics: false,
     fromFnShims: fromFnShims,
+    strConstants: strConstants,
     moduleInits: moduleInits,
   };
 }

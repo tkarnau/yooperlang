@@ -1,0 +1,5 @@
+# Needs OpenSSL's headers and libraries. Not a platform limit - it links fine on
+# any machine that has them, Windows included - so the suite probes for the
+# header rather than testing the platform, and skips only where it is absent.
+# Install: apt/brew install openssl, or `vcpkg install openssl` on Windows.
+openssl

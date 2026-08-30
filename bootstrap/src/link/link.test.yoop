@@ -20,6 +20,7 @@ import { Vec }, * as vec from "std/core/vec.yoop";
 import { disposable } from "std/core/kinds.yoop";
 import { collectSearchPaths, glueSources } from "../link";
 import { pushRuntimeLibrariesFor, pushFrameworkFor } from "../link";
+import { pushPlatformLinkFlags, pushLinkLibrariesFor, withExeSuffixFor } from "../link";
 import { PLATFORM_LINUX, PLATFORM_MACOS, PLATFORM_WINDOWS } from "../link";
 
 // `yoop_tls.c` is excluded from the sources every program gets, because it
@@ -225,4 +226,75 @@ function allEndWith(ref v: Vec<string>, suffix: string): bool {
     i += 1;
   }
   return true;
+}
+
+// The three rules that exist only because Windows is not POSIX. All three were
+// found the same way - by a link that failed on Windows and nowhere else - and
+// all three are asserted for every platform here, because the machine running
+// this suite is exactly the one that cannot reach two of the branches.
+suite function windowsLinkRulesDifferFromPosix(): void {
+  let test theory: Case = t.asserts("Windows asks for a bigger stack and the legacy stdio symbols") {
+    disposable cmd: Text = text.make(64);
+    pushPlatformLinkFlags(ref cmd, PLATFORM_WINDOWS);
+    const got = text.view(ref cmd);
+    theory.isSuccessful = str.stringEq(got, " -Wl,/STACK:8388608 -llegacy_stdio_definitions");
+    theory.detail = `got "${got}"`;
+  }
+
+  // The default 1 MB PE stack is what the recursive passes overflow, and the
+  // UCRT keeps sprintf inline rather than in a library. Neither is true of ELF
+  // or Mach-O, so neither flag belongs there.
+  let test theory: Case = t.asserts("POSIX gets neither flag") {
+    disposable linux: Text = text.make(64);
+    pushPlatformLinkFlags(ref linux, PLATFORM_LINUX);
+    disposable mac: Text = text.make(64);
+    pushPlatformLinkFlags(ref mac, PLATFORM_MACOS);
+    theory.isSuccessful = text.view(ref linux).len == 0 && text.view(ref mac).len == 0;
+    theory.detail = `linux "${text.view(ref linux)}", macOS "${text.view(ref mac)}"`;
+  }
+
+  // `from library "m"` is written by the compiler's own comptime externs, so
+  // this is the rule that decides whether the compiler can link ITSELF here.
+  let test theory: Case = t.asserts("m and pthread are dropped on Windows, kept on Linux") {
+    disposable libs: Vec<string> = vec.vecNew(3);
+    vec.vecPush(ref libs, "m");
+    vec.vecPush(ref libs, "pthread");
+    vec.vecPush(ref libs, "sqlite3");
+
+    disposable win: Text = text.make(64);
+    pushLinkLibrariesFor(ref win, ref libs, PLATFORM_WINDOWS);
+    disposable lin: Text = text.make(64);
+    pushLinkLibrariesFor(ref lin, ref libs, PLATFORM_LINUX);
+
+    theory.isSuccessful = str.stringEq(text.view(ref win), " -lsqlite3")
+      && str.stringEq(text.view(ref lin), " -lm -lpthread -lsqlite3");
+    theory.detail = `windows "${text.view(ref win)}", linux "${text.view(ref lin)}"`;
+  }
+}
+
+// Windows decides what is runnable by NAME, so the executable the driver
+// reports has to be the one the user can actually launch.
+suite function theExecutableSuffixFollowsThePlatform(): void {
+  let test theory: Case = t.asserts("Windows gets .exe, POSIX is left alone") {
+    theory.isSuccessful = str.stringEq(withExeSuffixFor("hello", PLATFORM_WINDOWS), "hello.exe")
+      && str.stringEq(withExeSuffixFor("hello", PLATFORM_LINUX), "hello")
+      && str.stringEq(withExeSuffixFor("hello", PLATFORM_MACOS), "hello");
+    theory.detail = `windows "${withExeSuffixFor("hello", PLATFORM_WINDOWS)}"`;
+  }
+
+  // `-o hello.exe` is what the test harnesses pass, so a second suffix here
+  // would send every one of them looking for hello.exe.exe.
+  let test theory: Case = t.asserts("an existing .exe is not doubled, in either case") {
+    theory.isSuccessful = str.stringEq(withExeSuffixFor("hello.exe", PLATFORM_WINDOWS), "hello.exe")
+      && str.stringEq(withExeSuffixFor("HELLO.EXE", PLATFORM_WINDOWS), "HELLO.EXE");
+    theory.detail = `got "${withExeSuffixFor("hello.exe", PLATFORM_WINDOWS)}" and "${withExeSuffixFor("HELLO.EXE", PLATFORM_WINDOWS)}"`;
+  }
+
+  // A path whose own name ends in something shorter than the suffix, and one
+  // that merely CONTAINS it, both still need it.
+  let test theory: Case = t.asserts("a name that only looks close still gets the suffix") {
+    theory.isSuccessful = str.stringEq(withExeSuffixFor("exe", PLATFORM_WINDOWS), "exe.exe")
+      && str.stringEq(withExeSuffixFor("a.exe.b", PLATFORM_WINDOWS), "a.exe.b.exe");
+    theory.detail = `got "${withExeSuffixFor("exe", PLATFORM_WINDOWS)}" and "${withExeSuffixFor("a.exe.b", PLATFORM_WINDOWS)}"`;
+  }
 }

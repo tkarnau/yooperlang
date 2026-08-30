@@ -35,7 +35,8 @@ import path from "path";
 import os from "os";
 
 import { compareStageBinaries } from "./fixpointCompare.js";
-import { runProcOrThrow } from "./testProc.js";
+import { runProcOrThrow, programOutput } from "./testProc.js";
+import { EXE_SUFFIX } from "./toolchain.js";
 import { seedCompiler } from "../scripts/seed.mjs";
 
 const REPO = path.resolve(import.meta.dirname, "..");
@@ -62,9 +63,15 @@ describe("self-hosting: the bootstrap compiles itself to a fixpoint", () => {
   before(async () => {
     work = fs.mkdtempSync(path.join(os.tmpdir(), "yoop-selfhost-"));
     for (const d of ["s1", "s2", "s3"]) fs.mkdirSync(path.join(work, d));
-    stage1 = path.join(work, "s1/yoopiler");
-    stage2 = path.join(work, "s2/yoopiler");
-    stage3 = path.join(work, "s3/yoopiler");
+    // EXE_SUFFIX on everything this builds AND then runs. The compiler names its
+    // output what the platform needs to consider it executable (withExeSuffix in
+    // bootstrap/src/link/clang.yoop), so on Windows a `-o foo` produces `foo.exe`
+    // and spawning `foo` is an ENOENT. Naming the output WITH the suffix keeps the
+    // path handed to `-o` and the path spawned afterwards one string rather than
+    // two that can drift.
+    stage1 = path.join(work, `s1/yoopiler${EXE_SUFFIX}`);
+    stage2 = path.join(work, `s2/yoopiler${EXE_SUFFIX}`);
+    stage3 = path.join(work, `s3/yoopiler${EXE_SUFFIX}`);
 
     const opts = { cwd: REPO, env, timeout: BUILD_TIMEOUT_MS };
     // stage1 comes from the SEED - a previously released yoopiler_boot. That is
@@ -113,13 +120,13 @@ describe("self-hosting: the bootstrap compiles itself to a fixpoint", () => {
   });
 
   it("stage3 is a working compiler", async () => {
-    const exe = path.join(work, "hello");
+    const exe = path.join(work, `hello${EXE_SUFFIX}`);
     await runProcOrThrow(stage3, [HELLO, "-o", exe], { cwd: REPO, env, timeout: BUILD_TIMEOUT_MS });
     const { stdout: out } = await runProcOrThrow(exe, [], { timeout: 10000 });
     const expected = fs.readFileSync(
       path.join(REPO, "bootstrap/tests/slice/hello.expected"),
       "utf8",
     );
-    assert.equal(`${out}exit=0\n`, expected);
+    assert.equal(`${programOutput(out)}exit=0\n`, expected);
   });
 });

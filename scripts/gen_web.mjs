@@ -23,6 +23,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
 import { seedCompiler, seedEnv } from "./seed.mjs";
+import { EXE_SUFFIX } from "../src/toolchain.js";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const webRoot = path.join(repoRoot, "web");
@@ -35,8 +36,8 @@ const dataRoot = path.join(webRoot, "data");
 // `dumpTokens` is a separate PROGRAM rather than a driver flag - the token dump
 // is a tool, and the driver has no reason to carry it.
 const buildDir = fs.mkdtempSync(path.join(os.tmpdir(), "yoop_web_tools_"));
-const yoopiler = path.join(buildDir, "yoopiler_boot");
-const tokenDumper = path.join(buildDir, "dump_tokens");
+const yoopiler = path.join(buildDir, `yoopiler_boot${EXE_SUFFIX}`);
+const tokenDumper = path.join(buildDir, `dump_tokens${EXE_SUFFIX}`);
 process.on("exit", () => fs.rmSync(buildDir, { recursive: true, force: true }));
 
 function buildTools() {
@@ -308,7 +309,7 @@ function excerptIr(irText, moduleBase) {
 
 function compileAndRun(file, tmpDir, { wantIr = false } = {}) {
   const base = path.basename(file, ".yoop");
-  const binPath = path.join(tmpDir, base);
+  const binPath = path.join(tmpDir, `${base}${EXE_SUFFIX}`);
   // No flag for the IR: the bootstrap writes `<out>.ll` beside the executable
   // on an ordinary linking run, so `wantIr` only changes whether it is READ.
   const compile = run(yoopiler, [file, "-o", binPath]);

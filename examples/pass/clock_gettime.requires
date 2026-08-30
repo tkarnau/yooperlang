@@ -1,0 +1,5 @@
+# clock_gettime and struct timespec are POSIX. The Windows CRT has neither, and
+# there is no drop-in spelling to fall back to - the program is ABOUT calling
+# that function through an extern block, so substituting a different clock would
+# make it a different test. Linux and macOS still assert it in full.
+posix

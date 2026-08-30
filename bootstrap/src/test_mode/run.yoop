@@ -17,6 +17,7 @@ import { Vec }, * as vec from "std/core/vec.yoop";
 import * as fs from "std/fs.yoop";
 import * as env from "std/env.yoop";
 import { disposable } from "std/core/kinds.yoop";
+import { currentPlatform, PLATFORM_WINDOWS } from "../link";
 
 extern "C" from "stdlib.h" {
   function system(cmd: string): int32;
@@ -29,13 +30,57 @@ extern "C" from "unistd.h" {
 // Where this run's test binary goes. The pid is in the name so two `--test`
 // runs at once do not link over each other's output.
 export function testBinaryPath(): string {
-  return `${env.getOr("TMPDIR", "/tmp")}/yoopiler_boot_tests_${getpid()}`;
+  return `${tempDir()}/yoopiler_boot_tests_${getpid()}${exeSuffix()}`;
+}
+
+// The system temp directory. TMPDIR is the POSIX spelling and TEMP is the
+// Windows one - Windows sets neither TMPDIR nor has a /tmp, so the POSIX
+// fallback there produces `/tmp/...`, which the link step then cannot write
+// and reports as a clang failure rather than as a missing directory.
+function tempDir(): string {
+  const posix = env.getOr("TMPDIR", "");
+  if (posix.len > 0) {
+    return posix;
+  }
+  const windows = env.getOr("TEMP", "");
+  if (windows.len > 0) {
+    return windows;
+  }
+  return "/tmp";
+}
+
+// Windows will not execute a file that is not named `.exe`, whatever its
+// contents. The test binary is run through `system`, so without this the link
+// succeeds and the run fails with "not recognized as an internal or external
+// command" - which reads as a broken compiler rather than as a missing
+// four characters.
+function exeSuffix(): string {
+  if (currentPlatform() == PLATFORM_WINDOWS) {
+    return ".exe";
+  }
+  return "";
 }
 
 // Run `exePath`, forwarding the extra positionals as suite-name FILTERS - which
 // is what std/test.yoop reads its argv for. Returns the process exit code.
 export function runTestBinary(exePath: string, ref filters: Vec<string>): int32 {
   disposable cmd: Text = text.make(256);
+  // Windows only: an extra pair of quotes around the WHOLE line.
+  //
+  // `system` runs `cmd.exe /c <line>`, and cmd has a rule that looks like a
+  // bug and is documented behaviour: when the line begins with a quote it
+  // strips the first and the last one. `"prog" "filter"` therefore reaches the
+  // shell as `prog" "filter`, which it reports as
+  // `'...exe" "addsPlainly' is not recognized as an internal or external
+  // command` - a message that names a program nobody asked for. Wrapping the
+  // line gives cmd the outer pair to eat and leaves the real quoting intact.
+  //
+  // The link line in link/clang.yoop needs none of this: it starts with
+  // `clang`, not with a quote, so the rule never fires there.
+  const wrap = currentPlatform() == PLATFORM_WINDOWS;
+  if (wrap) {
+    text.push(ref cmd, "\"");
+  }
   text.push(ref cmd, "\"");
   text.push(ref cmd, exePath);
   text.push(ref cmd, "\"");
@@ -45,6 +90,9 @@ export function runTestBinary(exePath: string, ref filters: Vec<string>): int32 
     text.push(ref cmd, vec.vecGet(ref filters, i));
     text.push(ref cmd, "\"");
     i += 1;
+  }
+  if (wrap) {
+    text.push(ref cmd, "\"");
   }
   return exitCodeOf(system(text.view(ref cmd)));
 }
@@ -58,6 +106,14 @@ export function runTestBinary(exePath: string, ref filters: Vec<string>): int32 
 function exitCodeOf(status: int32): int32 {
   if (status < 0) {
     return 1;
+  }
+  // Windows has no wait status. Its `system` returns what the child returned,
+  // so the POSIX decoding below would shift a real failure count clean out of
+  // the value - 3 failures would come back 0, and `--test` would report
+  // success on a red suite. That is the worst shape a bug can have in a test
+  // harness, so the platform is asked rather than assumed.
+  if (currentPlatform() == PLATFORM_WINDOWS) {
+    return status;
   }
   if ((status & 127) != 0) {
     return 1;

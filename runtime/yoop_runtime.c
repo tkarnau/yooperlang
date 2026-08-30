@@ -25,9 +25,18 @@
 
 #ifdef _WIN32
   // _setmode / _fileno / _O_BINARY, for taking the standard streams out of
-  // the CRT's newline-translating text mode (see set_stdio_binary below).
+  // the CRT's newline-translating text mode (see yoop_stdio_set_binary below).
   #include <fcntl.h>
   #include <io.h>
+  // GetProcessMemoryInfo, for yoop_runtime_rss_bytes.
+  //
+  // PSAPI_VERSION 2 binds it to the K32-prefixed forwarder that kernel32
+  // exports directly. That is the whole reason this needs no -lpsapi: version 1
+  // would resolve against psapi.lib, and adding a library to every Windows link
+  // to answer one query would be a poor trade. Windows 7 and later only, which
+  // every supported Windows is.
+  #define PSAPI_VERSION 2
+  #include <psapi.h>
 #elif defined(__APPLE__)
   // task_info / mach_task_self, for yoop_runtime_rss_bytes.
   #include <mach/mach.h>
@@ -288,7 +297,7 @@ static void join_worker(yoop_thread_t* t) {
 // lifecycle and prevents windows from appearing.
 static int n_workers_target = 0;
 
-// Windows only: take stdout/stderr out of the CRT's text mode.
+// Windows only: take stdin/stdout/stderr out of the CRT's text mode.
 //
 // By default the MSVC CRT opens the standard streams in text mode, which
 // rewrites every '\n' the program emits into "\r\n" on its way out. That is
@@ -303,8 +312,26 @@ static int n_workers_target = 0;
 //
 // This does not stop Windows consoles from rendering the output correctly -
 // they treat a bare LF as a newline. It only stops the translation layer.
-static void set_stdio_binary(void) {
+//
+// PUBLIC rather than static, and called from two places. yoop_runtime_init
+// still calls it, which covers every program that has a task. The compiler
+// itself does NOT have one - so it never reached this, and its own `--lsp`
+// mode was talking to editors through the translation layer. It now calls this
+// directly from main. See bootstrap/src/main.yoop.
+//
+// STDIN matters just as much, and for a sharper reason than symmetry. Text mode
+// translates on the way IN too, turning each CRLF back into a bare LF - so a
+// reader is handed fewer bytes than the writer sent. The language server is
+// where that stops being theoretical: LSP frames every message as
+// "Content-Length: N\r\n\r\n" followed by exactly N bytes, and with stdin in
+// text mode the header terminator the server scans for does not survive the
+// read. The server then waits for a frame that has already arrived, forever,
+// and an editor sees a language server that starts and never answers. That is
+// how it presented - all nine protocol tests burning their full 60s deadline
+// with "lsp: listening on stdio" as the only output.
+void yoop_stdio_set_binary(void) {
 #ifdef _WIN32
+    _setmode(_fileno(stdin),  _O_BINARY);
     _setmode(_fileno(stdout), _O_BINARY);
     _setmode(_fileno(stderr), _O_BINARY);
 #endif
@@ -316,7 +343,7 @@ void yoop_runtime_init(void) {
 
     // Before anything can print. Cheap and idempotent, and this is the one
     // function codegen guarantees runs at the top of every program's main.
-    set_stdio_binary();
+    yoop_stdio_set_binary();
 
     // Same reasoning for Winsock: it must be started before the first socket
     // call in the process, and std/net reaches sockets through paths that do
@@ -1117,9 +1144,15 @@ int yoop_atomic_cas_u64(uint64_t* p, uint64_t* expected, uint64_t desired) {
 // guessing.
 uint64_t yoop_runtime_rss_bytes(void) {
 #if defined(_WIN32)
-    // Would need PSAPI (GetProcessMemoryInfo) and the psapi link flag.
-    // Not wired up; callers get 0 and should treat it as "unavailable".
-    return 0;
+    // WorkingSetSize is the Win32 name for the same quantity: the bytes of
+    // physical memory the process currently occupies. PagefileUsage is the
+    // other candidate and is NOT the same thing - it is the committed private
+    // total, which counts pages that were never resident.
+    PROCESS_MEMORY_COUNTERS pmc;
+    if (!GetProcessMemoryInfo(GetCurrentProcess(), &pmc, sizeof(pmc))) {
+        return 0;
+    }
+    return (uint64_t)pmc.WorkingSetSize;
 #elif defined(__APPLE__)
     // mach_task_basic_info reports resident_size directly.
     mach_task_basic_info_data_t info;

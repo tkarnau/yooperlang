@@ -1,9 +1,10 @@
 // Tests for the stage comparison the self-hosting fixpoint is decided by.
 //
 // Two claims, and the whole value of the helper is that BOTH hold at once:
-// identical input has to compare equal even though macOS does not link it to
-// identical bytes, and different input still has to compare unequal. A
-// normalizer that only satisfied the first would pass every build forever.
+// identical input has to compare equal even though neither macOS nor Windows
+// links it to identical bytes, and different input still has to compare
+// unequal. A normalizer that only satisfied the first would pass every build
+// forever.
 //
 // C rather than Yoop on purpose: this covers the LINKER, which is downstream of
 // the compiler and shared by both languages. That keeps the test independent of
@@ -41,7 +42,7 @@ function sourceFile(work, text) {
 function build(work, stage, src) {
   const outDir = path.join(work, stage);
   fs.mkdirSync(outDir, { recursive: true });
-  const exe = path.join(outDir, "yoopiler");
+  const exe = path.join(outDir, process.platform === "win32" ? "yoopiler.exe" : "yoopiler");
   execFileSync("clang", ["-g", "-o", exe, src], { stdio: "ignore", cwd: work });
   return exe;
 }
@@ -94,6 +95,39 @@ describe("comparing two linked stages", () => {
     assert.ok(
       !fs.readFileSync(a).equals(fs.readFileSync(b)),
       "macOS linked one source to identical bytes twice - drop the normalization",
+    );
+  });
+
+  // Same claim for Windows, and it fails for different reasons: link.exe
+  // stamps the image with the time it ran and gives the PDB a fresh GUID, and
+  // the PDB PATH it records contains the output directory - which is the one
+  // thing that varies between two stages. If this ever fails, link.exe became
+  // reproducible and normalizePe can go.
+  it("is doing real work: Windows does not link the same source to the same bytes", (t) => {
+    if (!clangOk) return t.skip("clang is not on PATH");
+    if (process.platform !== "win32") return t.skip("only Windows links irreproducibly this way");
+    const src = sourceFile(work, SAME);
+    const a = build(work, "raw-a", src);
+    const b = build(work, "raw-b", src);
+    assert.ok(
+      !fs.readFileSync(a).equals(fs.readFileSync(b)),
+      "link.exe linked one source to identical bytes twice - drop the normalization",
+    );
+  });
+
+  // The normalizer has to be NARROW as well as sufficient. Zeroing the whole
+  // debug directory, or giving up and returning true, would satisfy the test
+  // above and hide every real miscompile; this pins the machine code down by
+  // changing one instruction and nothing else.
+  it("on Windows, normalizing does not swallow a code difference", (t) => {
+    if (!clangOk) return t.skip("clang is not on PATH");
+    if (process.platform !== "win32") return t.skip("covers the PE normalizer");
+    const a = build(work, "pe-code-a", sourceFile(work, SAME));
+    const b = build(work, "pe-code-b", sourceFile(work, OTHER));
+    assert.notEqual(
+      compareStageBinaries(a, b),
+      "",
+      "normalizePe erased a real difference in the code",
     );
   });
 

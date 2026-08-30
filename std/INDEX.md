@@ -517,6 +517,7 @@ Exports:
 - `statPath` - function
 - `timeString` - function
 - `hasYoopFileNameSuffix` - function
+- `isAbsolutePath` - function
 - `dirName` - function
 - `normalizePath` - function
 

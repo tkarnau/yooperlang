@@ -17,7 +17,8 @@ import fs from "fs";
 import path from "path";
 import os from "os";
 
-import { runProc, runProcOrThrow } from "./testProc.js";
+import { runProc, runProcOrThrow, programOutput } from "./testProc.js";
+import { EXE_SUFFIX } from "./toolchain.js";
 import { seedCompiler, seedEnv } from "../scripts/seed.mjs";
 
 const REPO = path.resolve(import.meta.dirname, "..");
@@ -87,7 +88,13 @@ describe("vertical slice: the bootstrap compiler produces working executables", 
       boot = process.env.YOOP_BOOT_COMPILER;
       return;
     }
-    boot = path.join(work, "yoopiler_boot");
+    // EXE_SUFFIX on everything this builds AND then runs. The compiler names its
+    // output what the platform needs to consider it executable (withExeSuffix in
+    // bootstrap/src/link/clang.yoop), so on Windows a `-o foo` produces `foo.exe`
+    // and spawning `foo` is an ENOENT. Naming the output WITH the suffix keeps the
+    // path handed to `-o` and the path spawned afterwards one string rather than
+    // two that can drift.
+    boot = path.join(work, `yoopiler_boot${EXE_SUFFIX}`);
     // The bootstrap compiler, built by the SEED - a previously released
     // yoopiler_boot. `seedEnv` points it at THIS tree's std and runtime rather
     // than the ones packaged beside it: the seed exists only to compile today's
@@ -143,7 +150,7 @@ describe("vertical slice: the bootstrap compiler produces working executables", 
 
     it(`${stem}: the bootstrap compiler produces the expected behaviour`, async () => {
       const expected = fs.readFileSync(path.join(SLICE, `${stem}.expected`), "utf8");
-      const got = await buildAndRun(boot, [path.join(SLICE, name), "-o", path.join(work, `${stem}_bs`)], path.join(work, `${stem}_bs`), env);
+      const got = await buildAndRun(boot, [path.join(SLICE, name), "-o", path.join(work, `${stem}_bs${EXE_SUFFIX}`)], path.join(work, `${stem}_bs${EXE_SUFFIX}`), env, work);
       assert.equal(got, expected, `${stem}: the bootstrap compiler is wrong`);
     });
 
@@ -164,7 +171,7 @@ describe("vertical slice: the bootstrap compiler produces working executables", 
       const r = await runProc(boot, [hello, "-o", out, "--emit-ir"], { cwd: REPO, env: env() });
       assert.equal(r.code, 0, r.stderr);
       assert.ok(fs.existsSync(`${out}.ll`), "--emit-ir did not write the IR");
-      assert.ok(!fs.existsSync(out), "--emit-ir linked an executable anyway");
+      assert.ok(!fs.existsSync(out + EXE_SUFFIX), "--emit-ir linked an executable anyway");
     });
 
     // The one invariant that matters: the flag stops the pipeline, it does not
@@ -181,7 +188,7 @@ describe("vertical slice: the bootstrap compiler produces working executables", 
         fs.readFileSync(`${linked}.ll`).equals(fs.readFileSync(`${emitted}.ll`)),
         "--emit-ir emits different IR than a linking run",
       );
-      assert.ok(fs.existsSync(linked), "the linking run produced no executable");
+      assert.ok(fs.existsSync(linked + EXE_SUFFIX), "the linking run produced no executable");
     });
 
     it("a flag may stand before the entry file", async () => {
@@ -222,7 +229,7 @@ describe("vertical slice: the bootstrap compiler produces working executables", 
         env: testEnv(),
       });
       assert.equal(
-        r.stdout,
+        programOutput(r.stdout),
         "# alpha.test.yoop:addsOne\n" +
           "# alpha.test.yoop:addsTwo\n" +
           "# nested/beta.test.yoop:betaBehaves\n" +
@@ -240,7 +247,7 @@ describe("vertical slice: the bootstrap compiler produces working executables", 
         env: testEnv(),
       });
       assert.equal(
-        r.stdout,
+        programOutput(r.stdout),
         "# strange_add.test.yoop:addsStrangelyWhenFirstIsTwoModFive\n" +
           "ok 1 - adds an extra 1 when a % 5 == 2\n" +
           "ok 2 - still adds the extra 1 at 7\n" +
@@ -260,7 +267,7 @@ describe("vertical slice: the bootstrap compiler produces working executables", 
         env: testEnv(),
       });
       assert.equal(
-        r.stdout,
+        programOutput(r.stdout),
         "# failing.test.yoop:reportsFailures\n" +
           "ok 1 - passes\n" +
           "not ok 2 - fails with detail\n" +
@@ -281,7 +288,7 @@ describe("vertical slice: the bootstrap compiler produces working executables", 
         [path.join(REPO, "examples/testing/pass/strange_add.test.yoop")],
         { cwd: REPO, env: testEnv() },
       );
-      assert.match(r.stdout, /# 3 passed, 0 failed\n$/);
+      assert.match(programOutput(r.stdout), /# 3 passed, 0 failed\n$/);
       assert.equal(r.code, 0, r.stderr);
     });
 
@@ -293,7 +300,7 @@ describe("vertical slice: the bootstrap compiler produces working executables", 
         { cwd: REPO, env: testEnv() },
       );
       assert.equal(
-        r.stdout,
+        programOutput(r.stdout),
         "# strange_add.test.yoop:addsPlainlyOtherwise\n" +
           "ok 1 - adds plainly when a % 5 is not 2\n" +
           "1..1\n" +
@@ -357,7 +364,7 @@ describe("vertical slice: the bootstrap compiler produces working executables", 
 // accumulate fastest. Every spawn there
 // carries a deadline, and every kill walks the process tree, which is the only
 // way to reach the clang the compiler started.
-async function buildAndRun(compiler, args, exe, env = process.env) {
+async function buildAndRun(compiler, args, exe, env = process.env, runCwd = undefined) {
   const built = await runProc(compiler, args, {
     cwd: REPO,
     env,
@@ -367,7 +374,12 @@ async function buildAndRun(compiler, args, exe, env = process.env) {
     const how = built.timedOut ? "never finished" : `exited ${built.code}`;
     throw new Error(`${compiler} ${args.join(" ")} ${how}\n${built.stderr}`);
   }
-  const ran = await runProc(exe, [], { timeout: RUN_TIMEOUT_MS });
+  // Run from the suite's own temp directory rather than from wherever the
+  // harness happens to sit. A fixture that touches the filesystem writes a
+  // RELATIVE name (see extern_opaque_type.yoop), and the alternative is either
+  // an absolute path - which is what made two fixtures POSIX-only - or a
+  // scratch file dropped in the repo root.
+  const ran = await runProc(exe, [], { cwd: runCwd, timeout: RUN_TIMEOUT_MS });
   if (ran.timedOut) {
     throw new Error(
       `${exe} did not exit within ${RUN_TIMEOUT_MS}ms and was killed - ` +
@@ -375,5 +387,5 @@ async function buildAndRun(compiler, args, exe, env = process.env) {
     );
   }
   if (ran.code === null) throw new Error(`${exe} was killed by ${ran.signal}`);
-  return `${ran.stdout}exit=${ran.code}\n`;
+  return `${programOutput(ran.stdout)}exit=${ran.code}\n`;
 }

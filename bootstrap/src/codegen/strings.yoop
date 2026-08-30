@@ -11,13 +11,28 @@ module codegen;
 
 import { Text }, * as text from "std/core/text.yoop";
 import { Vec }, * as vec from "std/core/vec.yoop";
+import { Map }, * as map from "std/collections/map.yoop";
+import { Option } from "std/core/types.yoop";
 import * as intr from "std/core/intrinsics.yoop";
 
 // Emits `@.str.N = private unnamed_addr constant [L x i8] c"..."` and returns
 // N, so a caller can reference it as `Operand.StrRef { id: N }`.
+//
+// INTERNED BY CONTENT, which the name has always claimed and which the compare
+// on an `enum<string>` depends on: identical bytes get one global and one
+// address, so `icmp eq ptr` answers the question a reader thinks it is asking.
+// Before this, the same case constant reached from two modules was two globals,
+// and only the ELF and Mach-O mergeable-string sections made that look right -
+// COFF kept them apart and `warm == Label.Warm` came out false on Windows.
 export function internStringConstant(ref e: Emitter, s: string): usize {
+  switch (map.mapGet(ref e.strConstants, s)) {
+    case Option.Some { value: existing }: { return existing; }
+    case Option.None: {}
+  }
+
   const id = e.nextStr;
   e.nextStr += 1;
+  map.mapInsert(ref e.strConstants, s, id);
 
   const raw = intr.stringAsBytes(s);
   text.push(ref e.globals, "@.str.");

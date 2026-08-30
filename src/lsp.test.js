@@ -14,11 +14,23 @@
 // about a server that is still healthy several messages in.
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert";
+import { pathToFileURL } from "node:url";
+
+// The URI an editor would actually send for `file`.
+//
+// Not `file://` + the path. That happens to read correctly on POSIX and is
+// simply wrong on Windows, where an absolute path starts with a drive letter:
+// it produces `file://C:\\dir\\x.yoop`, which has the drive as its HOST and
+// backslashes in a place the grammar does not allow them. Every one of these
+// tests would then be asserting against a URI no client emits. pathToFileURL
+// is Node's implementation of the same rule the LSP clients use.
+const uriFor = (file) => pathToFileURL(file).href;
 import fs from "fs";
 import path from "path";
 import os from "os";
 
 import { runProcOrThrow, trackChild, stopChild } from "./testProc.js";
+import { EXE_SUFFIX } from "./toolchain.js";
 import { seedCompiler, seedEnv } from "../scripts/seed.mjs";
 
 const REPO = path.resolve(import.meta.dirname, "..");
@@ -101,7 +113,7 @@ describe("the language server speaks LSP over stdio", () => {
       boot = process.env.YOOP_BOOT_COMPILER;
       return;
     }
-    boot = path.join(work, "yoopiler_boot");
+    boot = path.join(work, `yoopiler_boot${EXE_SUFFIX}`);
     await runProcOrThrow(
       seedCompiler(),
       [BOOT_SRC, "-o", boot],
@@ -120,7 +132,7 @@ describe("the language server speaks LSP over stdio", () => {
   it("initializes, diagnoses a document, and shuts down", async () => {
     const file = path.join(work, "broken.yoop");
     fs.writeFileSync(file, BROKEN);
-    const uri = `file://${file}`;
+    const uri = uriFor(file);
     const client = new LspClient(boot, env);
     try {
       client.send({ jsonrpc: "2.0", id: 1, method: "initialize", params: {} });
@@ -199,7 +211,7 @@ describe("the language server speaks LSP over stdio", () => {
   it("diagnoses the unsaved buffer rather than the file on disk", async () => {
     const file = path.join(work, "unsaved.yoop");
     fs.writeFileSync(file, CLEAN);
-    const uri = `file://${file}`;
+    const uri = uriFor(file);
     const client = new LspClient(boot, env);
     try {
       client.send({ jsonrpc: "2.0", id: 1, method: "initialize", params: {} });
@@ -331,7 +343,7 @@ describe("the language server speaks LSP over stdio", () => {
     }
     fs.writeFileSync(path.join(dir, "main.yoop"), MODULE_MAIN);
     const file = path.join(dir, "lib", "use.yoop");
-    return { dir, file, uri: `file://${file}`, text: MODULE_FILES["use.yoop"] };
+    return { dir, file, uri: uriFor(file), text: MODULE_FILES["use.yoop"] };
   }
 
   // `initialize` + `didOpen`, through the first publish. Every query test below
@@ -552,7 +564,7 @@ describe("the language server speaks LSP over stdio", () => {
       // filters them - an advisory belongs where the reader can see the line.
       const shapesText = MODULE_FILES["shapes.yoop"];
       const shapesFile = path.join(fx.dir, "lib", "shapes.yoop");
-      const shapesUri = `file://${shapesFile}`;
+      const shapesUri = uriFor(shapesFile);
       client.send({
         jsonrpc: "2.0",
         method: "textDocument/didOpen",

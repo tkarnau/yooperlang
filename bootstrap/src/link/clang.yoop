@@ -38,9 +38,55 @@ extern "C" from "yoop_runtime" {
   function yoop_runtime_platform(): c_int;
 }
 
+// The platform this compiler is RUNNING on, which is also the one it builds
+// for - nothing here cross-compiles. Exported because the link line is no
+// longer the only caller: test_mode/run.yoop needs the same answer to decide
+// an executable suffix and how to read an exit status.
+export function currentPlatform(): c_int {
+  return yoop_runtime_platform();
+}
+
 export const PLATFORM_LINUX: c_int = 1;
 export const PLATFORM_MACOS: c_int = 2;
 export const PLATFORM_WINDOWS: c_int = 3;
+
+// `out` with the suffix the platform needs to consider it an executable.
+//
+// Windows decides what is runnable by NAME: CreateProcess appends `.exe` when
+// the name it is given has no extension, so a file literally called `hello` is
+// a valid PE image that cmd, Explorer and `system()` all refuse to launch.
+// `yoopiler_boot hello.yoop -o hello` has to produce something the user can
+// then run, on every platform, and on this one that means four more
+// characters. A path that already ends in `.exe` is left alone rather than
+// growing a second one.
+//
+// The `.ll` beside it is NOT renamed - it is derived from the `-o` value as
+// written, so `--emit-ir` produces the same filename on every platform and the
+// probe does not need to know where it is running.
+// Platform passed in rather than read, for the reason given on
+// `pushRuntimeLibrariesFor`.
+export function withExeSuffixFor(out: string, platform: c_int): string {
+  if (platform != PLATFORM_WINDOWS) {
+    return out;
+  }
+  // Compared over bytes rather than with stringSlice, which returns an owned
+  // copy: this runs once per compile and does not need a malloc to answer a
+  // four-byte question. ASCII-case-insensitive, because `-o hello.EXE` names
+  // the same file to Windows and appending to it would produce hello.EXE.exe.
+  const raw = intr.stringAsBytes(out);
+  if (raw.len >= 4
+      && raw[raw.len - 4] == 46
+      && (raw[raw.len - 3] == 101 || raw[raw.len - 3] == 69)
+      && (raw[raw.len - 2] == 120 || raw[raw.len - 2] == 88)
+      && (raw[raw.len - 1] == 101 || raw[raw.len - 1] == 69)) {
+    return out;
+  }
+  return `${out}.exe`;
+}
+
+export function withExeSuffix(out: string): string {
+  return withExeSuffixFor(out, yoop_runtime_platform());
+}
 
 // Writes `ir` to `irPath`. Returns "" on success or a human-readable error.
 //
@@ -107,17 +153,55 @@ export function linkExecutable(
     }
   }
 
+  pushPlatformLinkFlags(ref cmd, yoop_runtime_platform());
+
   // `-L` and `-I` BEFORE the `-l` names: clang resolves a library against the
   // search path in effect, and a `-l` ahead of its `-L` finds nothing.
   pushSearchPaths(ref cmd);
   pushRuntimeLibraries(ref cmd);
-  pushLinkLibraries(ref cmd, ref linkLibraries);
+  pushLinkLibrariesFor(ref cmd, ref linkLibraries, yoop_runtime_platform());
 
   const rc = system(text.view(ref cmd));
   if (rc != 0) {
     return `clang failed (exit ${rc}) on ${irPath}`;
   }
   return "";
+}
+
+// Link flags that are about the PLATFORM rather than about any library.
+//
+// Both of these are Windows-only, and both are about what the platform assumes
+// rather than about anything a program wrote.
+//
+// legacy_stdio_definitions. Since the UCRT, `sprintf` and most of its family
+// are INLINE functions in <stdio.h> rather than symbols in a library. A C
+// program never notices, because it included the header and got the inline
+// body. This compiler emits a direct call to `@sprintf` from an
+// `extern "C"` declaration, so there is no header and no inline body, and the
+// link ends at `LNK2019: unresolved external symbol sprintf`. That library is
+// exactly what Microsoft ships to provide the real symbols. It is why
+// slice/floats.yoop and a dozen others linked on Linux and macOS and not here.
+//
+// The stack. A PE image declares the
+// stack its main thread gets, and the linker default is 1 MB; ELF and Mach-O
+// leave it to the kernel, which gives 8. Every pass in this compiler walks the
+// AST by recursion, so on a deeply nested expression a Windows build does not
+// report an error - it dies with no output at all, because a stack overflow is
+// not something a program gets to print about. That is how it presented: the
+// unit suite stopped mid-LINE, part way through codegen.
+//
+// 8 MB matches what the other two platforms hand out, so the depth a program
+// can reach stops depending on which one compiled it. It is RESERVED address
+// space, not committed memory - the pages are faulted in on use - so the cost
+// of asking for it is address space a 64-bit process has in abundance.
+// Platform passed in rather than read, for the reason given on
+// `pushRuntimeLibrariesFor`.
+export function pushPlatformLinkFlags(ref cmd: Text, platform: c_int): void {
+  if (platform != PLATFORM_WINDOWS) {
+    return;
+  }
+  text.push(ref cmd, " -Wl,/STACK:8388608");
+  text.push(ref cmd, " -llegacy_stdio_definitions");
 }
 
 // The libraries EVERY program links, whatever its source names. Mirrors
@@ -172,12 +256,17 @@ function pushRuntimeLibraries(ref cmd: Text): void {
 // Where clang LOOKS for those libraries is search_paths.yoop, which is a
 // separate question and a separate file. The corpus needs it:
 // `examples/pass/https_client/main.yoop` does not link without it.
-function pushLinkLibraries(ref cmd: Text, ref libs: Vec<string>): void {
+// Platform passed in rather than read, for the reason given on
+// `pushRuntimeLibrariesFor`: the rules that VARY by platform are exactly the
+// rules a one-platform test cannot cover.
+export function pushLinkLibrariesFor(ref cmd: Text, ref libs: Vec<string>, platform: c_int): void {
   let i: usize = 0;
   while (i < libs.len) {
     const name = vec.vecGet(ref libs, i);
     if (str.stringStartsWith(name, FRAMEWORK_PREFIX)) {
-      pushFramework(ref cmd, name);
+      pushFrameworkFor(ref cmd, name, platform);
+    } else if (platform == PLATFORM_WINDOWS && isImplicitOnWindows(name)) {
+      // Dropped rather than translated. See isImplicitOnWindows.
     } else if (str.stringEq(name, "ssl") || str.stringEq(name, "crypto")) {
       text.push(ref cmd, " -lssl -lcrypto");
     } else {
@@ -186,6 +275,23 @@ function pushLinkLibraries(ref cmd: Text, ref libs: Vec<string>): void {
     }
     i += 1;
   }
+}
+
+// The library names that name a REAL library on POSIX and no library at all on
+// Windows, where the C runtime already contains both.
+//
+// `-lm` is the one that matters, and it is not hypothetical: the compiler
+// itself writes `extern "C" from library "m"` for the math functions
+// (bootstrap/src/comptime/externs.yoop), so on Windows the link line asks the
+// MSVC linker for m.lib and gets `LNK1104: cannot open file m.lib`. That is
+// the compiler failing to compile ITSELF, with a message naming a file the
+// user never wrote.
+//
+// Mirrors WINDOWS_IMPLICIT_LIBS in src/toolchain.js, the rule the JS reference
+// has always had. This is the self-hosted half catching up, and the two lists
+// have to stay one list.
+function isImplicitOnWindows(name: string): bool {
+  return str.stringEq(name, "m") || str.stringEq(name, "pthread");
 }
 
 // One `framework:NAME` name, lowered for the platform being built for.
@@ -215,10 +321,6 @@ export function pushFrameworkFor(ref cmd: Text, name: string, platform: c_int): 
   } else if (platform == PLATFORM_LINUX) {
     text.push(ref cmd, " -lGL");
   }
-}
-
-function pushFramework(ref cmd: Text, name: string): void {
-  pushFrameworkFor(ref cmd, name, yoop_runtime_platform());
 }
 
 const FRAMEWORK_PREFIX: string = "framework:";

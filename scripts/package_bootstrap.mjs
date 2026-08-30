@@ -35,6 +35,7 @@
 
 import { execFileSync } from "node:child_process";
 import { compareStageBinaries } from "../src/fixpointCompare.js";
+import { programOutput } from "../src/testProc.js";
 import { seedCompiler } from "./seed.mjs";
 import crypto from "node:crypto";
 import fs from "node:fs";
@@ -210,11 +211,15 @@ try {
 }
 
 // Same shape the slice suite asserts: stdout, then the exit line.
+// Read through programOutput for the same reason the corpora are: on Windows
+// the C runtime turns each newline the program printed into a CRLF on the way
+// down the pipe, and hello.expected is one hand-written file serving all three
+// platforms.
 let actual;
 try {
-  actual = `${execFileSync(helloExe, [], { encoding: "utf8" })}exit=0\n`;
+  actual = `${programOutput(execFileSync(helloExe, [], { encoding: "utf8" }))}exit=0\n`;
 } catch (err) {
-  actual = `${err.stdout ?? ""}exit=${err.status}\n`;
+  actual = `${programOutput(err.stdout ?? "")}exit=${err.status}\n`;
 }
 const expected = fs.readFileSync(
   path.join(repoRoot, "bootstrap", "tests", "slice", "hello.expected"),
@@ -233,8 +238,15 @@ step("tarring");
 const tarName = `${target}.tar.gz`;
 const tarPath = path.join(repoRoot, "dist", tarName);
 fs.rmSync(tarPath, { force: true });
-execFileSync("tar", ["-czf", tarPath, "-C", path.join(repoRoot, "dist"), target], {
+// Run FROM dist/ and name everything relatively, which is not a style choice.
+// A Windows machine has at least two tars on PATH - the system bsdtar and the
+// GNU tar that comes with Git - and GNU tar reads an absolute Windows path as a
+// REMOTE one, splitting `C:\...` at the colon into host `C` and then failing
+// with "Cannot connect to C: resolve failed". Relative names have no colon, so
+// both tars do the same thing.
+execFileSync("tar", ["-czf", tarName, target], {
   stdio: "inherit",
+  cwd: path.join(repoRoot, "dist"),
   env: { ...process.env, COPYFILE_DISABLE: "1" },
 });
 

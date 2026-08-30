@@ -37,6 +37,7 @@
     "test:debug": "node --test --test-reporter=spec src/debug.test.js",
     "package:boot": "node scripts/package_bootstrap.mjs",
     "gen:index": "node scripts/gen_std_index.mjs",
-    "gen:web": "node scripts/gen_web.mjs"
+    "gen:web": "node scripts/gen_web.mjs",
+    "release:platform": "node scripts/release_platform.mjs"
   }
 }

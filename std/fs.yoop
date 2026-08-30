@@ -24,7 +24,13 @@
 //
 // What's deliberately absent:
 //   * No streaming reads. readFile slurps.
-//   * No Windows-specific path handling. Forward slashes only.
+//   * Paths are BUILT with forward slashes and only forward slashes -
+//     pathJoin emits one and never a backslash. Reading a path is the
+//     asymmetric half: dirName and mkdirP accept either separator, because
+//     Windows hands paths IN with backslashes (argv[0] above all) and those
+//     are not ours to have written. Everything the compiler derives from a
+//     path it normalized is forward-slash already - see
+//     yoop_io_normalize_real_path in runtime/yoop_fs.c.
 
 import.unsafe;
 
@@ -112,7 +118,7 @@ export function mkdirP(full_path: string): string {
     let bytes: uint8[] = intr.stringAsBytes(full_path);
     let i: usize = 1;
     while (i < bytes.len) {
-        if (bytes[i] == 47) {  // '/'
+        if (bytes[i] == 47 || bytes[i] == 92) {  // forward slash or backslash, see dirName
             let prefix_view: uint8[] = intr.arraySlice(bytes, 0, i);
             let prefix: string = intr.stringFromBytesUnchecked(prefix_view);
             let _r: c_int = yoop_io_mkdir(prefix);
@@ -323,9 +329,52 @@ export function hasYoopFileNameSuffix(s: string): bool {
   }
 }
 
+// Whether `path` is absolute as the OPERATING SYSTEM reads it.
+//
+// POSIX has one form: a leading separator. Windows has that one too (a UNC
+// path, //server/share) plus the drive form, C:/... or C:..., and the drive
+// form is the whole reason this is not a one-line startsWith. The compiler
+// passes absolute paths around constantly - every resolved import is one - and
+// on Windows every one of them begins with a letter, so a leading-separator
+// test answers false for the common case.
+export function isAbsolutePath(path: string): bool {
+  const bytes: uint8[] = intr.stringAsBytes(path);
+  if (bytes.len == 0) {
+    return false;
+  }
+  if (bytes[0] == 47 || bytes[0] == 92) {
+    return true;
+  }
+  // A drive letter, a colon, then a separator. All three, because "C:" alone
+  // is drive-RELATIVE on Windows (it means "the working directory on C"), and
+  // treating that as absolute would join it onto nothing.
+  if (bytes.len < 3 || bytes[1] != 58 || (bytes[2] != 47 && bytes[2] != 92)) {
+    return false;
+  }
+  const c: uint8 = bytes[0];
+  return (c >= 65 && c <= 90) || (c >= 97 && c <= 122);
+}
+
 export function dirName(path: string): string {
-  const lastSlashIndex = str.lastIndexOf(path, "/");
-  switch(str.stringSlice(path, 0, lastSlashIndex)) {
+  // Scanned over BYTES rather than with two lastIndexOf passes, so 47 and 92
+  // are one decision rather than two results to reconcile - and so the
+  // backslash never has to survive a round trip through a string literal.
+  //
+  // A path with no separator at all keeps the long-standing answer, which is
+  // the path itself: callers here join onto the result, and changing that is a
+  // separate question from which byte separates a directory from a name.
+  const bytes: uint8[] = intr.stringAsBytes(path);
+  let cut: usize = bytes.len;
+  let i: usize = bytes.len;
+  while (i > 0) {
+    const b: uint8 = bytes[i - 1];
+    if (b == 47 || b == 92) {  // forward slash or backslash
+      cut = i - 1;
+      break;
+    }
+    i -= 1;
+  }
+  switch(str.stringSlice(path, 0, cut)) {
     case Result.Ok { value: d }: { return d; }
     case Result.Err { error: _ }: { return ""; }
   }

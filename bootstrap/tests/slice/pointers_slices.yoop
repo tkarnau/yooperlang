@@ -18,6 +18,7 @@ import.unsafe;
 extern "C" from "stdio.h" {
   function fopen(path: string, mode: string): unsafe_ptr;
   function fclose(f: unsafe_ptr): c_int;
+  function remove(path: string): c_int;
 }
 
 trait Readable {
@@ -44,9 +45,17 @@ function main(): int {
   let missing: unsafe_ptr = fopen("/no/such/dir/nothing", "rb");
   printf("missing null=%d\n", missing == null);
 
-  let real: unsafe_ptr = fopen("/dev/null", "rb");
+  // A file this program CREATES, so the successful-open half needs no path
+  // that happens to exist. It used to open /dev/null, which Windows does not
+  // have - fopen returned null, and fclose(null) reaches the UCRT's invalid
+  // parameter handler, which does not return: the process died with
+  // STATUS_STACK_BUFFER_OVERRUN before printing a line.
+  const scratch: string = "yoop_pointers_slices.tmp";
+  fclose(fopen(scratch, "wb"));
+  let real: unsafe_ptr = fopen(scratch, "rb");
   printf("real null=%d\n", real == null);
   fclose(real);
+  remove(scratch);
 
   // `null` in a struct field, where it pins to the field's pointer type.
   const h: Handle = { raw: null, tag: 7 };

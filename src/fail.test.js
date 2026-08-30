@@ -50,6 +50,7 @@ import path from "path";
 import os from "os";
 
 import { runProc, runProcOrThrow } from "./testProc.js";
+import { EXE_SUFFIX } from "./toolchain.js";
 import { seedCompiler, seedEnv } from "../scripts/seed.mjs";
 
 const REPO = path.resolve(import.meta.dirname, "..");
@@ -104,7 +105,7 @@ describe("diagnostics: the bootstrap compiler refuses the programs in examples/f
       boot = process.env.YOOP_BOOT_COMPILER;
       return;
     }
-    boot = path.join(work, "yoopiler_boot");
+    boot = path.join(work, `yoopiler_boot${EXE_SUFFIX}`);
     await runProcOrThrow(
       seedCompiler(),
       [BOOT_SRC, "-o", boot],
@@ -234,9 +235,16 @@ function parseExpectations(text, name) {
 // than by splitting on the first one. Diagnostics with no location at all - the
 // module graph emits a few - are deliberately not returned; nothing in the
 // expectation format can name them.
+//
+// Split on CRLF as well as LF. On Windows the compiler's stderr arrives with
+// carriage returns, and a trailing one does not merely dirty the message - it
+// stops the regex matching at all, because JavaScript counts a carriage return
+// as a LINE TERMINATOR, so the dot does not match it and the end anchor will
+// not step over it. Every one of the 77 fixtures failed as "reported no
+// [error] diagnostic", printing the diagnostic it had just called missing.
 function parseDiagnostics(output) {
   const out = [];
-  for (const line of output.split("\n")) {
+  for (const line of output.split(/\r?\n/)) {
     const m = /^\[error\]\s+(.*):(\d+):(\d+):\s(.*)$/.exec(line);
     if (!m) continue;
     out.push({ file: m[1], line: Number(m[2]), column: Number(m[3]), message: m[4] });

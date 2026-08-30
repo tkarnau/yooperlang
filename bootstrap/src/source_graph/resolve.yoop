@@ -34,7 +34,10 @@ export function resolveImportPath(
   } else {
     const isRel = str.stringStartsWith(sourcePath, "./")
       || str.stringStartsWith(sourcePath, "../");
-    const isAbs = str.stringStartsWith(sourcePath, "/");
+    // Not a leading-slash test: on Windows an absolute path is C:/..., and the
+    // test harness writes the file it is testing into a generated entry module
+    // by absolute path. See fs.isAbsolutePath.
+    const isAbs = fs.isAbsolutePath(sourcePath);
     if (!isRel && !isAbs) {
       return Result.Err {
         // Every form that works is named, `modules/` included: a bare

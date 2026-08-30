@@ -41,6 +41,24 @@
 // detached. See the survivor check in CLAUDE.md.
 import { spawn, spawnSync } from "node:child_process";
 
+// A compiled program's stdout, as the characters the PROGRAM wrote.
+//
+// Windows' C runtime opens stdout in TEXT mode, so every "\n" a program prints
+// arrives down the pipe as "\r\n". That is a fact about the platform's stdio
+// and not about the program, while a `.expected` file is a hand-written
+// assertion about what the program PRINTS. Without this the whole corpus fails
+// on Windows - 247 programs, every one of them for a reason no compiler change
+// could fix - or every expectation has to exist in two versions, which would
+// make the corpus assert the platform instead of the compiler.
+//
+// PROGRAM OUTPUT ONLY. It must never be put on the LSP transport, where a
+// Content-Length header counts the bytes that actually arrived and rewriting
+// them would desynchronize the stream.
+export function programOutput(text) {
+  const s = String(text ?? "");
+  return process.platform === "win32" ? s.replaceAll("\r\n", "\n") : s;
+}
+
 // The deadline every child gets unless its caller sets a shorter one. Long
 // enough for the slowest thing any suite legitimately does (the ~9s
 // `--test bootstrap/src` build, the ~5s bootstrap rebuild, a cold clang on a

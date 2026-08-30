@@ -104,6 +104,17 @@ int yoop_io_normalize_real_path(const char* path, char** out) {
     if (!resolved) return -1;
     yoop_stat_t st;
     if (yoop_stat(resolved, &st) != 0) { free(resolved); errno = ENOENT; return -1; }
+    // Hand back a '/'-separated path. Every path the compiler and std do
+    // arithmetic on comes out of here, and all of that arithmetic - dirName,
+    // pathJoin, mkdirP, the module id in
+    // bootstrap/src/source_graph/module_id.yoop - is written against '/'.
+    // Win32 accepts either separator on every file API it has, so
+    // canonicalizing once at this boundary is what keeps the layers above from
+    // needing a second convention. _fullpath is the only thing in the tree that
+    // produces backslashes.
+    for (char* c = resolved; *c; c++) {
+        if (*c == 0x5C) { *c = 0x2F; }
+    }
     *out = resolved;
     return 0;
 #else
@@ -417,4 +428,5 @@ char* yoop_io_time_string(int64_t epoch) {
     return yoop_io_dup(out);
 }
 
-#endif
+#endif
+

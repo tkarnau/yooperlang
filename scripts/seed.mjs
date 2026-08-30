@@ -105,8 +105,15 @@ function download() {
         `Original error: ${e.message}`,
     );
   }
-  execFileSync("tar", ["-xzf", path.join(cacheRoot, archive), "-C", cacheRoot], {
+  // Run FROM the cache directory and name the archive relatively. A Windows
+  // machine has both the system bsdtar and Git's GNU tar on PATH, and GNU tar
+  // reads an absolute Windows path as a REMOTE one - it splits `C:\...` at the
+  // colon and fails with "Cannot connect to C: resolve failed". A relative name
+  // has no colon, so both tars agree. Same reason as the pack side in
+  // scripts/package_bootstrap.mjs.
+  execFileSync("tar", ["-xzf", archive], {
     stdio: "inherit",
+    cwd: cacheRoot,
   });
   fs.chmodSync(cachedBin, 0o755);
 }

@@ -52,7 +52,9 @@ import fs from "fs";
 import path from "path";
 import os from "os";
 
-import { runProc, runProcOrThrow } from "./testProc.js";
+import { runProc, runProcOrThrow, programOutput } from "./testProc.js";
+import { EXE_SUFFIX, resolveClang, clangEnv, librarySearchArgs } from "./toolchain.js";
+import { execFileSync } from "node:child_process";
 import { seedCompiler, seedEnv } from "../scripts/seed.mjs";
 
 const REPO = path.resolve(import.meta.dirname, "..");
@@ -103,6 +105,65 @@ const programs = [
 const expectationOf = (p) => path.join(p.dir, `${path.basename(p.stem)}.expected`);
 const markerOf = (p) => path.join(p.dir, `${path.basename(p.stem)}.nondeterministic`);
 
+// A program can also state what it NEEDS in a `<stem>.requires` file, one
+// token per line with `#` comments. That is a different claim from
+// `.nondeterministic`, and the difference is the whole reason it is a separate
+// file: a nondeterministic program can never have an expectation, while one of
+// these keeps its `.expected` and is simply not RUNNABLE everywhere. Where the
+// requirement is met the program is asserted exactly as before.
+//
+// The vocabulary is closed, and an unknown token is a hard failure rather than
+// a skip. A marker that silently excused a program because someone typed
+// "posix " or "OpenSSL" would remove it from the corpus with no one the wiser,
+// which is the failure mode this whole directory exists to prevent.
+const requiresOf = (p) => path.join(p.dir, `${path.basename(p.stem)}.requires`);
+
+const REQUIREMENTS = {
+  // clock_gettime and its struct timespec are POSIX. There is no Windows
+  // spelling to fall back to, so the program cannot link there at all.
+  posix: () => process.platform !== "win32",
+  // libssl and its headers, which the link line finds through the prefixes in
+  // bootstrap/src/link/search_paths.yoop. Probed rather than assumed: an
+  // install is a fact about the machine, not about the platform.
+  openssl: () => hasOpenSsl(),
+};
+
+let cachedOpenSsl = null;
+function hasOpenSsl() {
+  if (cachedOpenSsl !== null) return cachedOpenSsl;
+  const probeDir = fs.mkdtempSync(path.join(os.tmpdir(), "yoop-ssl-probe-"));
+  const probe = path.join(probeDir, "probe.c");
+  fs.writeFileSync(probe, "#include <openssl/ssl.h>\nint main(void){return 0;}\n");
+  try {
+    execFileSync(resolveClang(), ["-fsyntax-only", ...librarySearchArgs(), probe], { stdio: "ignore", env: clangEnv() });
+    cachedOpenSsl = true;
+  } catch {
+    cachedOpenSsl = false;
+  } finally {
+    fs.rmSync(probeDir, { recursive: true, force: true });
+  }
+  return cachedOpenSsl;
+}
+
+// What a program's `.requires` file asks for, as a list of tokens.
+function requirementsFor(program) {
+  const file = requiresOf(program);
+  if (!fs.existsSync(file)) return [];
+  return fs
+    .readFileSync(file, "utf8")
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0 && !l.startsWith("#"));
+}
+
+// The first requirement this machine does not meet, or null.
+function unmetRequirement(program) {
+  for (const token of requirementsFor(program)) {
+    if (!REQUIREMENTS[token]()) return token;
+  }
+  return null;
+}
+
 const ported = programs.filter((p) => fs.existsSync(expectationOf(p)));
 const excluded = programs.filter((p) => !fs.existsSync(expectationOf(p)) && fs.existsSync(markerOf(p)));
 
@@ -119,7 +180,13 @@ describe("the corpus: the bootstrap compiler builds and runs examples/ correctly
       boot = process.env.YOOP_BOOT_COMPILER;
       return;
     }
-    boot = path.join(work, "yoopiler_boot");
+    // EXE_SUFFIX on everything this builds AND then runs. The compiler names its
+    // output what the platform needs to consider it executable (withExeSuffix in
+    // bootstrap/src/link/clang.yoop), so on Windows a `-o foo` produces `foo.exe`
+    // and spawning `foo` is an ENOENT. Naming the output WITH the suffix keeps the
+    // path handed to `-o` and the path spawned afterwards one string rather than
+    // two that can drift.
+    boot = path.join(work, `yoopiler_boot${EXE_SUFFIX}`);
     await runProcOrThrow(
       seedCompiler(),
       [BOOT_SRC, "-o", boot],
@@ -139,6 +206,39 @@ describe("the corpus: the bootstrap compiler builds and runs examples/ correctly
 
   it("finds programs", () => {
     assert.ok(programs.length > 0, `no programs under ${PASS} or ${TOUR}`);
+  });
+
+  // A `.requires` file only excuses a program from RUNNING here. It has to name
+  // requirements this suite understands, and it has to say why in a comment, or
+  // it is a way to delete a program from the corpus by accident.
+  it("every .requires marker names known requirements and states a reason", () => {
+    const known = Object.keys(REQUIREMENTS);
+    const problems = [];
+    for (const program of programs) {
+      const file = requiresOf(program);
+      if (!fs.existsSync(file)) continue;
+      const body = fs.readFileSync(file, "utf8");
+      if (!body.split(/\r?\n/).some((l) => l.trim().startsWith("#"))) {
+        problems.push(`${program.stem}: no '#' comment saying why`);
+      }
+      const tokens = requirementsFor(program);
+      if (tokens.length === 0) {
+        problems.push(`${program.stem}: names no requirement at all`);
+      }
+      for (const token of tokens) {
+        if (!known.includes(token)) {
+          problems.push(`${program.stem}: unknown requirement '${token}' (known: ${known.join(", ")})`);
+        }
+      }
+    }
+    assert.deepEqual(problems, []);
+  });
+
+  // The two markers answer different questions, so a program carrying both is
+  // saying its output is undetermined AND asserting what that output is.
+  it("no program is both nondeterministic and merely unavailable here", () => {
+    const both = programs.filter((p) => fs.existsSync(markerOf(p)) && fs.existsSync(requiresOf(p)));
+    assert.deepEqual(both.map((p) => p.stem), []);
   });
 
   // A marker means "this program's output is not fully determined by the
@@ -162,10 +262,14 @@ describe("the corpus: the bootstrap compiler builds and runs examples/ correctly
   });
 
   for (const program of ported) {
-    it(`${program.stem}: builds, runs, and produces the expected output`, async () => {
+    it(`${program.stem}: builds, runs, and produces the expected output`, async (t) => {
+      const missing = unmetRequirement(program);
+      if (missing) {
+        return t.skip(`needs ${missing}, which this machine does not have`);
+      }
       const expected = fs.readFileSync(expectationOf(program), "utf8");
       const slug = program.stem.replace(/\//g, "_");
-      const out = path.join(work, slug);
+      const out = path.join(work, `${slug}${EXE_SUFFIX}`);
       const got = await buildAndRun(boot, [program.entry, "-o", out], out, sandboxFor(program, slug));
       assert.equal(
         got,
@@ -253,5 +357,5 @@ async function buildAndRun(compiler, args, exe, runCwd) {
     );
   }
   if (ran.code === null) throw new Error(`${exe} was killed by ${ran.signal}`);
-  return `${ran.stdout}exit=${ran.code}\n`;
+  return `${programOutput(ran.stdout)}exit=${ran.code}\n`;
 }

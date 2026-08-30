@@ -1,0 +1,22 @@
+# The tree is byte-identical on every platform.
+#
+# Git for Windows ships with core.autocrlf=true, so without this a Windows
+# checkout gets CRLF everywhere - and this repo cannot survive that. The
+# `.expected` and `.expected-errors` fixtures are compared against what a
+# compiled program actually prints, which is LF; the corpus would fail on
+# Windows for a reason that has nothing to do with the compiler. Forcing LF
+# on checkout is what makes a Windows build the same build as a Linux one.
+* text=auto eol=lf
+
+# Binaries and archives are never touched.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+*.woff binary
+*.woff2 binary
+*.tar.gz binary
+*.gz binary
+*.zip binary

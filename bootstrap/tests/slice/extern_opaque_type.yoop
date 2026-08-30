@@ -56,7 +56,11 @@ function bumpTwice(): int32 {
 }
 
 function main(): int32 {
-  const path: string = "/tmp/yoop_extern_opaque.txt";
+  // RELATIVE, and created by this program. An absolute POSIX path made this
+  // fixture silently Windows-only: there is no /tmp there, so fopen returned
+  // null and the fputs through it took the process down with
+  // STATUS_STACK_BUFFER_OVERRUN and no output at all.
+  const path: string = "yoop_extern_opaque.txt";
   let out: ref FILE = fopen(path, "w");
   writeLine(ref out, "abcdefgh");
   fclose(ref out);

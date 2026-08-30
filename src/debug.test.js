@@ -30,6 +30,7 @@ import os from "os";
 import { spawnSync } from "child_process";
 
 import { runProc, runProcOrThrow } from "./testProc.js";
+import { EXE_SUFFIX } from "./toolchain.js";
 import { seedCompiler, seedEnv } from "../scripts/seed.mjs";
 
 const REPO = path.resolve(import.meta.dirname, "..");
@@ -94,14 +95,14 @@ describe("dwarf: a debugger can read what the bootstrap emits", () => {
     // SELF-HOSTED stage gets tested rather than the one the JS compiler built.
     let boot = process.env.YOOP_BOOT_COMPILER;
     if (!boot) {
-      boot = path.join(work, "yoopiler_boot");
+      boot = path.join(work, `yoopiler_boot${EXE_SUFFIX}`);
       await runProcOrThrow(
         seedCompiler(),
         [BOOT_SRC, "-o", boot],
         { cwd: REPO, env: seedEnv(), timeout: COMPILE_TIMEOUT_MS },
       );
     }
-    binPath = path.join(work, "frames");
+    binPath = path.join(work, `frames${EXE_SUFFIX}`);
     // No `-g` to pass: the bootstrap emits DWARF unconditionally and its clang
     // line already keeps it. That is itself part of what this asserts.
     await runProcOrThrow(

@@ -32,13 +32,35 @@ import { typecheckProgram, Program, UNHANDLED_DISPOSABLE } from "./typecheck";
 import { Diagnostic, Severity, formatLocation } from "./diagnostics";
 import { codegenProgram, CodegenOptions, defaultCodegenOptions } from "./codegen";
 import { runPrecompilePass } from "./comptime";
-import { linkExecutable, writeIrFile } from "./link";
+import { linkExecutable, writeIrFile, withExeSuffix } from "./link";
 import { TestPlan, planTestRun, testBinaryPath, runTestBinary, removeTestArtifacts } from "./test_mode";
 import { runLanguageServer } from "./lsp";
+
+// The one runtime symbol the DRIVER reaches for directly rather than through a
+// std module.
+//
+// On Windows the CRT hands a program its standard streams in TEXT mode, which
+// rewrites newlines in both directions. `--lsp` cannot survive that: LSP frames
+// every message with a byte count, and a translation layer that adds a byte on
+// the way out and drops one on the way in makes the count a lie. The symptom is
+// a language server that starts, says it is listening, and never answers -
+// which is what an editor sees as a hang rather than as an error.
+//
+// yoop_runtime_init would do this, but only a program that has a TASK calls it
+// and the compiler has none. So the driver asks for itself, before anything can
+// read or write.
+extern "C" from "yoop_runtime" {
+  function yoop_stdio_set_binary(): void;
+}
 
 const USAGE: string = "usage: yoopiler_boot <entry.yoop> [-o <out>] [--emit-ir] [--track-heap]\n       yoopiler_boot --test <dir-or-file> [filter...]\n       yoopiler_boot --lsp\n       yoopiler_boot --list-attributes";
 
 function main(): int {
+  // FIRST, before any stream is touched. On Windows this is what makes the
+  // bytes this process reads and writes the bytes it named; everywhere else it
+  // does nothing. `--lsp` depends on it - see the extern above.
+  yoop_stdio_set_binary();
+
   // Extra positionals are suite-name FILTERS in a test run and an error in an
   // ordinary one, so they are collected either way and judged after the scan.
   disposable extras: Vec<string> = vec.vecNew(2);
@@ -231,15 +253,20 @@ function compileGraph(
             return 0;
           }
 
+          // The `.ll` above kept the `-o` value as written; the EXECUTABLE
+          // gets whatever the platform needs to consider it one. Reported
+          // rather than the raw `-o`, so the path in the log is the path the
+          // user can run.
+          const exePath = withExeSuffix(outPath);
           const linkErr = linkExecutable(
-            ref irText, text.view(ref irPath), outPath, out.needsRuntime,
+            ref irText, text.view(ref irPath), exePath, out.needsRuntime,
             ref libs, env.argAt(0)
           );
           if (linkErr.len > 0) {
             log.error(linkErr);
             return 1;
           }
-          log.info(`compiled: ${outPath}`);
+          log.info(`compiled: ${exePath}`);
           return 0;
         }
       }

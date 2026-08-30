@@ -20,6 +20,7 @@ import { Vec }, * as vec from "std/core/vec.yoop";
 import { Text }, * as text from "std/core/text.yoop";
 import { Disposable, disposable } from "std/core/kinds.yoop";
 import * as intr from "std/core/intrinsics.yoop";
+import { currentPlatform, PLATFORM_WINDOWS } from "../link";
 
 export type Document implements Disposable propagates<disposable> {
   uri: Text,
@@ -165,6 +166,16 @@ export function storeNextPending(ref s: DocumentStore): usize {
 
 /*
   `file:///home/a/b%20c.yoop` -> `/home/a/b c.yoop`.
+  `file:///c%3A/a/b.yoop`     -> `c:/a/b.yoop`   (Windows).
+
+  The Windows line is the whole reason this is not a substring operation. A
+  file URI has an ABSOLUTE path, and an absolute Windows path starts with a
+  drive letter rather than a separator - so the protocol writes a third slash
+  that is part of the URI grammar and not part of the path. Leaving it on
+  produces `/C:/a/b.yoop`, which no filesystem call resolves and, worse,
+  which does not compare equal to the canonical path the module loader already
+  holds. That is what broke every CROSS-FILE answer: the server had the right
+  file open under a name nothing else in the compiler could match.
 
   Only the `file:` scheme is understood, which is the only one this server can
   compile anyway. An authority is skipped rather than refused: `file://` with
@@ -180,6 +191,19 @@ export function uriToPath(uri: string): Text propagates<disposable> {
     i = 7;
     // Skip an authority, if one is there. The path starts at the next `/`.
     while (i < b.len && b[i] != '/') {
+      i += 1;
+    }
+  }
+  // A leading slash before a DRIVE LETTER belongs to the URI, not to the
+  // path. Gated on the platform rather than applied everywhere: `/c:/x` is a
+  // legal POSIX path, rare but real, and stripping its first byte there would
+  // turn a working absolute path into a broken relative one.
+  if (currentPlatform() == PLATFORM_WINDOWS && i + 2 < b.len && b[i] == '/' && isDriveLetter(b[i + 1])) {
+    // The colon may still be percent-encoded at this point, so both spellings
+    // have to be recognised: `/C:/...` and `/C%3A/...`.
+    const afterLetter = b[i + 2];
+    if (afterLetter == ':' || (afterLetter == '%' && i + 4 < b.len && b[i + 3] == '3'
+        && (b[i + 4] == 'A' || b[i + 4] == 'a'))) {
       i += 1;
     }
   }
@@ -215,21 +239,34 @@ function hexNibble(b: uint8): uint32 {
 
 /*
   `/home/a/b c.yoop` -> `file:///home/a/b%20c.yoop`.
+  `c:/a/b.yoop`      -> `file:///c:/a/b.yoop`      (Windows).
 
   The inverse of `uriToPath`, and it exists for one caller: an answer that
   points at a DIFFERENT file than the one asked about - a definition in another
   module - has to name that file the way the protocol does.
 
   What gets escaped is the unreserved set's complement, conservatively: a path
-  is bytes and a URI is ASCII, so anything outside `A-Za-z0-9-._~/` goes out as
+  is bytes and a URI is ASCII, so anything outside `A-Za-z0-9-._~/:` goes out as
   a percent triple. That is more escaping than strictly required and no client
   can tell the difference, while under-escaping a space or a `#` produces a URI
   that names a different file or none.
+
+  The colon is in that keep-list rather than escaped, which RFC 3986 allows
+  anywhere in a path segment. It is there for the Windows drive letter: every
+  client in circulation writes `file:///c:/...`, and a server that answered
+  `file:///c%3A/...` would be naming the same file in a spelling the client
+  cannot compare against the URI it sent.
 */
 export function pathToUri(path: string): Text propagates<disposable> {
   let out: Text = text.make(path.len + 16);
   text.push(ref out, "file://");
   const b = intr.stringAsBytes(path);
+  // The third slash. A POSIX path brings its own; a Windows path begins at a
+  // drive letter and needs one, or the drive is read as the URI's HOST and
+  // `c:/a` comes back naming a machine called `c`.
+  if (b.len > 0 && b[0] != '/') {
+    text.pushByte(ref out, '/');
+  }
   let i: usize = 0;
   while (i < b.len) {
     const c = b[i];
@@ -252,7 +289,12 @@ function isUnreservedUriByte(c: uint8): bool {
   if (c >= 'a' && c <= 'z') { return true; }
   if (c >= 'A' && c <= 'Z') { return true; }
   if (c >= '0' && c <= '9') { return true; }
-  return c == '-' || c == '.' || c == '_' || c == '~' || c == '/';
+  return c == '-' || c == '.' || c == '_' || c == '~' || c == '/' || c == ':';
+}
+
+// A-Z or a-z, the only thing that can precede the colon in a drive specifier.
+function isDriveLetter(c: uint8): bool {
+  return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
 }
 
 function hexDigit(v: uint8): uint8 {
