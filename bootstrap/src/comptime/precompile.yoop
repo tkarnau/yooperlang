@@ -121,10 +121,12 @@ function foldPrecompileBlock(
   disposable declIds: Vec<NodeId> = vec.vecNew(8);
   disposable slots: Vec<ValueId> = vec.vecNew(8);
 
+  let inactivePlugin: PluginBridge = pluginBridgeInactive();
   let cx: EvalCx = {
     prog: ref prog, tm: ref tm, mod: ref m, ast: ref m.ast, graph: ref graph,
     va: ref va, scope: ref scope, folded: ref folded,
     fnRet: TYPE_VOID_ID, depth: 0,
+    plugin: ref inactivePlugin,
   };
 
   // BEFORE: bind every module-level `let` that folds.

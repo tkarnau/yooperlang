@@ -468,6 +468,19 @@ int     yoop_socketpair_close(int fd);
 int64_t yoop_socketpair_read(int fd, void* buf, size_t n);
 int64_t yoop_socketpair_write(int fd, const void* buf, size_t n);
 
+// ----- child processes over line pipes --------------------------------------
+//
+// The `--plugin` host's channel to a spawned tool: stdin/stdout piped, one
+// LINE per message each way. POSIX only; on Windows spawn/write/kill return
+// -1, read returns "", alive returns 0. See the block in yoop_io.c for the
+// fork-with-a-worker-pool note and the read_line ownership rule.
+int64_t     yoop_proc_spawn(const char* cmdline);
+int         yoop_proc_write_line(int64_t h, const char* line);
+int         yoop_proc_write_blob(int64_t h, const char* kind, const char* payload);
+const char* yoop_proc_read_line(int64_t h);
+int         yoop_proc_alive(int64_t h);
+int         yoop_proc_kill(int64_t h);
+
 // ----- POSIX-shaped socket calls -------------------------------------------
 //
 // These present the BSD-sockets shape - int descriptors, -1 on failure, errno

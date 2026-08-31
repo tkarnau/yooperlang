@@ -1,0 +1,499 @@
+module plugin;
+
+/*
+  The `--plugin` host: a SECOND compile the driver carries alongside the one
+  it was asked for.
+
+  The plugin is ordinary Yoop source. It is loaded as its own module graph and
+  typechecked as its own Program - the loader and typecheck are reentrant, and
+  the LSP already holds an independent compile this same way (lsp/analysis.yoop
+  is the ownership pattern this copies). Its hook functions are then RUN, not
+  compiled: each one is a frame on the comptime evaluator, fired at a phase
+  boundary of the build being driven. A hook blocks the build until it returns;
+  that gating is the point of the mechanism.
+
+  A hook sees the build only through the PluginBridge (comptime/
+  plugin_bridge.yoop): snapshots the host refreshes before firing it, never a
+  ref into the user's compile. What a hook may DO is bounded by the comptime
+  evaluator's subset and its extern surface - anything outside is refused by
+  name, with the plugin file's own source location.
+
+  Each invocation gets a fresh ValueArena: the evaluator's arena only ever
+  grows, and a build fires many hooks. The one thing that survives between
+  hooks is the bridge.
+*/
+
+import * as log from "std/log.yoop";
+import * as str from "std/core/strings.yoop";
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { Text }, * as text from "std/core/text.yoop";
+import { Disposable, disposable } from "std/core/kinds.yoop";
+import { Result } from "std/core/types.yoop";
+import * as json from "modules/json";
+import { JsonDoc, JsonId } from "modules/json";
+import { NodeId, nodeAt, dumpAstJson } from "../ast";
+import { dumpTokens } from "../lex";
+import { Module, ModuleGraph, SourceFile, ImportEdge, LoadGraphResult, loadModuleGraph,
+  emptyModuleGraph, disposeModuleGraph } from "../source_graph";
+import { Program, TypedModule, typecheckProgram, initProgram, primTypeIdOfName,
+  TypeId, TYPE_VOID_ID } from "../typecheck";
+import { Severity, formatLocation } from "../diagnostics";
+import { PluginBridge, pluginBridgeInactive, runPrecompilePass,
+  EvalCx, EvalScope, newEvalScope, ValueArena, newValueArena, ValueId, ValueKind,
+  FoldedConsts, newFoldedConsts, valueAt, intValue, strValue,
+  runFrame, findFunctionDeclIn, funcReturnTypeOf, paramNodeIdsIn } from "../comptime";
+
+// The host writes to the plugin's child DIRECTLY (compiled code, the graph
+// in hand) when it streams the closure's files - the interpreted plugin
+// never has to route what its subset could not parse.
+extern "C" from "yoop_runtime" {
+  function yoop_proc_write_line(h: int64, line: string): c_int;
+  function yoop_proc_write_blob(h: int64, kind: string, payload: string): c_int;
+}
+
+export type PluginHost implements Disposable propagates<disposable> {
+  // False for the host every ordinary build carries: hooks are skipped, no
+  // graph is held beyond the placeholders. Also cleared when a load fails,
+  // so a caller that ignored `error` still fires nothing.
+  active: bool,
+  // Whether `graph` and `prog` own storage to release - same split as the
+  // LSP's Analysis: the placeholders are real storage too.
+  held: bool,
+  path: string,
+  graph: ModuleGraph,
+  prog: Program,
+  bridge: PluginBridge,
+  // "" when the plugin loaded and its hooks have usable shapes; otherwise the
+  // whole complaint, and the caller stops the build with it.
+  error: string,
+  // The artifact snapshots the bridge's string fields are VIEWS into. Owned
+  // here so a hook fired late in the build can still read what an earlier
+  // phase produced - a view into a build-local buffer would be freed under
+  // it. Refreshed in place, one Text per artifact, never reallocated per
+  // phase.
+  tokensT: Text,
+  astJsonT: Text,
+  modulesJsonT: Text,
+  diagnosticsJsonT: Text,
+  irT: Text,
+
+  function dispose(ref self): void {
+    releasePlugin(ref self);
+    Disposable.dispose(ref self.tokensT);
+    Disposable.dispose(ref self.astJsonT);
+    Disposable.dispose(ref self.modulesJsonT);
+    Disposable.dispose(ref self.diagnosticsJsonT);
+    Disposable.dispose(ref self.irT);
+  }
+}
+
+export function pluginHostInactive(): PluginHost propagates<disposable> {
+  return {
+    active: false, held: true, path: "",
+    graph: emptyModuleGraph(), prog: initProgram(),
+    bridge: pluginBridgeInactive(), error: "",
+    tokensT: text.make(16), astJsonT: text.make(16), modulesJsonT: text.make(16),
+    diagnosticsJsonT: text.make(16), irT: text.make(16),
+  };
+}
+
+export function releasePlugin(ref h: PluginHost): void {
+  if (h.held) {
+    disposeModuleGraph(ref h.graph);
+    Disposable.dispose(ref h.prog);
+    h.held = false;
+  }
+  h.active = false;
+}
+
+export function loadPlugin(path: string, stdRoot: string): PluginHost propagates<disposable> {
+  return pluginFromLoad(loadModuleGraph(path, stdRoot), path);
+}
+
+// The load, split from the disk read so a test can hand in a graph built from
+// source. This is the only constructor that produces an ACTIVE host.
+export function pluginFromLoad(loaded: LoadGraphResult, path: string): PluginHost propagates<disposable> {
+  let host: PluginHost = pluginHostInactive();
+  host.path = path;
+  switch (loaded) {
+    case LoadGraphResult.Err { error: e }: {
+      host.error = `plugin ${path}: ${e}`;
+      return host;
+    }
+    case LoadGraphResult.Ok { value: g }: {
+      releasePlugin(ref host);
+      host.graph = g;
+      host.prog = typecheckProgram(ref host.graph);
+      host.held = true;
+
+      // The plugin may use @precompile itself; its folds land in ITS tree.
+      runPrecompilePass(ref host.prog, ref host.graph);
+
+      // A plugin that does not typecheck is refused the way a program would
+      // be, with the same diagnostics - just prefixed, so a reader knows
+      // which of the two compiles complained.
+      let errors: usize = 0;
+      let d: usize = 0;
+      while (d < host.prog.diagnostics.len) {
+        const diag = vec.vecGet(ref host.prog.diagnostics, d);
+        switch (diag.severity) {
+          case Severity.ERROR: {
+            errors += 1;
+            log.error(`plugin: ${formatLocation(ref diag)}: ${diag.message}`);
+          }
+          case Severity.WARNING: {}
+        }
+        d += 1;
+      }
+      if (errors > 0) {
+        host.error = `plugin ${path}: ${errors} error(s)`;
+        return host;
+      }
+
+      const shapeErr = validateHooks(ref host);
+      if (shapeErr.len > 0) {
+        host.error = shapeErr;
+        return host;
+      }
+
+      host.active = true;
+      host.bridge.active = true;
+      return host;
+    }
+  }
+}
+
+// ----- the hook surface -----------------------------------------------------
+
+// Fire one no-argument hook: onParse, onTypecheck, onCodegen, onLink.
+// 0 continues the build - including "the plugin does not define this hook".
+// Nonzero is the hook refusing, and becomes the build's exit code.
+export function runPluginPhase(ref h: PluginHost, phase: string, hookName: string): int32 {
+  if (!h.active) {
+    return 0;
+  }
+  h.bridge.phase = phase;
+  disposable va: ValueArena = newValueArena();
+  disposable bound: Vec<ValueId> = vec.vecNew(1);
+  return reportRefusal(ref h, hookName, invokeHook(ref h, hookName, ref va, ref bound));
+}
+
+// `onStart(entry, out)` - before the user's graph is even loaded.
+export function runPluginStart(ref h: PluginHost, entry: string, out: string): int32 {
+  if (!h.active) {
+    return 0;
+  }
+  h.bridge.phase = "start";
+  h.bridge.entryPath = entry;
+  h.bridge.outPath = out;
+  disposable va: ValueArena = newValueArena();
+  disposable bound: Vec<ValueId> = vec.vecNew(2);
+  vec.vecPush(ref bound, strValue(ref va, primTypeIdOfName("string"), entry));
+  vec.vecPush(ref bound, strValue(ref va, primTypeIdOfName("string"), out));
+  return reportRefusal(ref h, "onStart", invokeHook(ref h, "onStart", ref va, ref bound));
+}
+
+// A nonzero hook return stops the build; the log says WHICH hook decided
+// that, because the exit code alone reads as any other failed compile.
+function reportRefusal(ref h: PluginHost, hookName: string, code: int32): int32 {
+  if (code != 0) {
+    log.error(`plugin ${h.path}: ${hookName} stopped the build (${code})`);
+  }
+  return code;
+}
+
+// `onFinish(ok)` - always fired when a plugin is active, success or not, so a
+// plugin holding a child process gets the chance to wind it down. Its return
+// value is ignored: the build's outcome is already decided.
+export function runPluginFinish(ref h: PluginHost, ok: int32): void {
+  if (!h.active) {
+    return;
+  }
+  h.bridge.phase = "finish";
+  h.bridge.buildOk = ok;
+  disposable va: ValueArena = newValueArena();
+  disposable bound: Vec<ValueId> = vec.vecNew(1);
+  vec.vecPush(ref bound, intValue(ref va, primTypeIdOfName("int32"), uint64(ok)));
+  const ignored = invokeHook(ref h, "onFinish", ref va, ref bound);
+}
+
+function invokeHook(ref h: PluginHost, hookName: string, ref va: ValueArena, ref bound: Vec<ValueId>): int32 {
+  let mods: Module[] = vec.vecAsArray(ref h.graph.modules);
+  let tms: TypedModule[] = vec.vecAsArray(ref h.prog.modules);
+  const ei = h.graph.entryIndex;
+  const declId = findFunctionDeclIn(ref mods[ei], hookName);
+  if (declId == 0) {
+    return 0;
+  }
+
+  disposable scope: EvalScope = newEvalScope();
+  disposable folded: FoldedConsts = newFoldedConsts();
+  let cx: EvalCx = {
+    prog: ref h.prog, tm: ref tms[ei], mod: ref mods[ei], ast: ref mods[ei].ast,
+    graph: ref h.graph, va: ref va, scope: ref scope, folded: ref folded,
+    fnRet: TYPE_VOID_ID, depth: 0,
+    plugin: ref h.bridge,
+  };
+  const declNode = nodeAt(ref mods[ei].ast, declId);
+  switch (runFrame(ref cx, ref tms[ei], ref mods[ei], declId, ref bound, declNode,
+      funcReturnTypeOf(ref h.prog, ref tms[ei], hookName))) {
+    case Result.Err { error: e }: {
+      log.error(`plugin ${h.path}:${e.sourceLoc.line + 1}:${e.sourceLoc.column}: ${hookName}: ${e.message}`);
+      return 1;
+    }
+    case Result.Ok { value: v }: {
+      const slot = valueAt(ref va, v);
+      if (slot.kind == ValueKind.INT) {
+        return int32(slot.bits);
+      }
+      return 0;
+    }
+  }
+}
+
+// ----- artifact snapshots -----------------------------------------------------
+
+/*
+  The refreshes: what the driver calls at each seam BEFORE firing the hook, so
+  the bridge's views describe the phase the hook is being told about.
+
+  Serialization happens HERE, in compiled code, with the compiler's own
+  serializers - a hook only ever receives one finished string per artifact.
+  The interpreter never concatenates anything big, which is what keeps a hook
+  over a compiler-sized input from being quadratic in an AST walk.
+*/
+
+// After the graph loads: the entry FILE's tokens and AST (the same one-file
+// scope --dump-ast-json draws, for the same reason), and the whole graph's
+// module map.
+export function refreshParseArtifacts(ref h: PluginHost, ref graph: ModuleGraph): void {
+  if (!h.active) {
+    return;
+  }
+  let mods: Module[] = vec.vecAsArray(ref graph.modules);
+  const ei = graph.entryIndex;
+  let files: SourceFile[] = vec.vecAsArray(ref mods[ei].files);
+  const srcArr: uint8[] = vec.vecAsArray(ref files[0].src);
+
+  text.clear(ref h.tokensT);
+  switch (dumpTokens(srcArr)) {
+    case Result.Ok { value: dumped }: {
+      disposable owned: Text = dumped;
+      text.push(ref h.tokensT, text.view(ref owned));
+    }
+    case Result.Err { error: e }: {}
+  }
+
+  text.clear(ref h.astJsonT);
+  disposable payload: Text = dumpAstJson(ref mods[ei].ast, files[0].root,
+    files[0].absPath, srcArr);
+  text.push(ref h.astJsonT, text.view(ref payload));
+
+  buildModulesJson(ref h, ref graph);
+
+  h.bridge.tokensText = text.view(ref h.tokensT);
+  h.bridge.astJson = text.view(ref h.astJsonT);
+  h.bridge.modulesJson = text.view(ref h.modulesJsonT);
+
+  streamAllFiles(ref h, ref graph);
+}
+
+/*
+  Every file of the graph, straight down the child's pipe: a `file <module>
+  <fileIndex> <path>` line, then that file's tokens and AST as blobs. This
+  is what lets a renderer offer EVERY module for walking, not only the
+  entry - and it happens HERE, in compiled code at the one seam that holds
+  both the graph and the child, because the bridge deliberately carries no
+  graph refs and the interpreted plugin could not parse a request anyway.
+
+  Only when the plugin has already spawned its child (onStart runs before
+  this refresh); a plugin with no child streams nothing and costs nothing.
+  Payloads for a compiler-sized closure run to a few MB; the pipe simply
+  backpressures against the renderer's frame loop.
+*/
+function streamAllFiles(ref h: PluginHost, ref graph: ModuleGraph): void {
+  if (h.bridge.procHandle < 0) {
+    return;
+  }
+  let mods: Module[] = vec.vecAsArray(ref graph.modules);
+  let m: usize = 0;
+  while (m < graph.modules.len) {
+    let files: SourceFile[] = vec.vecAsArray(ref mods[m].files);
+    let f: usize = 0;
+    while (f < mods[m].files.len) {
+      disposable header: Text = text.make(64);
+      text.push(ref header, "file ");
+      text.pushUint(ref header, uint64(m));
+      text.push(ref header, " ");
+      text.pushUint(ref header, uint64(f));
+      text.push(ref header, " ");
+      text.push(ref header, files[f].absPath);
+      if (yoop_proc_write_line(h.bridge.procHandle, text.view(ref header)) != 0) {
+        return;
+      }
+      const srcArr: uint8[] = vec.vecAsArray(ref files[f].src);
+      disposable toks: Text = text.make(256);
+      switch (dumpTokens(srcArr)) {
+        case Result.Ok { value: dumped }: {
+          disposable owned: Text = dumped;
+          text.push(ref toks, text.view(ref owned));
+        }
+        case Result.Err { error: e }: {}
+      }
+      const ignoredToks = yoop_proc_write_blob(h.bridge.procHandle, "tokens", text.view(ref toks));
+      disposable payload: Text = dumpAstJson(ref mods[m].ast, files[f].root,
+        files[f].absPath, srcArr);
+      const ignoredAst = yoop_proc_write_blob(h.bridge.procHandle, "ast", text.view(ref payload));
+      f += 1;
+    }
+    m += 1;
+  }
+}
+
+// After typecheck and precompile, and BEFORE the diagnostics gate decides the
+// build's fate - a failing build's diagnostics are exactly what a plugin
+// showing the failure wants at onFinish.
+export function refreshDiagnostics(ref h: PluginHost, ref prog: Program): void {
+  if (!h.active) {
+    return;
+  }
+  disposable d: JsonDoc = json.docNew();
+  const arr = json.addArray(ref d);
+  let i: usize = 0;
+  while (i < prog.diagnostics.len) {
+    const diag = vec.vecGet(ref prog.diagnostics, i);
+    const obj = json.addObject(ref d);
+    json.objectSetString(ref d, obj, "file", diag.filePath);
+    json.objectSetInt(ref d, obj, "line", int64(diag.sourceLoc.line + 1));
+    json.objectSetInt(ref d, obj, "col", int64(diag.sourceLoc.column));
+    switch (diag.severity) {
+      case Severity.ERROR: { json.objectSetString(ref d, obj, "severity", "error"); }
+      case Severity.WARNING: { json.objectSetString(ref d, obj, "severity", "warning"); }
+    }
+    // The code names the warning CLASS ("unhandled-disposable", "") - what
+    // lets a consumer treat a leaked obligation differently from any other
+    // note without parsing prose.
+    json.objectSetString(ref d, obj, "code", diag.code);
+    json.objectSetString(ref d, obj, "message", diag.message);
+    json.arrayPush(ref d, arr, obj);
+    i += 1;
+  }
+  json.setRoot(ref d, arr);
+  disposable out: Text = json.serializeDoc(ref d);
+  text.clear(ref h.diagnosticsJsonT);
+  text.push(ref h.diagnosticsJsonT, text.view(ref out));
+  h.bridge.diagnosticsJson = text.view(ref h.diagnosticsJsonT);
+}
+
+// After codegen: the emitted IR, whole. A copy rather than a view because the
+// build's own Text dies with compileGraph and onFinish outlives it.
+export function refreshIr(ref h: PluginHost, ref irText: Text): void {
+  if (!h.active) {
+    return;
+  }
+  text.clear(ref h.irT);
+  text.push(ref h.irT, text.view(ref irText));
+  h.bridge.irText = text.view(ref h.irT);
+}
+
+// The module map: every module of the graph with its size, and one edge per
+// import site. `{"nodes":[...],"edges":[...]}`, ids being the loader's own
+// module ids so an edge's ends match the nodes list by construction.
+function buildModulesJson(ref h: PluginHost, ref graph: ModuleGraph): void {
+  disposable d: JsonDoc = json.docNew();
+  const root = json.addObject(ref d);
+  const nodes = json.addArray(ref d);
+  const edges = json.addArray(ref d);
+  let mods: Module[] = vec.vecAsArray(ref graph.modules);
+  let m: usize = 0;
+  while (m < graph.modules.len) {
+    const node = json.addObject(ref d);
+    json.objectSetString(ref d, node, "id", mods[m].id);
+    json.objectSetString(ref d, node, "name", mods[m].name);
+    json.objectSetInt(ref d, node, "files", int64(mods[m].files.len));
+    json.objectSetInt(ref d, node, "loc", int64(moduleLines(ref mods[m])));
+    json.objectSetBool(ref d, node, "entry", m == graph.entryIndex);
+    json.arrayPush(ref d, nodes, node);
+
+    let files: SourceFile[] = vec.vecAsArray(ref mods[m].files);
+    let f: usize = 0;
+    while (f < mods[m].files.len) {
+      let imps: ImportEdge[] = vec.vecAsArray(ref files[f].imports);
+      let k: usize = 0;
+      while (k < files[f].imports.len) {
+        const e = json.addObject(ref d);
+        json.objectSetString(ref d, e, "from", mods[m].id);
+        json.objectSetString(ref d, e, "to", imps[k].resolvedModuleId);
+        json.arrayPush(ref d, edges, e);
+        k += 1;
+      }
+      f += 1;
+    }
+    m += 1;
+  }
+  json.objectSet(ref d, root, "nodes", nodes);
+  json.objectSet(ref d, root, "edges", edges);
+  json.setRoot(ref d, root);
+  disposable out: Text = json.serializeDoc(ref d);
+  text.clear(ref h.modulesJsonT);
+  text.push(ref h.modulesJsonT, text.view(ref out));
+}
+
+// Lines of a module, counted as newlines across its files' bytes - the same
+// number an editor's gutter would end on.
+function moduleLines(ref m: Module): usize {
+  let lines: usize = 0;
+  let files: SourceFile[] = vec.vecAsArray(ref m.files);
+  let f: usize = 0;
+  while (f < m.files.len) {
+    const bytes: uint8[] = vec.vecAsArray(ref files[f].src);
+    let i: usize = 0;
+    while (i < bytes.len) {
+      if (bytes[i] == 10) {
+        lines += 1;
+      }
+      i += 1;
+    }
+    f += 1;
+  }
+  return lines;
+}
+
+// ----- load-time shape checks -----------------------------------------------
+
+// Every hook the plugin declares must have the shape the host will call it
+// with, checked HERE so the mismatch is a load error naming the hook rather
+// than an arity failure in the middle of a build.
+function validateHooks(ref h: PluginHost): string {
+  const int32Ty = primTypeIdOfName("int32");
+  let msg = checkHook(ref h, "onStart", 2, int32Ty, "onStart(entry: string, out: string): int32");
+  if (msg.len > 0) { return msg; }
+  msg = checkHook(ref h, "onParse", 0, int32Ty, "onParse(): int32");
+  if (msg.len > 0) { return msg; }
+  msg = checkHook(ref h, "onTypecheck", 0, int32Ty, "onTypecheck(): int32");
+  if (msg.len > 0) { return msg; }
+  msg = checkHook(ref h, "onCodegen", 0, int32Ty, "onCodegen(): int32");
+  if (msg.len > 0) { return msg; }
+  msg = checkHook(ref h, "onLink", 0, int32Ty, "onLink(): int32");
+  if (msg.len > 0) { return msg; }
+  return checkHook(ref h, "onFinish", 1, TYPE_VOID_ID, "onFinish(ok: int32): void");
+}
+
+function checkHook(ref h: PluginHost, name: string, wantParams: usize, wantRet: TypeId, shape: string): string {
+  let mods: Module[] = vec.vecAsArray(ref h.graph.modules);
+  let tms: TypedModule[] = vec.vecAsArray(ref h.prog.modules);
+  const ei = h.graph.entryIndex;
+  const declId = findFunctionDeclIn(ref mods[ei], name);
+  if (declId == 0) {
+    return "";
+  }
+  const declNode = nodeAt(ref mods[ei].ast, declId);
+  disposable params: Vec<NodeId> = paramNodeIdsIn(ref mods[ei].ast, declNode);
+  if (params.len != wantParams) {
+    return `plugin ${h.path}: ${name} takes ${params.len} parameter(s), and the host calls it as ${shape}`;
+  }
+  if (funcReturnTypeOf(ref h.prog, ref tms[ei], name) != wantRet) {
+    return `plugin ${h.path}: ${name} has the wrong return type - the host calls it as ${shape}`;
+  }
+  return "";
+}

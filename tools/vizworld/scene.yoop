@@ -1,0 +1,1074 @@
+// The world's state: what the build has sent so far, digested into flat
+// arrays a draw loop can walk, plus the reveal clocks that make it appear
+// SLOWLY. Pure of SDL and GL, so every parser and the whole gating state
+// machine tests without a window.
+//
+// Strings drawn as labels are BORROWED from the kept JsonDocs, which is why
+// the docs live in the Scene rather than being read and dropped.
+
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { Text }, * as text from "std/core/text.yoop";
+import { Disposable, disposable } from "std/core/kinds.yoop";
+import * as str from "std/core/strings.yoop";
+import * as intr from "std/core/intrinsics.yoop";
+import * as json from "modules/json";
+import { JsonDoc, JsonId, ParseResult } from "modules/json";
+import { Control, ControlKind, Phase, Artifact } from "./protocol.yoop";
+import { revealedCount } from "./layout.yoop";
+
+// One conveyor token: its palette entry, and the byte range of the source
+// it was lexed from - the provenance the pick ray searches by.
+// (AstItem's `named` rides along for the same reason: whether a node has a
+// human name is asked per frame for its label, and a bool beats a JSON
+// lookup at frame rate.)
+export type TokenItem {
+  colorId: uint8,
+  pos: usize,
+  len: usize,
+}
+
+// One AST node, positioned by depth ring - see layout.astPos.
+export type AstItem {
+  depth: usize,
+  slot: usize,
+  slots: usize,
+  // Index of the parent in the items list, or the item's own index for the
+  // root - a self-loop, so the draw side needs no sentinel case.
+  parent: usize,
+  colorId: uint8,
+  // The introducing token's byte range (the dump's loc), and the node's own
+  // id in the kept astDoc, which is where kind and name labels are read
+  // back from on demand.
+  spanPos: usize,
+  spanLen: usize,
+  nodeId: JsonId,
+  named: bool,
+  // 0 clean; 1 a heap smell (raw malloc); 2 a heap smell INSIDE A LOOP.
+  smell: uint8,
+}
+
+export type IslandItem {
+  name: string,
+  loc: usize,
+  entry: bool,
+}
+
+export type EdgeItem {
+  src: usize,
+  dst: usize,
+}
+
+// One diagnostic placed in the world: entry-file only (the wall can only
+// point at the file it shows), message copied into diagMsgs. `leak` marks
+// the unhandled-disposable class - the one this world teaches about.
+export type DiagItem {
+  line: usize,
+  col: usize,
+  error: bool,
+  leak: bool,
+  msgStart: usize,
+  msgLen: usize,
+}
+
+// One cached file of the graph's closure, as streamed by the host: raw
+// artifact bytes, parsed only when the player walks INTO the file. The
+// path lives in the shared filePaths buffer.
+export type FileEntry propagates<disposable> {
+  modIdx: usize,
+  fileIdx: usize,
+  pathStart: usize,
+  pathLen: usize,
+  tokens: Vec<uint8>,
+  ast: Vec<uint8>,
+}
+
+export type IrFunc {
+  blockStart: usize,
+  blockCount: usize,
+  // The function's name as a range into the scene's irNames buffer.
+  nameStart: usize,
+  nameLen: usize,
+}
+
+// One basic block: its label, how many instructions it holds, and what
+// they ARE - the op families a tower's tooltip reports. Classified once at
+// parse, so a frame's worth of tooltips costs lookups, not scans.
+export type IrBlock {
+  instructions: usize,
+  calls: usize,
+  branches: usize,
+  memOps: usize,
+  labelStart: usize,
+  labelLen: usize,
+}
+
+export type Scene implements Disposable propagates<disposable> {
+  // Where the build stands. `pendingPhase` nonzero means it is BLOCKED at
+  // that gate waiting for the player; `continueSent` latches the answer so
+  // one keypress opens one gate.
+  pendingPhase: Phase,
+  buildDone: bool,
+  buildOk: int32,
+
+  tokens: Vec<TokenItem>,
+  astItems: Vec<AstItem>,
+  astDoc: JsonDoc,
+  astHeld: bool,
+  islands: Vec<IslandItem>,
+  edges: Vec<EdgeItem>,
+  modulesDoc: JsonDoc,
+  modulesHeld: bool,
+  diagErrors: usize,
+  diagWarnings: usize,
+  diagItems: Vec<DiagItem>,
+  diagMsgs: Text,
+  // What the smell scan counted: template literals and string-concat calls
+  // (each a raw malloc the allocator context never sees), split by whether
+  // they sit inside a loop - where they leak per iteration.
+  smellOnce: usize,
+  smellLoop: usize,
+  entryFile: string,
+  // The browsable closure: every file the host streamed, plus the raw
+  // diagnostics payload kept for re-placement after a file swap.
+  fileEntries: Vec<FileEntry>,
+  filePaths: Text,
+  diagRaw: Vec<uint8>,
+  irFuncs: Vec<IrFunc>,
+  irBlocks: Vec<IrBlock>,
+  irLines: usize,
+  // Every IR function name, back to back; IrFunc carries ranges into it.
+  irNames: Text,
+  // The entry file's text, BORROWED from the kept astDoc (it rides inside
+  // the --dump-ast-json payload), plus the byte offset each line starts at
+  // - what turns a wall cell back into a byte offset.
+  source: string,
+  lineStarts: Vec<usize>,
+
+  // The slowness machinery: per-district reveal clocks in seconds, one
+  // shared speed multiplier, one pause. layout.revealedCount turns a clock
+  // into how much of a district exists yet.
+  paused: bool,
+  speed: float32,
+  tokensClock: float32,
+  astClock: float32,
+  modulesClock: float32,
+  irClock: float32,
+
+  function dispose(ref self): void {
+    Disposable.dispose(ref self.tokens);
+    Disposable.dispose(ref self.astItems);
+    Disposable.dispose(ref self.islands);
+    Disposable.dispose(ref self.edges);
+    Disposable.dispose(ref self.irFuncs);
+    Disposable.dispose(ref self.irBlocks);
+    Disposable.dispose(ref self.irNames);
+    Disposable.dispose(ref self.lineStarts);
+    Disposable.dispose(ref self.diagItems);
+    Disposable.dispose(ref self.diagMsgs);
+    let fe: usize = 0;
+    while (fe < self.fileEntries.len) {
+      let entry: FileEntry = vec.vecGet(ref self.fileEntries, fe);
+      Disposable.dispose(ref entry.tokens);
+      Disposable.dispose(ref entry.ast);
+      fe += 1;
+    }
+    Disposable.dispose(ref self.fileEntries);
+    Disposable.dispose(ref self.filePaths);
+    Disposable.dispose(ref self.diagRaw);
+    if (self.astHeld) {
+      Disposable.dispose(ref self.astDoc);
+    }
+    if (self.modulesHeld) {
+      Disposable.dispose(ref self.modulesDoc);
+    }
+  }
+}
+
+export function sceneNew(): Scene propagates<disposable> {
+  return {
+    pendingPhase: Phase.NONE, buildDone: false, buildOk: 0,
+    tokens: vec.vecNew(256), astItems: vec.vecNew(256),
+    astDoc: json.docNew(), astHeld: true,
+    islands: vec.vecNew(8), edges: vec.vecNew(16),
+    modulesDoc: json.docNew(), modulesHeld: true,
+    diagErrors: 0, diagWarnings: 0,
+    diagItems: vec.vecNew(8), diagMsgs: text.make(64),
+    fileEntries: vec.vecNew(8), filePaths: text.make(64), diagRaw: vec.vecNew(2),
+    smellOnce: 0, smellLoop: 0, entryFile: "",
+    irFuncs: vec.vecNew(32), irBlocks: vec.vecNew(64), irLines: 0,
+    irNames: text.make(64), source: "", lineStarts: vec.vecNew(64),
+    paused: false, speed: 1.0,
+    tokensClock: 0.0, astClock: 0.0, modulesClock: 0.0, irClock: 0.0,
+  };
+}
+
+// The replay rates: how fast each algorithm appears to run, in items per
+// second at speed 1. One place, shared by the clocks below and by every
+// district's draw, so the wall's coloring and the belt's cubes can never
+// disagree about how far the lexer got.
+export const TOKENS_PER_SEC: float32 = 24.0;
+export const NODES_PER_SEC: float32 = 18.0;
+export const ISLANDS_PER_SEC: float32 = 4.0;
+export const BLOCKS_PER_SEC: float32 = 10.0;
+
+// How much of each artifact the replay has resolved so far.
+export function sceneShownTokens(ref s: Scene): usize {
+  return revealedCount(s.tokensClock, TOKENS_PER_SEC, s.tokens.len);
+}
+
+export function sceneShownAst(ref s: Scene): usize {
+  return revealedCount(s.astClock, NODES_PER_SEC, s.astItems.len);
+}
+
+export function sceneShownIslands(ref s: Scene): usize {
+  return revealedCount(s.modulesClock, ISLANDS_PER_SEC, s.islands.len);
+}
+
+export function sceneShownBlocks(ref s: Scene): usize {
+  return revealedCount(s.irClock, BLOCKS_PER_SEC, s.irBlocks.len);
+}
+
+// Which replay is running RIGHT NOW. One at a time, in pipeline order -
+// the lexer chunks through the whole file before the parser starts, the
+// way the real phases do (per file; the honest caveat is that the real
+// lexer feeds the parser on demand, and the replay plays them as stages).
+export function sceneLexing(ref s: Scene): bool {
+  return s.tokens.len > 0 && sceneShownTokens(ref s) < s.tokens.len;
+}
+
+export function sceneParsing(ref s: Scene): bool {
+  return !sceneLexing(ref s) && s.astItems.len > 0 &&
+    sceneShownAst(ref s) < s.astItems.len;
+}
+
+export function sceneMapping(ref s: Scene): bool {
+  return !sceneLexing(ref s) && !sceneParsing(ref s) && s.islands.len > 0 &&
+    sceneShownIslands(ref s) < s.islands.len;
+}
+
+export function sceneEmitting(ref s: Scene): bool {
+  return !sceneLexing(ref s) && !sceneParsing(ref s) && !sceneMapping(ref s) &&
+    s.irBlocks.len > 0 && sceneShownBlocks(ref s) < s.irBlocks.len;
+}
+
+// One frame's time, fed to exactly ONE clock: the active replay's. Speed
+// scales time itself, so pause and speed govern whichever algorithm is on
+// stage.
+export function sceneTick(ref s: Scene, dt: float32): void {
+  if (s.paused) {
+    return;
+  }
+  advanceReplay(ref s, dt * s.speed);
+}
+
+// A single manual step while paused: nudge the active replay by a fixed
+// slice - the debugger's step button.
+export function sceneStep(ref s: Scene): void {
+  advanceReplay(ref s, 0.15);
+}
+
+function advanceReplay(ref s: Scene, step: float32): void {
+  if (sceneLexing(ref s)) {
+    s.tokensClock += step;
+    return;
+  }
+  if (sceneParsing(ref s)) {
+    s.astClock += step;
+    return;
+  }
+  if (sceneMapping(ref s)) {
+    s.modulesClock += step;
+    return;
+  }
+  if (sceneEmitting(ref s)) {
+    s.irClock += step;
+  }
+}
+
+// The player answered a gate: forget the pending phase (the wire side has
+// already told the build to continue).
+export function sceneGateOpened(ref s: Scene): void {
+  s.pendingPhase = Phase.NONE;
+}
+
+export function sceneTogglePause(ref s: Scene): void {
+  s.paused = !s.paused;
+}
+
+export function sceneSpeedDown(ref s: Scene): void {
+  if (s.speed > 0.13) {
+    s.speed = s.speed * 0.5;
+  }
+}
+
+export function sceneSpeedUp(ref s: Scene): void {
+  if (s.speed < 16.0) {
+    s.speed = s.speed * 2.0;
+  }
+}
+
+export function applyControl(ref s: Scene, c: Control): void {
+  switch (c.kind) {
+    case ControlKind.PHASE: { s.pendingPhase = c.phase; }
+    case ControlKind.DONE: {
+      s.buildDone = true;
+      s.buildOk = c.ok;
+      s.pendingPhase = Phase.NONE;
+    }
+    default: {}
+  }
+}
+
+export function applyBlob(ref s: Scene, kind: Artifact, ref payload: Vec<uint8>): void {
+  switch (kind) {
+    case Artifact.TOKENS: { parseTokens(ref s, ref payload); }
+    case Artifact.AST: { parseAst(ref s, ref payload); }
+    case Artifact.MODULES: { parseModules(ref s, ref payload); }
+    case Artifact.DIAGNOSTICS: { parseDiagnostics(ref s, ref payload); }
+    case Artifact.IR: { parseIr(ref s, ref payload); }
+    default: {}
+  }
+}
+
+// ----- artifact parsers -----------------------------------------------------
+
+// `TAG <pos> <len>` per line. The color is a hash of the tag's bytes into
+// the palette: no taxonomy of tags to maintain, every tag stable and
+// distinct enough to read as variety on the belt.
+function parseTokens(ref s: Scene, ref payload: Vec<uint8>): void {
+  vec.vecClear(ref s.tokens);
+  const bytes: uint8[] = vec.vecAsArray(ref payload);
+  let i: usize = 0;
+  while (i < bytes.len) {
+    // Hash the tag - the bytes up to the first space.
+    let h: uint64 = 1469598103934665603;
+    let sawTag = false;
+    while (i < bytes.len && bytes[i] != 10 && bytes[i] != 32) {
+      h = (h ^ uint64(bytes[i])) * 1099511628211;
+      sawTag = true;
+      i += 1;
+    }
+    // The two decimals after the tag: start and length.
+    let pos: usize = 0;
+    let len: usize = 0;
+    if (i < bytes.len && bytes[i] == 32) {
+      i += 1;
+      while (i < bytes.len && bytes[i] >= 48 && bytes[i] <= 57) {
+        pos = pos * 10 + usize(bytes[i] - 48);
+        i += 1;
+      }
+      if (i < bytes.len && bytes[i] == 32) {
+        i += 1;
+        while (i < bytes.len && bytes[i] >= 48 && bytes[i] <= 57) {
+          len = len * 10 + usize(bytes[i] - 48);
+          i += 1;
+        }
+      }
+    }
+    // Skip to the line's end.
+    while (i < bytes.len && bytes[i] != 10) {
+      i += 1;
+    }
+    if (i < bytes.len) {
+      i += 1;
+    }
+    if (sawTag) {
+      vec.vecPush(ref s.tokens, { colorId: uint8(h % 12), pos: pos, len: len });
+    }
+  }
+  // The dump's trailing EOF token is real output; the belt does not need to
+  // end on an invisible block, so it rides like any other.
+}
+
+// The --dump-ast-json payload. The tree is flattened depth-ring style: a
+// first walk counts the nodes of each depth, a second assigns each its slot
+// on its ring. Color hashes the node's kind.
+function parseAst(ref s: Scene, ref payload: Vec<uint8>): void {
+  vec.vecClear(ref s.astItems);
+  switch (json.parseBytes(vec.vecAsArray(ref payload))) {
+    case ParseResult.Err { error: e }: { return; }
+    case ParseResult.Ok { value: d }: {
+      if (s.astHeld) {
+        Disposable.dispose(ref s.astDoc);
+      }
+      s.astDoc = d;
+      s.astHeld = true;
+      const rootObj = s.astDoc.root;
+      s.source = json.memberString(ref s.astDoc, rootObj, "source");
+      s.entryFile = json.memberString(ref s.astDoc, rootObj, "filename");
+      indexLines(ref s);
+      s.smellOnce = 0;
+      s.smellLoop = 0;
+      const astNode = json.member(ref s.astDoc, rootObj, "ast");
+      if (astNode == 0) {
+        return;
+      }
+      disposable perDepth: Vec<usize> = vec.vecNew(32);
+      countDepths(ref s.astDoc, astNode, 0, ref perDepth);
+      disposable filled: Vec<usize> = vec.vecNew(perDepth.len);
+      let i: usize = 0;
+      while (i < perDepth.len) {
+        vec.vecPush(ref filled, 0);
+        i += 1;
+      }
+      collectAst(ref s, astNode, 0, 0, 0, ref perDepth, ref filled);
+    }
+  }
+}
+
+function countDepths(ref d: JsonDoc, node: JsonId, depth: usize, ref perDepth: Vec<usize>): void {
+  while (perDepth.len <= depth) {
+    vec.vecPush(ref perDepth, 0);
+  }
+  vec.vecSet(ref perDepth, depth, vec.vecGet(ref perDepth, depth) + 1);
+  const kids = json.member(ref d, node, "children");
+  if (kids == 0) {
+    return;
+  }
+  let child = json.firstChild(ref d, kids);
+  while (child != 0) {
+    countDepths(ref d, child, depth + 1, ref perDepth);
+    child = json.nextSibling(ref d, child);
+  }
+}
+
+function collectAst(ref s: Scene, node: JsonId, depth: usize, parent: usize, loopDepth: usize, ref perDepth: Vec<usize>, ref filled: Vec<usize>): void {
+  const slot = vec.vecGet(ref filled, depth);
+  vec.vecSet(ref filled, depth, slot + 1);
+  const kind = json.memberString(ref s.astDoc, node, "kind");
+  const selfIndex = s.astItems.len;
+  const smell = smellOf(ref s, node, kind, loopDepth);
+  if (smell == 1) {
+    s.smellOnce += 1;
+  } else if (smell == 2) {
+    s.smellLoop += 1;
+  }
+  let innerLoopDepth = loopDepth;
+  if (str.stringEq(kind, "WHILE_STATEMENT") || str.stringEq(kind, "FOR_LOOP") ||
+      str.stringEq(kind, "FOR_IN_LOOP")) {
+    innerLoopDepth += 1;
+  }
+  const loc = json.member(ref s.astDoc, node, "loc");
+  let spanPos: usize = 0;
+  let spanLen: usize = 0;
+  if (loc != 0) {
+    spanPos = usize(json.memberInt(ref s.astDoc, loc, "pos", 0));
+    spanLen = usize(json.memberInt(ref s.astDoc, loc, "length", 0));
+  }
+  let named = false;
+  const fields = json.member(ref s.astDoc, node, "fields");
+  if (fields != 0 && json.memberString(ref s.astDoc, fields, "name").len > 0) {
+    named = true;
+  }
+  vec.vecPush(ref s.astItems, {
+    depth: depth,
+    slot: slot,
+    slots: vec.vecGet(ref perDepth, depth),
+    parent: parent,
+    colorId: uint8(hashBytes(intr.stringAsBytes(kind)) % 12),
+    spanPos: spanPos,
+    spanLen: spanLen,
+    nodeId: node,
+    named: named,
+    smell: smell,
+  });
+  const kids = json.member(ref s.astDoc, node, "children");
+  if (kids == 0) {
+    return;
+  }
+  let child = json.firstChild(ref s.astDoc, kids);
+  while (child != 0) {
+    collectAst(ref s, child, depth + 1, selfIndex, innerLoopDepth, ref perDepth, ref filled);
+    child = json.nextSibling(ref s.astDoc, child);
+  }
+}
+
+/*
+  The heap-smell rule, straight from the tree's own style law (CLAUDE.md /
+  docs/writing_yoop.md 3.1): a template literal and every stringConcat
+  build a raw malloc'd string the allocator context never sees and nothing
+  frees. Once is a cost; in a loop it is a leak per iteration - which is
+  why the loop cases get their own, louder class.
+*/
+function smellOf(ref s: Scene, node: JsonId, kind: string, loopDepth: usize): uint8 {
+  let smelly = false;
+  if (str.stringEq(kind, "TEMPLATE_LITERAL")) {
+    smelly = true;
+  } else if (str.stringEq(kind, "CALL_EXPRESSION")) {
+    const fields = json.member(ref s.astDoc, node, "fields");
+    if (fields != 0) {
+      const callee = json.memberString(ref s.astDoc, fields, "name");
+      if (str.stringEq(callee, "stringConcat") || str.stringEq(callee, "stringConcatAll")) {
+        smelly = true;
+      }
+    }
+  }
+  if (!smelly) {
+    return 0;
+  }
+  if (loopDepth > 0) {
+    return 2;
+  }
+  return 1;
+}
+
+// {"nodes":[{id,name,files,loc,entry}],"edges":[{from,to}]} - the host's
+// module map. Edges resolve their endpoint ids against the nodes list.
+function parseModules(ref s: Scene, ref payload: Vec<uint8>): void {
+  vec.vecClear(ref s.islands);
+  vec.vecClear(ref s.edges);
+  switch (json.parseBytes(vec.vecAsArray(ref payload))) {
+    case ParseResult.Err { error: e }: { return; }
+    case ParseResult.Ok { value: d }: {
+      if (s.modulesHeld) {
+        Disposable.dispose(ref s.modulesDoc);
+      }
+      s.modulesDoc = d;
+      s.modulesHeld = true;
+      const rootObj = s.modulesDoc.root;
+      const nodes = json.member(ref s.modulesDoc, rootObj, "nodes");
+      let n = json.firstChild(ref s.modulesDoc, nodes);
+      while (n != 0) {
+        vec.vecPush(ref s.islands, {
+          name: json.memberString(ref s.modulesDoc, n, "id"),
+          loc: usize(json.memberInt(ref s.modulesDoc, n, "loc", 0)),
+          entry: json.asBool(ref s.modulesDoc, json.member(ref s.modulesDoc, n, "entry"), false),
+        });
+        n = json.nextSibling(ref s.modulesDoc, n);
+      }
+      const edges = json.member(ref s.modulesDoc, rootObj, "edges");
+      let e = json.firstChild(ref s.modulesDoc, edges);
+      while (e != 0) {
+        const srcIdx = islandIndexOf(ref s, json.memberString(ref s.modulesDoc, e, "from"));
+        const dstIdx = islandIndexOf(ref s, json.memberString(ref s.modulesDoc, e, "to"));
+        if (srcIdx < s.islands.len && dstIdx < s.islands.len) {
+          vec.vecPush(ref s.edges, { src: srcIdx, dst: dstIdx });
+        }
+        e = json.nextSibling(ref s.modulesDoc, e);
+      }
+    }
+  }
+}
+
+function islandIndexOf(ref s: Scene, id: string): usize {
+  let i: usize = 0;
+  while (i < s.islands.len) {
+    if (str.stringEq(vec.vecGet(ref s.islands, i).name, id)) {
+      return i;
+    }
+    i += 1;
+  }
+  return s.islands.len;
+}
+
+// A JSON array of {file,line,col,severity,message}: the gate only needs the
+// two counts - the door opens on zero errors.
+function parseDiagnostics(ref s: Scene, ref payload: Vec<uint8>): void {
+  vec.vecClear(ref s.diagRaw);
+  vec.vecExtendFrom(ref s.diagRaw, vec.vecAsArray(ref payload));
+  placeDiagnostics(ref s);
+}
+
+// Parse and PLACE from the kept raw payload - re-run after a file swap so
+// the sigils follow whichever file the wall shows.
+function placeDiagnostics(ref s: Scene): void {
+  s.diagErrors = 0;
+  s.diagWarnings = 0;
+  vec.vecClear(ref s.diagItems);
+  text.clear(ref s.diagMsgs);
+  switch (json.parseBytes(vec.vecAsArray(ref s.diagRaw))) {
+    case ParseResult.Err { error: e }: { return; }
+    case ParseResult.Ok { value: d }: {
+      disposable doc: JsonDoc = d;
+      let n = json.firstChild(ref doc, doc.root);
+      while (n != 0) {
+        const isError = str.stringEq(json.memberString(ref doc, n, "severity"), "error");
+        if (isError) {
+          s.diagErrors += 1;
+        } else {
+          s.diagWarnings += 1;
+        }
+        // Only the entry file's diagnostics take a place in the world: the
+        // wall can only point at the file it shows.
+        if (endsWith(json.memberString(ref doc, n, "file"), s.entryFile)) {
+          const msg = json.memberString(ref doc, n, "message");
+          const msgStart = s.diagMsgs.len;
+          text.push(ref s.diagMsgs, msg);
+          vec.vecPush(ref s.diagItems, {
+            line: usize(json.memberInt(ref doc, n, "line", 1)),
+            col: usize(json.memberInt(ref doc, n, "col", 0)),
+            error: isError,
+            leak: str.stringEq(json.memberString(ref doc, n, "code"), "unhandled-disposable"),
+            msgStart: msgStart,
+            msgLen: msg.len,
+          });
+        }
+        n = json.nextSibling(ref doc, n);
+      }
+    }
+  }
+}
+
+function endsWith(haystack: string, needle: string): bool {
+  if (needle.len == 0 || needle.len > haystack.len) {
+    return false;
+  }
+  const hb: uint8[] = intr.stringAsBytes(haystack);
+  const nb: uint8[] = intr.stringAsBytes(needle);
+  let i: usize = 0;
+  while (i < nb.len) {
+    if (hb[hb.len - nb.len + i] != nb[i]) {
+      return false;
+    }
+    i += 1;
+  }
+  return true;
+}
+
+// The emitted .ll, read at the line level: `define` opens a function, `}`
+// closes one, a line ending in `:` is a block label, anything indented in
+// between is an instruction. The same reading tools/visualizer's JS parser
+// does, minus the pieces a skyline does not need.
+function parseIr(ref s: Scene, ref payload: Vec<uint8>): void {
+  vec.vecClear(ref s.irFuncs);
+  vec.vecClear(ref s.irBlocks);
+  text.clear(ref s.irNames);
+  s.irLines = 0;
+  const bytes: uint8[] = vec.vecAsArray(ref payload);
+  let inFunc = false;
+  let blockStart: usize = 0;
+  let hasBlock = false;
+  let nameStart: usize = 0;
+  let nameLen: usize = 0;
+  let blk: IrBlock = emptyIrBlock(0, 0);
+  let i: usize = 0;
+  while (i < bytes.len) {
+    const lineStart = i;
+    while (i < bytes.len && bytes[i] != 10) {
+      i += 1;
+    }
+    const lineEnd = i;
+    if (i < bytes.len) {
+      i += 1;
+    }
+    s.irLines += 1;
+    const len = lineEnd - lineStart;
+    if (len == 0) {
+      continue;
+    }
+    if (!inFunc) {
+      if (len > 7 && matchesAt(bytes, lineStart, "define ")) {
+        inFunc = true;
+        blockStart = s.irBlocks.len;
+        hasBlock = false;
+        blk = emptyIrBlock(labelInto(ref s, bytes, 0, 0), 0);
+        // The name: between the line's `@` and the `(` after it, copied
+        // into the scene's own buffer - the payload is reused per blob.
+        nameStart = s.irNames.len;
+        nameLen = 0;
+        let at = lineStart;
+        while (at < lineEnd && bytes[at] != 64) {
+          at += 1;
+        }
+        at += 1;
+        while (at < lineEnd && bytes[at] != 40) {
+          at += 1;
+          nameLen += 1;
+        }
+        if (nameLen > 0) {
+          text.pushBytes(ref s.irNames, intr.arraySlice(bytes, at - nameLen, at));
+        }
+      }
+      continue;
+    }
+    if (bytes[lineStart] == 125) {
+      if (hasBlock || blk.instructions > 0) {
+        vec.vecPush(ref s.irBlocks, blk);
+      }
+      vec.vecPush(ref s.irFuncs, {
+        blockStart: blockStart,
+        blockCount: s.irBlocks.len - blockStart,
+        nameStart: nameStart,
+        nameLen: nameLen,
+      });
+      inFunc = false;
+      continue;
+    }
+    if (bytes[lineEnd - 1] == 58 && bytes[lineStart] != 32) {
+      // A label line ends the block before it and names the next.
+      if (hasBlock || blk.instructions > 0) {
+        vec.vecPush(ref s.irBlocks, blk);
+      }
+      blk = emptyIrBlock(labelInto(ref s, bytes, lineStart, lineEnd - 1), lineEnd - 1 - lineStart);
+      hasBlock = true;
+      continue;
+    }
+    if (bytes[lineStart] == 32) {
+      blk.instructions += 1;
+      const fam = opFamilyOf(bytes, lineStart, lineEnd);
+      if (fam == 1) { blk.calls += 1; }
+      else if (fam == 2) { blk.branches += 1; }
+      else if (fam == 3) { blk.memOps += 1; }
+    }
+  }
+}
+
+function emptyIrBlock(labelStart: usize, labelLen: usize): IrBlock {
+  return { instructions: 0, calls: 0, branches: 0, memOps: 0,
+    labelStart: labelStart, labelLen: labelLen };
+}
+
+// Copies a block label's bytes into irNames and answers where they went.
+function labelInto(ref s: Scene, bytes: uint8[], first: usize, last: usize): usize {
+  const at = s.irNames.len;
+  if (last > first) {
+    text.pushBytes(ref s.irNames, intr.arraySlice(bytes, first, last));
+  }
+  return at;
+}
+
+/*
+  Which family an instruction line belongs to: 1 call, 2 branch (the
+  terminators), 3 memory, 0 everything else. The op is the word after the
+  optional `%name = ` assignment, which the textual format makes reliable
+  enough for a tooltip's histogram - this is a reading, not a parser.
+*/
+function opFamilyOf(bytes: uint8[], lineStart: usize, lineEnd: usize): uint8 {
+  let at = lineStart;
+  while (at < lineEnd && bytes[at] == 32) {
+    at += 1;
+  }
+  if (at < lineEnd && bytes[at] == 37) {
+    // `%name = op ...`: skip to the space after `=`.
+    while (at < lineEnd && bytes[at] != 61) {
+      at += 1;
+    }
+    at += 1;
+    while (at < lineEnd && bytes[at] == 32) {
+      at += 1;
+    }
+  }
+  if (wordAt(bytes, at, lineEnd, "call") || wordAt(bytes, at, lineEnd, "tail") ||
+      wordAt(bytes, at, lineEnd, "invoke")) {
+    return 1;
+  }
+  if (wordAt(bytes, at, lineEnd, "br") || wordAt(bytes, at, lineEnd, "ret") ||
+      wordAt(bytes, at, lineEnd, "switch") || wordAt(bytes, at, lineEnd, "unreachable")) {
+    return 2;
+  }
+  if (wordAt(bytes, at, lineEnd, "load") || wordAt(bytes, at, lineEnd, "store") ||
+      wordAt(bytes, at, lineEnd, "alloca") || wordAt(bytes, at, lineEnd, "getelementptr")) {
+    return 3;
+  }
+  return 0;
+}
+
+function wordAt(bytes: uint8[], at: usize, lineEnd: usize, word: string): bool {
+  const wb: uint8[] = intr.stringAsBytes(word);
+  if (at + wb.len > lineEnd) {
+    return false;
+  }
+  let i: usize = 0;
+  while (i < wb.len) {
+    if (bytes[at + i] != wb[i]) {
+      return false;
+    }
+    i += 1;
+  }
+  return at + wb.len == lineEnd || bytes[at + wb.len] == 32;
+}
+
+// ----- the pick ray's lookups -----------------------------------------------
+
+// Byte offsets each source line starts at, so a wall cell inverts to an
+// offset in O(1).
+function indexLines(ref s: Scene): void {
+  vec.vecClear(ref s.lineStarts);
+  vec.vecPush(ref s.lineStarts, 0);
+  const bytes: uint8[] = intr.stringAsBytes(s.source);
+  let i: usize = 0;
+  while (i < bytes.len) {
+    if (bytes[i] == 10 && i + 1 < bytes.len) {
+      vec.vecPush(ref s.lineStarts, i + 1);
+    }
+    i += 1;
+  }
+}
+
+export function sceneLineCount(ref s: Scene): usize {
+  return s.lineStarts.len;
+}
+
+// The byte offset of (line, col), or the source's length when the cell is
+// past the line's end - which no token or span covers, so a miss stays a
+// miss without a second sentinel.
+export function sceneOffsetAt(ref s: Scene, line: usize, col: usize): usize {
+  if (line >= s.lineStarts.len) {
+    return s.source.len;
+  }
+  const start = vec.vecGet(ref s.lineStarts, line);
+  const offset = start + col;
+  if (offset >= s.source.len) {
+    return s.source.len;
+  }
+  // Past this line's own newline is past its text.
+  const bytes: uint8[] = intr.stringAsBytes(s.source);
+  let i = start;
+  while (i < offset) {
+    if (bytes[i] == 10) {
+      return s.source.len;
+    }
+    i += 1;
+  }
+  return offset;
+}
+
+// The token whose source range covers `offset`, or tokens.len for none.
+export function sceneTokenAt(ref s: Scene, offset: usize): usize {
+  let i: usize = 0;
+  while (i < s.tokens.len) {
+    const t = vec.vecGet(ref s.tokens, i);
+    if (offset >= t.pos && offset < t.pos + t.len) {
+      return i;
+    }
+    i += 1;
+  }
+  return s.tokens.len;
+}
+
+// The DEEPEST AST node whose introducing token covers `offset`, or
+// astItems.len for none. Spans are token-sized (the dump points at the
+// introducing token), so "deepest cover" is "the most specific thing that
+// starts here" - aiming at a call's name finds the call, not the file.
+export function sceneAstNodeAt(ref s: Scene, offset: usize): usize {
+  let best = s.astItems.len;
+  let bestDepth: usize = 0;
+  let i: usize = 0;
+  while (i < s.astItems.len) {
+    const n = vec.vecGet(ref s.astItems, i);
+    if (offset >= n.spanPos && offset < n.spanPos + n.spanLen) {
+      if (best == s.astItems.len || n.depth >= bestDepth) {
+        best = i;
+        bestDepth = n.depth;
+      }
+    }
+    i += 1;
+  }
+  return best;
+}
+
+// A token's own source text, written into `out` - the label the belt shows
+// when the pick ray lands on the wall above it.
+export function sceneTokenText(ref s: Scene, idx: usize, ref out: Text): void {
+  text.clear(ref out);
+  if (idx >= s.tokens.len) {
+    return;
+  }
+  const t = vec.vecGet(ref s.tokens, idx);
+  if (t.pos + t.len > s.source.len) {
+    return;
+  }
+  text.pushBytes(ref out, intr.arraySlice(intr.stringAsBytes(s.source), t.pos, t.pos + t.len));
+}
+
+// An AST node's kind, read back from the kept doc.
+export function sceneAstKind(ref s: Scene, idx: usize): string {
+  if (idx >= s.astItems.len) {
+    return "";
+  }
+  return json.memberString(ref s.astDoc, vec.vecGet(ref s.astItems, idx).nodeId, "kind");
+}
+
+// An AST node's human name when the dump carried one (`fields.name`), "".
+export function sceneAstName(ref s: Scene, idx: usize): string {
+  if (idx >= s.astItems.len) {
+    return "";
+  }
+  const fields = json.member(ref s.astDoc, vec.vecGet(ref s.astItems, idx).nodeId, "fields");
+  if (fields == 0) {
+    return "";
+  }
+  return json.memberString(ref s.astDoc, fields, "name");
+}
+
+// The line and column a byte offset sits at - the wall side of every
+// reverse lookup (a picked NODE lighting its own span).
+export function sceneLineOfOffset(ref s: Scene, offset: usize): usize {
+  let line: usize = 0;
+  while (line + 1 < s.lineStarts.len &&
+      vec.vecGet(ref s.lineStarts, line + 1) <= offset) {
+    line += 1;
+  }
+  return line;
+}
+
+export function sceneColOfOffset(ref s: Scene, offset: usize): usize {
+  return offset - vec.vecGet(ref s.lineStarts, sceneLineOfOffset(ref s, offset));
+}
+
+// ----- the browsable closure ------------------------------------------------
+
+// A `file` line arrived: remember which file the next two blobs describe.
+export function sceneStoreFilePath(ref s: Scene, modIdx: usize, fileIdx: usize, line: string, pathAt: usize): void {
+  const bytes: uint8[] = intr.stringAsBytes(line);
+  const start = s.filePaths.len;
+  let plen: usize = 0;
+  if (pathAt < bytes.len) {
+    text.pushBytes(ref s.filePaths, intr.arraySlice(bytes, pathAt, bytes.len));
+    plen = bytes.len - pathAt;
+  }
+  vec.vecPush(ref s.fileEntries, {
+    modIdx: modIdx, fileIdx: fileIdx, pathStart: start, pathLen: plen,
+    tokens: vec.vecNew(2), ast: vec.vecNew(2),
+  });
+}
+
+// A streamed file's blob, routed into the LAST entry rather than the live
+// scene - the store is a shelf, not the stage.
+export function sceneStoreFileBlob(ref s: Scene, kind: Artifact, ref payload: Vec<uint8>): void {
+  if (s.fileEntries.len == 0) {
+    return;
+  }
+  let entry: FileEntry = vec.vecGet(ref s.fileEntries, s.fileEntries.len - 1);
+  if (kind == Artifact.TOKENS) {
+    vec.vecClear(ref entry.tokens);
+    vec.vecExtendFrom(ref entry.tokens, vec.vecAsArray(ref payload));
+  } else if (kind == Artifact.AST) {
+    vec.vecClear(ref entry.ast);
+    vec.vecExtendFrom(ref entry.ast, vec.vecAsArray(ref payload));
+  }
+  vec.vecSet(ref s.fileEntries, s.fileEntries.len - 1, entry);
+}
+
+// How many files a module streamed - what the archipelago's tooltip says
+// and what pressing E again cycles through.
+export function sceneModuleFileCount(ref s: Scene, modIdx: usize): usize {
+  let n: usize = 0;
+  let i: usize = 0;
+  while (i < s.fileEntries.len) {
+    if (vec.vecGet(ref s.fileEntries, i).modIdx == modIdx) {
+      n += 1;
+    }
+    i += 1;
+  }
+  return n;
+}
+
+// The store index of module `modIdx`'s `nth` file, or fileEntries.len.
+export function sceneFileEntryFor(ref s: Scene, modIdx: usize, nth: usize): usize {
+  let seen: usize = 0;
+  let i: usize = 0;
+  while (i < s.fileEntries.len) {
+    if (vec.vecGet(ref s.fileEntries, i).modIdx == modIdx) {
+      if (seen == nth) {
+        return i;
+      }
+      seen += 1;
+    }
+    i += 1;
+  }
+  return s.fileEntries.len;
+}
+
+/*
+  WALK INTO a stored file: its tokens and AST take the stage - the wall,
+  the belt and the grove all swap - and both replay clocks restart, so the
+  new file lexes and parses in front of the player the way the entry did.
+  Diagnostics re-place themselves against the new file from the kept raw
+  payload. The module map and the IR stay: they are whole-program.
+*/
+export function sceneOpenFile(ref s: Scene, entryIdx: usize): bool {
+  if (entryIdx >= s.fileEntries.len) {
+    return false;
+  }
+  let entry: FileEntry = vec.vecGet(ref s.fileEntries, entryIdx);
+  parseAst(ref s, ref entry.ast);
+  parseTokens(ref s, ref entry.tokens);
+  placeDiagnostics(ref s);
+  s.tokensClock = 0.0;
+  s.astClock = 0.0;
+  return true;
+}
+
+// A stored file's path into `out` - what the editor jump and any label
+// needs off an island.
+export function sceneFilePath(ref s: Scene, entryIdx: usize, ref out: Text): void {
+  text.clear(ref out);
+  if (entryIdx >= s.fileEntries.len) {
+    return;
+  }
+  const entry = vec.vecGet(ref s.fileEntries, entryIdx);
+  if (entry.pathStart + entry.pathLen > s.filePaths.len) {
+    return;
+  }
+  text.pushBytes(ref out,
+    intr.arraySlice(text.bytes(ref s.filePaths), entry.pathStart, entry.pathStart + entry.pathLen));
+}
+
+// A placed diagnostic's message into `out` - the sigil's tooltip text.
+export function sceneDiagMsg(ref s: Scene, idx: usize, ref out: Text): void {
+  text.clear(ref out);
+  if (idx >= s.diagItems.len) {
+    return;
+  }
+  const it = vec.vecGet(ref s.diagItems, idx);
+  if (it.msgStart + it.msgLen > s.diagMsgs.len) {
+    return;
+  }
+  text.pushBytes(ref out,
+    intr.arraySlice(text.bytes(ref s.diagMsgs), it.msgStart, it.msgStart + it.msgLen));
+}
+
+// A block's label ("entry", "L3") into `out`, from the shared name buffer.
+export function sceneIrBlockLabel(ref s: Scene, blockIdx: usize, ref out: Text): void {
+  text.clear(ref out);
+  if (blockIdx >= s.irBlocks.len) {
+    return;
+  }
+  const b = vec.vecGet(ref s.irBlocks, blockIdx);
+  if (b.labelLen == 0 || b.labelStart + b.labelLen > s.irNames.len) {
+    text.push(ref out, "entry");
+    return;
+  }
+  text.pushBytes(ref out,
+    intr.arraySlice(text.bytes(ref s.irNames), b.labelStart, b.labelStart + b.labelLen));
+}
+
+// An IR function's name as a view into the scene's own buffer.
+export function sceneIrName(ref s: Scene, idx: usize, ref out: Text): void {
+  text.clear(ref out);
+  if (idx >= s.irFuncs.len) {
+    return;
+  }
+  const f = vec.vecGet(ref s.irFuncs, idx);
+  if (f.nameLen == 0 || f.nameStart + f.nameLen > s.irNames.len) {
+    return;
+  }
+  text.pushBytes(ref out,
+    intr.arraySlice(text.bytes(ref s.irNames), f.nameStart, f.nameStart + f.nameLen));
+}
+
+function matchesAt(bytes: uint8[], at: usize, word: string): bool {
+  const wb: uint8[] = intr.stringAsBytes(word);
+  if (at + wb.len > bytes.len) {
+    return false;
+  }
+  let i: usize = 0;
+  while (i < wb.len) {
+    if (bytes[at + i] != wb[i]) {
+      return false;
+    }
+    i += 1;
+  }
+  return true;
+}
+
+function hashBytes(bytes: uint8[]): uint64 {
+  let h: uint64 = 1469598103934665603;
+  let i: usize = 0;
+  while (i < bytes.len) {
+    h = (h ^ uint64(bytes[i])) * 1099511628211;
+    i += 1;
+  }
+  return h;
+}

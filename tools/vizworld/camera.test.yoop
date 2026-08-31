@@ -1,0 +1,110 @@
+// The camera math, checked against the compass: the draw side applies
+// rotate(pitch) rotate(yaw) translate(-pos), and these vectors were derived
+// for that order - yaw 0 looks down -z, positive yaw turns right.
+
+import.test;
+import * as t from "std/test.yoop";
+import { suite, test, Case } from "std/test.yoop";
+import * as camera from "./camera.yoop";
+import { Camera } from "./camera.yoop";
+
+function near(a: float32, b: float32): bool {
+  let d = a - b;
+  if (d < 0.0) {
+    d = 0.0 - d;
+  }
+  return d < 0.001;
+}
+
+suite function theCompassPointsWhereTheViewDoes(): void {
+  let test theory: Case = t.asserts("yaw 0 walks down -z") {
+    theory.isSuccessful = near(camera.forwardX(0.0), 0.0) && near(camera.forwardZ(0.0), 0.0 - 1.0);
+    theory.detail = `forward was (${camera.forwardX(0.0)}, ${camera.forwardZ(0.0)})`;
+  }
+  // Facing north (-z), a right turn faces east (+x): positive yaw is the
+  // mouse's rightward motion, and forward must follow it around.
+  let test theory: Case = t.asserts("yaw 90 walks toward +x") {
+    theory.isSuccessful = near(camera.forwardX(90.0), 1.0) && near(camera.forwardZ(90.0), 0.0);
+    theory.detail = `forward was (${camera.forwardX(90.0)}, ${camera.forwardZ(90.0)})`;
+  }
+  let test theory: Case = t.asserts("right at yaw 0 is +x") {
+    theory.isSuccessful = near(camera.rightX(0.0), 1.0) && near(camera.rightZ(0.0), 0.0);
+    theory.detail = `right was (${camera.rightX(0.0)}, ${camera.rightZ(0.0)})`;
+  }
+  // Facing east, right is south (+z) - the sign the mirrored basis got
+  // wrong, which is why strafing skewed after any turn.
+  let test theory: Case = t.asserts("right at yaw 90 is +z") {
+    theory.isSuccessful = near(camera.rightX(90.0), 0.0) && near(camera.rightZ(90.0), 1.0);
+    theory.detail = `right was (${camera.rightX(90.0)}, ${camera.rightZ(90.0)})`;
+  }
+}
+
+suite function theAimRayFollowsPitch(): void {
+  let test theory: Case = t.asserts("level aim IS the forward vector") {
+    theory.isSuccessful = near(camera.aimX(37.0, 0.0), camera.forwardX(37.0)) &&
+      near(camera.aimY(0.0), 0.0) &&
+      near(camera.aimZ(37.0, 0.0), camera.forwardZ(37.0));
+    theory.detail = "aim at pitch 0 diverged from forward";
+  }
+  let test theory: Case = t.asserts("looking straight down aims at -y") {
+    theory.isSuccessful = near(camera.aimX(0.0, 90.0), 0.0) &&
+      near(camera.aimY(90.0), 0.0 - 1.0) && near(camera.aimZ(0.0, 90.0), 0.0);
+    theory.detail = `aim was (${camera.aimX(0.0, 90.0)}, ${camera.aimY(90.0)}, ${camera.aimZ(0.0, 90.0)})`;
+  }
+}
+
+suite function flightGlidesWithoutOvershooting(): void {
+  let test theory: Case = t.asserts("half the blend covers half the distance") {
+    theory.isSuccessful = near(camera.approach(0.0, 1.0, 10.0, 0.05), 0.5);
+    theory.detail = `got ${camera.approach(0.0, 1.0, 10.0, 0.05)}`;
+  }
+  let test theory: Case = t.asserts("a long frame lands ON the target, never past it") {
+    theory.isSuccessful = near(camera.approach(0.0, 1.0, 10.0, 1.0), 1.0);
+    theory.detail = `got ${camera.approach(0.0, 1.0, 10.0, 1.0)}`;
+  }
+  let test theory: Case = t.asserts("letting go glides back toward zero") {
+    const eased = camera.approach(1.0, 0.0, 10.0, 0.05);
+    theory.isSuccessful = eased < 1.0 && eased > 0.0;
+    theory.detail = `got ${eased}`;
+  }
+}
+
+suite function theWorldPickHitsWhatItAimsAt(): void {
+  let test theory: Case = t.asserts("a point dead ahead hits at its distance") {
+    theory.isSuccessful = near(camera.rayHit(0.0, 0.0, 0.0, 0.0, 0.0, 0.0 - 1.0,
+      0.0, 0.0, 0.0 - 5.0, 0.5), 5.0);
+    theory.detail = `t was ${camera.rayHit(0.0, 0.0, 0.0, 0.0, 0.0, 0.0 - 1.0, 0.0, 0.0, 0.0 - 5.0, 0.5)}`;
+  }
+  let test theory: Case = t.asserts("a point two units off a half-unit ray is a miss") {
+    theory.isSuccessful = camera.rayHit(0.0, 0.0, 0.0, 0.0, 0.0, 0.0 - 1.0,
+      2.0, 0.0, 0.0 - 5.0, 0.5) < 0.0;
+    theory.detail = "the wide point still hit";
+  }
+  let test theory: Case = t.asserts("a point BEHIND the camera never hits") {
+    theory.isSuccessful = camera.rayHit(0.0, 0.0, 0.0, 0.0, 0.0, 0.0 - 1.0,
+      0.0, 0.0, 5.0, 3.0) < 0.0;
+    theory.detail = "the behind point hit";
+  }
+}
+
+suite function movementAndTurningStayBounded(): void {
+  let cam: Camera = camera.cameraStart();
+  const startZ = cam.z;
+  camera.moveCamera(ref cam, 1.0, 0.0, 0.0, 1.0, 2.0);
+  let test theory: Case = t.asserts("one second ahead at speed 2 is two units down -z") {
+    theory.isSuccessful = near(cam.z, startZ - 2.0) && near(cam.x, 0.0);
+    theory.detail = `moved to (${cam.x}, ${cam.z}) from z ${startZ}`;
+  }
+
+  camera.turnCamera(ref cam, 0, 100000, 0.14);
+  let test theory: Case = t.asserts("pitch clamps short of the pole") {
+    theory.isSuccessful = near(cam.pitch, 89.0);
+    theory.detail = `pitch was ${cam.pitch}`;
+  }
+
+  camera.turnCamera(ref cam, 100000, 0, 0.14);
+  let test theory: Case = t.asserts("yaw wraps into one turn") {
+    theory.isSuccessful = cam.yaw >= 0.0 && cam.yaw < 360.0;
+    theory.detail = `yaw was ${cam.yaw}`;
+  }
+}

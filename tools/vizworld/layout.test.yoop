@@ -1,0 +1,92 @@
+// The world's arithmetic. Positions are pinned from the layout's own
+// stated rules - serpentine rows, capped towers, the reveal curve - so a
+// change that moves a district moves these first.
+
+import.test;
+import * as t from "std/test.yoop";
+import { suite, test, Case } from "std/test.yoop";
+import * as layout from "./layout.yoop";
+import { Vec3, TOKENS_PER_ROW, WALL_Z0, WALL_CELL_W, WALL_MAX_COLS } from "./layout.yoop";
+
+function near(a: float32, b: float32): bool {
+  let d = a - b;
+  if (d < 0.0) {
+    d = 0.0 - d;
+  }
+  return d < 0.001;
+}
+
+suite function theConveyorSnakes(): void {
+  const first: Vec3 = layout.tokenPos(0);
+  let test theory: Case = t.asserts("token 0 starts the first row") {
+    theory.isSuccessful = near(first.x, 6.0);
+    theory.detail = `x was ${first.x}`;
+  }
+  // The second row runs BACKWARD: its first token sits under the first
+  // row's last, which is what makes the stream one path.
+  const turn: Vec3 = layout.tokenPos(TOKENS_PER_ROW);
+  const above: Vec3 = layout.tokenPos(TOKENS_PER_ROW - 1);
+  let test theory: Case = t.asserts("the belt turns at the row's end") {
+    theory.isSuccessful = near(turn.x, above.x) && !near(turn.z, above.z);
+    theory.detail = `turn (${turn.x}, ${turn.z}) vs above (${above.x}, ${above.z})`;
+  }
+}
+
+suite function theWallMapsBothWays(): void {
+  // A cell's own position, offset to where a glyph actually stands (a bit
+  // up the cell, a bit into it), must come back as the same cell - that
+  // roundtrip IS the pick ray's correctness.
+  const p: Vec3 = layout.wallCellPos(5, 7, 40);
+  let line: usize = 0;
+  let col: usize = 0;
+  const hit = layout.wallHit(p.y + 0.15, p.z - 0.1, 40, ref line, ref col);
+  let test theory: Case = t.asserts("a glyph's position picks its own cell") {
+    theory.isSuccessful = hit && line == 5 && col == 7;
+    theory.detail = `hit=${hit} line=${line} col=${col}`;
+  }
+
+  let test theory: Case = t.asserts("above the wall's text is a miss") {
+    let l: usize = 0;
+    let c: usize = 0;
+    theory.isSuccessful = !layout.wallHit(1.2 + 100.0, WALL_Z0, 40, ref l, ref c);
+    theory.detail = "a point above the top line still hit";
+  }
+
+  let test theory: Case = t.asserts("past the last column is a miss") {
+    let l: usize = 0;
+    let c: usize = 0;
+    const q: Vec3 = layout.wallCellPos(5, 7, 40);
+    theory.isSuccessful = !layout.wallHit(q.y + 0.15,
+      WALL_Z0 - float32(WALL_MAX_COLS) * WALL_CELL_W - 1.0,
+      40, ref l, ref c);
+    theory.detail = "a point beyond the columns still hit";
+  }
+}
+
+suite function sizesStayInsideTheWorld(): void {
+  let test theory: Case = t.asserts("an island grows with lines and stops growing") {
+    theory.isSuccessful = layout.islandRadius(10) < layout.islandRadius(1000) &&
+      layout.islandRadius(1000000) <= 3.0;
+    theory.detail = `radii ${layout.islandRadius(10)}, ${layout.islandRadius(1000)}, ${layout.islandRadius(1000000)}`;
+  }
+  let test theory: Case = t.asserts("a tower caps at 120 instructions") {
+    theory.isSuccessful = near(layout.irTowerHeight(500), layout.irTowerHeight(120)) &&
+      layout.irTowerHeight(10) < layout.irTowerHeight(100);
+    theory.detail = "the tower cap did not hold";
+  }
+}
+
+suite function theRevealCurveIsTheSlownessContract(): void {
+  let test theory: Case = t.asserts("nothing exists before time passes") {
+    theory.isSuccessful = layout.revealedCount(0.0, 24.0, 100) == 0;
+    theory.detail = "items appeared at t=0";
+  }
+  let test theory: Case = t.asserts("one second at 24 per second is 24 items") {
+    theory.isSuccessful = layout.revealedCount(1.0, 24.0, 100) == 24;
+    theory.detail = `got ${layout.revealedCount(1.0, 24.0, 100)}`;
+  }
+  let test theory: Case = t.asserts("the reveal never overshoots the total") {
+    theory.isSuccessful = layout.revealedCount(1000.0, 24.0, 100) == 100;
+    theory.detail = `got ${layout.revealedCount(1000.0, 24.0, 100)}`;
+  }
+}

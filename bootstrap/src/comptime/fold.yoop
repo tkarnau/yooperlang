@@ -28,6 +28,7 @@ export function foldExpression(
   exprId: NodeId
 ): Result<ValueId, ComptimeError> {
   disposable scope: EvalScope = newEvalScope();
+  let inactivePlugin: PluginBridge = pluginBridgeInactive();
   let cx: EvalCx = {
     prog: ref prog, tm: ref tm, mod: ref mod, ast: ref mod.ast, graph: ref graph,
     // A const initializer is not inside a function, so there is no return type
@@ -35,6 +36,7 @@ export function foldExpression(
     // written there for exactly that reason.
     va: ref va, scope: ref scope, folded: ref folded,
     fnRet: TYPE_VOID_ID, depth: 0,
+    plugin: ref inactivePlugin,
   };
   return evalExprValue(ref cx, exprId);
 }

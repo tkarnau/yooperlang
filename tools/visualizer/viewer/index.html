@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Yooperlang Compilation World</title>
+<style>
+  html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #05060f; }
+  body { font-family: ui-monospace, "Cascadia Code", "Fira Code", Menlo, Consolas, monospace; color: #cfd8ff; }
+  #app { position: fixed; inset: 0; }
+  canvas { display: block; }
+
+  .hud { position: fixed; z-index: 10; pointer-events: none; user-select: none; }
+
+  #chips { top: 10px; left: 50%; transform: translateX(-50%); display: flex; gap: 6px; }
+  .chip {
+    padding: 4px 10px; border-radius: 4px; font-size: 11px; letter-spacing: 0.5px;
+    background: rgba(10, 14, 30, 0.75); border: 1px solid #26305a; color: #5a668f;
+  }
+  .chip.ready { border-color: #2fbf71; color: #7fe0a8; box-shadow: 0 0 8px rgba(47,191,113,0.35); }
+  .chip.running { border-color: #e8b93c; color: #ffd970; animation: chippulse 0.8s infinite alternate; }
+  .chip.done { border-color: #3c78e8; color: #8ab4ff; background: rgba(18, 30, 66, 0.8); }
+  .chip.failed { border-color: #e84a4a; color: #ff8a8a; box-shadow: 0 0 8px rgba(232,74,74,0.4); }
+  @keyframes chippulse { from { opacity: 0.65; } to { opacity: 1; } }
+
+  #crosshair {
+    top: 50%; left: 50%; transform: translate(-50%, -50%);
+    width: 6px; height: 6px; border-radius: 50%;
+    border: 1px solid rgba(200, 220, 255, 0.8); background: rgba(200, 220, 255, 0.15);
+  }
+
+  #info {
+    left: 14px; bottom: 14px; max-width: 460px; min-width: 200px;
+    background: rgba(8, 11, 26, 0.85); border: 1px solid #26305a; border-radius: 6px;
+    padding: 10px 12px; font-size: 12px; line-height: 1.5; display: none;
+  }
+  #info .title { color: #9fd8ff; font-weight: bold; margin-bottom: 4px; }
+  #info .line { color: #aab4dd; white-space: pre-wrap; word-break: break-word; }
+  #info .prompt { color: #7fe0a8; margin-top: 6px; }
+
+  #help {
+    right: 14px; bottom: 14px; background: rgba(8, 11, 26, 0.85);
+    border: 1px solid #26305a; border-radius: 6px; padding: 8px 12px;
+    font-size: 11px; line-height: 1.6; color: #7a86b5; pointer-events: auto; cursor: pointer;
+  }
+  #help.collapsed .body { display: none; }
+  #help .head { color: #9fd8ff; }
+
+  #toast {
+    top: 52px; left: 50%; transform: translateX(-50%); max-width: 640px;
+    background: rgba(40, 10, 14, 0.92); border: 1px solid #e84a4a; border-radius: 6px;
+    padding: 10px 16px; font-size: 13px; color: #ffb3b3; display: none;
+  }
+  #toast.note { background: rgba(10, 20, 40, 0.92); border-color: #3c78e8; color: #9fc4ff; }
+
+  #debugbar {
+    bottom: 14px; left: 50%; transform: translateX(-50%);
+    display: flex; align-items: center; gap: 10px; pointer-events: auto;
+    background: rgba(8, 11, 26, 0.85); border: 1px solid #26305a; border-radius: 6px;
+    padding: 8px 14px; font-size: 12px;
+  }
+  #debugbar button {
+    background: #16204a; color: #cfd8ff; border: 1px solid #3a4a8a; border-radius: 4px;
+    font-family: inherit; font-size: 12px; padding: 4px 10px; cursor: pointer;
+  }
+  #debugbar button:hover { background: #223070; }
+  #debugbar button:disabled { opacity: 0.4; cursor: default; }
+  #debugbar input[type=range] { width: 130px; accent-color: #3c78e8; }
+  #debugbar .status { color: #7a86b5; min-width: 150px; }
+  #debugbar .speedval { color: #9fd8ff; min-width: 44px; text-align: right; }
+
+  #intro {
+    inset: 0; background: rgba(3, 4, 10, 0.88); display: flex;
+    align-items: center; justify-content: center; pointer-events: auto; cursor: pointer;
+  }
+  #intro .card {
+    max-width: 560px; background: rgba(10, 14, 30, 0.95); border: 1px solid #3a4a8a;
+    border-radius: 10px; padding: 28px 34px; font-size: 14px; line-height: 1.7; color: #aab4dd;
+  }
+  #intro h1 { font-size: 20px; color: #9fd8ff; margin: 0 0 12px 0; letter-spacing: 1px; }
+  #intro .go { color: #7fe0a8; margin-top: 16px; }
+  #intro kbd {
+    background: #16204a; border: 1px solid #3a4a8a; border-radius: 3px;
+    padding: 0 5px; font-family: inherit; color: #cfd8ff;
+  }
+
+  #viz-state { display: none; }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "/vendor/three.module.js",
+    "three/addons/": "/vendor/addons/"
+  }
+}
+</script>
+</head>
+<body>
+<div id="app"></div>
+
+<div id="chips" class="hud"></div>
+<div id="crosshair" class="hud"></div>
+<div id="info" class="hud"></div>
+<div id="toast" class="hud"></div>
+
+<div id="debugbar" class="hud">
+  <button id="db-play" title="pause or resume the current materialization">Pause</button>
+  <button id="db-step" title="advance one element while paused">Step</button>
+  <label>speed <input id="db-speed" type="range" min="-2" max="3" step="0.05" value="0"></label>
+  <span class="speedval" id="db-speedval">1.0x</span>
+  <span class="status" id="db-status">idle</span>
+</div>
+
+<div id="help" class="hud collapsed">
+  <div class="head">controls [click]</div>
+  <div class="body">
+    click - capture mouse<br>
+    WASD - move, mouse - look<br>
+    Shift - sprint, Space - jump<br>
+    F - fly (Space up, C down)<br>
+    E - run the stage at a pedestal<br>
+    Esc - release mouse
+  </div>
+</div>
+
+<div id="intro" class="hud">
+  <div class="card">
+    <h1>YOOPERLANG COMPILATION WORLD</h1>
+    <div>
+      A compiler run, laid out as a road through the night. Eight districts,
+      one per stage: source, lex, parse, modules, typecheck, codegen, link, run.
+      Each district is a dark hologram until you walk to its pedestal and press
+      <kbd>E</kbd> - that really runs the stage, and the district materializes
+      piece by piece from what the compiler produced.
+    </div>
+    <div>
+      The bar at the bottom is your debugger: pause a materialization,
+      step it one element at a time, slow it down or speed it up.
+    </div>
+    <div class="go">Click anywhere to start walking.</div>
+  </div>
+</div>
+
+<div id="viz-state"></div>
+
+<script type="module" src="/viewer/main.js"></script>
+</body>
+</html>

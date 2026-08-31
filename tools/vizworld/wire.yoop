@@ -1,0 +1,134 @@
+// The renderer's descriptors: buffered NONBLOCKING reads off stdin, where
+// the plugin's stream arrives, and whole-line writes to stdout, which is the
+// protocol's other direction - so nothing else in the renderer may ever
+// print there. Logs go to stderr via std/log like everything else.
+//
+// Nonblocking is the point of the design: the frame loop pumps this every
+// frame and keeps drawing whether or not the build has said anything new.
+// The read side is the lsp/transport fill-and-compact shape, minus framing -
+// framing lives in protocol.yoop where it is testable.
+
+import.unsafe;
+
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { Text }, * as text from "std/core/text.yoop";
+import { Disposable, disposable } from "std/core/kinds.yoop";
+import * as intr from "std/core/intrinsics.yoop";
+
+extern "C" from "unistd.h" {
+  function read(fd: c_int, buf: unsafe_ptr<uint8>, count: c_size_t): c_ssize_t;
+  function write(fd: c_int, buf: unsafe_ptr<uint8>, count: c_size_t): c_ssize_t;
+}
+
+extern "C" from "yoop_runtime" {
+  function yoop_io_set_nonblocking(fd: c_int): c_int;
+}
+
+const STDIN_FD: int32 = 0;
+const STDOUT_FD: int32 = 1;
+const FILL_CHUNK: usize = 65536;
+
+export type Wire implements Disposable propagates<disposable> {
+  buf: Vec<uint8>,
+  scratch: Vec<uint8>,
+  pos: usize,
+  atEof: bool,
+
+  function dispose(ref self): void {
+    Disposable.dispose(ref self.buf);
+    Disposable.dispose(ref self.scratch);
+  }
+}
+
+export function wireOpen(): Wire propagates<disposable> {
+  const ignored = yoop_io_set_nonblocking(STDIN_FD);
+  let scratch: Vec<uint8> = vec.vecNew(FILL_CHUNK);
+  scratch.len = 0;
+  return { buf: vec.vecNew(FILL_CHUNK), scratch: scratch, pos: 0, atEof: false };
+}
+
+// Pull whatever stdin has right now. Nonblocking: a read with nothing there
+// fails with EAGAIN, which is indistinguishable from and treated as "nothing
+// yet"; a zero read is EOF - the plugin is gone.
+export function wirePump(ref w: Wire): void {
+  if (w.atEof) {
+    return;
+  }
+  while (true) {
+    const n = read(STDIN_FD, w.scratch.data.ptr, w.scratch.cap);
+    if (n == 0) {
+      w.atEof = true;
+      return;
+    }
+    if (n < 0) {
+      return;
+    }
+    vec.vecExtendFrom(ref w.buf, intr.arraySlice(w.scratch.data, 0, usize(n)));
+    if (usize(n) < w.scratch.cap) {
+      return;
+    }
+  }
+}
+
+export function wireEof(ref w: Wire): bool {
+  return w.atEof && w.pos >= w.buf.len;
+}
+
+// One line into `out` (cleared first), without its newline. False when no
+// complete line is buffered yet.
+export function wireTakeLine(ref w: Wire, ref out: Text): bool {
+  const bytes: uint8[] = vec.vecAsArray(ref w.buf);
+  let i = w.pos;
+  while (i < w.buf.len) {
+    if (bytes[i] == 10) {
+      text.clear(ref out);
+      text.pushBytes(ref out, intr.arraySlice(bytes, w.pos, i));
+      w.pos = i + 1;
+      compact(ref w);
+      return true;
+    }
+    i += 1;
+  }
+  return false;
+}
+
+// Exactly `n` payload bytes plus the frame's closing newline, into `out`
+// (cleared first). False until that many are buffered.
+export function wireTakeBlob(ref w: Wire, n: usize, ref out: Vec<uint8>): bool {
+  if (w.buf.len - w.pos < n + 1) {
+    return false;
+  }
+  vec.vecClear(ref out);
+  vec.vecExtendFrom(ref out,
+    intr.arraySlice(vec.vecAsArray(ref w.buf), w.pos, w.pos + n));
+  w.pos += n + 1;
+  compact(ref w);
+  return true;
+}
+
+// One line up to the plugin. The write is the whole protocol upstream, so a
+// short write on a closed pipe is simply dropped - the build will see the
+// child gone its own way.
+export function wireSendLine(line: string): void {
+  disposable framed: Text = text.fromString(line);
+  text.push(ref framed, "\n");
+  const payload: uint8[] = text.bytes(ref framed);
+  const ignored = write(STDOUT_FD, payload.ptr, payload.len);
+}
+
+function compact(ref w: Wire): void {
+  if (w.pos == 0) {
+    return;
+  }
+  if (w.pos >= w.buf.len) {
+    vec.vecClear(ref w.buf);
+    w.pos = 0;
+    return;
+  }
+  disposable tail: Vec<uint8> = vec.vecNew(w.buf.len - w.pos);
+  vec.vecExtendFrom(ref tail,
+    intr.arraySlice(vec.vecAsArray(ref w.buf), w.pos, w.buf.len));
+  vec.vecClear(ref w.buf);
+  vec.vecExtendFrom(ref w.buf, vec.vecAsArray(ref tail));
+  w.pos = 0;
+}

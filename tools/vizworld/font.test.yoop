@@ -1,0 +1,36 @@
+// The font's dots, counted by reading the glyph tables - `A` is 0x0E, 0x11,
+// 0x11, 0x1F, 0x11, 0x11, 0x11, which is 3+2+2+5+2+2+2 = 18 dots, and that
+// arithmetic is the expectation, not a capture.
+
+import.test;
+import * as t from "std/test.yoop";
+import { suite, test, Case } from "std/test.yoop";
+import * as font from "./font.yoop";
+
+suite function glyphsLightTheDotsTheirTablesSay(): void {
+  let test theory: Case = t.asserts("A's top row is the 0x0E arch") {
+    theory.isSuccessful = !font.glyphDot(65, 0, 0) && font.glyphDot(65, 1, 0) &&
+      font.glyphDot(65, 2, 0) && font.glyphDot(65, 3, 0) && !font.glyphDot(65, 4, 0);
+    theory.detail = "row 0 of A did not read as .###.";
+  }
+
+  let test theory: Case = t.asserts("A carries its 18 dots") {
+    theory.isSuccessful = font.textDots("A") == 18;
+    theory.detail = `counted ${font.textDots("A")}`;
+  }
+
+  let test theory: Case = t.asserts("lowercase folds to the same glyph") {
+    theory.isSuccessful = font.textDots("a") == font.textDots("A");
+    theory.detail = "a and A differ";
+  }
+
+  let test theory: Case = t.asserts("an unmapped character is empty, not noise") {
+    theory.isSuccessful = font.textDots("#") == 0;
+    theory.detail = `counted ${font.textDots("#")}`;
+  }
+
+  let test theory: Case = t.asserts("out-of-cell coordinates are never lit") {
+    theory.isSuccessful = !font.glyphDot(65, 5, 0) && !font.glyphDot(65, 0, 7);
+    theory.detail = "a dot outside the 5x7 cell answered true";
+  }
+}

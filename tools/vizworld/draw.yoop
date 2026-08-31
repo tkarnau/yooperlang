@@ -1,0 +1,1180 @@
+// The draw side: scene state in, GL calls out. Everything visual and
+// nothing else - no input, no protocol, no state of its own beyond the
+// palette. Distance dimming is done here per vertex color, which is the
+// depth cueing the fixed pipeline's fog would otherwise want a pointer for.
+
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { Text }, * as text from "std/core/text.yoop";
+import * as intr from "std/core/intrinsics.yoop";
+import { MODELVIEW, PROJECTION, QUADS, LINES, POINTS, LINE_STRIP, DEPTH_TEST }, * as gl from "./gl.yoop";
+import { GLYPH_ROWS, GLYPH_COLS }, * as font from "./font.yoop";
+import { Vec3, Z_GATEHOUSE, Z_TOKENS, Z_AST, Z_MODULES, Z_DIAGNOSTICS, Z_IR,
+  Z_FORGE, ROAD_HALF_WIDTH, WALL_X, WALL_Z0, WALL_CELL_W, WALL_CELL_H,
+  WALL_MAX_LINES, WALL_MAX_COLS }, * as layout from "./layout.yoop";
+import { Camera } from "./camera.yoop";
+import { Scene, AstItem, IslandItem, EdgeItem, IrFunc, TokenItem }, * as scene from "./scene.yoop";
+import { Phase, phaseLabel } from "./protocol.yoop";
+
+// What the crosshair ray found this frame, and WHERE it found it: on the
+// wall, on a grove node, on a belt cube, or on an IR tower. Whatever the
+// kind, the source-coupled fields converge to the same shape - a NODE pick
+// fills line/col/offset from its own span - so the wall highlight and the
+// arcs work identically in both directions.
+export enum PickKind {
+  NONE 0,
+  WALL 1,
+  NODE 2,
+  TOKEN 3,
+  IRBLOCK 4,
+  DIAG 5,
+  ISLAND 6,
+}
+
+export type Pick {
+  active: bool,
+  kind: PickKind,
+  line: usize,
+  col: usize,
+  offset: usize,
+  tokenIdx: usize,
+  astIdx: usize,
+  irFunc: usize,
+  irBlock: usize,
+  diagIdx: usize,
+}
+
+export function noPick(): Pick {
+  return { active: false, kind: PickKind.NONE, line: 0, col: 0, offset: 0,
+    tokenIdx: 0, astIdx: 0, irFunc: 0, irBlock: 0, diagIdx: 0 };
+}
+
+// The palette: 12 hues around the wheel, all bright against the night.
+// colorId indexes it; the fourth channel rides separately.
+function paletteR(id: uint8): float32 {
+  const v: float32[] = [0.95, 0.95, 0.85, 0.45, 0.25, 0.25, 0.30, 0.55, 0.80, 0.95, 0.65, 0.90];
+  return v[usize(id) % 12];
+}
+function paletteG(id: uint8): float32 {
+  const v: float32[] = [0.35, 0.65, 0.90, 0.90, 0.85, 0.65, 0.45, 0.40, 0.35, 0.50, 0.85, 0.80];
+  return v[usize(id) % 12];
+}
+function paletteB(id: uint8): float32 {
+  const v: float32[] = [0.35, 0.30, 0.30, 0.40, 0.60, 0.95, 0.95, 0.95, 0.90, 0.75, 0.75, 0.35];
+  return v[usize(id) % 12];
+}
+
+/*
+  The dusk sky: a screen-space gradient painted before the world, depth
+  off - indigo overhead, a warm apricot band toward the horizon, plum
+  below it where the ground takes over. Screen-space rather than a dome
+  because a gradient this soft reads the same either way and costs three
+  quads.
+*/
+export function drawSky(w: float32, h: float32): void {
+  gl.matrixMode(PROJECTION);
+  gl.pushMatrix();
+  gl.loadIdentity();
+  gl.ortho2d(float64(w), float64(h));
+  gl.matrixMode(MODELVIEW);
+  gl.pushMatrix();
+  gl.loadIdentity();
+  gl.disable(DEPTH_TEST);
+  gl.depthWrite(false);
+
+  const horizon = h * 0.52;
+  gl.begin(QUADS);
+  // Overhead to the horizon band.
+  gl.color(0.16, 0.14, 0.30, 1.0);
+  gl.vertex(0.0, 0.0, 0.0);
+  gl.vertex(w, 0.0, 0.0);
+  gl.color(0.62, 0.40, 0.34, 1.0);
+  gl.vertex(w, horizon, 0.0);
+  gl.vertex(0.0, horizon, 0.0);
+  // The band down into the ground's plum.
+  gl.color(0.62, 0.40, 0.34, 1.0);
+  gl.vertex(0.0, horizon, 0.0);
+  gl.vertex(w, horizon, 0.0);
+  gl.color(0.20, 0.15, 0.24, 1.0);
+  gl.vertex(w, h, 0.0);
+  gl.vertex(0.0, h, 0.0);
+  gl.end();
+
+  gl.depthWrite(true);
+  gl.enable(DEPTH_TEST);
+  gl.matrixMode(PROJECTION);
+  gl.popMatrix();
+  gl.matrixMode(MODELVIEW);
+  gl.popMatrix();
+}
+
+export function applyCamera(ref cam: Camera): void {
+  gl.matrixMode(MODELVIEW);
+  gl.loadIdentity();
+  gl.rotate(cam.pitch, 1.0, 0.0, 0.0);
+  gl.rotate(cam.yaw, 0.0, 1.0, 0.0);
+  gl.translate(0.0 - cam.x, 0.0 - cam.y, 0.0 - cam.z);
+}
+
+// The night, the road, and its edge glow. The ground is a dark plane the
+// districts sit on; the road's dashes give motion parallax when flying.
+export function drawGround(): void {
+  gl.color(0.15, 0.13, 0.19, 1.0);
+  gl.begin(QUADS);
+  gl.vertex(0.0 - 200.0, 0.0, 60.0);
+  gl.vertex(200.0, 0.0, 60.0);
+  gl.vertex(200.0, 0.0, 0.0 - 320.0);
+  gl.vertex(0.0 - 200.0, 0.0, 0.0 - 320.0);
+  gl.end();
+
+  gl.color(0.22, 0.23, 0.36, 1.0);
+  gl.begin(QUADS);
+  gl.vertex(0.0 - ROAD_HALF_WIDTH, 0.01, 20.0);
+  gl.vertex(ROAD_HALF_WIDTH, 0.01, 20.0);
+  gl.vertex(ROAD_HALF_WIDTH, 0.01, Z_FORGE - 15.0);
+  gl.vertex(0.0 - ROAD_HALF_WIDTH, 0.01, Z_FORGE - 15.0);
+  gl.end();
+
+  gl.lineWidth(2.0);
+  gl.color(0.35, 0.85, 0.85, 0.9);
+  gl.line3(0.0 - ROAD_HALF_WIDTH, 0.02, 20.0,
+    0.0 - ROAD_HALF_WIDTH, 0.02, Z_FORGE - 15.0);
+  gl.line3(ROAD_HALF_WIDTH, 0.02, 20.0,
+    ROAD_HALF_WIDTH, 0.02, Z_FORGE - 15.0);
+
+  gl.color(0.25, 0.45, 0.85, 0.8);
+  let z: float32 = 15.0;
+  while (z > Z_FORGE - 10.0) {
+    gl.line3(0.0, 0.02, z, 0.0, 0.02, z - 2.0);
+    z -= 6.0;
+  }
+}
+
+// A label as dot-matrix points, standing at (x, y, z), yaw-billboarded so
+// it always faces the camera's heading. Scale is the height of one dot.
+export function drawLabel(s: string, x: float32, y: float32, z: float32, dot: float32, ref cam: Camera, r: float32, g: float32, b: float32): void {
+  const bytes: uint8[] = intr.stringAsBytes(s);
+  gl.pushMatrix();
+  gl.translate(x, y, z);
+  gl.rotate(0.0 - cam.yaw, 0.0, 1.0, 0.0);
+  gl.color(r, g, b, 1.0);
+  // Quads rather than points: a point's size is SCREEN pixels, so pointed
+  // text refuses perspective - same size ten meters away, unreadable up
+  // close. A quad per dot lives in the world like everything else.
+  const h = dot * 0.42;
+  gl.begin(QUADS);
+  const width = float32(bytes.len) * 6.0 * dot;
+  let i: usize = 0;
+  while (i < bytes.len) {
+    const ox = float32(i) * 6.0 * dot - width * 0.5;
+    let row: usize = 0;
+    while (row < GLYPH_ROWS) {
+      let col: usize = 0;
+      while (col < GLYPH_COLS) {
+        if (font.glyphDot(bytes[i], col, row)) {
+          const dx = ox + float32(col) * dot;
+          const dy = float32(GLYPH_ROWS - row) * dot;
+          gl.vertex(dx - h, dy - h, 0.0);
+          gl.vertex(dx + h, dy - h, 0.0);
+          gl.vertex(dx + h, dy + h, 0.0);
+          gl.vertex(dx - h, dy + h, 0.0);
+        }
+        col += 1;
+      }
+      row += 1;
+    }
+    i += 1;
+  }
+  gl.end();
+  gl.popMatrix();
+}
+
+// How much to dim something `dist` units from the camera - depth cueing in
+// the vertex color, since the scene knows every distance anyway.
+function dimFor(ref cam: Camera, x: float32, z: float32): float32 {
+  const dx = x - cam.x;
+  const dz = z - cam.z;
+  const d2 = dx * dx + dz * dz;
+  let dim: float32 = 1.0 - d2 / 60000.0;
+  if (dim < 0.45) {
+    dim = 0.45;
+  }
+  return dim;
+}
+
+/*
+  The source wall: the entry file itself, standing beside the road's start.
+  Glyphs are quads on the x = WALL_X plane, text running toward -z, revealed
+  a few lines a second once the parse blob lands. The picked cell (and the
+  whole byte range of whatever token covers it) glows gold, with a backing
+  pane so the highlight reads at distance.
+*/
+export function drawSourceWall(ref s: Scene, ref cam: Camera, ref pick: Pick, pulse: float32): void {
+  const lines = scene.sceneLineCount(ref s);
+  if (lines == 0 || s.source.len == 0) {
+    return;
+  }
+  let wallLines = lines;
+  if (wallLines > WALL_MAX_LINES) {
+    wallLines = WALL_MAX_LINES;
+  }
+
+  // The picked byte range: the covering token's whole extent when there is
+  // one, else just the picked cell.
+  let hiStart: usize = s.source.len;
+  let hiEnd: usize = s.source.len;
+  if (pick.active) {
+    hiStart = pick.offset;
+    hiEnd = pick.offset + 1;
+    if (pick.tokenIdx < s.tokens.len) {
+      const t = vec.vecGet(ref s.tokens, pick.tokenIdx);
+      hiStart = t.pos;
+      hiEnd = t.pos + t.len;
+    }
+  }
+
+  /*
+    The whole file stands here from the moment the parse blob lands, GRAYED
+    OUT: it is the lexer's INPUT. As the lex replay resolves each token,
+    its span colors in - in the same palette entry as the cube that pops
+    onto the belt for it, which is what makes the two halves read as one
+    algorithm. Comments never color, because the lexer never makes tokens
+    of them. `tk` advances with the byte scan, so coverage is O(1) a char.
+  */
+  const shownTokens = scene.sceneShownTokens(ref s);
+  const bytes: uint8[] = intr.stringAsBytes(s.source);
+  const dotS = WALL_CELL_H * 0.052;
+  const h = dotS * 0.46;
+  let dim = dimFor(ref cam, WALL_X, WALL_Z0 - 12.0);
+  if (dim < 0.5) {
+    dim = 0.5;
+  }
+
+  gl.begin(QUADS);
+  let line: usize = 0;
+  let col: usize = 0;
+  let tk: usize = 0;
+  let i: usize = 0;
+  while (i < bytes.len && line < wallLines) {
+    const c = bytes[i];
+    if (c == 10) {
+      line += 1;
+      col = 0;
+      i += 1;
+      continue;
+    }
+    while (tk < s.tokens.len) {
+      const tt = vec.vecGet(ref s.tokens, tk);
+      if (tt.pos + tt.len <= i) {
+        tk += 1;
+      } else {
+        break;
+      }
+    }
+    if (col < WALL_MAX_COLS && c != 32) {
+      const cell: Vec3 = layout.wallCellPos(line, col, wallLines);
+      const picked = i >= hiStart && i < hiEnd;
+      let lexed = false;
+      let lexedColor: uint8 = 0;
+      if (tk < shownTokens) {
+        const tt = vec.vecGet(ref s.tokens, tk);
+        if (tt.pos <= i) {
+          lexed = true;
+          lexedColor = tt.colorId;
+        }
+      }
+      if (picked) {
+        gl.color(1.0, 0.85, 0.35, 1.0);
+      } else if (lexed) {
+        gl.color(paletteR(lexedColor) * dim, paletteG(lexedColor) * dim,
+          paletteB(lexedColor) * dim, 1.0);
+      } else {
+        gl.color(0.42, 0.44, 0.52, 1.0);
+      }
+      let row: usize = 0;
+      while (row < GLYPH_ROWS) {
+        let gcol: usize = 0;
+        while (gcol < GLYPH_COLS) {
+          if (font.glyphDot(c, gcol, row)) {
+            const gy = cell.y + float32(GLYPH_ROWS - row) * dotS;
+            const gz = cell.z - float32(gcol) * dotS;
+            gl.vertex(WALL_X, gy - h, gz - h);
+            gl.vertex(WALL_X, gy - h, gz + h);
+            gl.vertex(WALL_X, gy + h, gz + h);
+            gl.vertex(WALL_X, gy + h, gz - h);
+          }
+          gcol += 1;
+        }
+        row += 1;
+      }
+    }
+    col += 1;
+    i += 1;
+  }
+  gl.end();
+
+  // The read head: a pulsing cursor on the NEXT unresolved token - where
+  // lexNext stands right now.
+  if (scene.sceneLexing(ref s) && shownTokens < s.tokens.len) {
+    const head = vec.vecGet(ref s.tokens, shownTokens);
+    const hl = pickLineOf(ref s, head.pos);
+    const hc = pickColOf(ref s, head.pos);
+    if (hl < wallLines && hc < WALL_MAX_COLS) {
+      const cell: Vec3 = layout.wallCellPos(hl, hc, wallLines);
+      gl.color(0.4, 0.95, 0.95, 0.35 + pulse * 0.45);
+      gl.solidBox(WALL_X + 0.06, cell.y + WALL_CELL_H * 0.45, cell.z - WALL_CELL_W * 0.2,
+        0.06, WALL_CELL_H * 1.2, WALL_CELL_W * 1.6);
+    }
+  }
+
+  // Underlines beneath every heap smell's span - amber for a one-shot
+  // malloc, red where a loop multiplies it - so the mistake is visible IN
+  // the source, not only out in the grove.
+  gl.begin(QUADS);
+  let si: usize = 0;
+  let drawn: usize = 0;
+  while (si < s.astItems.len && drawn < 200) {
+    const it = vec.vecGet(ref s.astItems, si);
+    if (it.smell > 0 && it.spanLen > 0) {
+      const ul = pickLineOf(ref s, it.spanPos);
+      const uc = pickColOf(ref s, it.spanPos);
+      if (ul < wallLines) {
+        if (it.smell == 2) {
+          gl.color(0.95, 0.3, 0.2, 0.9);
+        } else {
+          gl.color(0.9, 0.65, 0.25, 0.9);
+        }
+        const cell: Vec3 = layout.wallCellPos(ul, uc, wallLines);
+        const spanW = float32(it.spanLen) * WALL_CELL_W;
+        gl.vertex(WALL_X + 0.01, cell.y - 0.05, cell.z + WALL_CELL_W * 0.4);
+        gl.vertex(WALL_X + 0.01, cell.y - 0.05, cell.z - spanW + WALL_CELL_W * 0.4);
+        gl.vertex(WALL_X + 0.01, cell.y - 0.11, cell.z - spanW + WALL_CELL_W * 0.4);
+        gl.vertex(WALL_X + 0.01, cell.y - 0.11, cell.z + WALL_CELL_W * 0.4);
+        drawn += 1;
+      }
+    }
+    si += 1;
+  }
+  gl.end();
+
+  // The backing pane behind the picked range, one quad per cell, a hair
+  // behind the glyph plane so the glyphs stay crisp over it.
+  if (pick.active && hiEnd > hiStart) {
+    gl.color(0.45, 0.35, 0.10, 0.55);
+    gl.begin(QUADS);
+    let j = hiStart;
+    let hl = pickLineOf(ref s, hiStart);
+    let hc = pickColOf(ref s, hiStart);
+    while (j < hiEnd && j < s.source.len) {
+      if (bytes[j] == 10) {
+        hl += 1;
+        hc = 0;
+      } else {
+        if (hc < WALL_MAX_COLS && hl < wallLines) {
+          const cell: Vec3 = layout.wallCellPos(hl, hc, wallLines);
+          const bx = WALL_X - 0.02;
+          gl.vertex(bx, cell.y - 0.02, cell.z + WALL_CELL_W * 0.5);
+          gl.vertex(bx, cell.y - 0.02, cell.z - WALL_CELL_W * 0.7);
+          gl.vertex(bx, cell.y + WALL_CELL_H - 0.06, cell.z - WALL_CELL_W * 0.7);
+          gl.vertex(bx, cell.y + WALL_CELL_H - 0.06, cell.z + WALL_CELL_W * 0.5);
+        }
+        hc += 1;
+      }
+      j += 1;
+    }
+    gl.end();
+  }
+
+  drawLabel("source", WALL_X, 1.2 + float32(wallLines + 3) * WALL_CELL_H,
+    WALL_Z0 - 12.0, 0.12, ref cam, 0.75, 0.85, 0.95);
+  if (lines > wallLines) {
+    drawLabel(`${lines - wallLines} more lines below`, WALL_X, 0.6,
+      WALL_Z0 - 12.0, 0.06, ref cam, 0.5, 0.6, 0.7);
+  }
+}
+
+
+// The line a byte offset sits on, walked off the scene's line index.
+function pickLineOf(ref s: Scene, offset: usize): usize {
+  let line: usize = 0;
+  while (line + 1 < s.lineStarts.len &&
+      vec.vecGet(ref s.lineStarts, line + 1) <= offset) {
+    line += 1;
+  }
+  return line;
+}
+
+function pickColOf(ref s: Scene, offset: usize): usize {
+  return offset - vec.vecGet(ref s.lineStarts, pickLineOf(ref s, offset));
+}
+
+// A provenance arc: a quadratic curve lifted over the world between a wall
+// cell and the artifact it became. Drawn additively so crossing arcs sum
+// into glow rather than mud.
+export function drawArc(a: Vec3, b: Vec3, lift: float32, r: float32, g: float32, bl: float32): void {
+  const mx = (a.x + b.x) * 0.5;
+  let my = (a.y + b.y) * 0.5 + lift;
+  const mz = (a.z + b.z) * 0.5;
+  gl.lineWidth(2.5);
+  gl.blendAdditive();
+  gl.color(r, g, bl, 0.85);
+  gl.begin(LINE_STRIP);
+  let seg: usize = 0;
+  while (seg <= 24) {
+    const t = float32(seg) / 24.0;
+    const u = 1.0 - t;
+    gl.vertex(
+      u * u * a.x + 2.0 * u * t * mx + t * t * b.x,
+      u * u * a.y + 2.0 * u * t * my + t * t * b.y,
+      u * u * a.z + 2.0 * u * t * mz + t * t * b.z);
+    seg += 1;
+  }
+  gl.end();
+  gl.blendAlpha();
+}
+
+export function drawTokens(ref s: Scene, ref cam: Camera, ref pick: Pick, ref scratch: Text): void {
+  const shown = scene.sceneShownTokens(ref s);
+  const lexing = scene.sceneLexing(ref s);
+  let i: usize = 0;
+  while (i < shown) {
+    const t = vec.vecGet(ref s.tokens, i);
+    const p: Vec3 = layout.tokenPos(i);
+    const dim = dimFor(ref cam, p.x, p.z);
+    if (pick.active && i == pick.tokenIdx) {
+      gl.color(1.0, 0.9, 0.5, 1.0);
+      gl.solidBox(p.x, p.y + 0.15, p.z, 0.8, 0.8, 0.8);
+    } else if (lexing && i + 1 == shown) {
+      // The cube lexNext JUST resolved: born big and bright, one frame's
+      // hero, settling into the belt as the head moves on.
+      gl.color(paletteR(t.colorId), paletteG(t.colorId), paletteB(t.colorId), 1.0);
+      gl.solidBox(p.x, p.y + 0.25, p.z, 0.85, 0.85, 0.85);
+    } else {
+      gl.color(paletteR(t.colorId) * dim, paletteG(t.colorId) * dim, paletteB(t.colorId) * dim, 1.0);
+      gl.solidBox(p.x, p.y, p.z, 0.5, 0.5, 0.5);
+    }
+    i += 1;
+  }
+  // The provenance arc and the token's own text, when the wall pick found
+  // a token that has already ridden onto the belt.
+  if (pick.active && pick.tokenIdx < shown) {
+    const wallLines = wallLineCap(ref s);
+    const a: Vec3 = layout.wallCellPos(pick.line, pick.col, wallLines);
+    const b: Vec3 = layout.tokenPos(pick.tokenIdx);
+    drawArc(a, b, 5.0, 0.4, 0.9, 0.9);
+    scene.sceneTokenText(ref s, pick.tokenIdx, ref scratch);
+    drawLabel(text.view(ref scratch), b.x, b.y + 1.3, b.z, 0.06, ref cam, 1.0, 0.9, 0.5);
+  }
+  if (s.tokens.len > 0) {
+    drawLabel("lexer", 12.0, 6.0, Z_TOKENS + 4.0, 0.12, ref cam, 0.6, 0.9, 0.9);
+    if (shown == s.tokens.len) {
+      drawLabel(`${s.tokens.len} tokens`, 12.0, 4.8, Z_TOKENS + 4.0, 0.08, ref cam, 0.5, 0.7, 0.7);
+    }
+  }
+}
+
+export function drawAst(ref s: Scene, ref cam: Camera, ref pick: Pick, clock: float32, ref scratch: Text): void {
+  const shown = scene.sceneShownAst(ref s);
+  let i: usize = 0;
+  while (i < shown) {
+    const n = vec.vecGet(ref s.astItems, i);
+    const p: Vec3 = layout.astPos(n.depth, n.slot, n.slots);
+    const dim = dimFor(ref cam, p.x, p.z);
+    if (pick.active && i == pick.astIdx) {
+      gl.color(1.0, 0.9, 0.5, 1.0);
+      gl.solidBox(p.x, p.y, p.z, 0.75, 0.75, 0.75);
+    } else {
+      gl.color(paletteR(n.colorId) * dim, paletteG(n.colorId) * dim, paletteB(n.colorId) * dim, 1.0);
+      gl.solidBox(p.x, p.y, p.z, 0.45, 0.45, 0.45);
+    }
+    if (n.parent < i) {
+      const pa = vec.vecGet(ref s.astItems, n.parent);
+      const pp: Vec3 = layout.astPos(pa.depth, pa.slot, pa.slots);
+      gl.color(0.25 * dim, 0.55 * dim, 0.35 * dim, 0.7);
+      gl.lineWidth(1.0);
+      gl.line3(p.x, p.y, p.z, pp.x, pp.y, pp.z);
+    }
+    // A heap smell BURNS: an ember-colored halo, red and angrier when the
+    // malloc sits in a loop, with sparks drifting up out of it.
+    if (n.smell > 0) {
+      gl.blendAdditive();
+      gl.depthWrite(false);
+      const heat = 0.35 + pulseHalo(clock + float32(i)) * 0.4;
+      if (n.smell == 2) {
+        gl.color(0.95, 0.25, 0.15, heat);
+      } else {
+        gl.color(0.9, 0.6, 0.2, heat * 0.8);
+      }
+      gl.solidBox(p.x, p.y, p.z, 0.75, 0.75, 0.75);
+      let e: usize = 0;
+      while (e < 3) {
+        let rise = clock * 0.4 + float32(i) * 0.31 + float32(e) * 0.37;
+        rise = rise - float32(int32(rise));
+        gl.color(0.95, 0.5, 0.2, (1.0 - rise) * 0.7);
+        gl.solidBox(p.x + (float32(e) - 1.0) * 0.15, p.y + 0.5 + rise * 1.3, p.z,
+          0.08, 0.08, 0.08);
+        e += 1;
+      }
+      gl.depthWrite(true);
+      gl.blendAlpha();
+    }
+    i += 1;
+  }
+  // Named nodes wear their names when the player is close enough to read
+  // them - a walk through the grove reads as declarations and calls, not
+  // anonymous boxes. Capped, so a compiler-sized tree stays legible.
+  let labeled: usize = 0;
+  let li: usize = 0;
+  while (li < shown && labeled < 30) {
+    const n = vec.vecGet(ref s.astItems, li);
+    if (n.named) {
+      const p: Vec3 = layout.astPos(n.depth, n.slot, n.slots);
+      const dx = p.x - cam.x;
+      const dz = p.z - cam.z;
+      if (dx * dx + dz * dz < 800.0) {
+        text.clear(ref scratch);
+        text.push(ref scratch, scene.sceneAstName(ref s, li));
+        drawLabel(text.view(ref scratch), p.x, p.y + 0.7, p.z, 0.035, ref cam,
+          0.75, 0.9, 0.8);
+        labeled += 1;
+      }
+    }
+    li += 1;
+  }
+
+  // The construction beam: the node the parser JUST built, tied back to
+  // the span that produced it - the parse replay's read head.
+  if (scene.sceneParsing(ref s) && shown > 0) {
+    const newest = vec.vecGet(ref s.astItems, shown - 1);
+    if (newest.spanLen > 0) {
+      const wl = pickLineOf(ref s, newest.spanPos);
+      const wc = pickColOf(ref s, newest.spanPos);
+      const cap = wallLineCap(ref s);
+      if (wl < cap) {
+        const a: Vec3 = layout.wallCellPos(wl, wc, cap);
+        const b: Vec3 = layout.astPos(newest.depth, newest.slot, newest.slots);
+        drawArc(a, b, 6.0, 0.9, 0.95, 0.6);
+        gl.color(1.0, 1.0, 0.8, 1.0);
+        gl.solidBox(b.x, b.y, b.z, 0.7, 0.7, 0.7);
+        text.clear(ref scratch);
+        text.push(ref scratch, scene.sceneAstKind(ref s, shown - 1));
+        const newName = scene.sceneAstName(ref s, shown - 1);
+        if (newName.len > 0) {
+          text.push(ref scratch, " ");
+          text.push(ref scratch, newName);
+        }
+        drawLabel(text.view(ref scratch), b.x, b.y + 1.1, b.z, 0.05, ref cam,
+          1.0, 1.0, 0.75);
+      }
+    }
+  }
+
+  // The picked node: an arc from the wall, its kind, and its name when the
+  // dump carried one - CALL_EXPRESSION vecPush reads as a sentence.
+  if (pick.active && pick.astIdx < shown) {
+    const n = vec.vecGet(ref s.astItems, pick.astIdx);
+    const b: Vec3 = layout.astPos(n.depth, n.slot, n.slots);
+    const a: Vec3 = layout.wallCellPos(pick.line, pick.col, wallLineCap(ref s));
+    drawArc(a, b, 7.0, 0.5, 0.95, 0.55);
+    text.clear(ref scratch);
+    text.push(ref scratch, scene.sceneAstKind(ref s, pick.astIdx));
+    const nodeName = scene.sceneAstName(ref s, pick.astIdx);
+    if (nodeName.len > 0) {
+      text.push(ref scratch, " ");
+      text.push(ref scratch, nodeName);
+    }
+    drawLabel(text.view(ref scratch), b.x, b.y + 1.2, b.z, 0.055, ref cam, 0.7, 1.0, 0.7);
+  }
+  if (s.astItems.len > 0) {
+    drawLabel("ast grove", 0.0 - 14.0, 12.0, Z_AST, 0.12, ref cam, 0.55, 0.9, 0.55);
+  }
+}
+
+// Where a diagnostic's sigil floats: in front of its wall line, bobbing.
+export function diagSigilPos(ref s: Scene, idx: usize, clock: float32): Vec3 {
+  const it = vec.vecGet(ref s.diagItems, idx);
+  let line = it.line;
+  if (line > 0) {
+    line -= 1;
+  }
+  const cap = wallLineCap(ref s);
+  if (line >= cap && cap > 0) {
+    line = cap - 1;
+  }
+  let col = it.col;
+  if (col > 0) {
+    col -= 1;
+  }
+  if (col >= WALL_MAX_COLS) {
+    col = WALL_MAX_COLS - 1;
+  }
+  const cell: Vec3 = layout.wallCellPos(line, col, cap);
+  return {
+    x: WALL_X + 1.4,
+    y: cell.y + 0.5 + pulseWave(clock + float32(idx)) * 0.25,
+    z: cell.z,
+  };
+}
+
+function pulseWave(clock: float32): float32 {
+  let t = clock * 0.35;
+  t = t - float32(int32(t));
+  if (t > 0.5) {
+    return 2.0 - t * 2.0;
+  }
+  return t * 2.0;
+}
+
+/*
+  The diagnostic sigils: every entry-file diagnostic gets a small slowly
+  spinning marker floating in front of its line - red for an error, VIOLET
+  for an unhandled disposable (the leak this world teaches about), amber
+  for any other warning. Aim at one for its message.
+*/
+export function drawDiagSigils(ref s: Scene, ref cam: Camera, ref pick: Pick, clock: float32): void {
+  let i: usize = 0;
+  while (i < s.diagItems.len) {
+    const it = vec.vecGet(ref s.diagItems, i);
+    const p: Vec3 = diagSigilPos(ref s, i, clock);
+    const picked = pick.active && pick.kind == PickKind.DIAG && pick.diagIdx == i;
+    gl.pushMatrix();
+    gl.translate(p.x, p.y, p.z);
+    gl.rotate(clock * 40.0 + float32(i) * 30.0, 0.0, 1.0, 0.0);
+    if (picked) {
+      gl.color(1.0, 1.0, 0.85, 1.0);
+    } else if (it.error) {
+      gl.color(0.95, 0.30, 0.30, 0.95);
+    } else if (it.leak) {
+      gl.color(0.80, 0.45, 0.95, 0.95);
+    } else {
+      gl.color(0.95, 0.75, 0.35, 0.95);
+    }
+    gl.rotate(45.0, 1.0, 0.0, 0.0);
+    gl.solidBox(0.0, 0.0, 0.0, 0.4, 0.4, 0.4);
+    gl.popMatrix();
+    i += 1;
+  }
+}
+
+// The last `keep` bytes of a path - the end is the identity, the front is
+// the same repo prefix every file shares.
+function pushTail(ref out: Text, s2: string, keep: usize): void {
+  const bytes: uint8[] = intr.stringAsBytes(s2);
+  let start: usize = 0;
+  if (bytes.len > keep) {
+    start = bytes.len - keep;
+  }
+  text.pushBytes(ref out, intr.arraySlice(bytes, start, bytes.len));
+}
+
+function diagLeaks(ref s: Scene): usize {
+  let n: usize = 0;
+  let i: usize = 0;
+  while (i < s.diagItems.len) {
+    if (vec.vecGet(ref s.diagItems, i).leak) {
+      n += 1;
+    }
+    i += 1;
+  }
+  return n;
+}
+
+function pulseHalo(clock: float32): float32 {
+  let t = clock * 0.5;
+  t = t - float32(int32(t));
+  if (t > 0.5) {
+    return 2.0 - t * 2.0;
+  }
+  return t * 2.0;
+}
+
+// The wall's positional line count - the same cap drawSourceWall draws
+// with, so arc anchors land on the glyphs they point from.
+function wallLineCap(ref s: Scene): usize {
+  const lines = scene.sceneLineCount(ref s);
+  if (lines > WALL_MAX_LINES) {
+    return WALL_MAX_LINES;
+  }
+  return lines;
+}
+
+export function drawModules(ref s: Scene, ref cam: Camera, ref pick: Pick): void {
+  const shown = scene.sceneShownIslands(ref s);
+  let i: usize = 0;
+  while (i < shown) {
+    const isle = vec.vecGet(ref s.islands, i);
+    const p: Vec3 = layout.islandPos(i, s.islands.len, isle.entry);
+    const radius = layout.islandRadius(isle.loc);
+    const dim = dimFor(ref cam, p.x, p.z);
+    if (pick.active && pick.kind == PickKind.ISLAND && pick.irFunc == i) {
+      gl.color(1.0, 0.95, 0.6, 1.0);
+    } else if (isle.entry) {
+      gl.color(0.95 * dim, 0.85 * dim, 0.45 * dim, 1.0);
+    } else {
+      gl.color(0.30 * dim, 0.70 * dim, 0.85 * dim, 1.0);
+    }
+    gl.solidBox(p.x, p.y, p.z, radius * 2.0, 0.6, radius * 2.0);
+    gl.color(0.20 * dim, 0.35 * dim, 0.45 * dim, 1.0);
+    gl.solidBox(p.x, p.y - 0.8, p.z, radius * 1.2, 1.0, radius * 1.2);
+    drawLabel(isle.name, p.x, p.y + 1.6, p.z, 0.07, ref cam, 0.8, 0.9, 1.0);
+    i += 1;
+  }
+  // Bridges appear only once both ends exist.
+  gl.lineWidth(1.5);
+  let e: usize = 0;
+  while (e < s.edges.len) {
+    const edge = vec.vecGet(ref s.edges, e);
+    if (edge.src < shown && edge.dst < shown) {
+      const a = vec.vecGet(ref s.islands, edge.src);
+      const b = vec.vecGet(ref s.islands, edge.dst);
+      const pa: Vec3 = layout.islandPos(edge.src, s.islands.len, a.entry);
+      const pb: Vec3 = layout.islandPos(edge.dst, s.islands.len, b.entry);
+      const dim = dimFor(ref cam, pa.x, pa.z);
+      gl.color(0.5 * dim, 0.6 * dim, 0.9 * dim, 0.6);
+      gl.line3(pa.x, pa.y + 0.2, pa.z, pb.x, pb.y + 0.2, pb.z);
+    }
+    e += 1;
+  }
+  if (s.islands.len > 0) {
+    drawLabel("modules", 14.0, 10.0, Z_MODULES, 0.12, ref cam, 0.6, 0.8, 1.0);
+  }
+}
+
+// The typecheck gate: two pillars astride the road and a bar that lifts
+// when the diagnostics allowed the build through.
+export function drawGate(ref s: Scene, ref cam: Camera, typecheckSeen: bool): void {
+  const z = Z_DIAGNOSTICS;
+  const dim = dimFor(ref cam, 0.0, z);
+  gl.color(0.35 * dim, 0.40 * dim, 0.60 * dim, 1.0);
+  gl.solidBox(0.0 - 4.0, 3.0, z, 1.4, 6.0, 1.4);
+  gl.solidBox(4.0, 3.0, z, 1.4, 6.0, 1.4);
+  let barY: float32 = 2.0;
+  if (typecheckSeen && s.diagErrors == 0) {
+    barY = 5.6;
+    gl.color(0.35 * dim, 0.9 * dim, 0.5 * dim, 1.0);
+  } else if (typecheckSeen) {
+    gl.color(0.95 * dim, 0.30 * dim, 0.30 * dim, 1.0);
+  } else {
+    gl.color(0.5 * dim, 0.5 * dim, 0.6 * dim, 1.0);
+  }
+  gl.solidBox(0.0, barY, z, 8.0, 0.5, 0.5);
+  if (typecheckSeen) {
+    if (s.diagErrors == 0) {
+      drawLabel("typecheck ok", 0.0, 7.2, z, 0.1, ref cam, 0.5, 0.95, 0.6);
+    } else {
+      drawLabel(`${s.diagErrors} errors`, 0.0, 7.2, z, 0.1, ref cam, 0.95, 0.4, 0.4);
+    }
+    if (s.diagWarnings > 0) {
+      drawLabel(`${s.diagWarnings} warnings`, 0.0, 6.4, z, 0.07, ref cam, 0.9, 0.8, 0.4);
+    }
+  }
+}
+
+export function drawIr(ref s: Scene, ref cam: Camera, ref pick: Pick, ref scratch: Text): void {
+  const shown = scene.sceneShownBlocks(ref s);
+  let f: usize = 0;
+  let drawnBlocks: usize = 0;
+  while (f < s.irFuncs.len && drawnBlocks < shown) {
+    const fun = vec.vecGet(ref s.irFuncs, f);
+    const fp: Vec3 = layout.irFunctionPos(f);
+    const dim = dimFor(ref cam, fp.x, fp.z);
+    gl.color(0.10 * dim, 0.14 * dim, 0.24 * dim, 1.0);
+    gl.solidBox(fp.x, 0.15, fp.z - 1.2, 5.0, 0.3, 4.0);
+    let b: usize = 0;
+    while (b < fun.blockCount && drawnBlocks < shown) {
+      const blk = vec.vecGet(ref s.irBlocks, fun.blockStart + b);
+      const bp: Vec3 = layout.irBlockPos(fp, b);
+      const h = layout.irTowerHeight(blk.instructions);
+      if (pick.active && pick.kind == PickKind.IRBLOCK && pick.irBlock == fun.blockStart + b) {
+        gl.color(1.0, 0.9, 0.5, 1.0);
+        gl.solidBox(bp.x, 0.3 + h * 0.5, bp.z, 1.05, h + 0.2, 1.05);
+      } else {
+        const colorId = uint8((f * 5 + b) % 12);
+        gl.color(paletteR(colorId) * dim * 0.8, paletteG(colorId) * dim * 0.8, paletteB(colorId) * dim * 0.8, 1.0);
+        gl.solidBox(bp.x, 0.3 + h * 0.5, bp.z, 0.8, h, 0.8);
+      }
+      b += 1;
+      drawnBlocks += 1;
+    }
+    f += 1;
+  }
+  // The picked tower announces itself in the world too, not only in the
+  // HUD: function and block over the tower's head.
+  if (pick.active && pick.kind == PickKind.IRBLOCK && pick.irFunc < s.irFuncs.len) {
+    const fp2: Vec3 = layout.irFunctionPos(pick.irFunc);
+    const fun2 = vec.vecGet(ref s.irFuncs, pick.irFunc);
+    const bp2: Vec3 = layout.irBlockPos(fp2, pick.irBlock - fun2.blockStart);
+    const blk2 = vec.vecGet(ref s.irBlocks, pick.irBlock);
+    scene.sceneIrName(ref s, pick.irFunc, ref scratch);
+    text.push(ref scratch, " / ");
+    disposable lbl: Text = text.make(8);
+    scene.sceneIrBlockLabel(ref s, pick.irBlock, ref lbl);
+    text.push(ref scratch, text.view(ref lbl));
+    drawLabel(text.view(ref scratch), bp2.x,
+      layout.irTowerHeight(blk2.instructions) + 1.4, bp2.z, 0.06, ref cam, 1.0, 0.9, 0.5);
+  }
+  // Function names over their platforms, nearest first, capped - at forty
+  // dim plaques the hall reads as a directory rather than confetti.
+  let named: usize = 0;
+  let nf: usize = 0;
+  while (nf < s.irFuncs.len && named < 40) {
+    const fp2: Vec3 = layout.irFunctionPos(nf);
+    scene.sceneIrName(ref s, nf, ref scratch);
+    if (scratch.len > 0) {
+      const dim2 = dimFor(ref cam, fp2.x, fp2.z);
+      drawLabel(text.view(ref scratch), fp2.x, 3.6, fp2.z - 1.2, 0.045, ref cam,
+        0.85 * dim2, 0.75 * dim2, 0.55 * dim2);
+      named += 1;
+    }
+    nf += 1;
+  }
+  if (s.irBlocks.len > 0) {
+    drawLabel("llvm ir", 10.0, 10.0, Z_IR, 0.12, ref cam, 0.9, 0.7, 0.4);
+    drawLabel(`${s.irFuncs.len} functions / ${s.irLines} lines`, 10.0, 8.8, Z_IR, 0.07, ref cam, 0.7, 0.6, 0.4);
+  }
+}
+
+// The forge: dark until the build finishes, then a beacon - green pillar of
+// light for success, red for a failure.
+export function drawForge(ref s: Scene, ref cam: Camera): void {
+  const z = Z_FORGE;
+  const dim = dimFor(ref cam, 0.0, z);
+  gl.color(0.25 * dim, 0.25 * dim, 0.35 * dim, 1.0);
+  gl.solidBox(0.0, 1.5, z, 5.0, 3.0, 5.0);
+  if (s.buildDone) {
+    if (s.buildOk == 1) {
+      gl.color(0.3, 0.95, 0.5, 0.35);
+      drawLabel("compiled", 0.0, 8.5, z, 0.14, ref cam, 0.5, 0.95, 0.6);
+    } else {
+      gl.color(0.95, 0.3, 0.3, 0.35);
+      drawLabel("build failed", 0.0, 8.5, z, 0.14, ref cam, 0.95, 0.4, 0.4);
+    }
+    gl.depthWrite(false);
+    gl.solidBox(0.0, 20.0, z, 2.0, 40.0, 2.0);
+    gl.depthWrite(true);
+  }
+}
+
+// ----- the heads-up display -------------------------------------------------
+
+// Screen-space text: the same dot font, but in PIXELS under an ortho
+// projection - row 0 at the TOP because the HUD's y axis points down.
+export function drawText2d(s2: string, x: float32, y: float32, px: float32, r: float32, g: float32, b: float32, a: float32): void {
+  const bytes: uint8[] = intr.stringAsBytes(s2);
+  const h = px * 0.44;
+  gl.color(r, g, b, a);
+  gl.begin(QUADS);
+  let i: usize = 0;
+  while (i < bytes.len) {
+    const ox = x + float32(i) * 6.0 * px;
+    let row: usize = 0;
+    while (row < GLYPH_ROWS) {
+      let col: usize = 0;
+      while (col < GLYPH_COLS) {
+        if (font.glyphDot(bytes[i], col, row)) {
+          const dx = ox + float32(col) * px;
+          const dy = y + float32(row) * px;
+          gl.vertex(dx - h, dy - h, 0.0);
+          gl.vertex(dx + h, dy - h, 0.0);
+          gl.vertex(dx + h, dy + h, 0.0);
+          gl.vertex(dx - h, dy + h, 0.0);
+        }
+        col += 1;
+      }
+      row += 1;
+    }
+    i += 1;
+  }
+  gl.end();
+}
+
+function fillRect2d(x: float32, y: float32, w: float32, h: float32, r: float32, g: float32, b: float32, a: float32): void {
+  gl.color(r, g, b, a);
+  gl.begin(QUADS);
+  gl.vertex(x, y, 0.0);
+  gl.vertex(x + w, y, 0.0);
+  gl.vertex(x + w, y + h, 0.0);
+  gl.vertex(x, y + h, 0.0);
+  gl.end();
+}
+
+/*
+  The HUD: everything drawn over the world in screen space. A crosshair (the
+  pick ray finally has a visible end), a status block top-left, the controls
+  line at the bottom, and - when the pick has something - a tooltip panel
+  beside the crosshair naming the token, the node, and the spot, with its
+  PINNED state. One ortho push/pop pair brackets the whole pass.
+*/
+export function drawHud(ref s: Scene, ref pick: Pick, pinned: bool, w: float32, h: float32, toast: string, toastAlpha: float32, ref scratch: Text): void {
+  gl.matrixMode(PROJECTION);
+  gl.pushMatrix();
+  gl.loadIdentity();
+  gl.ortho2d(float64(w), float64(h));
+  gl.matrixMode(MODELVIEW);
+  gl.pushMatrix();
+  gl.loadIdentity();
+  gl.disable(DEPTH_TEST);
+
+  // The crosshair: four ticks around an open center, so the aimed character
+  // stays visible inside it.
+  const cx = w * 0.5;
+  const cy = h * 0.5;
+  fillRect2d(cx - 9.0, cy - 1.0, 5.0, 2.0, 0.9, 0.95, 1.0, 0.8);
+  fillRect2d(cx + 4.0, cy - 1.0, 5.0, 2.0, 0.9, 0.95, 1.0, 0.8);
+  fillRect2d(cx - 1.0, cy - 9.0, 2.0, 5.0, 0.9, 0.95, 1.0, 0.8);
+  fillRect2d(cx - 1.0, cy + 4.0, 2.0, 5.0, 0.9, 0.95, 1.0, 0.8);
+
+  // Status, top-left.
+  text.clear(ref scratch);
+  if (s.pendingPhase != Phase.NONE) {
+    text.push(ref scratch, "build waiting at ");
+    text.push(ref scratch, phaseLabel(s.pendingPhase));
+    text.push(ref scratch, " - press g");
+    drawText2d(text.view(ref scratch), 16.0, 16.0, 2.4, 0.95, 0.85, 0.4, 1.0);
+  } else if (s.buildDone) {
+    if (s.buildOk == 1) {
+      drawText2d("build complete - q to leave", 16.0, 16.0, 2.4, 0.5, 0.9, 0.6, 1.0);
+    } else {
+      drawText2d("build failed - q to leave", 16.0, 16.0, 2.4, 0.9, 0.4, 0.4, 1.0);
+    }
+  } else {
+    drawText2d("compiling...", 16.0, 16.0, 2.4, 0.6, 0.7, 0.9, 1.0);
+  }
+  // What the replay is doing right now - the algorithm's own progress bar.
+  text.clear(ref scratch);
+  if (scene.sceneLexing(ref s)) {
+    text.push(ref scratch, "lexing ");
+    text.pushUint(ref scratch, uint64(scene.sceneShownTokens(ref s)));
+    text.push(ref scratch, "/");
+    text.pushUint(ref scratch, uint64(s.tokens.len));
+    text.push(ref scratch, " tokens");
+  } else if (scene.sceneParsing(ref s)) {
+    text.push(ref scratch, "parsing ");
+    text.pushUint(ref scratch, uint64(scene.sceneShownAst(ref s)));
+    text.push(ref scratch, "/");
+    text.pushUint(ref scratch, uint64(s.astItems.len));
+    text.push(ref scratch, " nodes");
+  } else if (scene.sceneMapping(ref s)) {
+    text.push(ref scratch, "mapping ");
+    text.pushUint(ref scratch, uint64(scene.sceneShownIslands(ref s)));
+    text.push(ref scratch, "/");
+    text.pushUint(ref scratch, uint64(s.islands.len));
+    text.push(ref scratch, " modules");
+  } else if (scene.sceneEmitting(ref s)) {
+    text.push(ref scratch, "emitting ");
+    text.pushUint(ref scratch, uint64(scene.sceneShownBlocks(ref s)));
+    text.push(ref scratch, "/");
+    text.pushUint(ref scratch, uint64(s.irBlocks.len));
+    text.push(ref scratch, " blocks");
+  }
+  if (scratch.len > 0) {
+    drawText2d(text.view(ref scratch), 16.0, 62.0, 2.0, 0.5, 0.9, 0.9, 1.0);
+  }
+
+  if (s.entryFile.len > 0) {
+    text.clear(ref scratch);
+    text.push(ref scratch, "viewing ");
+    pushTail(ref scratch, s.entryFile, 52);
+    drawText2d(text.view(ref scratch), 16.0, 106.0, 1.6, 0.55, 0.7, 0.75, 1.0);
+  }
+
+  if (s.smellOnce + s.smellLoop > 0 || diagLeaks(ref s) > 0) {
+    text.clear(ref scratch);
+    text.push(ref scratch, "memory: ");
+    text.pushUint(ref scratch, uint64(s.smellOnce + s.smellLoop));
+    text.push(ref scratch, " heap smells (");
+    text.pushUint(ref scratch, uint64(s.smellLoop));
+    text.push(ref scratch, " in loops)  ");
+    text.pushUint(ref scratch, uint64(diagLeaks(ref s)));
+    text.push(ref scratch, " unhandled disposables");
+    drawText2d(text.view(ref scratch), 16.0, 84.0, 1.7, 0.9, 0.6, 0.4, 1.0);
+  }
+
+  text.clear(ref scratch);
+  text.push(ref scratch, "speed x");
+  text.pushUint(ref scratch, uint64(s.speed));
+  text.push(ref scratch, ".");
+  text.pushUint(ref scratch, uint64(s.speed * 10.0) % 10);
+  if (s.paused) {
+    text.push(ref scratch, "  paused");
+  }
+  drawText2d(text.view(ref scratch), 16.0, 40.0, 1.8, 0.6, 0.65, 0.85, 1.0);
+
+  // The tooltip, beside the crosshair. What it says follows what KIND of
+  // thing the ray landed on.
+  if (pick.active && pick.kind == PickKind.ISLAND && pick.irFunc < s.islands.len) {
+    const isle = vec.vecGet(ref s.islands, pick.irFunc);
+    const stored = scene.sceneModuleFileCount(ref s, pick.irFunc);
+    const panelX = cx + 22.0;
+    const panelY = cy - 14.0;
+    fillRect2d(panelX - 8.0, panelY - 8.0, 420.0, 80.0, 0.03, 0.05, 0.12, 0.82);
+    drawText2d(isle.name, panelX, panelY, 2.2, 0.7, 0.9, 1.0, 1.0);
+    text.clear(ref scratch);
+    text.pushUint(ref scratch, uint64(isle.loc));
+    text.push(ref scratch, " lines in ");
+    text.pushUint(ref scratch, uint64(stored));
+    text.push(ref scratch, " file(s)");
+    drawText2d(text.view(ref scratch), panelX, panelY + 22.0, 1.7, 0.65, 0.75, 0.85, 1.0);
+    if (stored > 0) {
+      drawText2d("press e to walk its source", panelX, panelY + 44.0, 1.7, 0.95, 0.85, 0.5, 1.0);
+    } else {
+      drawText2d("its files were not streamed", panelX, panelY + 44.0, 1.6, 0.6, 0.6, 0.7, 1.0);
+    }
+  } else if (pick.active && pick.kind == PickKind.DIAG && pick.diagIdx < s.diagItems.len) {
+    const it = vec.vecGet(ref s.diagItems, pick.diagIdx);
+    const panelX = cx + 22.0;
+    const panelY = cy - 14.0;
+    fillRect2d(panelX - 8.0, panelY - 8.0, 560.0, 80.0, 0.03, 0.05, 0.12, 0.82);
+    text.clear(ref scratch);
+    if (it.error) {
+      text.push(ref scratch, "error");
+    } else if (it.leak) {
+      text.push(ref scratch, "unhandled disposable");
+    } else {
+      text.push(ref scratch, "warning");
+    }
+    text.push(ref scratch, "  line ");
+    text.pushUint(ref scratch, uint64(it.line));
+    if (it.error) {
+      drawText2d(text.view(ref scratch), panelX, panelY, 2.0, 0.95, 0.4, 0.4, 1.0);
+    } else if (it.leak) {
+      drawText2d(text.view(ref scratch), panelX, panelY, 2.0, 0.85, 0.55, 0.95, 1.0);
+    } else {
+      drawText2d(text.view(ref scratch), panelX, panelY, 2.0, 0.95, 0.8, 0.45, 1.0);
+    }
+    scene.sceneDiagMsg(ref s, pick.diagIdx, ref scratch);
+    drawText2d(text.view(ref scratch), panelX, panelY + 22.0, 1.5, 0.75, 0.8, 0.9, 1.0);
+    if (it.leak) {
+      drawText2d("its dispose never runs - mark it disposable, or hand it on",
+        panelX, panelY + 44.0, 1.5, 0.7, 0.6, 0.8, 1.0);
+    }
+  } else if (pick.active && pick.kind == PickKind.IRBLOCK && pick.irBlock < s.irBlocks.len) {
+    const blk = vec.vecGet(ref s.irBlocks, pick.irBlock);
+    const panelX = cx + 22.0;
+    const panelY = cy - 14.0;
+    fillRect2d(panelX - 8.0, panelY - 8.0, 420.0, 80.0, 0.03, 0.05, 0.12, 0.82);
+    scene.sceneIrName(ref s, pick.irFunc, ref scratch);
+    text.push(ref scratch, " / ");
+    disposable lbl: Text = text.make(8);
+    scene.sceneIrBlockLabel(ref s, pick.irBlock, ref lbl);
+    text.push(ref scratch, text.view(ref lbl));
+    drawText2d(text.view(ref scratch), panelX, panelY, 2.2, 1.0, 0.9, 0.5, 1.0);
+    text.clear(ref scratch);
+    text.pushUint(ref scratch, uint64(blk.instructions));
+    text.push(ref scratch, " instructions");
+    drawText2d(text.view(ref scratch), panelX, panelY + 22.0, 1.7, 0.7, 0.8, 0.9, 1.0);
+    text.clear(ref scratch);
+    text.pushUint(ref scratch, uint64(blk.calls));
+    text.push(ref scratch, " calls  ");
+    text.pushUint(ref scratch, uint64(blk.branches));
+    text.push(ref scratch, " branches  ");
+    text.pushUint(ref scratch, uint64(blk.memOps));
+    text.push(ref scratch, " memory");
+    drawText2d(text.view(ref scratch), panelX, panelY + 44.0, 1.7, 0.85, 0.7, 0.55, 1.0);
+  } else if (pick.active) {
+    let lineCount: usize = 2;
+    let smell: uint8 = 0;
+    if (pick.astIdx < s.astItems.len) {
+      lineCount += 2;
+      smell = vec.vecGet(ref s.astItems, pick.astIdx).smell;
+      if (smell > 0) {
+        lineCount += 1;
+      }
+    }
+    if (pinned) {
+      lineCount += 1;
+    }
+    const panelX = cx + 22.0;
+    const panelY = cy - 14.0;
+    fillRect2d(panelX - 8.0, panelY - 8.0, 420.0, float32(lineCount) * 22.0 + 14.0,
+      0.03, 0.05, 0.12, 0.82);
+    let ty = panelY;
+    if (pick.tokenIdx < s.tokens.len) {
+      const t = vec.vecGet(ref s.tokens, pick.tokenIdx);
+      scene.sceneTokenText(ref s, pick.tokenIdx, ref scratch);
+      drawText2d(text.view(ref scratch), panelX, ty, 2.2, 1.0, 0.9, 0.5, 1.0);
+      ty += 22.0;
+      text.clear(ref scratch);
+      text.push(ref scratch, "token ");
+      text.pushUint(ref scratch, uint64(t.len));
+      text.push(ref scratch, " bytes at ");
+      text.pushUint(ref scratch, uint64(t.pos));
+      drawText2d(text.view(ref scratch), panelX, ty, 1.7, 0.6, 0.8, 0.85, 1.0);
+      ty += 22.0;
+    } else {
+      text.clear(ref scratch);
+      text.push(ref scratch, "line ");
+      text.pushUint(ref scratch, uint64(pick.line + 1));
+      text.push(ref scratch, " col ");
+      text.pushUint(ref scratch, uint64(pick.col + 1));
+      drawText2d(text.view(ref scratch), panelX, ty, 1.9, 0.7, 0.8, 0.9, 1.0);
+      ty += 22.0;
+      drawText2d("no token here", panelX, ty, 1.7, 0.5, 0.6, 0.7, 1.0);
+      ty += 22.0;
+    }
+    if (pick.astIdx < s.astItems.len) {
+      text.clear(ref scratch);
+      text.push(ref scratch, scene.sceneAstKind(ref s, pick.astIdx));
+      const nodeName = scene.sceneAstName(ref s, pick.astIdx);
+      if (nodeName.len > 0) {
+        text.push(ref scratch, " ");
+        text.push(ref scratch, nodeName);
+      }
+      text.push(ref scratch, "  depth ");
+      text.pushUint(ref scratch, uint64(vec.vecGet(ref s.astItems, pick.astIdx).depth));
+      drawText2d(text.view(ref scratch), panelX, ty, 1.7, 0.6, 0.95, 0.65, 1.0);
+      ty += 22.0;
+      text.clear(ref scratch);
+      text.push(ref scratch, "line ");
+      text.pushUint(ref scratch, uint64(pick.line + 1));
+      text.push(ref scratch, " col ");
+      text.pushUint(ref scratch, uint64(pick.col + 1));
+      if (pick.kind == PickKind.NODE) {
+        text.push(ref scratch, "  (picked in the grove)");
+      }
+      drawText2d(text.view(ref scratch), panelX, ty, 1.6, 0.55, 0.65, 0.8, 1.0);
+      ty += 22.0;
+      if (smell == 2) {
+        drawText2d("heap smell in a loop: a malloc PER ITERATION - use Text",
+          panelX, ty, 1.6, 0.95, 0.45, 0.35, 1.0);
+        ty += 22.0;
+      } else if (smell == 1) {
+        drawText2d("heap smell: a raw malloc nothing frees - prefer Text",
+          panelX, ty, 1.6, 0.9, 0.65, 0.3, 1.0);
+        ty += 22.0;
+      }
+    }
+    if (pinned) {
+      drawText2d("pinned - click empty space to release", panelX, ty, 1.6, 0.95, 0.8, 0.4, 1.0);
+    }
+  }
+
+  // The toast: one loud transient line ("opening vec.yoop line 12...")
+  // centered above the controls, fading as its clock runs out.
+  if (toast.len > 0 && toastAlpha > 0.0) {
+    const px: float32 = 2.2;
+    const tw = float32(toast.len) * 6.0 * px;
+    drawText2d(toast, (w - tw) * 0.5, h - 64.0, px, 0.95, 0.85, 0.45, toastAlpha);
+  }
+
+  // The controls, one quiet line at the bottom.
+  drawText2d("wasd fly  space up  c down  shift fast  click pin  o editor  e walk in  g gate  p pause  x step  -/= speed  q quit",
+    16.0, h - 28.0, 1.6, 0.4, 0.45, 0.6, 1.0);
+
+  gl.enable(DEPTH_TEST);
+  gl.matrixMode(PROJECTION);
+  gl.popMatrix();
+  gl.matrixMode(MODELVIEW);
+  gl.popMatrix();
+}
+
+// The gatehouse pedestal at the road's start, and the "the build is waiting"
+// beacon wherever a phase is blocked.
+export function drawGatehouse(ref s: Scene, ref cam: Camera, pulse: float32): void {
+  const dim = dimFor(ref cam, 0.0, Z_GATEHOUSE);
+  gl.color(0.20 * dim, 0.30 * dim, 0.50 * dim, 1.0);
+  gl.solidBox(0.0, 0.6, Z_GATEHOUSE, 2.0, 1.2, 2.0);
+  if (s.pendingPhase != Phase.NONE) {
+    gl.color(0.95, 0.85, 0.35, 0.5 + pulse * 0.5);
+    gl.solidBox(0.0, 2.2, Z_GATEHOUSE, 0.8, 0.8, 0.8);
+  }
+}

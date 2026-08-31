@@ -1,0 +1,256 @@
+// Immediate-mode OpenGL, the 1.x fixed pipeline: matrix stack, glBegin
+// geometry, blending, fog. Chosen over the modern pipeline on purpose - the
+// renderer issues its scene from Yoop every frame, and the fixed pipeline is
+// the smallest possible door between that walk and pixels. Every argument is
+// a scalar; nothing here needs a pointer.
+//
+// `framework:OpenGL` is the platform's GL: -lGL on Linux, the framework on
+// macOS (see link/clang.yoop pushFrameworkFor).
+
+import.unsafe;
+
+import * as intr from "std/core/intrinsics.yoop";
+import * as log from "std/log.yoop";
+
+extern "C" from library "framework:OpenGL" {
+  function glClearColor(r: float32, g: float32, b: float32, a: float32): void;
+  function glClear(mask: uint32): void;
+  function glViewport(x: int32, y: int32, w: int32, h: int32): void;
+  function glEnable(cap: uint32): void;
+  function glDisable(cap: uint32): void;
+  function glBlendFunc(sfactor: uint32, dfactor: uint32): void;
+  function glDepthMask(flag: uint8): void;
+  function glLineWidth(w: float32): void;
+  function glPointSize(s: float32): void;
+
+  function glMatrixMode(mode: uint32): void;
+  function glLoadIdentity(): void;
+  function glPushMatrix(): void;
+  function glPopMatrix(): void;
+  function glFrustum(l: float64, r: float64, b: float64, t: float64, near: float64, far: float64): void;
+  function glOrtho(l: float64, r: float64, b: float64, t: float64, near: float64, far: float64): void;
+  function glTranslatef(x: float32, y: float32, z: float32): void;
+  function glRotatef(angle: float32, x: float32, y: float32, z: float32): void;
+  function glScalef(x: float32, y: float32, z: float32): void;
+
+  function glCreateShader(stage: uint32): uint32;
+  function glShaderSource(shader: uint32, count: int32, sources: unsafe_ptr<string>, lengths: unsafe_ptr<int32>): void;
+  function glCompileShader(shader: uint32): void;
+  function glGetShaderiv(shader: uint32, pname: uint32, params: unsafe_ptr<int32>): void;
+  function glGetShaderInfoLog(shader: uint32, maxLen: int32, written: unsafe_ptr<int32>, log: unsafe_ptr<uint8>): void;
+  function glDeleteShader(shader: uint32): void;
+  function glCreateProgram(): uint32;
+  function glAttachShader(program: uint32, shader: uint32): void;
+  function glLinkProgram(program: uint32): void;
+  function glGetProgramiv(program: uint32, pname: uint32, params: unsafe_ptr<int32>): void;
+  function glGetProgramInfoLog(program: uint32, maxLen: int32, written: unsafe_ptr<int32>, log: unsafe_ptr<uint8>): void;
+  function glDeleteProgram(program: uint32): void;
+  function glUseProgram(program: uint32): void;
+  function glGetUniformLocation(program: uint32, name: string): int32;
+  function glUniform1f(location: int32, v: float32): void;
+  function glUniform3f(location: int32, a: float32, b: float32, c: float32): void;
+
+  function glBegin(mode: uint32): void;
+  function glEnd(): void;
+  function glVertex3f(x: float32, y: float32, z: float32): void;
+  function glColor4f(r: float32, g: float32, b: float32, a: float32): void;
+
+}
+
+export const COLOR_BUFFER_BIT: uint32 = 0x00004000;
+export const DEPTH_BUFFER_BIT: uint32 = 0x00000100;
+export const DEPTH_TEST: uint32 = 0x0B71;
+export const BLEND: uint32 = 0x0BE2;
+export const SRC_ALPHA: uint32 = 0x0302;
+export const ONE_MINUS_SRC_ALPHA: uint32 = 0x0303;
+export const ONE: uint32 = 1;
+export const MODELVIEW: uint32 = 0x1700;
+export const PROJECTION: uint32 = 0x1701;
+export const LINES: uint32 = 0x0001;
+export const TRIANGLES: uint32 = 0x0004;
+export const QUADS: uint32 = 0x0007;
+export const LINE_STRIP: uint32 = 0x0003;
+export const POINTS: uint32 = 0x0000;
+
+export const VERTEX_SHADER: uint32 = 0x8B31;
+export const FRAGMENT_SHADER: uint32 = 0x8B30;
+const COMPILE_STATUS: uint32 = 0x8B81;
+const LINK_STATUS: uint32 = 0x8B82;
+const INFO_LOG_LENGTH: uint32 = 0x8B84;
+
+export function clearColor(r: float32, g: float32, b: float32, a: float32): void {
+  glClearColor(r, g, b, a);
+}
+export function clearFrame(): void { glClear(COLOR_BUFFER_BIT | DEPTH_BUFFER_BIT); }
+export function viewport(w: int32, h: int32): void { glViewport(0, 0, w, h); }
+export function enable(cap: uint32): void { glEnable(cap); }
+export function disable(cap: uint32): void { glDisable(cap); }
+export function blendAlpha(): void { glBlendFunc(SRC_ALPHA, ONE_MINUS_SRC_ALPHA); }
+export function blendAdditive(): void { glBlendFunc(SRC_ALPHA, ONE); }
+export function depthWrite(on: bool): void {
+  let flag: uint8 = 0;
+  if (on) {
+    flag = 1;
+  }
+  glDepthMask(flag);
+}
+export function lineWidth(w: float32): void { glLineWidth(w); }
+export function pointSize(s: float32): void { glPointSize(s); }
+
+export function matrixMode(mode: uint32): void { glMatrixMode(mode); }
+export function loadIdentity(): void { glLoadIdentity(); }
+export function pushMatrix(): void { glPushMatrix(); }
+export function popMatrix(): void { glPopMatrix(); }
+export function translate(x: float32, y: float32, z: float32): void { glTranslatef(x, y, z); }
+export function rotate(angle: float32, x: float32, y: float32, z: float32): void {
+  glRotatef(angle, x, y, z);
+}
+export function scale(x: float32, y: float32, z: float32): void { glScalef(x, y, z); }
+
+// A perspective projection out of glFrustum: fovY in degrees, near plane
+// derived symmetric. What gluPerspective does, without GLU.
+export function perspective(fovYDegrees: float64, aspect: float64, near: float64, far: float64): void {
+  // tan(fov/2) via sqrt-free small series is not worth it; the C library is
+  // right there.
+  const half = tanDegrees(fovYDegrees * 0.5) * near;
+  glFrustum(0.0 - half * aspect, half * aspect, 0.0 - half, half, near, far);
+}
+
+extern "C" from library "m" {
+  function tan(x: float64): float64;
+  function sin(x: float64): float64;
+  function cos(x: float64): float64;
+}
+
+export const PI: float64 = 3.14159265358979;
+
+export function tanDegrees(d: float64): float64 { return tan(d * PI / 180.0); }
+export function sinDegrees(d: float64): float64 { return sin(d * PI / 180.0); }
+export function cosDegrees(d: float64): float64 { return cos(d * PI / 180.0); }
+
+export function ortho2d(w: float64, h: float64): void {
+  glOrtho(0.0, w, h, 0.0, 0.0 - 1.0, 1.0);
+}
+
+export function begin(mode: uint32): void { glBegin(mode); }
+export function end(): void { glEnd(); }
+export function vertex(x: float32, y: float32, z: float32): void { glVertex3f(x, y, z); }
+export function color(r: float32, g: float32, b: float32, a: float32): void {
+  glColor4f(r, g, b, a);
+}
+
+// No GL fog on purpose: the fixed-pipeline fog wants a pointer to a color
+// vector, and depth cueing is cheaper to do honestly - the scene knows every
+// vertex's distance and dims its COLOR before it ever reaches GL.
+
+// ----- shaders --------------------------------------------------------------
+//
+// GLSL 1.20 on the compatibility context: a program here WRAPS the
+// immediate-mode drawing rather than replacing it - the vertex stage reads
+// gl_Vertex and the fixed matrices through the compatibility built-ins, so
+// every district keeps issuing glBegin geometry and the fragment stage
+// still gets to restyle all of it. The compile idiom (a named local for
+// the source pointer, heapAlloc for the log) is nebula_arena's.
+
+export function compileShader(stage: uint32, src: string): uint32 {
+  const sh = glCreateShader(stage);
+  let srcLocal: string = src;
+  glShaderSource(sh, 1, &srcLocal, null);
+  glCompileShader(sh);
+  let status: int32 = 0;
+  glGetShaderiv(sh, COMPILE_STATUS, &status);
+  if (status == 0) {
+    logFor(sh, true);
+    glDeleteShader(sh);
+    return 0;
+  }
+  return sh;
+}
+
+export function linkProgram(vs: uint32, fs: uint32): uint32 {
+  const prog = glCreateProgram();
+  glAttachShader(prog, vs);
+  glAttachShader(prog, fs);
+  glLinkProgram(prog);
+  let status: int32 = 0;
+  glGetProgramiv(prog, LINK_STATUS, &status);
+  if (status == 0) {
+    logFor(prog, false);
+    glDeleteProgram(prog);
+    return 0;
+  }
+  return prog;
+}
+
+// The failure log, to stderr via std/log - stdout is the wire's.
+function logFor(object: uint32, isShader: bool): void {
+  let logLen: int32 = 0;
+  if (isShader) {
+    glGetShaderiv(object, INFO_LOG_LENGTH, &logLen);
+  } else {
+    glGetProgramiv(object, INFO_LOG_LENGTH, &logLen);
+  }
+  if (logLen <= 0) {
+    log.error("vizworld: GLSL failed with an empty log");
+    return;
+  }
+  let buf: uint8[] = intr.heapAlloc(usize(logLen) + 1);
+  let written: int32 = 0;
+  if (isShader) {
+    glGetShaderInfoLog(object, logLen, &written, buf.ptr);
+  } else {
+    glGetProgramInfoLog(object, logLen, &written, buf.ptr);
+  }
+  buf[usize(written)] = 0;
+  log.error(`vizworld GLSL: ${intr.stringFromBytesUnchecked(buf)}`);
+}
+
+export function useProgram(program: uint32): void {
+  glUseProgram(program);
+}
+
+export function uniformLocation(program: uint32, name: string): int32 {
+  return glGetUniformLocation(program, name);
+}
+
+export function uniform1(location: int32, v: float32): void {
+  glUniform1f(location, v);
+}
+
+export function uniform3(location: int32, a: float32, b: float32, c: float32): void {
+  glUniform3f(location, a, b, c);
+}
+
+// ----- compound shapes ------------------------------------------------------
+
+// An axis-aligned box centered at (x, y, z), drawn as quads in the current
+// color. The world's whole vocabulary is boxes and lines.
+export function solidBox(x: float32, y: float32, z: float32, sx: float32, sy: float32, sz: float32): void {
+  const hx = sx * 0.5;
+  const hy = sy * 0.5;
+  const hz = sz * 0.5;
+  glBegin(QUADS);
+  // +z / -z
+  glVertex3f(x - hx, y - hy, z + hz); glVertex3f(x + hx, y - hy, z + hz);
+  glVertex3f(x + hx, y + hy, z + hz); glVertex3f(x - hx, y + hy, z + hz);
+  glVertex3f(x - hx, y - hy, z - hz); glVertex3f(x - hx, y + hy, z - hz);
+  glVertex3f(x + hx, y + hy, z - hz); glVertex3f(x + hx, y - hy, z - hz);
+  // +x / -x
+  glVertex3f(x + hx, y - hy, z - hz); glVertex3f(x + hx, y + hy, z - hz);
+  glVertex3f(x + hx, y + hy, z + hz); glVertex3f(x + hx, y - hy, z + hz);
+  glVertex3f(x - hx, y - hy, z - hz); glVertex3f(x - hx, y - hy, z + hz);
+  glVertex3f(x - hx, y + hy, z + hz); glVertex3f(x - hx, y + hy, z - hz);
+  // +y / -y
+  glVertex3f(x - hx, y + hy, z - hz); glVertex3f(x - hx, y + hy, z + hz);
+  glVertex3f(x + hx, y + hy, z + hz); glVertex3f(x + hx, y + hy, z - hz);
+  glVertex3f(x - hx, y - hy, z - hz); glVertex3f(x + hx, y - hy, z - hz);
+  glVertex3f(x + hx, y - hy, z + hz); glVertex3f(x - hx, y - hy, z + hz);
+  glEnd();
+}
+
+export function line3(x1: float32, y1: float32, z1: float32, x2: float32, y2: float32, z2: float32): void {
+  glBegin(LINES);
+  glVertex3f(x1, y1, z1);
+  glVertex3f(x2, y2, z2);
+  glEnd();
+}

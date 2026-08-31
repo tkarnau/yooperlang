@@ -35,6 +35,9 @@ import { runPrecompilePass } from "./comptime";
 import { linkExecutable, writeIrFile, withExeSuffix } from "./link";
 import { TestPlan, planTestRun, testBinaryPath, runTestBinary, removeTestArtifacts } from "./test_mode";
 import { runLanguageServer } from "./lsp";
+import { PluginHost, pluginHostInactive, loadPlugin,
+  runPluginStart, runPluginPhase, runPluginFinish,
+  refreshParseArtifacts, refreshDiagnostics, refreshIr } from "./plugin";
 
 // The one runtime symbol the DRIVER reaches for directly rather than through a
 // std module.
@@ -53,7 +56,7 @@ extern "C" from "yoop_runtime" {
   function yoop_stdio_set_binary(): void;
 }
 
-const USAGE: string = "usage: yoopiler_boot <entry.yoop> [-o <out>] [--emit-ir] [--track-heap]\n       yoopiler_boot --test <dir-or-file> [filter...]\n       yoopiler_boot --lsp\n       yoopiler_boot --list-attributes";
+const USAGE: string = "usage: yoopiler_boot <entry.yoop> [-o <out>] [--emit-ir] [--track-heap] [--plugin <path.yoop>]\n       yoopiler_boot --test <dir-or-file> [filter...]\n       yoopiler_boot --lsp\n       yoopiler_boot --list-attributes";
 
 function main(): int {
   // FIRST, before any stream is touched. On Windows this is what makes the
@@ -110,9 +113,49 @@ function main(): int {
     return dumpAstJsonTo(cli.entry, cli.astJsonOut);
   }
 
-  return compileGraph(loadModuleGraph(cli.entry, stdRoot), cli.out, cli.emitIr,
+  // The plugin is a SECOND compile, loaded and typechecked before the user's
+  // so a broken plugin is refused up front rather than after the build paid
+  // for typechecking a program it will not finish. `onStart` fires before the
+  // user's graph is even loaded; `onFinish` fires no matter how the build
+  // went, so a plugin holding a child process can wind it down.
+  disposable host: PluginHost = pluginHostFor(cli.plugin, stdRoot);
+  if (host.error.len > 0) {
+    log.error(host.error);
+    return 1;
+  }
+  const started = runPluginStart(ref host, cli.entry, cli.out);
+  if (started != 0) {
+    return hookExitCode(started);
+  }
+
+  const code = compileGraph(loadModuleGraph(cli.entry, stdRoot), cli.out, cli.emitIr,
     { trackHeap: cli.trackHeap },
-    { disposable: cli.warnDisposable, std: cli.warnStd, stdRoot: stdRoot });
+    { disposable: cli.warnDisposable, std: cli.warnStd, stdRoot: stdRoot },
+    ref host);
+  let ok: int32 = 0;
+  if (code == 0) {
+    ok = 1;
+  }
+  runPluginFinish(ref host, ok);
+  return code;
+}
+
+// The host an ordinary build carries: inactive unless `--plugin` named one.
+function pluginHostFor(path: string, stdRoot: string): PluginHost propagates<disposable> {
+  if (path.len == 0) {
+    return pluginHostInactive();
+  }
+  return loadPlugin(path, stdRoot);
+}
+
+// A refusing hook's return value becomes the process exit code, clamped into
+// the range an exit status can carry - 0 would read as success and anything
+// past 255 is truncated by the OS, so both collapse to 1.
+function hookExitCode(fromHook: int32): int {
+  if (fromHook < 1 || fromHook > 255) {
+    return 1;
+  }
+  return fromHook;
 }
 
 // Discover, generate, compile, run. The compile is the ORDINARY one - there is
@@ -126,12 +169,16 @@ function main(): int {
 function runTests(ref plan: TestPlan, stdRoot: string, ref filters: Vec<string>): int {
   log.info(`test: ${plan.suiteCount} suite(s) in ${plan.fileCount} file(s)`);
   const exePath = testBinaryPath();
+  // A test run never carries a plugin - `--plugin` with `--test` is refused
+  // at the command line - so the host here is the inactive one.
+  disposable host: PluginHost = pluginHostInactive();
   const built = compileGraph(
     loadModuleGraphFromSource(plan.entrySource, plan.entryPath, stdRoot),
     exePath,
     false,
     defaultCodegenOptions(),
-    { disposable: false, std: false, stdRoot: stdRoot }
+    { disposable: false, std: false, stdRoot: stdRoot },
+    ref host
   );
   if (built != 0) {
     // A build that got as far as clang and stopped there still left a `.ll`
@@ -204,7 +251,8 @@ function compileGraph(
   outPath: string,
   emitIr: bool,
   opts: CodegenOptions,
-  warn: WarnOptions
+  warn: WarnOptions,
+  ref host: PluginHost
 ): int {
   switch (loaded) {
     case LoadGraphResult.Err { error: e }: {
@@ -212,6 +260,15 @@ function compileGraph(
       return 1;
     }
     case LoadGraphResult.Ok { value: moduleGraph }: {
+      // The first hook a plugin sees with a graph behind it. A hook BLOCKS
+      // the build until it returns - that is the mechanism's whole point -
+      // and a nonzero return stops the build with that exit code.
+      refreshParseArtifacts(ref host, ref moduleGraph);
+      const afterParse = runPluginPhase(ref host, "parse", "onParse");
+      if (afterParse != 0) {
+        return hookExitCode(afterParse);
+      }
+
       // `disposable` here because the unhandled-disposable warning caught it:
       // Program owns the type/symbol arenas and every TypedModule's maps.
       disposable prog: Program = typecheckProgram(ref moduleGraph);
@@ -223,10 +280,19 @@ function compileGraph(
       // it produced back in the AST, so codegen reads an ordinary constant.
       runPrecompilePass(ref prog, ref moduleGraph);
 
+      // BEFORE the gate below: a build the diagnostics stop still reaches
+      // onFinish, and the plugin showing why wants them on the bridge.
+      refreshDiagnostics(ref host, ref prog);
+
       if (reportDiagnostics(ref prog, warn) > 0) {
         return 1;
       }
       log.info("typecheck: ok");
+
+      const afterTypecheck = runPluginPhase(ref host, "typecheck", "onTypecheck");
+      if (afterTypecheck != 0) {
+        return hookExitCode(afterTypecheck);
+      }
 
       switch (codegenProgram(ref prog, ref moduleGraph, opts)) {
         case Result.Err { error: e }: {
@@ -239,6 +305,12 @@ function compileGraph(
           disposable irPath: Text = text.fromString(outPath);
           text.push(ref irPath, ".ll");
           disposable libs: Vec<string> = out.linkLibraries;
+
+          refreshIr(ref host, ref irText);
+          const afterCodegen = runPluginPhase(ref host, "codegen", "onCodegen");
+          if (afterCodegen != 0) {
+            return hookExitCode(afterCodegen);
+          }
 
           // --emit-ir stops HERE, one step short of clang. The `.ll` is written
           // where a linking run would have written it, so the two modes leave
@@ -267,6 +339,10 @@ function compileGraph(
             return 1;
           }
           log.info(`compiled: ${exePath}`);
+          const afterLink = runPluginPhase(ref host, "link", "onLink");
+          if (afterLink != 0) {
+            return hookExitCode(afterLink);
+          }
           return 0;
         }
       }
@@ -299,6 +375,12 @@ type CliArgs {
   lsp: bool,
   warnDisposable: bool,
   warnStd: bool,
+  // `--plugin <path.yoop>` - a Yoop source file whose hook functions the
+  // build runs at its phase boundaries, or "" when none was named. Only the
+  // ordinary compile path takes one: the other modes either have no phases
+  // (--dump-ast-json, --list-attributes), own the process (--lsp), or build
+  // many times (--test).
+  plugin: string,
   error: string,
 }
 
@@ -322,7 +404,7 @@ function parseCommandLine(ref extras: Vec<string>): CliArgs {
   let args: CliArgs = {
     entry: "", out: "a.out", emitIr: false, test: false,
     trackHeap: false, listAttributes: false, astJsonOut: "", lsp: false,
-    warnDisposable: false, warnStd: false, error: ""
+    warnDisposable: false, warnStd: false, plugin: "", error: ""
   };
   const argc = env.argCount();
   let i: int32 = 1;
@@ -347,6 +429,13 @@ function parseCommandLine(ref extras: Vec<string>): CliArgs {
         return args;
       }
       args.astJsonOut = env.argAt(i + 1);
+      i += 2;
+    } else if (str.stringEq(a, "--plugin")) {
+      if (i + 1 >= argc) {
+        args.error = "--plugin needs a path";
+        return args;
+      }
+      args.plugin = env.argAt(i + 1);
       i += 2;
     } else if (str.stringEq(a, "--lsp")) {
       args.lsp = true;
@@ -377,6 +466,14 @@ function parseCommandLine(ref extras: Vec<string>): CliArgs {
   }
   if (!args.test && extras.len > 0) {
     args.error = `more than one input file: ${vec.vecGet(ref extras, 0)}`;
+    return args;
+  }
+  // See the CliArgs note: a plugin rides the ordinary compile's phases, and
+  // the other modes have none to offer. Refused rather than ignored, so a
+  // command line never quietly does less than it said.
+  if (args.plugin.len > 0 &&
+      (args.test || args.lsp || args.listAttributes || args.astJsonOut.len > 0)) {
+    args.error = "--plugin only applies to an ordinary compile";
     return args;
   }
   // `--test` with no path means the current directory, so only an ordinary

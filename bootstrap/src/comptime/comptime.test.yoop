@@ -856,6 +856,25 @@ function foldRefused(got: FoldOutcome, needle: string): bool {
   return str.stringIndexOf(got.message, needle) < got.message.len;
 }
 
+suite function pluginBuiltinsAreClosedOutsideAPlugin(): void {
+  // The gate, not the builtin: every ordinary fold carries an INACTIVE
+  // bridge, so the whole `yoop_plugin_` surface refuses by name before any
+  // argument is evaluated. The host tests in ../plugin drive the open side.
+  const closed = foldLastConst(
+    "extern \"C\" from \"yoop_plugin\" {\n  function yoop_plugin_phase(): string;\n}\nconst N: int32 = int32(yoop_plugin_phase().len);");
+  let test theory: Case = t.asserts("a plugin builtin is refused when no plugin is active") {
+    theory.isSuccessful = foldRefused(closed, "is a plugin builtin");
+    theory.detail = `got: ok=${closed.ok} message="${closed.message}"`;
+  }
+
+  const unknown = foldLastConst(
+    "extern \"C\" from \"yoop_plugin\" {\n  function yoop_plugin_bogus(): string;\n}\nconst N: int32 = int32(yoop_plugin_bogus().len);");
+  let test theory: Case = t.asserts("an unknown name under the plugin prefix is refused, not treated as pure") {
+    theory.isSuccessful = foldRefused(unknown, "is a plugin builtin");
+    theory.detail = `got: ok=${unknown.ok} message="${unknown.message}"`;
+  }
+}
+
 // Parses, typechecks, runs the `@precompile` pass, and emits IR - the whole
 // pipeline the driver runs, minus the link. `errors` is every diagnostic the
 // run reported, joined, so an assertion can look for one by name.

@@ -1,0 +1,13 @@
+// Illegal outside --plugin: a plugin builtin reads the bridge a plugin host
+// refreshes before firing a hook, and an ordinary build has no plugin host.
+// The refusal names the builtin and says where it does exist.
+
+extern "C" from "yoop_plugin" {
+    function yoop_plugin_phase(): string;
+}
+
+@precompile const P: int32 = int32(yoop_plugin_phase().len);
+
+function main(): int32 {
+    return P;
+}

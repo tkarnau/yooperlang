@@ -1,0 +1,141 @@
+// The fly camera: position, yaw, pitch, and the movement math. Pure on
+// purpose - no SDL, no GL - so the math that decides where the player ends
+// up is testable without a window. The draw side applies it as
+// rotate(pitch) rotate(yaw) translate(-position), and the vectors here are
+// derived for exactly that order.
+
+extern "C" from library "m" {
+  function sin(x: float64): float64;
+  function cos(x: float64): float64;
+}
+
+export const PI: float64 = 3.14159265358979;
+
+@derive(display)
+export type Camera {
+  x: float32,
+  y: float32,
+  z: float32,
+  // Degrees. Yaw 0 looks down -z; positive yaw turns right. Pitch positive
+  // looks down (matching the screen-space mouse delta), clamped well short
+  // of the poles so the view never flips.
+  yaw: float32,
+  pitch: float32,
+}
+
+export function cameraStart(): Camera {
+  return { x: 0.0, y: 2.0, z: 12.0, yaw: 0.0, pitch: 0.0 };
+}
+
+function radians(degrees: float32): float64 {
+  return float64(degrees) * PI / 180.0;
+}
+
+// The ground-plane forward vector for a yaw, unit length.
+//
+// Derived from the view the draw side builds, not from intuition: the view
+// is rotate(yaw, 0,1,0) then translate(-pos), so the world direction that
+// lands on the view's -z is Ry(-yaw) applied to (0,0,-1), which is
+// (sin yaw, 0, -cos yaw). Yaw 0 walks down -z; yaw 90 walks toward +x -
+// the turn the mouse's rightward motion makes.
+export function forwardX(yaw: float32): float32 {
+  return float32(sin(radians(yaw)));
+}
+
+export function forwardZ(yaw: float32): float32 {
+  return float32(0.0 - cos(radians(yaw)));
+}
+
+// The ground-plane right vector: Ry(-yaw) applied to (1,0,0), which is
+// (cos yaw, 0, sin yaw) - the view's own +x carried back into the world.
+export function rightX(yaw: float32): float32 {
+  return float32(cos(radians(yaw)));
+}
+
+export function rightZ(yaw: float32): float32 {
+  return float32(sin(radians(yaw)));
+}
+
+// The AIM ray: where the crosshair points, pitch included - unlike the
+// ground-plane movement vectors above. Derived the same way they are:
+// Ry(-yaw) then Rx(-pitch) applied to the view's -z, which lands at
+// (cos p sin y, -sin p, -cos p cos y). Pitch positive looks down, so a
+// downward look aims at negative y - the wall-picking ray the districts'
+// hit tests march along.
+export function aimX(yaw: float32, pitch: float32): float32 {
+  return float32(cos(radians(pitch)) * sin(radians(yaw)));
+}
+
+export function aimY(pitch: float32): float32 {
+  return float32(0.0 - sin(radians(pitch)));
+}
+
+export function aimZ(yaw: float32, pitch: float32): float32 {
+  return float32(0.0 - cos(radians(pitch)) * cos(radians(yaw)));
+}
+
+// Ray against a sphere, simplified to what a pick needs: the distance
+// along the aim ray at which it passes closest to the point, or -1 when
+// that pass misses by more than `radius` (or lies behind the camera). The
+// world pick calls this once per candidate and keeps the nearest hit.
+export function rayHit(
+  cx: float32, cy: float32, cz: float32,
+  ax: float32, ay: float32, az: float32,
+  px: float32, py: float32, pz: float32,
+  radius: float32
+): float32 {
+  const dx = px - cx;
+  const dy = py - cy;
+  const dz = pz - cz;
+  const t = dx * ax + dy * ay + dz * az;
+  if (t <= 0.0) {
+    return 0.0 - 1.0;
+  }
+  const missSq = dx * dx + dy * dy + dz * dz - t * t;
+  if (missSq > radius * radius) {
+    return 0.0 - 1.0;
+  }
+  return t;
+}
+
+// One movement step: ahead/strafe/rise are -1, 0 or 1 off the keyboard,
+// dt in seconds, speed in units per second. Flight, not walking - the
+// world is a diorama and hovering over it is the point.
+export function moveCamera(ref cam: Camera, ahead: float32, strafe: float32, rise: float32, dt: float32, speed: float32): void {
+  const step = dt * speed;
+  cam.x += (forwardX(cam.yaw) * ahead + rightX(cam.yaw) * strafe) * step;
+  cam.z += (forwardZ(cam.yaw) * ahead + rightZ(cam.yaw) * strafe) * step;
+  cam.y += rise * step;
+}
+
+// Exponential approach: `current` glides toward `target` covering `rate`
+// of the remaining distance per second, framerate-independent. What turns
+// keyboard steps into flight - velocity eases in and out instead of
+// snapping, and the math is one testable line.
+export function approach(current: float32, target: float32, rate: float32, dt: float32): float32 {
+  let blend = rate * dt;
+  if (blend > 1.0) {
+    blend = 1.0;
+  }
+  return current + (target - current) * blend;
+}
+
+// One mouse step: screen-space deltas in, degrees out, pitch clamped.
+export function turnCamera(ref cam: Camera, dx: int32, dy: int32, sensitivity: float32): void {
+  cam.yaw += float32(dx) * sensitivity;
+  cam.pitch += float32(dy) * sensitivity;
+  if (cam.pitch > 89.0) {
+    cam.pitch = 89.0;
+  }
+  if (cam.pitch < 0.0 - 89.0) {
+    cam.pitch = 0.0 - 89.0;
+  }
+  // Yaw wraps rather than accumulates, so a long session cannot walk the
+  // float32 off its precision.
+  while (cam.yaw >= 360.0) {
+    cam.yaw -= 360.0;
+  }
+  while (cam.yaw < 0.0) {
+    cam.yaw += 360.0;
+  }
+}

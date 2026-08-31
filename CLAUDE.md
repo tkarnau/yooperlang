@@ -79,6 +79,10 @@ below, and you usually need exactly one of them.
   one file. `src/` holds no compiler: it is the Node test harnesses and the
   clang/runtime helpers they share.
 - **Language reference**: [SPEC.md](SPEC.md). Grammar and semantics.
+- **Compiler plugins** (`--plugin`, the hooks, `std/plugin.yoop`, the
+  vizworld visualizer): [docs/plugins.md](docs/plugins.md). The host is
+  `bootstrap/src/plugin/`, the extern gate is in `bootstrap/src/comptime/`,
+  and a hook is INTERPRETED - the comptime evaluator's subset applies.
 - **Modules outside std** (`modules/`): [modules/README.md](modules/README.md).
   Opt-in Yoop modules the project maintains and ships but does not force on
   every program. The compiler is allowed to depend on one, and does:
@@ -110,7 +114,7 @@ Std API index: [std/INDEX.md](std/INDEX.md) (generated; regenerate with
 
 **Writing style** for docs, plans, comments, anything: **no em-dash**, **no
 characters that are awkward to type on an American keyboard** (no arrows, no
-curly quotes), **no fancy markdown tables**.
+curly quotes), **no fancy markdown tables**. Use American English. For example, no "colour", or "behaviour" - use "color", "behavior".
 
 **Code style**: 2-space indentation in all new code.
 

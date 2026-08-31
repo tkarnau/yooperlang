@@ -1,0 +1,163 @@
+module comptime;
+
+// The plugin builtins: the externs a `--plugin` hook may call.
+//
+// None of them is a real C symbol. Each is answered right here by the host
+// compiler, reading the PluginBridge the plugin host refreshed before firing
+// the hook - which is why the whole surface costs no linker anything and why
+// `std/plugin.yoop`, which declares these, is interpret-only.
+//
+// The names all carry one prefix, and the prefix IS the registry: evalCall
+// gates on `isPluginExternName` plus the bridge's `active` flag, so outside
+// `--plugin` every one of these is refused by a message that says where it
+// does exist.
+
+import * as str from "std/core/strings.yoop";
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { Result } from "std/core/types.yoop";
+import { SourceLocation } from "../diagnostics";
+import { TypeId } from "../typecheck";
+
+// The child-process half is real: these run in the COMPILER's process, which
+// links the same runtime every compiled program does. One child per plugin,
+// held by handle on the bridge, which is the one thing that survives between
+// hook invocations.
+extern "C" from "yoop_runtime" {
+  function yoop_proc_spawn(cmdline: string): int64;
+  function yoop_proc_write_line(h: int64, line: string): c_int;
+  function yoop_proc_write_blob(h: int64, kind: string, payload: string): c_int;
+  function yoop_proc_read_line(h: int64): string;
+  function yoop_proc_alive(h: int64): c_int;
+  function yoop_proc_kill(h: int64): c_int;
+  function yoop_sleep_ms(ms: uint64): int32;
+}
+
+const PLUGIN_PREFIX: string = "yoop_plugin_";
+
+export function isPluginExternName(name: string): bool {
+  return str.stringStartsWith(name, PLUGIN_PREFIX);
+}
+
+export function callPluginExtern(
+  ref cx: EvalCx,
+  name: string,
+  ref args: Vec<ValueId>,
+  resultTy: TypeId,
+  loc: SourceLocation
+): Result<ValueId, ComptimeError> {
+  if (str.stringEq(name, "yoop_plugin_phase")) {
+    return Result.Ok { value: strValue(cx.va, resultTy, cx.plugin.phase) };
+  }
+  if (str.stringEq(name, "yoop_plugin_entry_path")) {
+    return Result.Ok { value: strValue(cx.va, resultTy, cx.plugin.entryPath) };
+  }
+  if (str.stringEq(name, "yoop_plugin_out_path")) {
+    return Result.Ok { value: strValue(cx.va, resultTy, cx.plugin.outPath) };
+  }
+  if (str.stringEq(name, "yoop_plugin_tokens")) {
+    return Result.Ok { value: strValue(cx.va, resultTy, cx.plugin.tokensText) };
+  }
+  if (str.stringEq(name, "yoop_plugin_ast_json")) {
+    return Result.Ok { value: strValue(cx.va, resultTy, cx.plugin.astJson) };
+  }
+  if (str.stringEq(name, "yoop_plugin_modules_json")) {
+    return Result.Ok { value: strValue(cx.va, resultTy, cx.plugin.modulesJson) };
+  }
+  if (str.stringEq(name, "yoop_plugin_diagnostics_json")) {
+    return Result.Ok { value: strValue(cx.va, resultTy, cx.plugin.diagnosticsJson) };
+  }
+  if (str.stringEq(name, "yoop_plugin_ir")) {
+    return Result.Ok { value: strValue(cx.va, resultTy, cx.plugin.irText) };
+  }
+  if (str.stringEq(name, "yoop_plugin_build_ok")) {
+    return Result.Ok { value: intValue(cx.va, resultTy, uint64(cx.plugin.buildOk)) };
+  }
+
+  // The child-process family. One child per plugin: spawn refuses a second
+  // while the first handle is live, and everything else answers about THE
+  // child rather than taking a handle the interpreter would have to keep.
+  if (str.stringEq(name, "yoop_plugin_spawn")) {
+    if (cx.plugin.procHandle >= 0) {
+      return Result.Err { error: comptimeError(
+        "the plugin already holds a child process - kill it before spawning another",
+        loc
+      )};
+    }
+    const h = yoop_proc_spawn(argText(ref cx, ref args, 0, loc)?);
+    cx.plugin.procHandle = h;
+    let ok: int64 = 0;
+    if (h < 0) {
+      ok = 0 - 1;
+    }
+    return Result.Ok { value: intValue(cx.va, resultTy,
+      normalizeInt(cx.prog, resultTy, uint64(ok))) };
+  }
+  if (str.stringEq(name, "yoop_plugin_send_line")) {
+    if (cx.plugin.procHandle < 0) {
+      return Result.Ok { value: intValue(cx.va, resultTy,
+        normalizeInt(cx.prog, resultTy, uint64(0 - 1))) };
+    }
+    const r = yoop_proc_write_line(cx.plugin.procHandle, argText(ref cx, ref args, 0, loc)?);
+    return Result.Ok { value: intValue(cx.va, resultTy,
+      normalizeInt(cx.prog, resultTy, uint64(r))) };
+  }
+  if (str.stringEq(name, "yoop_plugin_send_artifact")) {
+    // The host frames the whole artifact for the child (`blob <kind>
+    // <bytes>`, then the bytes) - a hook cannot: its evaluator has no
+    // string library to escape or split anything with.
+    if (cx.plugin.procHandle < 0) {
+      return Result.Ok { value: intValue(cx.va, resultTy,
+        normalizeInt(cx.prog, resultTy, uint64(0 - 1))) };
+    }
+    const kind = argText(ref cx, ref args, 0, loc)?;
+    let payload = "";
+    if (str.stringEq(kind, "tokens")) { payload = cx.plugin.tokensText; }
+    else if (str.stringEq(kind, "ast")) { payload = cx.plugin.astJson; }
+    else if (str.stringEq(kind, "modules")) { payload = cx.plugin.modulesJson; }
+    else if (str.stringEq(kind, "diagnostics")) { payload = cx.plugin.diagnosticsJson; }
+    else if (str.stringEq(kind, "ir")) { payload = cx.plugin.irText; }
+    else {
+      return Result.Err { error: comptimeError(
+        `"${kind}" is not an artifact the bridge carries - tokens, ast, modules, diagnostics or ir`,
+        loc
+      )};
+    }
+    const r = yoop_proc_write_blob(cx.plugin.procHandle, kind, payload);
+    return Result.Ok { value: intValue(cx.va, resultTy,
+      normalizeInt(cx.prog, resultTy, uint64(r))) };
+  }
+  if (str.stringEq(name, "yoop_plugin_recv_line")) {
+    // BLOCKS the build until the child answers - which is the mechanism's
+    // whole point. "" means the child is gone (or was never there).
+    if (cx.plugin.procHandle < 0) {
+      return Result.Ok { value: strValue(cx.va, resultTy, "") };
+    }
+    return Result.Ok { value: strValue(cx.va, resultTy,
+      yoop_proc_read_line(cx.plugin.procHandle)) };
+  }
+  if (str.stringEq(name, "yoop_plugin_child_alive")) {
+    if (cx.plugin.procHandle < 0) {
+      return Result.Ok { value: intValue(cx.va, resultTy, 0) };
+    }
+    return Result.Ok { value: intValue(cx.va, resultTy,
+      uint64(yoop_proc_alive(cx.plugin.procHandle))) };
+  }
+  if (str.stringEq(name, "yoop_plugin_kill_child")) {
+    if (cx.plugin.procHandle < 0) {
+      return Result.Ok { value: intValue(cx.va, resultTy, 0) };
+    }
+    const r = yoop_proc_kill(cx.plugin.procHandle);
+    cx.plugin.procHandle = 0 - 1;
+    return Result.Ok { value: intValue(cx.va, resultTy,
+      normalizeInt(cx.prog, resultTy, uint64(r))) };
+  }
+  if (str.stringEq(name, "yoop_plugin_sleep_ms")) {
+    const ignored = yoop_sleep_ms(argBits(ref cx, ref args, 0, loc)?);
+    return Result.Ok { value: intValue(cx.va, resultTy, 0) };
+  }
+
+  return Result.Err { error: comptimeError(
+    `"${name}" carries the plugin builtin prefix and is not a builtin this compiler knows`,
+    loc
+  )};
+}

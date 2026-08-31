@@ -1,0 +1,209 @@
+// Tests for the `--plugin` host: loading, load-time shape validation, hook
+// discovery, argument delivery, and the gate a nonzero return closes.
+//
+// Every plugin here is SOURCE handed to the real loader, so what is tested is
+// the path the driver takes minus the disk read - the same split runTests
+// uses for its generated entry module.
+
+import.test;
+import * as t from "std/test.yoop";
+import { suite, test, Case } from "std/test.yoop";
+import * as env from "std/env.yoop";
+import * as str from "std/core/strings.yoop";
+import * as intr from "std/core/intrinsics.yoop";
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import { loadModuleGraphFromSource, discoverStdRoot } from "../source_graph";
+import { Text }, * as text from "std/core/text.yoop";
+import { PluginHost, pluginHostInactive, pluginFromLoad,
+  runPluginPhase, runPluginStart, runPluginFinish,
+  refreshParseArtifacts, refreshIr } from "../plugin";
+
+function hostOf(src: string): PluginHost propagates<disposable> {
+  const stdRoot = discoverStdRoot(env.argAt(0));
+  let srcBuf: Vec<uint8> = vec.vecNew(src.len + 1);
+  vec.vecExtendFrom(ref srcBuf, intr.stringAsBytes(src));
+  return pluginFromLoad(
+    loadModuleGraphFromSource(srcBuf, "plug_test.yoop", stdRoot), "plug_test.yoop");
+}
+
+function mentions(haystack: string, needle: string): bool {
+  return str.stringIndexOf(haystack, needle) < haystack.len;
+}
+
+suite function aHookFiresAndItsReturnValueGatesTheBuild(): void {
+  disposable ok: PluginHost = hostOf(
+    "export function onParse(): int32 { return 0; }");
+  let test theory: Case = t.asserts("a plugin with a clean hook loads active") {
+    theory.isSuccessful = ok.active && ok.error.len == 0;
+    theory.detail = `active=${ok.active} error="${ok.error}"`;
+  }
+  let test theory: Case = t.asserts("a hook returning 0 lets the build continue") {
+    theory.isSuccessful = runPluginPhase(ref ok, "parse", "onParse") == 0;
+    theory.detail = "onParse returned nonzero through the host";
+  }
+
+  disposable refusing: PluginHost = hostOf(
+    "export function onParse(): int32 { return 7; }");
+  let test theory: Case = t.asserts("a hook's nonzero return comes back as itself") {
+    theory.isSuccessful = runPluginPhase(ref refusing, "parse", "onParse") == 7;
+    theory.detail = "the refusal code was not preserved";
+  }
+
+  let test theory: Case = t.asserts("a hook the plugin does not define is skipped") {
+    theory.isSuccessful = runPluginPhase(ref ok, "codegen", "onCodegen") == 0;
+    theory.detail = "an absent hook did not read as 'continue'";
+  }
+
+  disposable none: PluginHost = pluginHostInactive();
+  let test theory: Case = t.asserts("the inactive host fires nothing and continues") {
+    theory.isSuccessful = runPluginPhase(ref none, "parse", "onParse") == 0;
+    theory.detail = "the inactive host did not read as 'continue'";
+  }
+}
+
+suite function aPluginIsValidatedWhenItLoads(): void {
+  disposable badRet: PluginHost = hostOf(
+    "export function onParse(): string { return \"no\"; }");
+  let test theory: Case = t.asserts("a hook with the wrong return type is refused by name") {
+    theory.isSuccessful = !badRet.active && mentions(badRet.error, "wrong return type");
+    theory.detail = `error was "${badRet.error}"`;
+  }
+
+  disposable badArity: PluginHost = hostOf(
+    "export function onStart(): int32 { return 0; }");
+  let test theory: Case = t.asserts("a hook with the wrong arity is refused with the expected shape") {
+    theory.isSuccessful = !badArity.active && mentions(badArity.error, "parameter(s)");
+    theory.detail = `error was "${badArity.error}"`;
+  }
+
+  disposable broken: PluginHost = hostOf(
+    "export function onParse(): int32 { return nowhere; }");
+  let test theory: Case = t.asserts("a plugin that does not typecheck loads inactive with a count") {
+    theory.isSuccessful = !broken.active && mentions(broken.error, "error(s)");
+    theory.detail = `error was "${broken.error}"`;
+  }
+
+  disposable hookless: PluginHost = hostOf(
+    "function helper(): int32 { return 1; }");
+  let test theory: Case = t.asserts("a plugin with no hooks at all is a legal plugin") {
+    theory.isSuccessful = hookless.active && hookless.error.len == 0;
+    theory.detail = `active=${hookless.active} error="${hookless.error}"`;
+  }
+}
+
+suite function hookArgumentsArriveAsValues(): void {
+  // onStart is handed the entry and output paths; echoing the entry's length
+  // back as the exit code is the cheapest observable proof it arrived intact.
+  disposable echo: PluginHost = hostOf(
+    "export function onStart(entry: string, out: string): int32 { return int32(entry.len); }");
+  let test theory: Case = t.asserts("onStart sees the entry path the driver passed") {
+    theory.isSuccessful = runPluginStart(ref echo, "abc.yoop", "x") == 8;
+    theory.detail = "entry.len did not come back as 8";
+  }
+
+  disposable finisher: PluginHost = hostOf(
+    "export function onFinish(ok: int32): void { const ignored = ok; }");
+  let test theory: Case = t.asserts("onFinish runs and a void return is not an error") {
+    runPluginFinish(ref finisher, 1);
+    theory.isSuccessful = true;
+    theory.detail = "";
+  }
+}
+
+suite function hooksReadTheBridgeThroughStdPlugin(): void {
+  // The plugin imports std/plugin.yoop namespaced, which is the shipped way
+  // in: the wrappers' bodies live in that module, whose extern declarations
+  // are what the evaluator's gate sees when a frame walks into them.
+  disposable h: PluginHost = hostOf(
+    "import * as plug from \"std/plugin.yoop\";\nexport function onParse(): int32 { return int32(plug.phase().len); }\nexport function onCodegen(): int32 { return int32(plug.ir().len); }");
+  let test theory: Case = t.asserts("a plugin importing std/plugin loads active") {
+    theory.isSuccessful = h.active && h.error.len == 0;
+    theory.detail = `active=${h.active} error="${h.error}"`;
+  }
+
+  // "parse" is five bytes; the hook echoing phase().len proves the bridge's
+  // phase field reached interpreted code through the namespaced wrapper.
+  let test theory: Case = t.asserts("a hook reads the phase off the bridge") {
+    theory.isSuccessful = runPluginPhase(ref h, "parse", "onParse") == 5;
+    theory.detail = "phase().len did not come back as 5";
+  }
+
+  disposable ir: Text = text.fromString("abc");
+  refreshIr(ref h, ref ir);
+  let test theory: Case = t.asserts("refreshIr copies the IR where a hook can read it") {
+    theory.isSuccessful = runPluginPhase(ref h, "codegen", "onCodegen") == 3;
+    theory.detail = "ir().len did not come back as 3";
+  }
+
+  // The refresh serializers against a REAL graph - the plugin's own stands
+  // in for the user program's, which is the same shape.
+  refreshParseArtifacts(ref h, ref h.graph);
+  let test theory: Case = t.asserts("a parse refresh fills tokens, ast and modules") {
+    theory.isSuccessful = h.bridge.tokensText.len > 0 && h.bridge.astJson.len > 0 &&
+      h.bridge.modulesJson.len > 0;
+    theory.detail = `tokens=${h.bridge.tokensText.len} ast=${h.bridge.astJson.len} modules=${h.bridge.modulesJson.len}`;
+  }
+  let test theory: Case = t.asserts("the modules payload is the nodes-and-edges object") {
+    theory.isSuccessful = mentions(h.bridge.modulesJson, "\"nodes\":[") &&
+      mentions(h.bridge.modulesJson, "\"edges\":[") &&
+      mentions(h.bridge.modulesJson, "\"entry\":true");
+    theory.detail = `payload was: ${h.bridge.modulesJson}`;
+  }
+}
+
+suite function aPluginDrivesAChildOverLinePipes(): void {
+  // ONE host, one hook, every scenario in sequence - a suite runs inside a
+  // 1 MiB arena and each loaded plugin graph costs a real slice of it, so
+  // the scenarios share a load and their order tells the story: the no-child
+  // family answers cleanly, `cat` (the identity over lines) round-trips,
+  // kill reaps, and a child that exits at once reads as an empty line - the
+  // documented "stop waiting" - never as a hang.
+  disposable h: PluginHost = hostOf(
+    "import * as plug from \"std/plugin.yoop\";\nexport function onParse(): int32 {\n  if (plug.sendLine(\"x\") != 0 - 1) { return 61; }\n  if (plug.recvLine().len != 0) { return 62; }\n  if (plug.childAlive() != 0) { return 63; }\n  if (plug.spawn(\"cat\") != 0) { return 81; }\n  if (plug.childAlive() != 1) { return 82; }\n  if (plug.sendLine(\"ping\") != 0) { return 83; }\n  if (plug.recvLine().len != 4) { return 84; }\n  if (plug.killChild() != 0) { return 85; }\n  if (plug.childAlive() != 0) { return 86; }\n  if (plug.spawn(\"true\") != 0) { return 71; }\n  if (plug.recvLine().len != 0) { return 72; }\n  const ignored = plug.killChild();\n  return 0;\n}");
+  let test theory: Case = t.asserts("the child-process family behaves through a hook, end to end") {
+    theory.isSuccessful = runPluginPhase(ref h, "parse", "onParse") == 0;
+    theory.detail = "a child step failed - the hook's return code in the log names which";
+  }
+
+  // The artifact framing, through cat: refreshIr puts "abc" on the bridge,
+  // sendArtifact frames it, and the echoed header line is its receipt.
+  disposable framing: PluginHost = hostOf(
+    "import * as plug from \"std/plugin.yoop\";\nexport function onCodegen(): int32 {\n  if (plug.spawn(\"cat\") != 0) { return 51; }\n  if (plug.sendArtifact(\"ir\") != 0) { return 52; }\n  if (plug.recvLine().len != 9) { return 53; }\n  if (plug.recvLine().len != 3) { return 54; }\n  const ignored = plug.killChild();\n  return 0;\n}");
+  disposable ir: Text = text.fromString("abc");
+  refreshIr(ref framing, ref ir);
+  let test theory: Case = t.asserts("sendArtifact frames the bridge's payload for the child") {
+    // "blob ir 3" is nine bytes, then the three payload bytes on their line.
+    theory.isSuccessful = runPluginPhase(ref framing, "codegen", "onCodegen") == 0;
+    theory.detail = "the framed artifact did not echo back as header then payload";
+  }
+}
+
+suite function theParseRefreshStreamsTheClosureToTheChild(): void {
+  // The plugin spawns cat, then the HOST refresh streams every file of the
+  // graph down the pipe. cat echoes it back: the first line is a `file`
+  // header (module 0, file 0, an absolute-ish path - longer than the bare
+  // prefix), the next a tokens blob header. The hook does the reading and
+  // reports lengths; the shapes are pinned renderer-side.
+  disposable h: PluginHost = hostOf(
+    "import * as plug from \"std/plugin.yoop\";\nexport function onParse(): int32 {\n  if (plug.spawn(\"cat\") != 0) { return 41; }\n  return 0;\n}\nexport function onCodegen(): int32 {\n  const fileLine = plug.recvLine();\n  if (fileLine.len < 10) { return 42; }\n  const blobLine = plug.recvLine();\n  if (blobLine.len < 12) { return 43; }\n  const ignored = plug.killChild();\n  return 0;\n}");
+  let test theory: Case = t.asserts("spawn first, then a refresh reaches the child as file frames") {
+    const spawned = runPluginPhase(ref h, "parse", "onParse");
+    refreshParseArtifacts(ref h, ref h.graph);
+    theory.isSuccessful = spawned == 0 &&
+      runPluginPhase(ref h, "codegen", "onCodegen") == 0;
+    theory.detail = "the streamed closure did not echo back as file+blob frames";
+  }
+}
+
+suite function aHookThatCannotEvaluateStopsTheBuildAsAnError(): void {
+  // getenv typechecks - it is a legal extern declaration - and the evaluator
+  // then refuses it as impure, exactly as it would under @precompile. The
+  // host turns that refusal into exit code 1 rather than a crash.
+  disposable impure: PluginHost = hostOf(
+    "extern \"C\" from \"stdlib.h\" {\n  function getenv(name: string): string;\n}\nexport function onParse(): int32 {\n  const home = getenv(\"HOME\");\n  return 0;\n}");
+  let test theory: Case = t.asserts("an off-list extern in a hook fails the build with code 1") {
+    theory.isSuccessful = impure.active && runPluginPhase(ref impure, "parse", "onParse") == 1;
+    theory.detail = `active=${impure.active}`;
+  }
+}

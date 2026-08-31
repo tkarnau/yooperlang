@@ -1,0 +1,180 @@
+// The renderer's half of the wire: parse what the plugin sends. Pure, and
+// allocation-free on purpose - a control line becomes enums and a size, and
+// the tests exercise exactly what the frame loop will feed it.
+//
+// The plugin's stream, one message per line:
+//
+//   phase <name>       the build reached a gate and is BLOCKED on us
+//   blob <kind> <n>    the next n bytes (then one newline) are an artifact
+//   file <m> <f> <p>   a file of the graph: module m, file f, path p; its
+//                      tokens and ast blobs follow - the browsable closure
+//   done <ok>          the build finished; ok is 1 or 0
+//
+// Ours back: `continue` to open the gate. That single word is the whole
+// upstream protocol - the build's own exit code carries everything else.
+
+import * as str from "std/core/strings.yoop";
+import * as intr from "std/core/intrinsics.yoop";
+
+export enum ControlKind {
+  NONE 0,
+  PHASE 1,
+  BLOB 2,
+  DONE 3,
+  FILE 4,
+}
+
+export enum Artifact {
+  NONE 0,
+  TOKENS 1,
+  AST 2,
+  MODULES 3,
+  DIAGNOSTICS 4,
+  IR 5,
+}
+
+export enum Phase {
+  NONE 0,
+  START 1,
+  PARSE 2,
+  TYPECHECK 3,
+  CODEGEN 4,
+  LINK 5,
+}
+
+export type Control {
+  kind: ControlKind,
+  phase: Phase,
+  artifact: Artifact,
+  size: usize,
+  ok: int32,
+  // FILE only: which module and file, and where in the LINE its path
+  // begins - the caller owns the line's text and slices the path itself.
+  modIdx: usize,
+  fileIdx: usize,
+  pathAt: usize,
+}
+
+export function noControl(): Control {
+  return { kind: ControlKind.NONE, phase: Phase.NONE, artifact: Artifact.NONE,
+    size: 0, ok: 0, modIdx: 0, fileIdx: 0, pathAt: 0 };
+}
+
+export function parseControl(line: string): Control {
+  let c: Control = noControl();
+  if (str.stringStartsWith(line, "phase ")) {
+    c.kind = ControlKind.PHASE;
+    c.phase = phaseNamed(line, 6);
+    return c;
+  }
+  if (str.stringStartsWith(line, "blob ")) {
+    c.artifact = artifactNamed(line, 5);
+    if (c.artifact == Artifact.NONE) {
+      return noControl();
+    }
+    // The size begins after the artifact word's own space.
+    const at = 5 + artifactNameLen(c.artifact) + 1;
+    c.size = decimalAt(line, at);
+    c.kind = ControlKind.BLOB;
+    return c;
+  }
+  if (str.stringStartsWith(line, "file ")) {
+    c.kind = ControlKind.FILE;
+    let at: usize = 5;
+    c.modIdx = decimalAt(line, at);
+    at = afterDecimal(line, at) + 1;
+    c.fileIdx = decimalAt(line, at);
+    c.pathAt = afterDecimal(line, at) + 1;
+    return c;
+  }
+  if (str.stringStartsWith(line, "done ")) {
+    c.kind = ControlKind.DONE;
+    c.ok = int32(decimalAt(line, 5));
+    return c;
+  }
+  return c;
+}
+
+// The phase's display name - what the HUD and the status line both print,
+// kept beside the enum so a new phase cannot forget its label.
+export function phaseLabel(p: Phase): string {
+  switch (p) {
+    case Phase.START: { return "start"; }
+    case Phase.PARSE: { return "parse"; }
+    case Phase.TYPECHECK: { return "typecheck"; }
+    case Phase.CODEGEN: { return "codegen"; }
+    case Phase.LINK: { return "link"; }
+    default: { return "?"; }
+  }
+}
+
+function phaseNamed(line: string, at: usize): Phase {
+  if (wordAtIs(line, at, "start")) { return Phase.START; }
+  if (wordAtIs(line, at, "parse")) { return Phase.PARSE; }
+  if (wordAtIs(line, at, "typecheck")) { return Phase.TYPECHECK; }
+  if (wordAtIs(line, at, "codegen")) { return Phase.CODEGEN; }
+  if (wordAtIs(line, at, "link")) { return Phase.LINK; }
+  return Phase.NONE;
+}
+
+function artifactNamed(line: string, at: usize): Artifact {
+  if (wordAtIs(line, at, "tokens")) { return Artifact.TOKENS; }
+  if (wordAtIs(line, at, "ast")) { return Artifact.AST; }
+  if (wordAtIs(line, at, "modules")) { return Artifact.MODULES; }
+  if (wordAtIs(line, at, "diagnostics")) { return Artifact.DIAGNOSTICS; }
+  if (wordAtIs(line, at, "ir")) { return Artifact.IR; }
+  return Artifact.NONE;
+}
+
+function artifactNameLen(a: Artifact): usize {
+  switch (a) {
+    case Artifact.TOKENS: { return 6; }
+    case Artifact.AST: { return 3; }
+    case Artifact.MODULES: { return 7; }
+    case Artifact.DIAGNOSTICS: { return 11; }
+    case Artifact.IR: { return 2; }
+    default: { return 0; }
+  }
+}
+
+// True when the word starting at `at` is exactly `word` - ended by a space
+// or the line's end, so "ast" never matches a leading slice of "astral".
+function wordAtIs(line: string, at: usize, word: string): bool {
+  const bytes: uint8[] = intr.stringAsBytes(line);
+  const wb: uint8[] = intr.stringAsBytes(word);
+  if (at + wb.len > bytes.len) {
+    return false;
+  }
+  let i: usize = 0;
+  while (i < wb.len) {
+    if (bytes[at + i] != wb[i]) {
+      return false;
+    }
+    i += 1;
+  }
+  return at + wb.len == bytes.len || bytes[at + wb.len] == 32;
+}
+
+// Where the decimal starting at `at` ends.
+function afterDecimal(line: string, at: usize): usize {
+  const bytes: uint8[] = intr.stringAsBytes(line);
+  let i = at;
+  while (i < bytes.len && bytes[i] >= 48 && bytes[i] <= 57) {
+    i += 1;
+  }
+  return i;
+}
+
+// The unsigned decimal starting at `at`; stops at the first non-digit.
+// Garbage parses as 0, which the caller treats as an empty blob - the
+// stream is a pipe from our own plugin, not an adversary.
+function decimalAt(line: string, at: usize): usize {
+  const bytes: uint8[] = intr.stringAsBytes(line);
+  let n: usize = 0;
+  let i: usize = at;
+  while (i < bytes.len && bytes[i] >= 48 && bytes[i] <= 57) {
+    n = n * 10 + usize(bytes[i] - 48);
+    i += 1;
+  }
+  return n;
+}

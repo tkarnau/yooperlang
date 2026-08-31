@@ -1,0 +1,69 @@
+// The world's one shader program, and the dusk it paints.
+//
+// GLSL 1.20 against the compatibility profile: the vertex stage is a
+// pass-through over the fixed matrices (ftransform), keeping the eye-space
+// position; the fragment stage restyles EVERY district at once - a gentle
+// quadratic lift that makes saturated colors pop off the haze, and a
+// distance fog that dissolves the far world into the dusk instead of into
+// black. Sources are functions, not module consts, because module-level
+// string initialization does not process escapes and GLSL needs newlines.
+//
+// A machine whose GL cannot compile this (or a driver stuck pre-2.1) gets
+// the unshaded world: shadeInit answers 0, the callers skip useProgram,
+// and everything still draws.
+
+import * as gl from "./gl.yoop";
+import { VERTEX_SHADER, FRAGMENT_SHADER } from "./gl.yoop";
+
+function vertexSrc(): string {
+  return "#version 120\nvarying vec4 vColor;\nvarying vec3 vEye;\nvoid main() {\n  gl_Position = ftransform();\n  vEye = (gl_ModelViewMatrix * gl_Vertex).xyz;\n  vColor = gl_Color;\n}\n";
+}
+
+function fragmentSrc(): string {
+  return "#version 120\nvarying vec4 vColor;\nvarying vec3 vEye;\nuniform vec3 uDusk;\nuniform float uDensity;\nvoid main() {\n  vec3 c = vColor.rgb;\n  c += c * c * 0.35;\n  float d = length(vEye);\n  float f = 1.0 - exp(-d * d * uDensity);\n  gl_FragColor = vec4(mix(c, uDusk, f * 0.8), vColor.a);\n}\n";
+}
+
+export type Shade {
+  program: uint32,
+  duskLoc: int32,
+  densityLoc: int32,
+}
+
+export function shadeInit(): Shade {
+  const none: Shade = { program: 0, duskLoc: 0, densityLoc: 0 };
+  const vs = gl.compileShader(VERTEX_SHADER, vertexSrc());
+  if (vs == 0) {
+    return none;
+  }
+  const fs = gl.compileShader(FRAGMENT_SHADER, fragmentSrc());
+  if (fs == 0) {
+    return none;
+  }
+  const prog = gl.linkProgram(vs, fs);
+  if (prog == 0) {
+    return none;
+  }
+  return {
+    program: prog,
+    duskLoc: gl.uniformLocation(prog, "uDusk"),
+    densityLoc: gl.uniformLocation(prog, "uDensity"),
+  };
+}
+
+// The haze the far world dissolves into - a warm mauve, not black: dusk.
+// Density is 1 over the square of roughly how far things stay crisp.
+export function shadeBegin(ref sh: Shade): void {
+  if (sh.program == 0) {
+    return;
+  }
+  gl.useProgram(sh.program);
+  gl.uniform3(sh.duskLoc, 0.46, 0.34, 0.40);
+  gl.uniform1(sh.densityLoc, 0.000028);
+}
+
+export function shadeEnd(ref sh: Shade): void {
+  if (sh.program == 0) {
+    return;
+  }
+  gl.useProgram(0);
+}

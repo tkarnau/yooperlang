@@ -1,0 +1,35 @@
+// The bridge back to the editor: pressing O on a source-coupled pick opens
+// the file at that line, the way the compiler itself shells out to clang.
+// The command is one shell line so the EDITOR choice stays an environment
+// matter - $YOOP_VIZWORLD_EDITOR when set ("vim +{}" people exist), else
+// VSCode's `code --goto`, which jumps a running window rather than opening
+// a new one. Backgrounded and silenced: an editor's chatter is not the
+// renderer's, and its lifetime is not the renderer's problem.
+//
+// Building the line is split from running it so the exact string a pick
+// turns into is pinned by a test rather than believed.
+
+import { Text }, * as text from "std/core/text.yoop";
+
+extern "C" from "stdlib.h" {
+  function system(cmd: string): int32;
+}
+
+export function buildEditorCmd(path: string, line: usize, col: usize, ref out: Text): void {
+  text.clear(ref out);
+  text.push(ref out, "${YOOP_VIZWORLD_EDITOR:-code --goto} \"");
+  text.push(ref out, path);
+  text.push(ref out, ":");
+  text.pushUint(ref out, uint64(line));
+  text.push(ref out, ":");
+  text.pushUint(ref out, uint64(col));
+  text.push(ref out, "\" >/dev/null 2>&1 &");
+}
+
+export function openInEditor(path: string, line: usize, col: usize, ref scratch: Text): void {
+  if (path.len == 0) {
+    return;
+  }
+  buildEditorCmd(path, line, col, ref scratch);
+  const ignored = system(text.view(ref scratch));
+}

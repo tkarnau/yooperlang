@@ -3,14 +3,14 @@
 window.YOOP_DATA = window.YOOP_DATA || {};
 window.YOOP_DATA.status = {
  "version": "0.2.0",
- "commit": "bc65761",
- "commitDate": "2026-08-26",
- "generatedAt": "2026-08-26",
- "stdModules": 32,
- "bootstrapFiles": 206,
- "bootstrapLines": 48260,
+ "commit": "11c3daf",
+ "commitDate": "2026-08-27",
+ "generatedAt": "2026-08-28",
+ "stdModules": 33,
+ "bootstrapFiles": 209,
+ "bootstrapLines": 49083,
  "exampleProgramsPass": 244,
- "exampleProgramsFail": 142,
+ "exampleProgramsFail": 143,
  "specLines": 1900,
- "stdExports": 522
+ "stdExports": 532
 };
