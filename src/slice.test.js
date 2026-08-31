@@ -321,7 +321,11 @@ describe("vertical slice: the bootstrap compiler produces working executables", 
         const childLog = path.join(work, "gate_child.log");
         fs.writeFileSync(child,
           "#!/bin/sh\n" +
-          `while IFS= read -r line; do echo "$line" >> "${childLog}"; echo go; done\n`);
+          `while IFS= read -r line; do
+            case "$line" in
+              at*|finish*) echo "$line" >> "${childLog}"; echo go ;;
+            esac
+          done\n`);
         fs.chmodSync(child, 0o755);
         const plug = writePlugin("gate_plugin.yoop",
           'import * as plug from "std/plugin.yoop";\n' +
