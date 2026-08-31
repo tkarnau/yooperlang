@@ -1069,6 +1069,61 @@ int yoop_proc_kill(int64_t h) {
     return 0;
 }
 
+// ----- run a program to completion, from an argv ARRAY --------------------
+//
+// This is what the compiler drives clang and a `--test` binary with, and the
+// reason it exists is that there is NO SHELL in the path. `system()` hands one
+// string to `/bin/sh -c`, so every byte in it is interpreted: a library name
+// spliced from `extern "C" from library "m; rm -rf ~"` was a command, not a
+// name. An argv array has no such layer - argv[1] is delivered to the child as
+// exactly those bytes, whatever they are - so the injection class does not
+// exist here rather than being escaped away.
+//
+// posix_spawnp rather than fork+exec: it is what the C library recommends in a
+// process that owns threads (the worker pool), and on every supported libc it
+// reports an exec failure (a program not on PATH) as its own return value
+// instead of as a child that exited 127, so "clang is not installed" comes
+// back as -1 with errno = ENOENT and the caller can say so.
+//
+// The child inherits stdin, stdout, stderr and the environment; nothing is
+// redirected. That is the right shape for a compiler driving a compiler.
+#include <spawn.h>
+extern char** environ;
+
+int yoop_proc_run(const char* const* argv, size_t argc) {
+    if (!argv || argc == 0 || !argv[0]) {
+        errno = EINVAL;
+        return -1;
+    }
+    // A NULL-terminated copy, because that is the shape exec wants and the
+    // yoop side hands over a (pointer, length) pair.
+    char** av = (char**)calloc(argc + 1, sizeof(char*));
+    if (!av) return -1;
+    for (size_t i = 0; i < argc; i++) av[i] = (char*)argv[i];
+    av[argc] = NULL;
+
+    pid_t pid = 0;
+    int rc = posix_spawnp(&pid, av[0], NULL, NULL, av, environ);
+    free(av);
+    if (rc != 0) {
+        errno = rc;
+        return -1;
+    }
+
+    int status = 0;
+    for (;;) {
+        if (waitpid(pid, &status, 0) < 0) {
+            if (errno == EINTR) continue;
+            return -1;
+        }
+        break;
+    }
+    if (WIFEXITED(status)) return WEXITSTATUS(status);
+    if (WIFSIGNALED(status)) return 128 + WTERMSIG(status);
+    errno = ECHILD;
+    return -1;
+}
+
 #else  // _WIN32
 
 int64_t yoop_proc_spawn(const char* cmdline) { (void)cmdline; return -1; }
@@ -1077,5 +1132,110 @@ int yoop_proc_write_blob(int64_t h, const char* kind, const char* payload) { (vo
 const char* yoop_proc_read_line(int64_t h) { (void)h; return ""; }
 int yoop_proc_alive(int64_t h) { (void)h; return 0; }
 int yoop_proc_kill(int64_t h) { (void)h; return -1; }
+
+// ----- run a program to completion, from an argv ARRAY --------------------
+//
+// Windows has no execve: CreateProcess takes ONE command-line string, and the
+// child's C runtime splits it back into argv. So an argv array has to be
+// serialized after all - but into the fixed grammar the Microsoft CRT parses
+// (documented under "Parsing C Command-Line Arguments"), not into cmd.exe's,
+// and cmd.exe is never involved. The rules, per argument:
+//
+//   * no spaces, tabs or quotes: emitted verbatim
+//   * otherwise wrapped in double quotes, where a run of N backslashes before
+//     a quote becomes 2N+1 backslashes (so the quote is literal), a run of N
+//     backslashes at the END becomes 2N (so the closing quote survives), and
+//     backslashes anywhere else are left alone
+//
+// That is the inverse of what the CRT does, so the child sees the array the
+// caller built. `%VAR%`, `&`, `|` and friends mean nothing here: those are
+// cmd.exe's, and there is no cmd.exe.
+
+typedef struct {
+    char*  buf;
+    size_t len;
+    size_t cap;
+} win_cmdline_t;
+
+static int win_cmdline_push(win_cmdline_t* c, char ch) {
+    if (c->len + 1 >= c->cap) {
+        size_t grown = c->cap ? c->cap * 2 : 256;
+        char* p = (char*)realloc(c->buf, grown);
+        if (!p) return -1;
+        c->buf = p;
+        c->cap = grown;
+    }
+    c->buf[c->len++] = ch;
+    c->buf[c->len] = 0;
+    return 0;
+}
+
+static int win_cmdline_push_arg(win_cmdline_t* c, const char* arg) {
+    int needs_quotes = (arg[0] == 0);
+    for (const char* p = arg; *p && !needs_quotes; p++) {
+        if (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\v' || *p == '"') needs_quotes = 1;
+    }
+    if (!needs_quotes) {
+        for (const char* p = arg; *p; p++) if (win_cmdline_push(c, *p)) return -1;
+        return 0;
+    }
+    if (win_cmdline_push(c, '"')) return -1;
+    for (const char* p = arg;; p++) {
+        size_t backslashes = 0;
+        while (*p == '\\') { backslashes++; p++; }
+        if (*p == 0) {
+            for (size_t i = 0; i < backslashes * 2; i++) if (win_cmdline_push(c, '\\')) return -1;
+            break;
+        }
+        if (*p == '"') {
+            for (size_t i = 0; i < backslashes * 2 + 1; i++) if (win_cmdline_push(c, '\\')) return -1;
+            if (win_cmdline_push(c, '"')) return -1;
+        } else {
+            for (size_t i = 0; i < backslashes; i++) if (win_cmdline_push(c, '\\')) return -1;
+            if (win_cmdline_push(c, *p)) return -1;
+        }
+    }
+    return win_cmdline_push(c, '"');
+}
+
+int yoop_proc_run(const char* const* argv, size_t argc) {
+    if (!argv || argc == 0 || !argv[0]) {
+        errno = EINVAL;
+        return -1;
+    }
+    win_cmdline_t c = { NULL, 0, 0 };
+    for (size_t i = 0; i < argc; i++) {
+        if (i > 0 && win_cmdline_push(&c, ' ')) { free(c.buf); return -1; }
+        if (win_cmdline_push_arg(&c, argv[i] ? argv[i] : "")) { free(c.buf); return -1; }
+    }
+    if (!c.buf && win_cmdline_push(&c, 0)) return -1;
+
+    STARTUPINFOA si;
+    PROCESS_INFORMATION pi;
+    memset(&si, 0, sizeof si);
+    memset(&pi, 0, sizeof pi);
+    si.cb = sizeof si;
+    // lpApplicationName NULL: the first token of the line names the program,
+    // resolved against PATH with `.exe` appended when it has no extension -
+    // which is what makes a bare `clang` work. Handles are inherited so the
+    // child's stdout and stderr are ours.
+    BOOL ok = CreateProcessA(NULL, c.buf, NULL, NULL, TRUE, 0, NULL, NULL, &si, &pi);
+    free(c.buf);
+    if (!ok) {
+        DWORD e = GetLastError();
+        errno = (e == ERROR_FILE_NOT_FOUND || e == ERROR_PATH_NOT_FOUND) ? ENOENT : EACCES;
+        return -1;
+    }
+    CloseHandle(pi.hThread);
+    WaitForSingleObject(pi.hProcess, INFINITE);
+    DWORD code = 0;
+    if (!GetExitCodeProcess(pi.hProcess, &code)) {
+        CloseHandle(pi.hProcess);
+        errno = ECHILD;
+        return -1;
+    }
+    CloseHandle(pi.hProcess);
+    return (int)code;
+}
 
 #endif

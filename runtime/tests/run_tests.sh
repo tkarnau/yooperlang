@@ -25,7 +25,7 @@ $RT/yoop_debug.c $RT/yoop_format.c $RT/yoop_args.c $RT/yoop_alloc.c \
 $RT/yoop_time.c $RT/yoop_atomic.c"
 
 TESTS="smoke submit_one submit_many refcount park_unpark sleep_ms io_pipe \
-cancel_token io_deadline io_cancel io_fd_conflict"
+proc_spawn proc_run cancel_token io_deadline io_cancel io_fd_conflict"
 
 for t in $TESTS; do
     bin="$OUT/yoop_test_$t"

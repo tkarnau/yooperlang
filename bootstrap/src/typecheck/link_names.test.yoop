@@ -1,0 +1,86 @@
+// Tests for the `from library "NAME"` name rule.
+//
+// The rule decides what a source file may put on the linker's command line, so
+// both halves matter equally: every name a real program writes has to pass,
+// and every shape that would be a flag or a command has to be refused with a
+// message that says why. The end-to-end half - that a refused name is a
+// diagnostic at the block and the program never reaches clang - is
+// examples/fail/extern_library_bad_name.yoop.
+
+import.test;
+import * as t from "std/test.yoop";
+import { suite, test, Case } from "std/test.yoop";
+import * as str from "std/core/strings.yoop";
+import { linkNameProblem } from "../typecheck";
+
+suite function everyNameARealProgramWritesIsAccepted(): void {
+  // The names in this tree today: libc's math, OpenSSL, SQLite, SDL, and the
+  // one framework spelling.
+  let test theory: Case = t.asserts("m, ssl, crypto, sqlite3, SDL2 pass") {
+    theory.isSuccessful = ok("m") && ok("ssl") && ok("crypto") && ok("sqlite3") && ok("SDL2");
+    theory.detail = `m: "${linkNameProblem("m")}", SDL2: "${linkNameProblem("SDL2")}"`;
+  }
+
+  let test theory: Case = t.asserts("the framework spelling passes with a plain name after the colon") {
+    theory.isSuccessful = ok("framework:OpenGL") && ok("framework:Cocoa");
+    theory.detail = `got "${linkNameProblem("framework:OpenGL")}"`;
+  }
+
+  // `stdc++`, `SDL2_image`, `foo.so.1` and a versioned name are all things a
+  // library is called, so the punctuation they need is in the set.
+  let test theory: Case = t.asserts("underscore, dot, plus and an interior dash pass") {
+    theory.isSuccessful = ok("stdc++") && ok("SDL2_image") && ok("foo.so.1") && ok("gtk-3");
+    theory.detail = `stdc++: "${linkNameProblem("stdc++")}", gtk-3: "${linkNameProblem("gtk-3")}"`;
+  }
+}
+
+suite function anythingThatIsNotANameIsRefused(): void {
+  // The shape the rule exists for. Even though the link step no longer runs a
+  // shell, a name like this names nothing and the message should say so at
+  // the declaration rather than as a linker error about `-lm;`.
+  let test theory: Case = t.asserts("shell metacharacters are refused by name") {
+    theory.isSuccessful = bad("m; rm -rf ~") && bad("m | cat") && bad("$(id)") && bad("a b");
+    theory.detail = `got "${linkNameProblem("m; rm -rf ~")}"`;
+  }
+
+  // A leading dash is the one thing an argv array cannot make harmless: the
+  // linker reads `-Wl,-rpath,/x` as the flag it is, whichever argument slot it
+  // arrives in.
+  let test theory: Case = t.asserts("a leading dash is refused as a flag, for libraries and frameworks alike") {
+    const lib = linkNameProblem("-Wl,-rpath,/tmp");
+    const fw = linkNameProblem("framework:-Wl,-rpath,/tmp");
+    theory.isSuccessful = contains(lib, "flag") && contains(fw, "flag");
+    theory.detail = `library: "${lib}", framework: "${fw}"`;
+  }
+
+  let test theory: Case = t.asserts("an empty name, and an empty framework name, are refused") {
+    theory.isSuccessful = bad("") && bad("framework:");
+    theory.detail = `empty: "${linkNameProblem("")}", framework: "${linkNameProblem("framework:")}"`;
+  }
+
+  // A path is not a name: `-l` takes what goes between `lib` and `.so`, and a
+  // slash means the writer wanted `-L`, which is YOOP_LIB_PATH's job.
+  let test theory: Case = t.asserts("a slash, a quote and a colon outside the framework prefix are refused") {
+    theory.isSuccessful = bad("lib/foo") && bad("/usr/lib/libm.so") && bad("m\"") && bad("a:b");
+    theory.detail = `path: "${linkNameProblem("lib/foo")}"`;
+  }
+
+  // The message names the offending value, so the reader can find the block
+  // it came from among several.
+  let test theory: Case = t.asserts("the message quotes the name it refused") {
+    theory.isSuccessful = contains(linkNameProblem("m; rm -rf ~"), "\"m; rm -rf ~\"");
+    theory.detail = `got "${linkNameProblem("m; rm -rf ~")}"`;
+  }
+}
+
+function ok(name: string): bool {
+  return linkNameProblem(name).len == 0;
+}
+
+function bad(name: string): bool {
+  return linkNameProblem(name).len > 0;
+}
+
+function contains(haystack: string, needle: string): bool {
+  return str.stringIndexOf(haystack, needle) < haystack.len;
+}

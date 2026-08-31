@@ -1489,7 +1489,11 @@ export "C" function on_tick(ms: int32): int32 { return ms + 1; }
 ```
 
 - `extern "C" from "..."` reads like `import … from …` and positions C interop as a peer of module imports.
-- `extern "C" from library "..."` links against a named library (emits `-lNAME`).
+- `extern "C" from library "..."` links against a named library (emits `-lNAME`,
+  or `-framework NAME` for the `framework:NAME` spelling on Apple). Because the
+  name goes on the linker's command line, it is checked at the declaration: only
+  letters, digits, `_`, `.`, `+` and `-`, and it may not begin with `-`. Anything
+  else is a compile error at the block.
 - `export "C" function …` emits a function with the C ABI and an unmangled symbol.
 - `extern "Rust" from ...` / `extern "Zig" from ...` - syntax reserved.
 

@@ -481,6 +481,21 @@ const char* yoop_proc_read_line(int64_t h);
 int         yoop_proc_alive(int64_t h);
 int         yoop_proc_kill(int64_t h);
 
+// Run argv[0] with argv[1..argc) as its arguments, with NO shell in between,
+// and wait for it to finish. argv[0] is resolved against PATH. The child
+// inherits stdin, stdout, stderr and the environment.
+//
+// Returns the child's exit code (0..255); 128 + the signal number when a POSIX
+// child died on a signal; -1 with errno set when the child could not be
+// started at all (ENOENT is the common one: the program is not on PATH).
+//
+// This is how the compiler runs clang and a `--test` binary. It exists so no
+// byte of a link line is ever interpreted by a shell - a library name from a
+// source file reaches the linker as the argument it is, whatever it contains.
+// Implemented on every platform (posix_spawnp; CreateProcess on Windows,
+// serializing the array by the CRT's own quoting rules, never through cmd.exe).
+int yoop_proc_run(const char* const* argv, size_t argc);
+
 // ----- POSIX-shaped socket calls -------------------------------------------
 //
 // These present the BSD-sockets shape - int descriptors, -1 on failure, errno

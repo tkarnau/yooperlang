@@ -100,6 +100,11 @@ function registerFileShells(
         //   "intrinsic"  there IS no symbol - codegen lowers the call to
         //                instructions - so it must NOT go in `externNames`, or
         //                a call would be emitted to something nothing defines
+        //
+        // A `from library "NAME"` clause puts NAME on the linker's command
+        // line, so the name is checked here where there is a line to point at.
+        // See link_names.yoop.
+        checkExternLinkName(ref prog, declNode, ref m.ast);
         const isIntrinsic = declNode.flagA;
         let x: usize = 0;
         while (x < declNode.childCount) {

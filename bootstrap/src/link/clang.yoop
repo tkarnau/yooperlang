@@ -1,11 +1,17 @@
 module link;
 
-// Layer 6: LLVM IR text -> executable, by shelling out to clang.
+// Layer 6: LLVM IR text -> executable, by running clang.
 //
-// This layer is identical in both implementations by design - it is the one
-// layer that does not deviate. The only wrinkle is that yoop has no process
-// API, so we reach for libc's `system` directly. That is why this
-// file is `import.unsafe`.
+// clang is run from an ARGV ARRAY through the runtime's `yoop_proc_run`, and
+// never through a shell. That is a security property, not a style choice: the
+// link line carries strings copied out of the program being compiled (every
+// `extern "C" from library "NAME"` becomes `-lNAME`), and a shell would
+// interpret every byte of them. `library "m; rm -rf ~"` used to be a command;
+// as an argv element it is one library clang cannot find, and the typechecker
+// refuses the name before it gets even that far (typecheck/link_names.yoop).
+//
+// The file is `import.unsafe` for one reason: handing the array to C means
+// reading its data pointer (`.ptr`), which is gated.
 //
 // A program that only touches libc needs no yoop runtime, which is what keeps
 // the link line down to one clang invocation and one input. When codegen says
@@ -21,10 +27,6 @@ import { Text }, * as text from "std/core/text.yoop";
 import { Vec }, * as vec from "std/core/vec.yoop";
 import { disposable } from "std/core/kinds.yoop";
 
-extern "C" from "stdlib.h" {
-  function system(cmd: string): c_int;
-}
-
 // Which platform we are building for. The reference reads `process.platform`;
 // this is the bootstrap's equivalent, and the three platform-dependent rules
 // below are the reason it exists. Values mirror YOOP_PLATFORM_* in
@@ -34,14 +36,18 @@ extern "C" from "stdlib.h" {
 // that module is not in the bootstrap's import graph today, and the bootstrap
 // has to COMPILE everything it imports. Adding a module to the self-hosting
 // graph to read one integer is a much larger bet than one extern line.
+//
+// `yoop_proc_run` is the process primitive: argv in, exit code out, no shell.
+// Its contract is on the declaration in runtime/yoop_runtime.h.
 extern "C" from "yoop_runtime" {
   function yoop_runtime_platform(): c_int;
+  function yoop_proc_run(argv: unsafe_ptr<string>, argc: usize): c_int;
 }
 
 // The platform this compiler is RUNNING on, which is also the one it builds
 // for - nothing here cross-compiles. Exported because the link line is no
 // longer the only caller: test_mode/run.yoop needs the same answer to decide
-// an executable suffix and how to read an exit status.
+// an executable suffix.
 export function currentPlatform(): c_int {
   return yoop_runtime_platform();
 }
@@ -50,11 +56,24 @@ export const PLATFORM_LINUX: c_int = 1;
 export const PLATFORM_MACOS: c_int = 2;
 export const PLATFORM_WINDOWS: c_int = 3;
 
+// Runs `args[0]` with `args[1..]` as its arguments and waits for it. Returns
+// the child's exit code, 128 + signal for a child killed by one, or -1 when it
+// could not be started (errno says why; ENOENT means "not on PATH").
+//
+// Every argument is delivered to the child as exactly the bytes in the
+// vector. There is no shell, so there is nothing to quote and nothing to
+// escape - which is the whole point, and why this is the ONE way the compiler
+// runs another program. test_mode/run.yoop runs the test binary through it.
+export function runProgram(ref args: Vec<string>): c_int {
+  const argv = vec.vecAsArray(ref args);
+  return yoop_proc_run(argv.ptr, argv.len);
+}
+
 // `out` with the suffix the platform needs to consider it an executable.
 //
 // Windows decides what is runnable by NAME: CreateProcess appends `.exe` when
 // the name it is given has no extension, so a file literally called `hello` is
-// a valid PE image that cmd, Explorer and `system()` all refuse to launch.
+// a valid PE image that cmd, Explorer and CreateProcess all refuse to launch.
 // `yoopiler_boot hello.yoop -o hello` has to produce something the user can
 // then run, on every platform, and on this one that means four more
 // characters. A path that already ends in `.exe` is left alone rather than
@@ -121,11 +140,19 @@ export function linkExecutable(
     return writeErr;
   }
 
-  disposable cmd: Text = text.make(256);
+  // One argv element per push. A path with a space in it is one argument, and
+  // so is a path with a `$(` in it - there is no shell between here and clang
+  // to read either.
+  disposable args: Vec<string> = vec.vecNew(32);
+  vec.vecPush(ref args, "clang");
   // `-g` keeps the DWARF the IR carries. Without it clang drops the metadata on
   // the way to the object file, and a binary compiled from debuggable IR is not
   // debuggable - with nothing in the output saying so.
-  text.push(ref cmd, `clang -g -Wno-override-module -o "${exePath}" "${irPath}"`);
+  vec.vecPush(ref args, "-g");
+  vec.vecPush(ref args, "-Wno-override-module");
+  vec.vecPush(ref args, "-o");
+  vec.vecPush(ref args, exePath);
+  vec.vecPush(ref args, irPath);
 
   if (needsRuntime) {
     const runtimeRoot = discoverRuntimeRoot(exeSelfPath);
@@ -136,7 +163,7 @@ export function linkExecutable(
     disposable sources: Vec<string> = runtimeSources(runtimeRoot);
     let i: usize = 0;
     while (i < sources.len) {
-      text.push(ref cmd, ` "${vec.vecGet(ref sources, i)}"`);
+      vec.vecPush(ref args, vec.vecGet(ref sources, i));
       i += 1;
     }
 
@@ -148,20 +175,23 @@ export function linkExecutable(
     disposable glue: Vec<string> = glueSources(runtimeRoot, ref linkLibraries);
     let g: usize = 0;
     while (g < glue.len) {
-      text.push(ref cmd, ` "${vec.vecGet(ref glue, g)}"`);
+      vec.vecPush(ref args, vec.vecGet(ref glue, g));
       g += 1;
     }
   }
 
-  pushPlatformLinkFlags(ref cmd, yoop_runtime_platform());
+  pushPlatformLinkFlags(ref args, yoop_runtime_platform());
 
   // `-L` and `-I` BEFORE the `-l` names: clang resolves a library against the
   // search path in effect, and a `-l` ahead of its `-L` finds nothing.
-  pushSearchPaths(ref cmd);
-  pushRuntimeLibraries(ref cmd);
-  pushLinkLibrariesFor(ref cmd, ref linkLibraries, yoop_runtime_platform());
+  pushSearchPaths(ref args);
+  pushRuntimeLibraries(ref args);
+  pushLinkLibrariesFor(ref args, ref linkLibraries, yoop_runtime_platform());
 
-  const rc = system(text.view(ref cmd));
+  const rc = runProgram(ref args);
+  if (rc < 0) {
+    return `could not run clang (${errno.message(errno.get())}) - is it installed and on PATH?`;
+  }
   if (rc != 0) {
     return `clang failed (exit ${rc}) on ${irPath}`;
   }
@@ -196,12 +226,12 @@ export function linkExecutable(
 // of asking for it is address space a 64-bit process has in abundance.
 // Platform passed in rather than read, for the reason given on
 // `pushRuntimeLibrariesFor`.
-export function pushPlatformLinkFlags(ref cmd: Text, platform: c_int): void {
+export function pushPlatformLinkFlags(ref args: Vec<string>, platform: c_int): void {
   if (platform != PLATFORM_WINDOWS) {
     return;
   }
-  text.push(ref cmd, " -Wl,/STACK:8388608");
-  text.push(ref cmd, " -llegacy_stdio_definitions");
+  vec.vecPush(ref args, "-Wl,/STACK:8388608");
+  vec.vecPush(ref args, "-llegacy_stdio_definitions");
 }
 
 // The libraries EVERY program links, whatever its source names. Mirrors
@@ -222,18 +252,18 @@ export function pushPlatformLinkFlags(ref cmd: Text, platform: c_int): void {
 // whichever machine it happens to run on. `collectSearchPaths` is split from
 // `pushSearchPaths` in search_paths.yoop for the same reason: a rule that
 // varies by platform is exactly the rule a one-platform test cannot cover.
-export function pushRuntimeLibrariesFor(ref cmd: Text, platform: c_int): void {
+export function pushRuntimeLibrariesFor(ref args: Vec<string>, platform: c_int): void {
   if (platform == PLATFORM_WINDOWS) {
     return;
   }
-  text.push(ref cmd, " -lpthread");
+  vec.vecPush(ref args, "-lpthread");
   if (platform == PLATFORM_LINUX) {
-    text.push(ref cmd, " -lm");
+    vec.vecPush(ref args, "-lm");
   }
 }
 
-function pushRuntimeLibraries(ref cmd: Text): void {
-  pushRuntimeLibrariesFor(ref cmd, yoop_runtime_platform());
+function pushRuntimeLibraries(ref args: Vec<string>): void {
+  pushRuntimeLibrariesFor(ref args, yoop_runtime_platform());
 }
 
 // `-lm`, `-framework OpenGL`, and the OpenSSL pair.
@@ -251,7 +281,10 @@ function pushRuntimeLibraries(ref cmd: Text): void {
 //     is everything underneath it, and libssl cannot link without it; making a
 //     user name both would be a papercut whose failure mode is a wall of
 //     unresolved symbols rather than a message.
-//   * everything else is `-lNAME`.
+//   * everything else is `-lNAME`, as ONE argument. The name was checked at
+//     its declaration (typecheck/link_names.yoop), so by the time it is here it
+//     is letters, digits and a little punctuation; and even if it were not, an
+//     argv element is not a place anything gets interpreted.
 //
 // Where clang LOOKS for those libraries is search_paths.yoop, which is a
 // separate question and a separate file. The corpus needs it:
@@ -259,19 +292,21 @@ function pushRuntimeLibraries(ref cmd: Text): void {
 // Platform passed in rather than read, for the reason given on
 // `pushRuntimeLibrariesFor`: the rules that VARY by platform are exactly the
 // rules a one-platform test cannot cover.
-export function pushLinkLibrariesFor(ref cmd: Text, ref libs: Vec<string>, platform: c_int): void {
+export function pushLinkLibrariesFor(ref args: Vec<string>, ref libs: Vec<string>, platform: c_int): void {
   let i: usize = 0;
   while (i < libs.len) {
     const name = vec.vecGet(ref libs, i);
     if (str.stringStartsWith(name, FRAMEWORK_PREFIX)) {
-      pushFrameworkFor(ref cmd, name, platform);
+      pushFrameworkFor(ref args, name, platform);
     } else if (platform == PLATFORM_WINDOWS && isImplicitOnWindows(name)) {
       // Dropped rather than translated. See isImplicitOnWindows.
     } else if (str.stringEq(name, "ssl") || str.stringEq(name, "crypto")) {
-      text.push(ref cmd, " -lssl -lcrypto");
+      vec.vecPush(ref args, "-lssl");
+      vec.vecPush(ref args, "-lcrypto");
     } else {
-      text.push(ref cmd, " -l");
-      text.push(ref cmd, name);
+      // One short string per library named, once per compile. Not worth a
+      // Text; see writing_yoop.md 3.1 on when the rule applies.
+      vec.vecPush(ref args, `-l${name}`);
     }
     i += 1;
   }
@@ -296,18 +331,20 @@ function isImplicitOnWindows(name: string): bool {
 
 // One `framework:NAME` name, lowered for the platform being built for.
 //
-// Apple gets the real thing. Windows gets `opengl32` for OpenGL and nothing for
-// anything else, since every other framework name really is Apple's. Linux
-// drops the lot: it has no framework concept, and passing `-framework` to a GNU
-// ld is an "unrecognized option" rather than something it ignores.
+// Apple gets the real thing, as TWO arguments: `-framework` and then the name,
+// which is how clang's driver wants it. Windows gets `opengl32` for OpenGL and
+// nothing for anything else, since every other framework name really is
+// Apple's. Linux drops the lot: it has no framework concept, and passing
+// `-framework` to a GNU ld is an "unrecognized option" rather than something
+// it ignores.
 // Platform passed in rather than read, for the reason given on
 // `pushRuntimeLibrariesFor`.
-export function pushFrameworkFor(ref cmd: Text, name: string, platform: c_int): void {
+export function pushFrameworkFor(ref args: Vec<string>, name: string, platform: c_int): void {
   if (platform == PLATFORM_MACOS) {
-    text.push(ref cmd, " -framework ");
-    // The name after the prefix, pushed BYTE by byte: `stringSlice` returns a
-    // Result whose Ok is a fresh malloc, and a link line is not worth one.
-    pushFrom(ref cmd, name, FRAMEWORK_PREFIX.len);
+    vec.vecPush(ref args, "-framework");
+    // The name after the prefix. An owned copy, once per framework per
+    // compile; a link line is the wrong place to economize on a malloc.
+    vec.vecPush(ref args, str.sliceFrom(name, FRAMEWORK_PREFIX.len));
     return;
   }
   // OpenGL is the one framework name that means something off Apple, because
@@ -317,21 +354,12 @@ export function pushFrameworkFor(ref cmd: Text, name: string, platform: c_int): 
     return;
   }
   if (platform == PLATFORM_WINDOWS) {
-    text.push(ref cmd, " -lopengl32");
+    vec.vecPush(ref args, "-lopengl32");
   } else if (platform == PLATFORM_LINUX) {
-    text.push(ref cmd, " -lGL");
+    vec.vecPush(ref args, "-lGL");
   }
 }
 
+// Mirrors FRAMEWORK_PREFIX in typecheck/link_names.yoop, which checks the name
+// this lowers.
 const FRAMEWORK_PREFIX: string = "framework:";
-
-// The bytes of `s` from `start` on, appended. No allocation: `stringSlice`
-// would hand back an owned copy nothing frees.
-function pushFrom(ref out: Text, s: string, start: usize): void {
-  const raw = intr.stringAsBytes(s);
-  let i: usize = start;
-  while (i < raw.len) {
-    text.pushByte(ref out, raw[i]);
-    i += 1;
-  }
-}

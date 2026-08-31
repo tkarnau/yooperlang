@@ -503,10 +503,21 @@ symbol scheme" rather than "codegen walks the typed AST", so that inserting one
 later stays a contained change.
 
 **Link.** clang is handed the `.ll`, the runtime C sources and the accumulated
-`-l` flags. Yoop has no process API, so
-[bootstrap/src/link/clang.yoop](../bootstrap/src/link/clang.yoop) calls libc
-`system` directly and is `import.unsafe` for that reason. `--emit-ir` stops one
-step short, writing `<out>.ll` and skipping the link entirely, which is what
+`-l` flags, as an ARGV ARRAY through the runtime's `yoop_proc_run` - never
+through a shell.
+[bootstrap/src/link/clang.yoop](../bootstrap/src/link/clang.yoop) is
+`import.unsafe` only because handing the array to C reads its data pointer.
+The link line carries strings copied out of the program (`extern "C" from
+library "NAME"` becomes `-lNAME`), so a shell in the path would have
+interpreted them: `library "m; rm -rf ~"` was a command once, and is now one
+argument clang cannot find. It never reaches even that far, because the name
+is checked at its declaration
+([bootstrap/src/typecheck/link_names.yoop](../bootstrap/src/typecheck/link_names.yoop):
+letters, digits, `_`, `.`, `+`, `-`, no leading `-`), which is the second
+layer and the one an argv array cannot provide - a name beginning with `-` is
+a linker flag whichever argument slot it lands in. `--test` runs the test
+binary through the same `runProgram`. `--emit-ir` stops one step short,
+writing `<out>.ll` and skipping the link entirely, which is what
 [scripts/probe_surface.sh](../scripts/probe_surface.sh) uses to ask whether
 codegen HANDLED a file without paying for a link nobody reads.
 
