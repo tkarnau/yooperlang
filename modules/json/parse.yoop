@@ -65,7 +65,7 @@ export function parseBytes(src: uint8[]): ParseResult {
     }
   }
   if (p.error.len > 0) {
-    Disposable.dispose(ref d);
+    d.dispose();
     return ParseResult.Err { error: p.error };
   }
   d.root = root;

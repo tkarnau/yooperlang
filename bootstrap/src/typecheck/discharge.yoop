@@ -5,7 +5,7 @@ module typecheck;
   that reaches here?"
 
       disposable c: Conn = { id: 3 };
-      Disposable.dispose(ref c);        // the obligation is answered here
+      c.dispose();        // the obligation is answered here
       printf("after manual dispose\n");
     }                                  // and nothing is owed at this brace
 
@@ -118,8 +118,8 @@ export function computeDischarges(ref prog: Program, ref tm: TypedModule, m: Mod
     walkFileBodies(ref w, file.root);
     f += 1;
   }
-  Disposable.dispose(ref w.live);
-  Disposable.dispose(ref w.frames);
+  w.live.dispose();
+  w.frames.dispose();
 }
 
 // True when the binding declared at `bindingId` was already disposed by hand

@@ -3,11 +3,11 @@ module typecheck;
 /*
   Traits, the methods that satisfy them, and how a call finds one.
 
-  STATIC dispatch only. `Display.toString(ref p)` is resolved at compile time by
+  STATIC dispatch only. `p.toString()` is resolved at compile time by
   the RECEIVER's concrete type: the first argument's type names a struct, that
   struct's method table names a function, and that function is what is called.
   No vtable, no indirect call, nothing at run time. It is the form the
-  bootstrap's own source uses almost exclusively - `SelfLexing.peek(ref ps)`.
+  bootstrap's own source uses almost exclusively - `ps.peek()`.
 
   Two tables, and the split matters:
 

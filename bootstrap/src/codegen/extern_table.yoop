@@ -52,9 +52,9 @@ export type ExternTable implements Disposable propagates<disposable> {
   sigs: Vec<ExternSig>,
   types: Vec<string>,           // the return type then the parameters, per sig
   function dispose(ref self): void {
-    Disposable.dispose(ref self.byName);
-    Disposable.dispose(ref self.sigs);
-    Disposable.dispose(ref self.types);
+    self.byName.dispose();
+    self.sigs.dispose();
+    self.types.dispose();
   }
 }
 

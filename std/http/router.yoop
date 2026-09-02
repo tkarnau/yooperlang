@@ -108,7 +108,7 @@ export type Router implements (Disposable, Handler) propagates<disposable> {
     hasFallback: bool,
 
     function dispose(ref self): void {
-        Disposable.dispose(ref self.routes);
+        self.routes.dispose();
     }
 
     async handle(ref self, ref req: Request, ref resp: Response): HandleOutcome {
@@ -118,13 +118,13 @@ export type Router implements (Disposable, Handler) propagates<disposable> {
             paramsClear(ref req.params);
             if (!matchPath(entries[i].pattern, req.path, ref req.params)) { continue; }
             if (methodEq(req.method, entries[i].method)) {
-                return await Dispatcher.handle(ref entries[i].dispatcher, ref req, ref resp);
+                return await entries[i].dispatcher.handle(ref req, ref resp);
             }
             // A HEAD with no HEAD route is answered by the GET route; the
             // server drops the body on the way out.
             if (methodEq(req.method, HttpMethod.Head)
                 && methodEq(entries[i].method, HttpMethod.Get)) {
-                return await Dispatcher.handle(ref entries[i].dispatcher, ref req, ref resp);
+                return await entries[i].dispatcher.handle(ref req, ref resp);
             }
         }
         paramsClear(ref req.params);
@@ -145,7 +145,7 @@ export type Router implements (Disposable, Handler) propagates<disposable> {
         // API that answers JSON everywhere needs that hook, because otherwise
         // these two responses are the only plain-text ones it emits.
         if (self.hasFallback) {
-            return await Dispatcher.handle(ref self.fallback, ref req, ref resp);
+            return await self.fallback.handle(ref req, ref resp);
         }
         if (allow.len > 0) {
             respondText(ref resp, methodNotAllowed(),

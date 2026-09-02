@@ -38,9 +38,9 @@ export type Document implements Disposable propagates<disposable> {
   needsDiagnostics: bool,
 
   function dispose(ref self): void {
-    Disposable.dispose(ref self.uri);
-    Disposable.dispose(ref self.path);
-    Disposable.dispose(ref self.content);
+    self.uri.dispose();
+    self.path.dispose();
+    self.content.dispose();
   }
 }
 
@@ -52,10 +52,10 @@ export type DocumentStore implements Disposable propagates<disposable> {
     let i: usize = 0;
     while (i < self.docs.len) {
       let d: Document = vec.vecGet(ref self.docs, i);
-      Disposable.dispose(ref d);
+      d.dispose();
       i += 1;
     }
-    Disposable.dispose(ref self.docs);
+    self.docs.dispose();
   }
 }
 

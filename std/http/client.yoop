@@ -40,7 +40,7 @@ export type ClientRequest implements Disposable propagates<disposable> {
     headers: Headers,
     body:    uint8[],
     function dispose(ref self): void {
-        Disposable.dispose(ref self.headers);
+        self.headers.dispose();
     }
 }
 
@@ -74,8 +74,8 @@ export type ClientResponse implements Disposable propagates<disposable> {
     headers: Headers,
     body:    Vec<uint8>,
     function dispose(ref self): void {
-        Disposable.dispose(ref self.headers);
-        Disposable.dispose(ref self.body);
+        self.headers.dispose();
+        self.body.dispose();
     }
 }
 
@@ -174,7 +174,7 @@ function checkRequestHeaders(ref req: ClientRequest): Result<usize, HttpError> {
 // One recv, with the error mapped into the layer's error type. See the twin
 // `readRequestBytes` in server.yoop for why the duplicate is deliberate.
 async readResponseBytes(ref r: Reader, ref window: uint8[]): Result<usize, HttpError> {
-    switch (await Reader.read(ref r, ref window)) {
+    switch (await r.read(ref window)) {
         case Result.Ok { value: n }: { return Result.Ok { value: usize(n) }; }
         case Result.Err { error: e }: { return Result.Err { error: errIo(e) }; }
     }
@@ -267,7 +267,7 @@ export async sendOn(
     disposable out: Vec<uint8> = vec.vecNew(512 + req.body.len);
     serializeRequest(ref req, ref u, ref c, ref out);
     let outView: uint8[] = vec.vecAsArray(ref out);
-    switch (await Writer.write(ref w, ref outView)) {
+    switch (await w.write(ref outView)) {
         case Result.Ok { value: _n }: { }
         case Result.Err { error: e }: { return Result.Err { error: errIo(e) }; }
     }
@@ -298,7 +298,7 @@ export async sendOn(
     switch (await readRest(ref r, ref buf, ref scratch, ref c, ref head, ref resp.body)) {
         case Result.Ok { value: _n }: { return Result.Ok { value: resp }; }
         case Result.Err { error: e }: {
-            Disposable.dispose(ref resp);
+            resp.dispose();
             return Result.Err { error: e };
         }
     }

@@ -370,7 +370,7 @@ value before overwriting it:
 ```js
 let disposable s: Text = text_from("a");
 let next: Text = replace(ref s, "a", "b");
-Disposable.dispose(ref s);      // the outgoing value, by hand
+s.dispose();      // the outgoing value, by hand
 s = next;
 ```
 
@@ -579,7 +579,7 @@ vtable Reader for Readable {
 }
 
 const r: Reader = Reader.from(ref my_tcp_stream);   // builder
-const n = Reader.read(ref r, ref buf);              // indirect dispatch
+const n = r.read(ref buf);              // indirect dispatch
 ```
 
 Two builtins on every vtable type:
@@ -597,7 +597,7 @@ Two builtins on every vtable type:
   share the same nominal vtable type, so one array can hold a mix of both.
   Arguments must be named functions (so their address is known statically),
   not runtime function-pointer values.
-- **`VTableName.method(ref v, ...)`** - dispatches through the vtable's
+- **`v.method(...)`** - dispatches through the vtable's
   method slot. Equivalent to `TraitName.method(ref v, ...)` where v is
   the vtable value; both forms produce the same IR.
 
@@ -891,7 +891,7 @@ function make_pass(scene: Scene): RenderPass propagates<gpu_buffer>;
    ```js
    let arr: DynArray<int32> = new_dynarray(4);
    use(arr);
-   Disposable.dispose(ref arr);   // satisfies the obligation
+   arr.dispose();   // satisfies the obligation
    ```
 
 3. **Transfer to the caller.** Bind with plain `let`/`const` and `return` it from a function whose return type also declares `propagates<K>`:
@@ -1360,7 +1360,7 @@ The typechecker looks for a trait named `Into` in the operand-Err type's
 `implementsTraits` whose single type-arg is the enclosing return's `Err`
 payload type. A miss produces a fix-it pointing at the missing impl;
 a hit rewrites the `?` failure branch to call
-`Into.into(ref operandErr)` and store the returned target value into the
+`operandErr.into()` and store the returned target value into the
 outer `Err` variant. The same-type fast path is unaffected - the
 conversion is paid only when the shapes actually differ.
 
@@ -1745,7 +1745,7 @@ disposable v: Vec<int32> = vecNew(4);   // auto-cleanup at scope end
 // or
 let v: Vec<int32> = vecNew(4);
 // ... use ...
-Disposable.dispose(ref v);               // manual
+v.dispose();               // manual
 // or
 function build(): Vec<int32> propagates<disposable> {
     return vecNew(4);                   // transfer up

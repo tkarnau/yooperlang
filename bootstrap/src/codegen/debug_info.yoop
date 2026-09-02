@@ -70,11 +70,11 @@ export type DebugInfo implements Disposable propagates<disposable> {
   // is used, so one node serves the whole program.
   basics: Map<string, DebugNodeId>,
   function dispose(ref self): void {
-    Disposable.dispose(ref self.nodes);
-    Disposable.dispose(ref self.compileUnits);
-    Disposable.dispose(ref self.locations);
-    Disposable.dispose(ref self.types);
-    Disposable.dispose(ref self.basics);
+    self.nodes.dispose();
+    self.compileUnits.dispose();
+    self.locations.dispose();
+    self.types.dispose();
+    self.basics.dispose();
   }
 }
 

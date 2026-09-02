@@ -6,7 +6,7 @@ module typecheck;
   the promise the bound made. bounds.yoop resolves them; this uses them.
 
   The pairing is the whole design. `boundMethodOn` lets the body call
-  `Comparable.compare(ref a, b)` on an opaque `T` because the bound says every
+  `a.compare(b)` on an opaque `T` because the bound says every
   future `T` will have one; `checkBoundsSatisfied` is what makes that true, at
   every call site and every generic application. Drop either half and the other
   is unsound in a different direction - the first alone miscompiles, the second

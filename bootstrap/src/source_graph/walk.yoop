@@ -153,8 +153,8 @@ function loadGraphFrom(
   let autoLoads: Map<string, string> = map.mapNew(0, map.stringKeyOps());
   const autoErr = loadAutoloads(ref loader, ref autoLoads, stdRoot);
   if (autoErr.len > 0) {
-    Disposable.dispose(ref loader.byPath);
-    Disposable.dispose(ref loader.onStack);
+    loader.byPath.dispose();
+    loader.onStack.dispose();
     return LoadGraphResult.Err { error: autoErr };
   }
 
@@ -163,8 +163,8 @@ function loadGraphFrom(
   // is MOVED into the graph (the one-owner discipline the rest of this module
   // follows), and on failure the compile ends in the next breath - see
   // main.yoop - so reclaiming the modules loaded so far would buy nothing.
-  Disposable.dispose(ref loader.byPath);
-  Disposable.dispose(ref loader.onStack);
+  loader.byPath.dispose();
+  loader.onStack.dispose();
 
   switch (loaded) {
     case Result.Err { error: e }: {

@@ -155,31 +155,31 @@ export type Scene implements Disposable propagates<disposable> {
   irClock: float32,
 
   function dispose(ref self): void {
-    Disposable.dispose(ref self.tokens);
-    Disposable.dispose(ref self.astItems);
-    Disposable.dispose(ref self.islands);
-    Disposable.dispose(ref self.edges);
-    Disposable.dispose(ref self.irFuncs);
-    Disposable.dispose(ref self.irBlocks);
-    Disposable.dispose(ref self.irNames);
-    Disposable.dispose(ref self.lineStarts);
-    Disposable.dispose(ref self.diagItems);
-    Disposable.dispose(ref self.diagMsgs);
+    self.tokens.dispose();
+    self.astItems.dispose();
+    self.islands.dispose();
+    self.edges.dispose();
+    self.irFuncs.dispose();
+    self.irBlocks.dispose();
+    self.irNames.dispose();
+    self.lineStarts.dispose();
+    self.diagItems.dispose();
+    self.diagMsgs.dispose();
     let fe: usize = 0;
     while (fe < self.fileEntries.len) {
       let entry: FileEntry = vec.vecGet(ref self.fileEntries, fe);
-      Disposable.dispose(ref entry.tokens);
-      Disposable.dispose(ref entry.ast);
+      entry.tokens.dispose();
+      entry.ast.dispose();
       fe += 1;
     }
-    Disposable.dispose(ref self.fileEntries);
-    Disposable.dispose(ref self.filePaths);
-    Disposable.dispose(ref self.diagRaw);
+    self.fileEntries.dispose();
+    self.filePaths.dispose();
+    self.diagRaw.dispose();
     if (self.astHeld) {
-      Disposable.dispose(ref self.astDoc);
+      self.astDoc.dispose();
     }
     if (self.modulesHeld) {
-      Disposable.dispose(ref self.modulesDoc);
+      self.modulesDoc.dispose();
     }
   }
 }
@@ -389,7 +389,7 @@ function parseAst(ref s: Scene, ref payload: Vec<uint8>): void {
     case ParseResult.Err { error: e }: { return; }
     case ParseResult.Ok { value: d }: {
       if (s.astHeld) {
-        Disposable.dispose(ref s.astDoc);
+        s.astDoc.dispose();
       }
       s.astDoc = d;
       s.astHeld = true;
@@ -521,7 +521,7 @@ function parseModules(ref s: Scene, ref payload: Vec<uint8>): void {
     case ParseResult.Err { error: e }: { return; }
     case ParseResult.Ok { value: d }: {
       if (s.modulesHeld) {
-        Disposable.dispose(ref s.modulesDoc);
+        s.modulesDoc.dispose();
       }
       s.modulesDoc = d;
       s.modulesHeld = true;

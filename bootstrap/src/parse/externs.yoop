@@ -57,10 +57,10 @@ export const LIBRARY_KEYWORD: string = "library";
 //                     link-flag note below.
 //   own childIds run  the EXTERN_FUNCTION_DECLs
 export function parseExternBlock(ref ps: ParserState): Result<NodeId, ParsingError> {
-  let node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.EXTERN_BLOCK);
-  SelfLexing.expect(ref ps, TokenTags.EXTERN)?;
+  let node = ps.buildSourcedNode(ASTNodeKind.EXTERN_BLOCK);
+  ps.expect(TokenTags.EXTERN)?;
 
-  const abiTok = SelfLexing.expect(ref ps, TokenTags.STRLITERAL)?;
+  const abiTok = ps.expect(TokenTags.STRLITERAL)?;
   const abi = decodeStringLiteral(ref ps, abiTok)?;
   if (!str.stringEq(abi, ABI_C) && !str.stringEq(abi, ABI_INTRINSIC)) {
     return Result.Err { error: SelfLexing.createParsingError(
@@ -78,7 +78,7 @@ export function parseExternBlock(ref ps: ParserState): Result<NodeId, ParsingErr
   // against the looser rule would not compile with the other compiler, and the
   // library name is the thing layer 6 will need the day it links anything but
   // libc. std spells it `"stdio.h"`, `"yoop_runtime"`, and so on.
-  SelfLexing.expect(ref ps, TokenTags.FROM)?;
+  ps.expect(TokenTags.FROM)?;
   // `from library "m"` is the LINKING form: it lowers to `-lm` on the clang
   // line, program-wide. `from "math.h"` is the documenting form and lowers to
   // nothing at all. Both are recorded in the same slot, and `operator` is what
@@ -92,26 +92,26 @@ export function parseExternBlock(ref ps: ParserState): Result<NodeId, ParsingErr
   // It must be followed by a STRING; `from library m` is refused on both sides,
   // which was established by probing the reference.
   if (peekIsWord(ref ps, LIBRARY_KEYWORD)) {
-    SelfLexing.advance(ref ps)?;
+    ps.advance()?;
     node.operator = TokenTags.LIBRARY;
   }
-  const libTok = SelfLexing.expect(ref ps, TokenTags.STRLITERAL)?;
+  const libTok = ps.expect(TokenTags.STRLITERAL)?;
   node.strId = internString(ref ps, decodeStringLiteral(ref ps, libTok)?);
 
-  SelfLexing.expect(ref ps, TokenTags.LCURLY)?;
+  ps.expect(TokenTags.LCURLY)?;
   disposable ids: Vec<NodeId> = vec.vecNew(4);
   while (untilClosing(ref ps, TokenTags.RCURLY)) {
-    if (SelfLexing.peek(ref ps).tag == TokenTags.TYPE) {
+    if (ps.peek().tag == TokenTags.TYPE) {
       vec.vecPush(ref ids, parseExternType(ref ps)?);
     } else {
       vec.vecPush(ref ids, parseExternFunction(ref ps)?);
     }
   }
-  SelfLexing.expect(ref ps, TokenTags.RCURLY)?;
+  ps.expect(TokenTags.RCURLY)?;
 
   spliceChildren(ref ps, ref node, ref ids);
 
-  return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
+  return Result.Ok { value: ps.pushNode(node) };
 }
 
 // `type FILE;` - an OPAQUE type. It names something whose layout lives in a C
@@ -124,11 +124,11 @@ export function parseExternBlock(ref ps: ParserState): Result<NodeId, ParsingErr
 // type nothing can read a field out of, so the "opaque" part needs no
 // enforcement of its own.
 function parseExternType(ref ps: ParserState): Result<NodeId, ParsingError> {
-  let node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.EXTERN_TYPE_DECL);
-  SelfLexing.expect(ref ps, TokenTags.TYPE)?;
+  let node = ps.buildSourcedNode(ASTNodeKind.EXTERN_TYPE_DECL);
+  ps.expect(TokenTags.TYPE)?;
   node.name = parseIdentAsName(ref ps)?;
-  SelfLexing.expect(ref ps, TokenTags.SEMICOLON)?;
-  return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
+  ps.expect(TokenTags.SEMICOLON)?;
+  return Result.Ok { value: ps.pushNode(node) };
 }
 
 // `function name<T>(a: T, b: U): R;` - a signature and nothing else. The same
@@ -149,12 +149,12 @@ function parseExternType(ref ps: ParserState): Result<NodeId, ParsingError> {
 // reporting "expected FUNCTION, got IDENT" about a line std actually writes.
 function parseExternFunction(ref ps: ParserState): Result<NodeId, ParsingError> {
   const prefixes = parseKindPrefixRun(ref ps)?;
-  let node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.EXTERN_FUNCTION_DECL);
+  let node = ps.buildSourcedNode(ASTNodeKind.EXTERN_FUNCTION_DECL);
   node.childE = prefixes;
   node.name = parseIdentAsName(ref ps)?;
   node.childA = parseTypeParamList(ref ps)?;
 
-  SelfLexing.expect(ref ps, TokenTags.LPAREN)?;
+  ps.expect(TokenTags.LPAREN)?;
   const loc = posToSourceLocation(ps.src, ps.pos, 1);
   disposable ids: Vec<NodeId> = vec.vecNew(4);
   node.flagA = false;
@@ -164,30 +164,30 @@ function parseExternFunction(ref ps: ParserState): Result<NodeId, ParsingError> 
     // nothing after it could be one. Probing the JS reference confirms the same
     // rule: `..., x: int32` there is "expected rparen, got comma", and so is a
     // trailing comma or a second `...`.
-    if (SelfLexing.peek(ref ps).tag == TokenTags.DOTDOTDOT) {
-      SelfLexing.advance(ref ps)?;
+    if (ps.peek().tag == TokenTags.DOTDOTDOT) {
+      ps.advance()?;
       node.flagA = true;
-      if (SelfLexing.peek(ref ps).tag != TokenTags.RPAREN) {
+      if (ps.peek().tag != TokenTags.RPAREN) {
         return Result.Err { error: SelfLexing.createParsingError(
           ref ps,
-          `\`...\` must be the LAST parameter, so nothing may follow it - got ${tagName(SelfLexing.peek(ref ps).tag)}`,
+          `\`...\` must be the LAST parameter, so nothing may follow it - got ${tagName(ps.peek().tag)}`,
           peekLengthUsize(ref ps),
         )};
       }
       break;
     }
     vec.vecPush(ref ids, parseExternFunctionParam(ref ps)?);
-    if (SelfLexing.peek(ref ps).tag == TokenTags.COMMA) {
-      SelfLexing.advance(ref ps)?;
+    if (ps.peek().tag == TokenTags.COMMA) {
+      ps.advance()?;
     }
   }
-  node.childB = SelfLexing.buildListNode(ref ps, ref ids, loc);
-  SelfLexing.expect(ref ps, TokenTags.RPAREN)?;
-  SelfLexing.expect(ref ps, TokenTags.COLON)?;
+  node.childB = ps.buildListNode(ref ids, loc);
+  ps.expect(TokenTags.RPAREN)?;
+  ps.expect(TokenTags.COLON)?;
   node.childC = parseTypeAnnotation(ref ps)?;
-  SelfLexing.expect(ref ps, TokenTags.SEMICOLON)?;
+  ps.expect(TokenTags.SEMICOLON)?;
 
-  return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
+  return Result.Ok { value: ps.pushNode(node) };
 }
 
 // `import.unsafe;` / `import.test;` - a module-level FLAG rather than an
@@ -198,10 +198,10 @@ function parseExternFunction(ref ps: ParserState): Result<NodeId, ParsingError> 
 // main, and the harness runs its suites). Both land on the PROGRAM node's flags
 // rather than producing a decl, because neither declares anything.
 export function parseImportDirective(ref ps: ParserState): Result<string, ParsingError> {
-  SelfLexing.expect(ref ps, TokenTags.IMPORT)?;
-  SelfLexing.expect(ref ps, TokenTags.DOT)?;
+  ps.expect(TokenTags.IMPORT)?;
+  ps.expect(TokenTags.DOT)?;
   const name = parseIdentAsName(ref ps)?;
-  SelfLexing.expect(ref ps, TokenTags.SEMICOLON)?;
+  ps.expect(TokenTags.SEMICOLON)?;
 
   if (!str.stringEq(name, "unsafe") && !str.stringEq(name, "test")) {
     return Result.Err { error: SelfLexing.createParsingError(

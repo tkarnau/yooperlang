@@ -53,47 +53,47 @@ export function atKindDecl(ref ps: ParserState): bool {
 //   flagA             true for the `= a & b` COMPOSITION form
 //   own childIds run  the KIND_CLAUSE nodes
 export function parseKindDecl(ref ps: ParserState): Result<NodeId, ParsingError> {
-  SelfLexing.advance(ref ps)?;                    // the contextual `kind`
-  let node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.KIND_DECL);
+  ps.advance()?;                    // the contextual `kind`
+  let node = ps.buildSourcedNode(ASTNodeKind.KIND_DECL);
   node.name = parseIdentAsName(ref ps)?;
   node.childA = parseKindParams(ref ps)?;
 
   // `kind scoped_alt = disposable_base & noescape;` - a COMPOSITION. Recorded
   // as a name with no clauses of its own, which is all an unenforced kind
   // needs; resolving the operands would be enforcement.
-  if (SelfLexing.peek(ref ps).tag == TokenTags.EQ) {
+  if (ps.peek().tag == TokenTags.EQ) {
     return parseKindComposition(ref ps, node);
   }
 
-  SelfLexing.expect(ref ps, TokenTags.LCURLY)?;
+  ps.expect(TokenTags.LCURLY)?;
   disposable ids: Vec<NodeId> = vec.vecNew(4);
   while (untilClosing(ref ps, TokenTags.RCURLY)) {
     vec.vecPush(ref ids, parseKindClause(ref ps)?);
   }
-  SelfLexing.expect(ref ps, TokenTags.RCURLY)?;
+  ps.expect(TokenTags.RCURLY)?;
 
   spliceChildren(ref ps, ref node, ref ids);
-  return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
+  return Result.Ok { value: ps.pushNode(node) };
 }
 
 // `(n: usize, ...)` after a kind's name. The same parameter parser a function
 // uses, because they are the same thing: a name and an annotation.
 function parseKindParams(ref ps: ParserState): Result<NodeId, ParsingError> {
-  if (SelfLexing.peek(ref ps).tag != TokenTags.LPAREN) {
+  if (ps.peek().tag != TokenTags.LPAREN) {
     return Result.Ok { value: 0 };
   }
-  SelfLexing.advance(ref ps)?;
+  ps.advance()?;
   const loc = posToSourceLocation(ps.src, ps.pos, 1);
 
   disposable ids: Vec<NodeId> = vec.vecNew(2);
   while (untilClosing(ref ps, TokenTags.RPAREN)) {
     vec.vecPush(ref ids, parseFunctionParam(ref ps)?);
-    if (SelfLexing.peek(ref ps).tag == TokenTags.COMMA) {
-      SelfLexing.advance(ref ps)?;
+    if (ps.peek().tag == TokenTags.COMMA) {
+      ps.advance()?;
     }
   }
-  SelfLexing.expect(ref ps, TokenTags.RPAREN)?;
-  return Result.Ok { value: SelfLexing.buildListNode(ref ps, ref ids, loc) };
+  ps.expect(TokenTags.RPAREN)?;
+  return Result.Ok { value: ps.buildListNode(ref ids, loc) };
 }
 
 // `kind scoped_alt = disposable_base & { mustNotEscape scope; };` - a
@@ -122,20 +122,20 @@ function parseKindComposition(ref ps: ParserState, node: ASTNode): Result<NodeId
   guard.flagA = true;
   disposable ids: Vec<NodeId> = vec.vecNew(2);
   while (untilClosing(ref ps, TokenTags.SEMICOLON)) {
-    const tag = SelfLexing.peek(ref ps).tag;
+    const tag = ps.peek().tag;
     if (tag == TokenTags.LCURLY) {
-      SelfLexing.advance(ref ps)?;
+      ps.advance()?;
       while (untilClosing(ref ps, TokenTags.RCURLY)) {
         vec.vecPush(ref ids, parseKindClause(ref ps)?);
       }
-      SelfLexing.expect(ref ps, TokenTags.RCURLY)?;
+      ps.expect(TokenTags.RCURLY)?;
       continue;
     }
     if (tag == TokenTags.IDENT) {
-      let operand = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.KIND_CLAUSE);
+      let operand = ps.buildSourcedNode(ASTNodeKind.KIND_CLAUSE);
       operand.name = COMPOSE_CLAUSE;
       operand.strId = internString(ref ps, parseIdentAsName(ref ps)?);
-      vec.vecPush(ref ids, SelfLexing.pushNode(ref ps, operand));
+      vec.vecPush(ref ids, ps.pushNode(operand));
       continue;
     }
     // `(b & c) & d` - a GROUPING, and the language has no such thing. There is
@@ -151,12 +151,12 @@ function parseKindComposition(ref ps: ParserState, node: ASTNode): Result<NodeId
     }
     // `&` and anything else joining the operands. There is one operator, so
     // there is nothing to record about which was written.
-    SelfLexing.advance(ref ps)?;
+    ps.advance()?;
   }
-  SelfLexing.expect(ref ps, TokenTags.SEMICOLON)?;
+  ps.expect(TokenTags.SEMICOLON)?;
 
   spliceChildren(ref ps, ref guard, ref ids);
-  return Result.Ok { value: SelfLexing.pushNode(ref ps, guard) };
+  return Result.Ok { value: ps.pushNode(guard) };
 }
 
 // The clause a composition's NAMED operand is recorded as. Not a spelling any
@@ -181,16 +181,16 @@ export const COMPOSE_CLAUSE: string = "compose";
 // being skipped wholesale: a site rule cannot be checked against a clause that
 // was consumed and forgotten.
 function parseKindClause(ref ps: ParserState): Result<NodeId, ParsingError> {
-  if (SelfLexing.peek(ref ps).tag == TokenTags.SEMICOLON) {
+  if (ps.peek().tag == TokenTags.SEMICOLON) {
     return Result.Err { error: SelfLexing.createParsingError(
       ref ps,
-      `a kind clause starts with a word like "appliesTo" or "requires", got ${tagName(SelfLexing.peek(ref ps).tag)}`,
+      `a kind clause starts with a word like "appliesTo" or "requires", got ${tagName(ps.peek().tag)}`,
       peekLengthUsize(ref ps),
     )};
   }
-  let node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.KIND_CLAUSE);
+  let node = ps.buildSourcedNode(ASTNodeKind.KIND_CLAUSE);
   node.name = peekText(ref ps);
-  SelfLexing.advance(ref ps)?;
+  ps.advance()?;
 
   // The clause's first ARGUMENT, interned: the `dispose` in
   // `mustCall dispose beforeScopeEnd;`, the `region` in `appliesTo region;`.
@@ -201,8 +201,8 @@ function parseKindClause(ref ps: ParserState): Result<NodeId, ParsingError> {
   // real string, so a 0 in `strId` cannot mean "absent". A clause with no
   // argument interns "" and reads back as "".
   let argument = "";
-  if (SelfLexing.peek(ref ps).tag != TokenTags.SEMICOLON &&
-      SelfLexing.peek(ref ps).tag != TokenTags.EOF) {
+  if (ps.peek().tag != TokenTags.SEMICOLON &&
+      ps.peek().tag != TokenTags.EOF) {
     argument = peekText(ref ps);
   }
   node.strId = internString(ref ps, argument);
@@ -222,7 +222,7 @@ function parseKindClause(ref ps: ParserState): Result<NodeId, ParsingError> {
   // to which sub-clause, which is the whole question a layout rule asks.
   disposable words: Vec<NodeId> = vec.vecNew(2);
   while (true) {
-    const tag = SelfLexing.peek(ref ps).tag;
+    const tag = ps.peek().tag;
     if (tag == TokenTags.EOF || tag == TokenTags.SEMICOLON || tag == TokenTags.RCURLY) {
       break;
     }
@@ -231,28 +231,28 @@ function parseKindClause(ref ps: ParserState): Result<NodeId, ParsingError> {
       continue;
     }
     if (tag != TokenTags.COMMA) {
-      let word = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.KIND_CLAUSE_WORD);
+      let word = ps.buildSourcedNode(ASTNodeKind.KIND_CLAUSE_WORD);
       word.name = peekText(ref ps);
-      vec.vecPush(ref words, SelfLexing.pushNode(ref ps, word));
+      vec.vecPush(ref words, ps.pushNode(word));
     }
-    SelfLexing.advance(ref ps)?;
+    ps.advance()?;
   }
-  SelfLexing.expect(ref ps, TokenTags.SEMICOLON)?;
+  ps.expect(TokenTags.SEMICOLON)?;
   spliceChildren(ref ps, ref node, ref words);
-  return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
+  return Result.Ok { value: ps.pushNode(node) };
 }
 
 // `{ abi "C"; align 32; }` - a clause's braced body, as a NODE_LIST of the
 // KIND_CLAUSE nodes inside it.
 function parseKindClauseBody(ref ps: ParserState): Result<NodeId, ParsingError> {
   const loc = posToSourceLocation(ps.src, ps.pos, 1);
-  SelfLexing.expect(ref ps, TokenTags.LCURLY)?;
+  ps.expect(TokenTags.LCURLY)?;
   disposable ids: Vec<NodeId> = vec.vecNew(2);
   while (untilClosing(ref ps, TokenTags.RCURLY)) {
     vec.vecPush(ref ids, parseKindSubClause(ref ps)?);
   }
-  SelfLexing.expect(ref ps, TokenTags.RCURLY)?;
-  return Result.Ok { value: SelfLexing.buildListNode(ref ps, ref ids, loc) };
+  ps.expect(TokenTags.RCURLY)?;
+  return Result.Ok { value: ps.buildListNode(ref ids, loc) };
 }
 
 // One `abi "C";` inside a body. Same shape as the outer clause and read the
@@ -263,24 +263,24 @@ function parseKindClauseBody(ref ps: ParserState): Result<NodeId, ParsingError> 
 // records `"C"` rather than `C`, which is what lets a diagnostic quote back what
 // was written.
 function parseKindSubClause(ref ps: ParserState): Result<NodeId, ParsingError> {
-  let node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.KIND_CLAUSE);
+  let node = ps.buildSourcedNode(ASTNodeKind.KIND_CLAUSE);
   node.name = peekText(ref ps);
-  SelfLexing.advance(ref ps)?;
+  ps.advance()?;
 
   disposable words: Vec<NodeId> = vec.vecNew(2);
   while (true) {
-    const tag = SelfLexing.peek(ref ps).tag;
+    const tag = ps.peek().tag;
     if (tag == TokenTags.EOF || tag == TokenTags.SEMICOLON || tag == TokenTags.RCURLY) {
       break;
     }
     if (tag != TokenTags.COMMA) {
-      let word = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.KIND_CLAUSE_WORD);
+      let word = ps.buildSourcedNode(ASTNodeKind.KIND_CLAUSE_WORD);
       word.name = peekText(ref ps);
-      vec.vecPush(ref words, SelfLexing.pushNode(ref ps, word));
+      vec.vecPush(ref words, ps.pushNode(word));
     }
-    SelfLexing.advance(ref ps)?;
+    ps.advance()?;
   }
-  SelfLexing.expect(ref ps, TokenTags.SEMICOLON)?;
+  ps.expect(TokenTags.SEMICOLON)?;
   spliceChildren(ref ps, ref node, ref words);
-  return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
+  return Result.Ok { value: ps.pushNode(node) };
 }

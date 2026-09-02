@@ -1192,7 +1192,7 @@ function main(): int32 {
             vec.vecPush(ref macros_v, scanned_view[mj]);
             mj = mj + 1;
         }
-        Disposable.dispose(ref scanned);
+        scanned.dispose();
         printf(`yoopbinder: ${int64(macros_v.len)} numeric macro(s) kept\n`);
     }
     let macros: MacroConst[] = vec.vecAsArray(ref macros_v);

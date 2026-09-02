@@ -85,7 +85,7 @@ export function localsPopBlock(ref l: FnLocals): void {
       map.mapRemove(ref l.slots, d.name);
     }
   }
-  Disposable.dispose(ref names);
+  names.dispose();
   l.blockNames.len -= 1;
 }
 

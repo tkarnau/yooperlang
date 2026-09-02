@@ -256,7 +256,7 @@ export type HeaderEntry { name: string, value: string }
 export type Headers implements Disposable propagates<disposable> {
     entries: Vec<HeaderEntry>,
     function dispose(ref self): void {
-        Disposable.dispose(ref self.entries);
+        self.entries.dispose();
     }
 }
 
@@ -332,7 +332,7 @@ export type Param { name: string, value: string }
 export type Params implements Disposable propagates<disposable> {
     entries: Vec<Param>,
     function dispose(ref self): void {
-        Disposable.dispose(ref self.entries);
+        self.entries.dispose();
     }
 }
 
@@ -404,9 +404,9 @@ export type Request implements Disposable propagates<disposable> {
     body:    uint8[],
 
     function dispose(ref self): void {
-        Disposable.dispose(ref self.headers);
-        Disposable.dispose(ref self.query);
-        Disposable.dispose(ref self.params);
+        self.headers.dispose();
+        self.query.dispose();
+        self.params.dispose();
     }
 }
 
@@ -479,7 +479,7 @@ export variant ResponseBody implements Disposable propagates<disposable> {
     Owned  { bytes: Bytes },
     function dispose(ref self): void {
         switch (self) {
-            case ResponseBody.Owned { bytes: b }: { Disposable.dispose(ref b); }
+            case ResponseBody.Owned { bytes: b }: { b.dispose(); }
             default: {}
         }
     }
@@ -491,8 +491,8 @@ export type Response implements Disposable propagates<disposable> {
     body:    ResponseBody,
 
     function dispose(ref self): void {
-        Disposable.dispose(ref self.headers);
-        Disposable.dispose(ref self.body);
+        self.headers.dispose();
+        self.body.dispose();
     }
 }
 
@@ -516,7 +516,7 @@ export function addHeader(ref resp: Response, name: string, value: string): void
 
 // Point the body at a borrowed string. Any previously owned body is freed.
 export function setBodyStatic(ref resp: Response, text: string): void {
-    Disposable.dispose(ref resp.body);
+    resp.body.dispose();
     resp.body = ResponseBody.Static { text: text };
 }
 
@@ -524,7 +524,7 @@ export function setBodyStatic(ref resp: Response, text: string): void {
 // inline (`setBodyBytes(ref resp, bytes.bytesFromVec(ref buf))`) so no
 // binding is left holding a value the response now owns.
 export function setBodyBytes(ref resp: Response, take: Bytes): void {
-    Disposable.dispose(ref resp.body);
+    resp.body.dispose();
     resp.body = ResponseBody.Owned { bytes: take };
 }
 

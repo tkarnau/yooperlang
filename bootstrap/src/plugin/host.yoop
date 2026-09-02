@@ -79,11 +79,11 @@ export type PluginHost implements Disposable propagates<disposable> {
 
   function dispose(ref self): void {
     releasePlugin(ref self);
-    Disposable.dispose(ref self.tokensT);
-    Disposable.dispose(ref self.astJsonT);
-    Disposable.dispose(ref self.modulesJsonT);
-    Disposable.dispose(ref self.diagnosticsJsonT);
-    Disposable.dispose(ref self.irT);
+    self.tokensT.dispose();
+    self.astJsonT.dispose();
+    self.modulesJsonT.dispose();
+    self.diagnosticsJsonT.dispose();
+    self.irT.dispose();
   }
 }
 
@@ -100,7 +100,7 @@ export function pluginHostInactive(): PluginHost propagates<disposable> {
 export function releasePlugin(ref h: PluginHost): void {
   if (h.held) {
     disposeModuleGraph(ref h.graph);
-    Disposable.dispose(ref h.prog);
+    h.prog.dispose();
     h.held = false;
   }
   h.active = false;

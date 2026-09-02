@@ -80,11 +80,11 @@ export type JsonDoc implements Disposable propagates<disposable> {
     let i: usize = 0;
     while (i < self.strings.len) {
       let t: Text = vec.vecGet(ref self.strings, i);
-      Disposable.dispose(ref t);
+      t.dispose();
       i += 1;
     }
-    Disposable.dispose(ref self.strings);
-    Disposable.dispose(ref self.nodes);
+    self.strings.dispose();
+    self.nodes.dispose();
   }
 }
 

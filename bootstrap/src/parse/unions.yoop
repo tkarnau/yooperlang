@@ -32,18 +32,18 @@ import { ParsingError } from "../diagnostics";
 // Declaration order is NOT ABI here the way a variant's case order is - every
 // field starts at byte 0 - but it is what the diagnostics list, so it is kept.
 export function parseUnionDecl(ref ps: ParserState): Result<NodeId, ParsingError> {
-  SelfLexing.expect(ref ps, TokenTags.UNION)?;
-  let node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.UNION_DECL);
+  ps.expect(TokenTags.UNION)?;
+  let node = ps.buildSourcedNode(ASTNodeKind.UNION_DECL);
   node.name = parseIdentAsName(ref ps)?;
 
-  if (SelfLexing.peek(ref ps).tag == TokenTags.LT) {
+  if (ps.peek().tag == TokenTags.LT) {
     return Result.Err { error: SelfLexing.createParsingError(
       ref ps,
       `generic unions are not supported - "${node.name}" may not take type parameters`,
       peekLengthUsize(ref ps),
     )};
   }
-  if (SelfLexing.peek(ref ps).tag == TokenTags.IMPLEMENTS) {
+  if (ps.peek().tag == TokenTags.IMPLEMENTS) {
     return Result.Err { error: SelfLexing.createParsingError(
       ref ps,
       `a union cannot implement a trait - "${node.name}" has no methods to satisfy one with`,
@@ -51,7 +51,7 @@ export function parseUnionDecl(ref ps: ParserState): Result<NodeId, ParsingError
     )};
   }
 
-  SelfLexing.expect(ref ps, TokenTags.LCURLY)?;
+  ps.expect(TokenTags.LCURLY)?;
   disposable fieldIds: Vec<NodeId> = vec.vecNew(4);
   while (untilClosing(ref ps, TokenTags.RCURLY)) {
     // Named rather than left to parseFieldDecl, which would report a missing
@@ -70,11 +70,11 @@ export function parseUnionDecl(ref ps: ParserState): Result<NodeId, ParsingError
     vec.vecPush(ref fieldIds, parseFieldDecl(ref ps)?);
     // A trailing comma after the last field is allowed, so consume the
     // separator whenever there is one and let the loop condition decide.
-    if (SelfLexing.peek(ref ps).tag == TokenTags.COMMA) {
-      SelfLexing.advance(ref ps)?;
+    if (ps.peek().tag == TokenTags.COMMA) {
+      ps.advance()?;
     }
   }
-  SelfLexing.expect(ref ps, TokenTags.RCURLY)?;
+  ps.expect(TokenTags.RCURLY)?;
 
   if (fieldIds.len == 0) {
     return Result.Err { error: SelfLexing.createParsingError(
@@ -86,5 +86,5 @@ export function parseUnionDecl(ref ps: ParserState): Result<NodeId, ParsingError
 
   spliceChildren(ref ps, ref node, ref fieldIds);
 
-  return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
+  return Result.Ok { value: ps.pushNode(node) };
 }

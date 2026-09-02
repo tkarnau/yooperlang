@@ -38,7 +38,7 @@ export trait SelfLexing {
 }
 
 export function peekLengthUsize(ref pState: ParserState): Option<usize> {
-  return Option.Some { value: usize(SelfLexing.peek(ref pState).length) };
+  return Option.Some { value: usize(pState.peek().length) };
 }
 
 // True while the cursor is inside a run that ends at `closer`.
@@ -52,7 +52,7 @@ export function peekLengthUsize(ref pState: ParserState): Option<usize> {
 // Seventeen sites spelled this out as a five-line condition that called `peek`
 // twice per iteration.
 export function untilClosing(ref ps: ParserState, closer: TokenTags): bool {
-  const t = SelfLexing.peek(ref ps).tag;
+  const t = ps.peek().tag;
   return t != closer && t != TokenTags.EOF;
 }
 
@@ -63,7 +63,7 @@ export function untilClosing(ref ps: ParserState, closer: TokenTags): bool {
 // keyword, and only the token AFTER it says which. False at end of input, since
 // nothing follows there to match.
 export function followingTokenIs(ref ps: ParserState, tag: TokenTags): bool {
-  switch (SelfLexing.peekAhead(ref ps, 1)) {
+  switch (ps.peekAhead(1)) {
     case Result.Err { error: e }: { return false; }
     case Result.Ok { value: tok }: { return tok.tag == tag; }
   }
@@ -170,7 +170,7 @@ export type ParserState implements SelfLexing propagates<disposable> {
     let listNode = createASTNode(ASTNodeKind.NODE_LIST, loc);
     listNode.childStart = start;
     listNode.childCount = ids.len;
-    return SelfLexing.pushNode(ref self, listNode);
+    return self.pushNode(listNode);
   }
   function peek(ref self): Token {
     return self.currentLex.token;
@@ -218,7 +218,7 @@ export type ParserState implements SelfLexing propagates<disposable> {
       )};
     }
     const tok = self.currentLex.token;
-    SelfLexing.advance(ref self)?;
+    self.advance()?;
 
     return Result.Ok { value:  tok };
   }

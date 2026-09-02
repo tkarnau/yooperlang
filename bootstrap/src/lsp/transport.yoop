@@ -75,8 +75,8 @@ export type FrameReader implements Disposable propagates<disposable> {
   error: string,
 
   function dispose(ref self): void {
-    Disposable.dispose(ref self.buf);
-    Disposable.dispose(ref self.scratch);
+    self.buf.dispose();
+    self.scratch.dispose();
   }
 }
 

@@ -20,12 +20,12 @@ export function parseVarDecl(ref ps: ParserState): ParsingResult {
   // Shape (3) is dispatched in parseStatement; (1) and (2) start with let/const.
   let declToken: Token;
   declToken.tag = TokenTags.NOTOKEN;
-  if (SelfLexing.peek(ref ps).tag == TokenTags.LET || SelfLexing.peek(ref ps).tag == TokenTags.CONST) {
-    declToken = SelfLexing.advance(ref ps)?;
+  if (ps.peek().tag == TokenTags.LET || ps.peek().tag == TokenTags.CONST) {
+    declToken = ps.advance()?;
   }
 
   // destructuring
-  if (declToken.tag != TokenTags.NOTOKEN && SelfLexing.peek(ref ps).tag == TokenTags.LCURLY) {
+  if (declToken.tag != TokenTags.NOTOKEN && ps.peek().tag == TokenTags.LCURLY) {
     // todo...
   }
   let nodeKind = ASTNodeKind.CONST_DECL;
@@ -47,16 +47,16 @@ export function parseVarDecl(ref ps: ParserState): ParsingResult {
   // span on `disposable` while an ordinary one's sits on its name - two
   // spellings of the same declaration landing in different places, which is a
   // squiggle on the wrong word and a hover that misses.
-  const nameTok = SelfLexing.peek(ref ps);
+  const nameTok = ps.peek();
   const name = parseIdentAsName(ref ps)?;
-  let node = SelfLexing.buildNodeAt(ref ps, nodeKind, nameTok);
+  let node = ps.buildNodeAt(nodeKind, nameTok);
   node.childC = prefixes;
   node.name = name;
 
   // type annotation is optional, when omitted, the typechecker infers
   // the binding's type from its initializer
-  if (SelfLexing.peek(ref ps).tag == TokenTags.COLON) {
-    SelfLexing.advance(ref ps)?; // consume the colon
+  if (ps.peek().tag == TokenTags.COLON) {
+    ps.advance()?; // consume the colon
     node.childA = parseTypeAnnotation(ref ps)?;
   }
 
@@ -66,11 +66,11 @@ export function parseVarDecl(ref ps: ParserState): ParsingResult {
   // plain let/const path
 
   // if it is just a semicolon, it is uninitialized...
-  if (SelfLexing.peek(ref ps).tag == TokenTags.SEMICOLON) {
-    SelfLexing.advance(ref ps)?;
-    return Result.Ok { value: SelfLexing.pushNode(ref ps, node ) };
+  if (ps.peek().tag == TokenTags.SEMICOLON) {
+    ps.advance()?;
+    return Result.Ok { value: ps.pushNode(node ) };
   }
-  SelfLexing.expect(ref ps, TokenTags.EQ)?;
+  ps.expect(TokenTags.EQ)?;
   node.childB = parseExpression(ref ps, 0)?;
 
   // `disposable reg: ArenaScope = arenaScope(4096) { ... }` - the BLOCK form of
@@ -86,11 +86,11 @@ export function parseVarDecl(ref ps: ParserState): ParsingResult {
   // plain `const p: Point = { x: 1 }` is followed by `;` and the `{ x: 1 }` was
   // already eaten by the expression; without the gate an ordinary binding
   // followed by a bare block statement would swallow the block.
-  if (node.childC != 0 && SelfLexing.peek(ref ps).tag == TokenTags.LCURLY) {
+  if (node.childC != 0 && ps.peek().tag == TokenTags.LCURLY) {
     node.childD = parseBlock(ref ps)?;
-    return Result.Ok { value: SelfLexing.pushNode(ref ps, node ) };
+    return Result.Ok { value: ps.pushNode(node ) };
   }
-  SelfLexing.expect(ref ps, TokenTags.SEMICOLON)?;
+  ps.expect(TokenTags.SEMICOLON)?;
 
-  return Result.Ok { value: SelfLexing.pushNode(ref ps, node ) };
+  return Result.Ok { value: ps.pushNode(node ) };
 }

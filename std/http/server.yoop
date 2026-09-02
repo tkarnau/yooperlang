@@ -187,7 +187,7 @@ async readRequestHead(
 // byte literal), so the duplicate stands until std/http is one module and one
 // private copy can serve both directions.
 async readRequestBytes(ref r: Reader, ref window: uint8[]): Result<usize, HttpError> {
-    switch (await Reader.read(ref r, ref window)) {
+    switch (await r.read(ref window)) {
         case Result.Ok { value: n }: { return Result.Ok { value: usize(n) }; }
         case Result.Err { error: e }: { return Result.Err { error: errIo(e) }; }
     }
@@ -295,7 +295,7 @@ async writeResponse(
     }
 
     let view: uint8[] = vec.vecAsArray(ref out);
-    switch (await Writer.write(ref w, ref view)) {
+    switch (await w.write(ref view)) {
         case Result.Ok { value: n }: { return Result.Ok { value: usize(n) }; }
         case Result.Err { error: e }: { return Result.Err { error: errIo(e) }; }
     }
@@ -371,7 +371,7 @@ async exchange(
         || !str.stringEq(pr.request.version, "HTTP/1.1");
     meta.line = `${methodLabel(pr.request.method)} ${pr.request.target}`;
 
-    switch (await Dispatcher.handle(ref d, ref pr.request, ref resp)) {
+    switch (await d.handle(ref pr.request, ref resp)) {
         case HandleOutcome.Ok: { return Result.Ok { value: meta.consumed }; }
         case HandleOutcome.Err { error: e }: { return Result.Err { error: e }; }
     }
@@ -666,7 +666,7 @@ task connectionTask(
 // nothing useful to do about a refusal that did not land.
 async refuse(ref w: Writer): void {
     let out: uint8[] = intr.stringAsBytes(BUSY_RESPONSE);
-    switch (await Writer.write(ref w, ref out)) {
+    switch (await w.write(ref out)) {
         case Result.Ok { value: _n }: { }
         case Result.Err { error: _e }: { }
     }

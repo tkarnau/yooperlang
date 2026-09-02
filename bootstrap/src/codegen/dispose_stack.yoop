@@ -101,7 +101,7 @@ export function disposePopScope(ref d: DisposeStack): void {
     return;
   }
   let top = vec.vecGet(ref d.scopes, d.scopes.len - 1);
-  Disposable.dispose(ref top);
+  top.dispose();
   d.scopes.len -= 1;
 }
 

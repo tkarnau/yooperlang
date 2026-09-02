@@ -68,7 +68,7 @@ export type TcpListener implements Disposable propagates<disposable> {
     // this is the one the kernel picked, and it is the only way to find out.
     boundPort: int32,
     function dispose(ref self): void {
-        Disposable.dispose(ref self.socket);
+        self.socket.dispose();
     }
 }
 
@@ -76,7 +76,7 @@ export type ListenResult implements Disposable propagates<disposable> {
     listener: TcpListener,
     error:    string,
     function dispose(ref self): void {
-        Disposable.dispose(ref self.listener);
+        self.listener.dispose();
     }
 }
 
@@ -137,10 +137,10 @@ export type TcpStream implements (Disposable, Readable, Writable) propagates<dis
     token: CancelToken,
 
     function dispose(ref self): void {
-        Disposable.dispose(ref self.socket);
+        self.socket.dispose();
         // The stream does not own the token - it holds a shared handle,
         // and disposing that handle only drops this stream's reference.
-        Disposable.dispose(ref self.token);
+        self.token.dispose();
     }
 
     // Async: on a worker these SUSPEND the calling task rather than
@@ -235,7 +235,7 @@ export function tcpSetTimeoutMs(ref stream: TcpStream, ms: uint64): void {
 // handle, so the caller's token can go out of scope independently. Any
 // previously attached token is released.
 export function tcpSetToken(ref stream: TcpStream, ref t: CancelToken): void {
-    Disposable.dispose(ref stream.token);
+    stream.token.dispose();
     stream.token = cancel.share(ref t);
 }
 
@@ -274,7 +274,7 @@ export type AcceptResult implements Disposable propagates<disposable> {
     peerPort: uint16,
     error:     string,
     function dispose(ref self): void {
-        Disposable.dispose(ref self.stream);
+        self.stream.dispose();
     }
 }
 
@@ -354,7 +354,7 @@ export type ConnectResult implements Disposable propagates<disposable> {
     stream: TcpStream,
     error:  string,
     function dispose(ref self): void {
-        Disposable.dispose(ref self.stream);
+        self.stream.dispose();
     }
 }
 

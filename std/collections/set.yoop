@@ -23,7 +23,7 @@ import {
 export type Set<K> implements Disposable propagates<disposable> {
     inner: Map<K, bool>,
     function dispose(ref self): void {
-        Disposable.dispose(ref self.inner);
+        self.inner.dispose();
     }
 }
 

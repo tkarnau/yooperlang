@@ -13,7 +13,7 @@ export function findMatchingRParen(ref ps: ParserState, lParentIdx: usize): Opti
     // every iteration, so an unbalanced count never converges and the parser
     // hangs rather than failing. `aligned(16)` on a type decl was the first
     // thing to reach this.
-    const peekAheadResult = SelfLexing.peekAhead(ref ps, i);
+    const peekAheadResult = ps.peekAhead(i);
     switch (peekAheadResult) {
       case Result.Err { error: e }: {
         return Option.None {}; // ignore this error, as we may peek too far and that's ok

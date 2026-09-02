@@ -9,7 +9,7 @@ module codegen;
   dispose_stack.yoop; this file only turns an entry into instructions.
 
   The call is an ordinary static trait dispatch, the same thing
-  `Disposable.dispose(ref ids)` would emit if it were written by hand. That is
+  `ids.dispose()` would emit if it were written by hand. That is
   the whole trick: a kind with `mustCall dispose beforeScopeEnd` names a method,
   the binding's type has that method, and the machinery for calling it already
   existed. Nothing here knows what `dispose` does.

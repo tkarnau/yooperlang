@@ -69,9 +69,9 @@ export type Analysis implements Disposable propagates<disposable> {
 
   function dispose(ref self): void {
     releaseCompile(ref self);
-    Disposable.dispose(ref self.diags);
-    Disposable.dispose(ref self.uri);
-    Disposable.dispose(ref self.path);
+    self.diags.dispose();
+    self.uri.dispose();
+    self.path.dispose();
   }
 }
 
@@ -109,7 +109,7 @@ export function releaseCompile(ref a: Analysis): void {
     // would free the Vec of modules and leave every AST and every module's
     // source bytes behind. See source_graph/graph.yoop.
     disposeModuleGraph(ref a.graph);
-    Disposable.dispose(ref a.prog);
+    a.prog.dispose();
     a.held = false;
   }
   a.typed = false;

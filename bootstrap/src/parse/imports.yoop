@@ -29,10 +29,10 @@ import { ParsingError } from "../diagnostics";
 import * as str from "std/core/strings.yoop";
 
 export function parseImportDecl(ref ps: ParserState): Result<NodeId, ParsingError> {
-  let node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.IMPORT_DECL);
-  SelfLexing.expect(ref ps, TokenTags.IMPORT)?;
+  let node = ps.buildSourcedNode(ASTNodeKind.IMPORT_DECL);
+  ps.expect(TokenTags.IMPORT)?;
 
-  const afterImport = SelfLexing.peek(ref ps).tag;
+  const afterImport = ps.peek().tag;
 
   // Either clause may come first, and either may appear alone. The combined
   // form is just both of them with a comma between, which is why this reads as
@@ -45,50 +45,50 @@ export function parseImportDecl(ref ps: ParserState): Result<NodeId, ParsingErro
   disposable specifiers: Vec<NodeId> = vec.vecNew(4);
   if (afterImport == TokenTags.MULT) {
     node.name = parseNamespaceClause(ref ps)?;
-    if (SelfLexing.peek(ref ps).tag == TokenTags.COMMA) {
-      SelfLexing.advance(ref ps)?;
+    if (ps.peek().tag == TokenTags.COMMA) {
+      ps.advance()?;
       parseNamedClause(ref ps, ref specifiers)?;
     }
   } else if (afterImport != TokenTags.STRLITERAL) {
     parseNamedClause(ref ps, ref specifiers)?;
-    if (SelfLexing.peek(ref ps).tag == TokenTags.COMMA) {
-      SelfLexing.advance(ref ps)?;
+    if (ps.peek().tag == TokenTags.COMMA) {
+      ps.advance()?;
       node.name = parseNamespaceClause(ref ps)?;
     }
   }
 
   if (afterImport != TokenTags.STRLITERAL) {
-    SelfLexing.expect(ref ps, TokenTags.FROM)?;
+    ps.expect(TokenTags.FROM)?;
   }
-  const pathTok = SelfLexing.expect(ref ps, TokenTags.STRLITERAL)?;
+  const pathTok = ps.expect(TokenTags.STRLITERAL)?;
   node.strId = internString(ref ps, decodeStringLiteral(ref ps, pathTok)?);
-  SelfLexing.expect(ref ps, TokenTags.SEMICOLON)?;
+  ps.expect(TokenTags.SEMICOLON)?;
 
   // The specifiers are this node's OWN run, spliced after every child is built
   // (a child parse can append runs of its own, so a partial splice interleaves).
   spliceChildren(ref ps, ref node, ref specifiers);
 
-  return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
+  return Result.Ok { value: ps.pushNode(node) };
 }
 
 // `* as ns`, returning the local name the namespace binds to. The `*` has not
 // been consumed yet.
 function parseNamespaceClause(ref ps: ParserState): Result<string, ParsingError> {
-  SelfLexing.expect(ref ps, TokenTags.MULT)?;
-  SelfLexing.expect(ref ps, TokenTags.AS)?;
+  ps.expect(TokenTags.MULT)?;
+  ps.expect(TokenTags.AS)?;
   return Result.Ok { value: parseIdentAsName(ref ps)? };
 }
 
 // `{ a, b as c }`. The `{` has not been consumed yet.
 function parseNamedClause(ref ps: ParserState, ref out: Vec<NodeId>): Result<usize, ParsingError> {
-  SelfLexing.expect(ref ps, TokenTags.LCURLY)?;
-  while (SelfLexing.peek(ref ps).tag == TokenTags.IDENT) {
+  ps.expect(TokenTags.LCURLY)?;
+  while (ps.peek().tag == TokenTags.IDENT) {
     vec.vecPush(ref out, parseImportSpecifier(ref ps)?);
-    if (SelfLexing.peek(ref ps).tag == TokenTags.COMMA) {
-      SelfLexing.advance(ref ps)?;
+    if (ps.peek().tag == TokenTags.COMMA) {
+      ps.advance()?;
     }
   }
-  SelfLexing.expect(ref ps, TokenTags.RCURLY)?;
+  ps.expect(TokenTags.RCURLY)?;
   return Result.Ok { value: out.len };
 }
 
@@ -96,16 +96,16 @@ function parseNamedClause(ref ps: ParserState, ref out: Vec<NodeId>): Result<usi
 // export name is interned - see astNodeStrIdName in ast/slots.yoop for why the
 // pair splits that way round.
 function parseImportSpecifier(ref ps: ParserState): Result<NodeId, ParsingError> {
-  let node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.IMPORT_SPECIFIER);
+  let node = ps.buildSourcedNode(ASTNodeKind.IMPORT_SPECIFIER);
   const exportName = parseIdentAsName(ref ps)?;
   let localName = exportName;
-  if (SelfLexing.peek(ref ps).tag == TokenTags.AS) {
-    SelfLexing.advance(ref ps)?;
+  if (ps.peek().tag == TokenTags.AS) {
+    ps.advance()?;
     localName = parseIdentAsName(ref ps)?;
   }
   node.name = localName;
   node.strId = internString(ref ps, exportName);
-  return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
+  return Result.Ok { value: ps.pushNode(node) };
 }
 
 // `export function f() {}` / `export type T { ... }`.
@@ -114,10 +114,10 @@ function parseImportSpecifier(ref ps: ParserState): Result<NodeId, ParsingError>
 // shape. `declOf` in the ast module is what keeps the four top-level walks from
 // each having to know about it.
 export function parseExportDecl(ref ps: ParserState): Result<NodeId, ParsingError> {
-  let node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.EXPORT_DECL);
-  SelfLexing.expect(ref ps, TokenTags.EXPORT)?;
+  let node = ps.buildSourcedNode(ASTNodeKind.EXPORT_DECL);
+  ps.expect(TokenTags.EXPORT)?;
 
-  const declTag = SelfLexing.peek(ref ps).tag;
+  const declTag = ps.peek().tag;
   switch (declTag) {
     case TokenTags.FUNCTION: {
       node.childA = parseFunctionDecl(ref ps)?;
@@ -156,7 +156,7 @@ export function parseExportDecl(ref ps: ParserState): Result<NodeId, ParsingErro
     // compiler IS the implementation, so there is no body to emit and nothing
     // for `export` to do with one.
     case TokenTags.STRLITERAL: {
-      const abiTok = SelfLexing.advance(ref ps)?;
+      const abiTok = ps.advance()?;
       const abi = decodeStringLiteral(ref ps, abiTok)?;
       if (!str.stringEq(abi, ABI_C)) {
         return Result.Err { error: SelfLexing.createParsingError(
@@ -173,11 +173,11 @@ export function parseExportDecl(ref ps: ParserState): Result<NodeId, ParsingErro
       // with an IDENT, so they are told apart the same way the top level does.
       if (atKindDecl(ref ps)) {
         node.childA = parseKindDecl(ref ps)?;
-        return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
+        return Result.Ok { value: ps.pushNode(node) };
       }
       if (atKindPrefixedDecl(ref ps)) {
         node.childA = parseKindPrefixedDecl(ref ps)?;
-        return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
+        return Result.Ok { value: ps.pushNode(node) };
       }
       return Result.Err { error: SelfLexing.createParsingError(
         ref ps,
@@ -187,5 +187,5 @@ export function parseExportDecl(ref ps: ParserState): Result<NodeId, ParsingErro
     }
   }
 
-  return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
+  return Result.Ok { value: ps.pushNode(node) };
 }

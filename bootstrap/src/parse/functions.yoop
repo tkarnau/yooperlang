@@ -10,7 +10,7 @@ import { TokenTags, posToSourceLocation } from "../lex";
 import { ParsingError } from "../diagnostics";
 
 export function parseFunctionDecl(ref ps: ParserState): Result<NodeId, ParsingError> {
-  SelfLexing.expect(ref ps, TokenTags.FUNCTION)?;
+  ps.expect(TokenTags.FUNCTION)?;
   return parseFunctionRest(ref ps, 0);
 }
 
@@ -26,16 +26,16 @@ export function parseFunctionRest(
   ref ps: ParserState,
   prefixes: NodeId
 ): Result<NodeId, ParsingError> {
-  let node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.FUNCTION_DECL);
+  let node = ps.buildSourcedNode(ASTNodeKind.FUNCTION_DECL);
   node.childE = prefixes;
   node.name = parseIdentAsName(ref ps)?;
   // function {name}<{typeparams}>({args}){{body}}
 
   node.childA = parseTypeParamList(ref ps)?;
-  SelfLexing.expect(ref ps, TokenTags.LPAREN)?;
+  ps.expect(TokenTags.LPAREN)?;
   const loc = posToSourceLocation(ps.src, ps.pos, 1);
   disposable ids: Vec<NodeId> = vec.vecNew(4);
-  let peekTag = SelfLexing.peek(ref ps).tag;
+  let peekTag = ps.peek().tag;
   // No POOLED case: `pooled` is contextual and lexes as IDENT, which the
   // first arm already covers. DOTDOTDOT is here only so `function f(...)`
   // reaches parseFunctionParam and gets the named refusal below, instead of
@@ -51,24 +51,24 @@ export function parseFunctionRest(
     atReservedUsedAsName(ref ps)
   ) {
     if (peekTag == TokenTags.COMMA) {
-      SelfLexing.advance(ref ps)?;
-      peekTag = SelfLexing.peek(ref ps).tag;
+      ps.advance()?;
+      peekTag = ps.peek().tag;
     }
     if (peekTag != TokenTags.RPAREN && peekTag != TokenTags.EOF) {
       vec.vecPush(ref ids, parseFunctionParam(ref ps)?);
-      peekTag = SelfLexing.peek(ref ps).tag;
+      peekTag = ps.peek().tag;
     }
   }
-  node.childB = SelfLexing.buildListNode(ref ps, ref ids, loc);
-  SelfLexing.expect(ref ps, TokenTags.RPAREN)?;
-  SelfLexing.expect(ref ps, TokenTags.COLON)?;
+  node.childB = ps.buildListNode(ref ids, loc);
+  ps.expect(TokenTags.RPAREN)?;
+  ps.expect(TokenTags.COLON)?;
   node.childC = parseTypeAnnotation(ref ps)?;
   node.childF = parsePropagatesClause(ref ps)?;
 
   // parse function body as a block
   node.childD = parseBlock(ref ps)?;
 
-  return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
+  return Result.Ok { value: ps.pushNode(node) };
 }
 
 export function parseFunctionParam(ref ps: ParserState): Result<NodeId, ParsingError> {
@@ -87,13 +87,13 @@ function parseParamWithName(
   ref ps: ParserState,
   keywordNameOk: bool
 ): Result<NodeId, ParsingError> {
-  if (SelfLexing.peek(ref ps).tag == TokenTags.DOTDOTDOT) {
+  if (ps.peek().tag == TokenTags.DOTDOTDOT) {
     return Result.Err { error: variadicNotAllowedHere(ref ps) };
   }
-  let node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.PARAM);
+  let node = ps.buildSourcedNode(ASTNodeKind.PARAM);
   node.childE = parseParamKindPrefix(ref ps)?;
-  if (SelfLexing.peek(ref ps).tag == TokenTags.REF) {
-    SelfLexing.advance(ref ps)?;
+  if (ps.peek().tag == TokenTags.REF) {
+    ps.advance()?;
     node.flagA = true; // isRef
   } else {
     node.flagA = false;
@@ -104,11 +104,11 @@ function parseParamWithName(
   } else {
     node.name = parseIdentAsName(ref ps)?;
   }
-  SelfLexing.expect(ref ps, TokenTags.COLON)?;
+  ps.expect(TokenTags.COLON)?;
   // type annotation stuff
   node.childA = parseTypeAnnotation(ref ps)?;
   // isRef and refType stuff
-  return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
+  return Result.Ok { value: ps.pushNode(node) };
 }
 
 // `scoped h: ref FileHandle` - the kind a PARAMETER carries, written before its
@@ -130,9 +130,9 @@ export function parseParamKindPrefix(ref ps: ParserState): Result<NodeId, Parsin
   }
   const loc = posToSourceLocation(ps.src, ps.pos, 1);
   disposable ids: Vec<NodeId> = vec.vecNew(1);
-  let prefix = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.KIND_PREFIX);
+  let prefix = ps.buildSourcedNode(ASTNodeKind.KIND_PREFIX);
   prefix.name = parseIdentAsName(ref ps)?;
-  vec.vecPush(ref ids, SelfLexing.pushNode(ref ps, prefix));
+  vec.vecPush(ref ids, ps.pushNode(prefix));
 
   if (atParamKindPrefix(ref ps)) {
     return Result.Err { error: SelfLexing.createParsingError(
@@ -141,14 +141,14 @@ export function parseParamKindPrefix(ref ps: ParserState): Result<NodeId, Parsin
       peekLengthUsize(ref ps),
     )};
   }
-  return Result.Ok { value: SelfLexing.buildListNode(ref ps, ref ids, loc) };
+  return Result.Ok { value: ps.buildListNode(ref ids, loc) };
 }
 
 function atParamKindPrefix(ref ps: ParserState): bool {
-  if (SelfLexing.peek(ref ps).tag != TokenTags.IDENT) {
+  if (ps.peek().tag != TokenTags.IDENT) {
     return false;
   }
-  switch (SelfLexing.peekAhead(ref ps, 1)) {
+  switch (ps.peekAhead(1)) {
     case Result.Err { error: e }: { return false; }
     case Result.Ok { value: tok }: {
       return tok.tag == TokenTags.IDENT || tok.tag == TokenTags.REF;

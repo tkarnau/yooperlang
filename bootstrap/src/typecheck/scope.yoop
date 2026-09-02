@@ -94,7 +94,7 @@ export function scopePop(ref s: LocalScope): void {
     return;
   }
   let top = vec.vecGet(ref s.blocks, s.blocks.len - 1);
-  Disposable.dispose(ref top);
+  top.dispose();
   s.blocks.len -= 1;
 }
 

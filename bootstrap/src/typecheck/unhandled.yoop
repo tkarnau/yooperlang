@@ -15,7 +15,7 @@ module typecheck;
   Three things answer the obligation, and any one of them is enough:
 
     the KIND KEYWORD   `disposable w: Widget = ...` - auto-cleanup at scope end
-    a MANUAL call      `Disposable.dispose(ref w)` - discharge.yoop decides this
+    a MANUAL call      `w.dispose()` - discharge.yoop decides this
                        one, path-sensitively, because a call in one arm of an
                        `if` answers nothing at the join
     a TRANSFER         the value is handed on - returned, passed by value,

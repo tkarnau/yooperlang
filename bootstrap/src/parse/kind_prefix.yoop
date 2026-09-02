@@ -38,10 +38,10 @@ import { ParsingError } from "../diagnostics";
 // variant or enum case may be a bare name with a method right after it. See
 // `atKindPrefixedMethod` for that side.
 export function atKindPrefixedDecl(ref ps: ParserState): bool {
-  if (SelfLexing.peek(ref ps).tag != TokenTags.IDENT) {
+  if (ps.peek().tag != TokenTags.IDENT) {
     return false;
   }
-  switch (SelfLexing.peekAhead(ref ps, 1)) {
+  switch (ps.peekAhead(1)) {
     case Result.Ok { value: next }: {
       return next.tag == TokenTags.IDENT || next.tag == TokenTags.FUNCTION;
     }
@@ -65,12 +65,12 @@ export function atKindPrefixedDecl(ref ps: ParserState): bool {
 //     `bareIdentIsMember` is how the caller says which body it is in: a struct
 //     field is always `name: T`, so there the shape can only be a prefix.
 export function atKindPrefixedMethod(ref ps: ParserState, bareIdentIsMember: bool): bool {
-  if (SelfLexing.peek(ref ps).tag != TokenTags.IDENT) {
+  if (ps.peek().tag != TokenTags.IDENT) {
     return false;
   }
   let n: usize = 1;
   while (n < MAX_METHOD_PREFIX_LOOKAHEAD) {
-    switch (SelfLexing.peekAhead(ref ps, n)) {
+    switch (ps.peekAhead(n)) {
       case Result.Err { error: e }: { return false; }
       case Result.Ok { value: tok }: {
         if (tok.tag == TokenTags.IDENT) {
@@ -101,10 +101,10 @@ const MAX_METHOD_PREFIX_LOOKAHEAD: usize = 8;
 // bare `IDENT IDENT (` shape is unambiguously a function.
 export function parseKindPrefixedDecl(ref ps: ParserState): Result<NodeId, ParsingError> {
   const prefixes = parseKindPrefixRun(ref ps)?;
-  if (SelfLexing.peek(ref ps).tag != TokenTags.IDENT) {
+  if (ps.peek().tag != TokenTags.IDENT) {
     return Result.Err { error: SelfLexing.createParsingError(
       ref ps,
-      `expected a function name after a kind prefix, got ${tagName(SelfLexing.peek(ref ps).tag)}`,
+      `expected a function name after a kind prefix, got ${tagName(ps.peek().tag)}`,
       peekLengthUsize(ref ps),
     )};
   }
@@ -132,25 +132,25 @@ export function parseKindPrefixedDecl(ref ps: ParserState): Result<NodeId, Parsi
 export function parseKindPrefixRun(ref ps: ParserState): Result<NodeId, ParsingError> {
   const loc = posToSourceLocation(ps.src, ps.pos, 1);
   disposable ids: Vec<NodeId> = vec.vecNew(2);
-  while (SelfLexing.peek(ref ps).tag == TokenTags.IDENT && atKindPrefixIdent(ref ps)) {
-    let prefix = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.KIND_PREFIX);
+  while (ps.peek().tag == TokenTags.IDENT && atKindPrefixIdent(ref ps)) {
+    let prefix = ps.buildSourcedNode(ASTNodeKind.KIND_PREFIX);
     prefix.name = parseIdentAsName(ref ps)?;
-    vec.vecPush(ref ids, SelfLexing.pushNode(ref ps, prefix));
+    vec.vecPush(ref ids, ps.pushNode(prefix));
   }
-  if (ids.len == 0 || SelfLexing.peek(ref ps).tag == TokenTags.FUNCTION) {
-    SelfLexing.expect(ref ps, TokenTags.FUNCTION)?;
+  if (ids.len == 0 || ps.peek().tag == TokenTags.FUNCTION) {
+    ps.expect(TokenTags.FUNCTION)?;
   }
   if (ids.len == 0) {
     return Result.Ok { value: 0 };
   }
-  return Result.Ok { value: SelfLexing.buildListNode(ref ps, ref ids, loc) };
+  return Result.Ok { value: ps.buildListNode(ref ids, loc) };
 }
 
 // Whether the identifier the parser is on is a PREFIX rather than the
 // declaration's own name: something follows it that a name cannot be followed
 // by.
 function atKindPrefixIdent(ref ps: ParserState): bool {
-  switch (SelfLexing.peekAhead(ref ps, 1)) {
+  switch (ps.peekAhead(1)) {
     case Result.Err { error: e }: { return false; }
     case Result.Ok { value: tok }: {
       return tok.tag == TokenTags.IDENT || tok.tag == TokenTags.FUNCTION;
@@ -177,24 +177,24 @@ export function parsePropagatesClause(ref ps: ParserState): Result<NodeId, Parsi
     return Result.Ok { value: 0 };
   }
   const loc = posToSourceLocation(ps.src, ps.pos, 1);
-  SelfLexing.advance(ref ps)?;
-  SelfLexing.expect(ref ps, TokenTags.LT)?;
+  ps.advance()?;
+  ps.expect(TokenTags.LT)?;
 
   disposable ids: Vec<NodeId> = vec.vecNew(2);
   while (true) {
-    let node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.KIND_PREFIX);
+    let node = ps.buildSourcedNode(ASTNodeKind.KIND_PREFIX);
     node.name = parseIdentAsName(ref ps)?;
-    vec.vecPush(ref ids, SelfLexing.pushNode(ref ps, node));
-    if (SelfLexing.peek(ref ps).tag != TokenTags.COMMA) {
+    vec.vecPush(ref ids, ps.pushNode(node));
+    if (ps.peek().tag != TokenTags.COMMA) {
       break;
     }
-    SelfLexing.advance(ref ps)?;
+    ps.advance()?;
   }
 
   // The same `>>` split every other closing angle bracket goes through:
   // `propagates<Foo<T>>` ends in one right-shift token.
   consumeClosingGt(ref ps)?;
-  return Result.Ok { value: SelfLexing.buildListNode(ref ps, ref ids, loc) };
+  return Result.Ok { value: ps.buildListNode(ref ids, loc) };
 }
 
 export const PROPAGATES_KEYWORD: string = "propagates";

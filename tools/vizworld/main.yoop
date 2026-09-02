@@ -67,7 +67,7 @@ function main(): int32 {
   // back a null context; refusing here beats faulting on the first glClear.
   if (ctx.handle == null) {
     log.error(`vizworld: no GL context: ${sdl.lastError()}`);
-    Disposable.dispose(ref win);
+    win.dispose();
     sdl.quit();
     return 1;
   }
@@ -551,8 +551,8 @@ function main(): int32 {
   // Leaving tells the plugin its window is gone: a build still waiting at a
   // gate sees the empty line and aborts rather than hanging.
   wire.wireSendLine("bye");
-  Disposable.dispose(ref ctx);
-  Disposable.dispose(ref win);
+  ctx.dispose();
+  win.dispose();
   sdl.quit();
   return 0;
 }

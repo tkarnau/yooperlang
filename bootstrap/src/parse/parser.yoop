@@ -18,7 +18,7 @@ import * as str from "std/core/strings.yoop";
 
 // main parsing logic, starts with top level and handles all child levels
 function parseAST(ref ps: ParserState): Result<NodeId, ParsingError> {
-  let program = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.PROGRAM);
+  let program = ps.buildSourcedNode(ASTNodeKind.PROGRAM);
 
   // `module <name>;`, when the file has one. It lands on the PROGRAM node's
   // `name` - empty for a file with no header, which is what makes it a
@@ -35,7 +35,7 @@ function parseAST(ref ps: ParserState): Result<NodeId, ParsingError> {
   // the edges, pass B to bind them), so an import further down would be
   // silently ignored rather than misunderstood. Refuse it here instead.
   let seenNonImport = false;
-  let peekTag = SelfLexing.peek(ref ps).tag;
+  let peekTag = ps.peek().tag;
   while (peekTag != TokenTags.EOF) {
     if (peekTag != TokenTags.IMPORT) {
       seenNonImport = true;
@@ -50,7 +50,7 @@ function parseAST(ref ps: ParserState): Result<NodeId, ParsingError> {
       case TokenTags.IMPORT: {
         // `import.unsafe;` is a module FLAG, not an import. Same keyword; the
         // `.` is what tells them apart, so the fork is here.
-        if (SelfLexing.peekAhead(ref ps, 1)?.tag == TokenTags.DOT) {
+        if (ps.peekAhead(1)?.tag == TokenTags.DOT) {
           const directive = parseImportDirective(ref ps)?;
           if (str.stringEq(directive, "unsafe")) {
             program.flagA = true;
@@ -123,7 +123,7 @@ function parseAST(ref ps: ParserState): Result<NodeId, ParsingError> {
         // as an IDENT like everything else here.
         if (atKindDecl(ref ps)) {
           vec.vecPush(ref body, parseKindDecl(ref ps)?);
-          peekTag = SelfLexing.peek(ref ps).tag;
+          peekTag = ps.peek().tag;
           continue;
         }
         // `async fetch(...)` - a declaration CARRYING a kind. A kind prefix
@@ -131,7 +131,7 @@ function parseAST(ref ps: ParserState): Result<NodeId, ParsingError> {
         // dispatch on and the two-identifier shape is what says so.
         if (atKindPrefixedDecl(ref ps)) {
           vec.vecPush(ref body, parseKindPrefixedDecl(ref ps)?);
-          peekTag = SelfLexing.peek(ref ps).tag;
+          peekTag = ps.peek().tag;
           continue;
         }
         return Result.Err { error: SelfLexing.createParsingError(
@@ -141,7 +141,7 @@ function parseAST(ref ps: ParserState): Result<NodeId, ParsingError> {
         )};
       }
     }
-    peekTag = SelfLexing.peek(ref ps).tag;
+    peekTag = ps.peek().tag;
   }
 
   // A file that wrote `a..b` gets a synthesized namespace import of
@@ -164,7 +164,7 @@ function parseAST(ref ps: ParserState): Result<NodeId, ParsingError> {
   vec.vecExtendFrom(ref ps.ast.childIds, vec.vecAsArray(ref body));
   program.childStart = start;
   program.childCount = body.len + extra;
-  ps.ast.root = SelfLexing.pushNode(ref ps, program);
+  ps.ast.root = ps.pushNode(program);
 
   return Result.Ok { value: ps.ast.root };
 }
@@ -202,7 +202,7 @@ export function parseInto(ast: AST, src: uint8[]): Result<ParsedFile, ParsingErr
     inForInIterExpr: false,
   };
 
-  SelfLexing.advance(ref pState)?; // prime: load the first real token into currentLex
+  pState.advance()?; // prime: load the first real token into currentLex
 
   const root = parseAST(ref pState)?;
   return Result.Ok { value: { ast: pState.ast, root: root } };

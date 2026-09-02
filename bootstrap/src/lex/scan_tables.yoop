@@ -63,8 +63,8 @@ export type LexTables implements Disposable propagates<disposable> {
   scan: Vec<SortedTokenDefinition>,     // sorted longest spelling first
   keywords: Vec<KeywordDefinition>,     // in declaration order; order is free
   function dispose(ref self): void {
-    Disposable.dispose(ref self.scan);
-    Disposable.dispose(ref self.keywords);
+    self.scan.dispose();
+    self.keywords.dispose();
   }
 }
 

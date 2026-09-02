@@ -42,29 +42,29 @@ const DERIVE_DISPLAY: string = "display";
 // identifier here would make the arg shape a property of `@` rather than of the
 // attribute.
 export function parseAttribute(ref ps: ParserState): Result<NodeId, ParsingError> {
-  let node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.ATTRIBUTE);
-  SelfLexing.expect(ref ps, TokenTags.AT)?;
+  let node = ps.buildSourcedNode(ASTNodeKind.ATTRIBUTE);
+  ps.expect(TokenTags.AT)?;
   const nameLoc = posToSourceLocation(ps.src, ps.pos, 1);
   node.name = parseIdentAsName(ref ps)?;
 
   disposable argIds: Vec<NodeId> = vec.vecNew(1);
-  if (SelfLexing.peek(ref ps).tag == TokenTags.LPAREN) {
-    SelfLexing.advance(ref ps)?;
+  if (ps.peek().tag == TokenTags.LPAREN) {
+    ps.advance()?;
     while (untilClosing(ref ps, TokenTags.RPAREN)) {
       vec.vecPush(ref argIds, parseExpression(ref ps, 0)?);
-      if (SelfLexing.peek(ref ps).tag != TokenTags.COMMA) {
+      if (ps.peek().tag != TokenTags.COMMA) {
         break;
       }
-      SelfLexing.advance(ref ps)?;
+      ps.advance()?;
     }
-    SelfLexing.expect(ref ps, TokenTags.RPAREN)?;
+    ps.expect(TokenTags.RPAREN)?;
   }
 
   node.childA = parseAttributeTarget(ref ps, node.name)?;
 
   spliceChildren(ref ps, ref node, ref argIds);
 
-  const id = SelfLexing.pushNode(ref ps, node);
+  const id = ps.pushNode(node);
   checkAttribute(ref ps, id, nameLoc)?;
   return Result.Ok { value: id };
 }
@@ -76,7 +76,7 @@ export function parseAttribute(ref ps: ParserState): Result<NodeId, ParsingError
 // A bare `@name;` has no target and yields 0, the none sentinel - not an error.
 // That is the argless statement form.
 function parseAttributeTarget(ref ps: ParserState, attrName: string): Result<NodeId, ParsingError> {
-  const tag = SelfLexing.peek(ref ps).tag;
+  const tag = ps.peek().tag;
   if (tag == TokenTags.LCURLY) {
     return parseBlock(ref ps);
   }
@@ -93,7 +93,7 @@ function parseAttributeTarget(ref ps: ParserState, attrName: string): Result<Nod
     return parseExportDecl(ref ps);
   }
   if (tag == TokenTags.SEMICOLON) {
-    SelfLexing.advance(ref ps)?;
+    ps.advance()?;
     return Result.Ok { value: 0 };
   }
   return Result.Err { error: SelfLexing.createParsingError(

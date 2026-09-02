@@ -321,21 +321,21 @@ export type Program implements Disposable propagates<disposable> {
   // registry: InstantiationRegistry - deferred until generics land in the bootstrap.
 
   function dispose(ref self): void {
-    Disposable.dispose(ref self.types);
-    Disposable.dispose(ref self.symbols);
-    Disposable.dispose(ref self.modules);
-    Disposable.dispose(ref self.diagnostics);
-    Disposable.dispose(ref self.generics);
-    Disposable.dispose(ref self.instances);
-    Disposable.dispose(ref self.funcInstances);
-    Disposable.dispose(ref self.typeParams);
-    Disposable.dispose(ref self.kinds);
-    Disposable.dispose(ref self.derivedDisplay);
-    Disposable.dispose(ref self.intrinsics);
-    Disposable.dispose(ref self.taskSymbols);
-    Disposable.dispose(ref self.sigMarkers);
-    Disposable.dispose(ref self.sigParams);
-    Disposable.dispose(ref self.markerNames);
+    self.types.dispose();
+    self.symbols.dispose();
+    self.modules.dispose();
+    self.diagnostics.dispose();
+    self.generics.dispose();
+    self.instances.dispose();
+    self.funcInstances.dispose();
+    self.typeParams.dispose();
+    self.kinds.dispose();
+    self.derivedDisplay.dispose();
+    self.intrinsics.dispose();
+    self.taskSymbols.dispose();
+    self.sigMarkers.dispose();
+    self.sigParams.dispose();
+    self.markerNames.dispose();
   }
 }
 
