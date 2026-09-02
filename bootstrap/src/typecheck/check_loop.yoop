@@ -57,7 +57,7 @@ function checkForLoop(ref cx: Cx, stmt: ASTNode, stmtId: NodeId): void {
       }
     }
   }
-  vec.vecSet(ref cx.tm.resolvedTypes, stmtId, counterType);
+  cx.tm.resolvedTypes.set(stmtId, counterType);
 
   checkCondition(ref cx, stmt.childC);
 
@@ -87,7 +87,7 @@ function checkForLoop(ref cx: Cx, stmt: ASTNode, stmtId: NodeId): void {
 function checkForInLoop(ref cx: Cx, stmt: ASTNode, stmtId: NodeId): void {
   const iterableType = checkExpr(ref cx, stmt.childA, TYPE_ERROR_ID);
   const elemType = forInElementType(ref cx, stmt, iterableType);
-  vec.vecSet(ref cx.tm.resolvedTypes, stmtId, elemType);
+  cx.tm.resolvedTypes.set(stmtId, elemType);
 
   // The loop variable is scoped to the loop, and shadowing an outer name is a
   // redeclaration the same way any other binding would be.

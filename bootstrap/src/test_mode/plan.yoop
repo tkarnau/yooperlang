@@ -23,6 +23,12 @@ import { disposable } from "std/core/kinds.yoop";
 import { Result } from "std/core/types.yoop";
 import { AST, isTestModuleProgram } from "../ast";
 import { parse } from "../parse";
+// `TextBuilder` is named here only so the SEED can build this file: a dotted call
+// handed straight to a generic (`vecFromArray(src.bytes())`) is checked
+// twice by the v0.3.1 checker, and its second look resolves the trait by name.
+// This tree's checker records the trait instead. Remove once the seed is
+// raised past that fix.
+import { TextBuilder } from "std/core/text.yoop";
 
 export type TestPlan propagates<disposable> {
   isTestRun: bool,           // false means "compile this the ordinary way"
@@ -63,7 +69,7 @@ export function planTestRun(explicit: bool, target: string): TestPlan propagates
     if (fs.statPath(abs).isDir) {
       plan.rootDir = abs;
       disposable found: Vec<string> = discoverTestFiles(abs);
-      vec.vecExtendFrom(ref files, vec.vecAsArray(ref found));
+      files.extendFrom(found.asArray());
       if (files.len == 0) {
         plan.isTestRun = true;
         plan.error = `--test: no *${TEST_FILE_SUFFIX} files found under ${abs}`;
@@ -71,7 +77,7 @@ export function planTestRun(explicit: bool, target: string): TestPlan propagates
       }
     } else {
       plan.rootDir = fs.dirName(abs);
-      vec.vecPush(ref files, abs);
+      files.push(abs);
     }
   } else {
     // The shorthand. Both tests have to pass: the NAME says which files are
@@ -84,7 +90,7 @@ export function planTestRun(explicit: bool, target: string): TestPlan propagates
       return plan;
     }
     plan.rootDir = fs.dirName(abs);
-    vec.vecPush(ref files, abs);
+    files.push(abs);
   }
 
   plan.isTestRun = true;
@@ -106,7 +112,7 @@ export function planTestRun(explicit: bool, target: string): TestPlan propagates
   // keeps the bytes its spans point into, so the entry's source has to outlive
   // this function in a shape the loader takes.
   disposable src: Text = generateEntrySource(ref collected.files);
-  plan.entrySource = vec.vecFromArray(text.bytes(ref src));
+  plan.entrySource = vec.vecFromArray(src.bytes());
   return plan;
 }
 
@@ -120,7 +126,7 @@ export function isTestModuleFile(absPath: string): bool {
   if (src.error.len > 0) {
     return false;
   }
-  switch (parse(vec.vecAsArray(ref src.data))) {
+  switch (parse(src.data.asArray())) {
     case Result.Err { error: e }: { return false; }
     case Result.Ok { value: parsed }: {
       disposable ast: AST = parsed;

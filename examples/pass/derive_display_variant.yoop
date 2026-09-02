@@ -49,8 +49,8 @@ function main(): int {
   printf(`${bytes}\n`);
 
   let nums: Vec<int32> = vec.vecNew(2);
-  vec.vecPush(ref nums, 7);
-  vec.vecPush(ref nums, 8);
+  nums.push(7);
+  nums.push(8);
   const many: Shape = Shape.Many { v: nums, tag: 9 };
   printf(`${many}\n`);
 

@@ -25,7 +25,7 @@ window.YOOP_DATA.tour = {
    "id": "strings",
    "num": 3,
    "file": "examples/tour/strings.yoop",
-   "source": "// Two string types, split by ownership.\n//\n//   string - a borrowed view. Literals are strings. Nothing frees it.\n//   Text   - an owned, growable buffer. Use it whenever you BUILD text.\n\nimport * as log from \"std/log.yoop\";\nimport * as text from \"std/core/text.yoop\";\nimport { Text } from \"std/core/text.yoop\";\nimport { disposable } from \"std/core/kinds.yoop\";\n\nfunction main(): int32 {\n  const town: string = \"Marquette\";\n\n  // Backtick strings interpolate, the same as JavaScript.\n  printf(`hello from ${town}\\n`);\n\n  // A Text owns its buffer and grows. `pushInt` formats digits straight into\n  // it, so the number costs no allocation. `disposable` frees it at the\n  // closing brace (that keyword is the next file).\n  disposable line: Text = text.make(32);\n  text.push(ref line, town);\n  text.push(ref line, \", founded \");\n  text.pushInt(ref line, 1849);\n  printf(`${text.view(ref line)}\\n`);\n\n  // Logging goes to stderr with a level prefix.\n  log.info(\"greeted a town\");\n  log.warn(\"nothing else to do\");\n\n  // `town == \"Marquette\"` does not compile: that would compare two pointers.\n  // Ask for the comparison you meant.\n  if (text.equals(town, \"Marquette\")) {\n    printf(\"names match\\n\");\n  }\n\n  return 0;\n}\n",
+   "source": "// Two string types, split by ownership.\n//\n//   string - a borrowed view. Literals are strings. Nothing frees it.\n//   Text   - an owned, growable buffer. Use it whenever you BUILD text.\n\nimport * as log from \"std/log.yoop\";\nimport * as text from \"std/core/text.yoop\";\nimport { Text } from \"std/core/text.yoop\";\nimport { disposable } from \"std/core/kinds.yoop\";\n\nfunction main(): int32 {\n  const town: string = \"Marquette\";\n\n  // Backtick strings interpolate, the same as JavaScript.\n  printf(`hello from ${town}\\n`);\n\n  // A Text owns its buffer and grows. `pushInt` formats digits straight into\n  // it, so the number costs no allocation. `disposable` frees it at the\n  // closing brace (that keyword is the next file).\n  disposable line: Text = text.make(32);\n  line.push(town);\n  line.push(\", founded \");\n  line.pushInt(1849);\n  printf(`${line.view()}\\n`);\n\n  // Logging goes to stderr with a level prefix.\n  log.info(\"greeted a town\");\n  log.warn(\"nothing else to do\");\n\n  // `town == \"Marquette\"` does not compile: that would compare two pointers.\n  // Ask for the comparison you meant.\n  if (text.equals(town, \"Marquette\")) {\n    printf(\"names match\\n\");\n  }\n\n  return 0;\n}\n",
    "output": "hello from Marquette\nMarquette, founded 1849\nnames match",
    "stderr": "[info] greeted a town\n[warn] nothing else to do",
    "exitCode": 0
@@ -78,13 +78,13 @@ window.YOOP_DATA.tour = {
    "diagnostic": "[error] examples/fail/struct_literal_no_target.yoop:7:15: cannot tell which struct this literal is - annotate the binding or the parameter it goes to"
   },
   {
-   "id": "method_call_sugar",
+   "id": "method_dot_temporary",
    "episode": "traits",
-   "title": "Call a trait method with a dot",
-   "note": "The call is `Greeter.greet(ref g)`, always. Note the fix-it below is out of date: it points at the bare `greet(ref g)` form, which is itself rejected, with a better message that names the trait for you.",
-   "file": "examples/fail/traits_method_call_sugar.yoop",
-   "source": "extern \"C\" from \"stdio.h\" { function printf(fmt: string, ...): int32; }\n\ntrait Disposable {\n    function dispose(ref self): void;\n}\n\ntype FileHandle implements Disposable {\n    fd: int32,\n    function dispose(ref self): void {\n        printf(`disposing fd=${self.fd}\\n`);\n    }\n}\n\nfunction main(): int32 {\n    let h: FileHandle = { fd: 7 };\n    h.dispose();\n    return 0;\n}\n\n// Fails because `h.dispose()` uses method-call syntax, which is not supported.\n// Trait methods must be called in the free-function form: `dispose(ref h)`.\n// The typechecker detects that `dispose` is a method name (not a field) and\n// produces a specific error pointing to the correct call form.\n",
-   "diagnostic": "[error] examples/fail/traits_method_call_sugar.yoop:16:5: \"h\" is a local of type FileHandle, not an imported namespace - calling a method on a value is not supported by the bootstrap typechecker yet"
+   "title": "Call a method on a temporary",
+   "note": "`g.greet()` is `Greeter.greet(ref g)`: the receiver is borrowed, so it has to be something with an address. A call's result has none, and the same rule that refuses `ref make()` refuses `make().area()`. Bind it to a name first.",
+   "file": "examples/fail/method_dot_temporary.yoop",
+   "source": "trait Shape { function area(ref self): int32; }\ntype Rect implements Shape { w: int32, function area(ref self): int32 { return self.w; } }\nfunction make(): Rect { return { w: 3 }; }\nfunction main(): int32 {\n  return make().area();\n}\n",
+   "diagnostic": "[error] examples/fail/method_dot_temporary.yoop:5:10: `ref` takes a named binding, a field of one, or an array element - there is no address for a temporary"
   },
   {
    "id": "generic_bound_unsatisfied",

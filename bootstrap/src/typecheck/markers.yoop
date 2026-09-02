@@ -205,13 +205,13 @@ export function recordSignatureMarkers(
     let p: usize = 0;
     while (p < list.childCount) {
       const param = nodeAt(ref ast, childAt(ref ast, list, p));
-      vec.vecPush(ref prog.sigParams, markersOfParam(ref prog, ref ast, param));
+      prog.sigParams.push(markersOfParam(ref prog, ref ast, param));
       count += 1;
       p += 1;
     }
   }
   const ret = markersOfAnnotation(ref prog, ref ast, declNode.childC);
-  map.mapInsert(ref prog.sigMarkers, uint64(symId), {
+  prog.sigMarkers.insert(uint64(symId), {
     retConf: ret.conf,
     retRestr: ret.restr,
     paramStart: start,
@@ -254,7 +254,7 @@ function reportMarkerFlow(
   while (i < prog.markerNames.len) {
     const bit = uint64(1) << uint64(i);
     if ((missing & bit) != 0) {
-      const name = vec.vecGet(ref prog.markerNames, i);
+      const name = prog.markerNames.get(i);
       reportError(
         ref prog,
         `${role} requires kind "${name}", which this value does not carry - a conferred kind comes from a signature that declares it, never from an annotation on the value`,
@@ -269,7 +269,7 @@ function reportMarkerFlow(
   while (j < prog.markerNames.len) {
     const bit = uint64(1) << uint64(j);
     if ((leaked & bit) != 0) {
-      const name = vec.vecGet(ref prog.markerNames, j);
+      const name = prog.markerNames.get(j);
       reportError(
         ref prog,
         `${role} does not accept kind "${name}", which this value carries - only a function that takes it and returns without it may shed it`,
@@ -327,7 +327,7 @@ export function exprMarkers(ref cx: Cx, nodeId: NodeId): MarkerSet {
       return exprMarkers(ref cx, node.childA);
     }
     case ASTNodeKind.CALL_EXPRESSION: {
-      switch (map.mapGet(ref cx.tm.valueMarkers, uint64(nodeId))) {
+      switch (cx.tm.valueMarkers.get(uint64(nodeId))) {
         case Option.Some { value: m }: { return m; }
         case Option.None: { return markersUnknown(); }
       }
@@ -364,7 +364,7 @@ export function checkCallMarkers(
 ): void {
   let sm: SigMarkers = { retConf: 0, retRestr: 0, paramStart: 0, paramCount: 0 };
   let found = false;
-  switch (map.mapGet(ref cx.prog.sigMarkers, uint64(symId))) {
+  switch (cx.prog.sigMarkers.get(uint64(symId))) {
     case Option.Some { value: v }: { sm = v; found = true; }
     case Option.None: { }
   }
@@ -372,7 +372,7 @@ export function checkCallMarkers(
     return;
   }
 
-  map.mapInsert(ref cx.tm.valueMarkers, uint64(exprId), {
+  cx.tm.valueMarkers.insert(uint64(exprId), {
     conf: sm.retConf,
     restr: sm.retRestr,
     noEscape: false,
@@ -386,13 +386,13 @@ export function checkCallMarkers(
   let a: usize = 0;
   while (a < args.childCount && a < sm.paramCount) {
     const argId = childAt(cx.ast, args, a);
-    const slot = vec.vecGet(ref cx.prog.sigParams, sm.paramStart + a);
+    const slot = cx.prog.sigParams.get(sm.paramStart + a);
     const value = exprMarkers(ref cx, argId);
     const loc = nodeAt(cx.ast, argId).sourceLoc;
     // What this argument flowed INTO, for unhandled.yoop: a by-value pass of an
     // `owned` binding to a slot that does not ask for `owned` is a read, not a
     // handoff, and the slot is the one thing that can say so.
-    map.mapInsert(ref cx.tm.argSlots, uint64(argId), slot);
+    cx.tm.argSlots.insert(uint64(argId), slot);
     warnOwnedTemporary(ref cx, argId, value, slot, a, calleeName);
     if (markerFlowViolates(value, slot)) {
       reportMarkerFlow(
@@ -567,7 +567,7 @@ export function checkConferredPassthrough(
     if ((ret.conf & bit) != 0 && !kindHasAppliedBy(ref prog, i)) {
       const passthrough = prog.retMarkerCount != 0 && (prog.retMarkerAll & bit) != 0;
       if (!passthrough) {
-        const name = vec.vecGet(ref prog.markerNames, i);
+        const name = prog.markerNames.get(i);
         reportError(
           ref prog,
           `"${declNode.name}" returns kind "${name}", which names no appliedBy - so nothing is authorized to confer it, and no return in this body hands back a value that already carries it`,
@@ -582,7 +582,7 @@ export function checkConferredPassthrough(
 // Whether the marker kind holding bit `index` names a method that may confer
 // it. A kind that DOES name one is clearance.yoop's business, in pass C.
 function kindHasAppliedBy(ref prog: Program, index: usize): bool {
-  const name = vec.vecGet(ref prog.markerNames, index);
+  const name = prog.markerNames.get(index);
   switch (lookupKind(ref prog, name)) {
     case Option.Some { value: info }: { return info.appliedBy.len != 0; }
     case Option.None: { return false; }

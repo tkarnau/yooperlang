@@ -25,9 +25,9 @@ export function newFoldedConsts(): FoldedConsts propagates<disposable> {
 }
 
 export function recordFolded(ref f: FoldedConsts, symId: SymbolId, value: ValueId): void {
-  map.mapInsert(ref f.values, uint64(symId), value);
+  f.values.insert(uint64(symId), value);
 }
 
 export function foldedValue(ref f: FoldedConsts, symId: SymbolId): Option<ValueId> {
-  return map.mapGet(ref f.values, uint64(symId));
+  return f.values.get(uint64(symId));
 }

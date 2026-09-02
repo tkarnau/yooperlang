@@ -131,8 +131,8 @@ import { Text } from "std/core/text.yoop";
 import { disposable } from "std/core/kinds.yoop";
 
 disposable greeting: Text = text.fromString("hello");
-text.push(ref greeting, ", world");
-printf("%s\n", text.view(ref greeting));   // borrow back out, no copy
+greeting.push(", world");
+printf("%s\n", greeting.view());   // borrow back out, no copy
                                            // dispose fires at scope end
 ```
 
@@ -166,22 +166,22 @@ easiest way to write a leak in this language, because nothing warns you:
 
 The rule that follows: **anything that accumulates text in a loop uses a
 `Text`**, not a `Vec<string>` plus a join, and not repeated concatenation. Use
-`text.push`, `text.pushByte`, `text.pushUint` / `text.pushInt` (which format
+`t.push`, `t.pushByte`, `t.pushUint` / `t.pushInt` (which format
 digits straight into the buffer, so a number costs no allocation at all), and
-`text.view` to borrow the result back out.
+`t.view()` to borrow the result back out.
 
 ```yoop
 // leaks one string per line, plus one per interpolated number
 disposable lines: Vec<string> = vec.vecNew(64);
-vec.vecPush(ref lines, `  ret i32 ${value}\n`);
-return str.stringConcatAll(vec.vecAsArray(ref lines));
+lines.push(`  ret i32 ${value}\n`);
+return str.stringConcatAll(lines.asArray());
 
 // leaks nothing, and is reclaimed by an enclosing arena
 disposable out: Text = text.make(1024);
-text.push(ref out, "  ret i32 ");
-text.pushUint(ref out, value);
-text.pushByte(ref out, '\n');
-return text.view(ref out);   // a borrow; the Text owns the bytes
+out.push("  ret i32 ");
+out.pushUint(value);
+out.pushByte('\n');
+return out.view();   // a borrow; the Text owns the bytes
 ```
 
 **Arguments are eager, so an assert or log message ALLOCATES even when nothing
@@ -219,9 +219,17 @@ pointer compare and works because identical literals are interned.
 
 ### 3.2 Containers
 
-- `Vec<T>` ([../std/core/vec.yoop](../std/core/vec.yoop)) is the growable array:
-  `vecNew`, `vecPush`, `vecGet`, `vecSet`, `vecClear`, `vecAsArray`,
-  `vecExtendFrom`, `vecFromArray`, and `vecIter` for `for x in`.
+- `Vec<T>` ([../std/core/vec.yoop](../std/core/vec.yoop)) is the growable array.
+  Build one with `vec.vecNew(n)` or `vec.vecFromArray(xs)`; everything else is a
+  method called through the value: `v.push(x)`, `v.get(i)`, `v.set(i, x)`,
+  `v.clear()`, `v.asArray()`, `v.extendFrom(xs)`, and `vec.vecIter(ref v)` for
+  `for x in`. The methods are the `Sequence<T>` and `Growable<T>` contracts in
+  [../std/core/traits.yoop](../std/core/traits.yoop), so a generic bounded by
+  them takes any implementation, not only `Vec`. `Map`, `Set` and `Deque`
+  follow the same shape (`Mapping`, `Membership`, `DoubleEnded`), and `Text`
+  is a `TextBuilder` (`t.push(s)`, `t.pushUint(n)`, `t.view()`).
+- A length is a field where the container stores one (`v.len`, `m.len`,
+  `t.len`); `Set` has no such field, so it is `s.len()`.
 - `Vec<T>` and `Text` are **container-owned**: each captures the allocator that
   was current when it was built and routes every later grow AND the final free
   back through that same one, whatever is ambient at the time. A Vec built inside
@@ -316,7 +324,7 @@ leak, which is why it is not on by default:
   to know it is in an arena: `yoop_cur_alloc` is thread-local runtime state, and
   it is already unsound across an `await` (a task can resume on another worker),
   so a static "you are in an arena" claim would be a lie in the async path.
-- **A copy read out of a container.** `let x = vec.vecGet(ref v, i)` copies a
+- **A copy read out of a container.** `let x = v.get(i)` copies a
   value the Vec still owns; disposing it would double-free. Distinguishing this
   from a real leak needs move analysis, which the advisory ownership model
   deliberately does not have.
@@ -354,7 +362,7 @@ version looks completely correct and the compiler says nothing.
 // WRONG. Compiles clean, runs, and hands back freed storage.
 function build(n: usize): Result<Text, string> {
   disposable out: Text = text.make(n);
-  text.push(ref out, "xxx");
+  out.push("xxx");
   return Result.Ok { value: out };     // dispose already fired at scope end
 }                                      // caller sees an empty Text
 ```
@@ -367,7 +375,7 @@ everywhere is a plain `let` plus `propagates<disposable>` on the return type:
 // RIGHT. `propagates<disposable>` documents that the RESULT owns a resource.
 function build(n: usize): Result<Text, string> propagates<disposable> {
   let out: Text = text.make(n);
-  text.push(ref out, "xxx");
+  out.push("xxx");
   return Result.Ok { value: out };
 }
 ```
@@ -671,10 +679,10 @@ function build(n: usize): Result<Text, string> propagates<disposable> {
   let out: Text = text.make(n);
   disposable items: Vec<int32> = vec.vecNew(n);
   for (let i = 0; i < n; i += 1) {
-    vec.vecPush(ref items, 1);
+    items.push(1);
   }
   for it in vec.vecIter(ref items) {
-    text.push(ref out, "x");
+    out.push("x");
   }
   return Result.Ok { value: out };
 }

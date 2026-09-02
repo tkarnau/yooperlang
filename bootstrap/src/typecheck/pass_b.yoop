@@ -39,11 +39,11 @@ export function passBWireImports(
 ): void {
   let f: usize = 0;
   while (f < m.files.len) {
-    const file = vec.vecGet(ref m.files, f);
+    const file = m.files.get(f);
     beginFile(ref prog, file.absPath);
     let i: usize = 0;
     while (i < file.imports.len) {
-      wireImport(ref prog, ref tm, m, vec.vecGet(ref file.imports, i));
+      wireImport(ref prog, ref tm, m, file.imports.get(i));
       i += 1;
     }
     f += 1;
@@ -67,7 +67,7 @@ function wireImport(ref prog: Program, ref tm: TypedModule, m: Module, edge: Imp
     );
     return;
   }
-  let source = vec.vecGet(ref prog.modules, edge.resolvedModuleIndex);
+  let source = prog.modules.get(edge.resolvedModuleIndex);
 
   // The namespace clause, when there is one. A combined import
   // (`import { A }, * as ns from ...`) carries BOTH, so this is not an
@@ -76,7 +76,7 @@ function wireImport(ref prog: Program, ref tm: TypedModule, m: Module, edge: Imp
     bindNamespace(ref prog, ref tm, decl, edge.resolvedModuleIndex);
   }
 
-  const fromStd = str.stringStartsWith(vec.vecGet(ref m.ast.strings, decl.strId), "std/");
+  const fromStd = str.stringStartsWith(m.ast.strings.get(decl.strId), "std/");
   let s: usize = 0;
   while (s < decl.childCount) {
     const spec = nodeAt(ref m.ast, childAt(ref m.ast, decl, s));
@@ -108,7 +108,7 @@ function bindNamespace(
   decl: ASTNode,
   sourceIndex: ModuleId
 ): void {
-  switch (map.mapGet(ref tm.names, decl.name)) {
+  switch (tm.names.get(decl.name)) {
     case Option.Some { value: existing }: {
       // Comparing SymbolIds would not do: every `import * as ns` interns its
       // OWN Namespace symbol, so two identical imports never share one. The
@@ -131,7 +131,7 @@ function bindNamespace(
     case Option.None: { }
   }
   const symId = internSymbol(ref prog, Symbol.Namespace { module: sourceIndex });
-  map.mapInsert(ref tm.names, decl.name, symId);
+  tm.names.insert(decl.name, symId);
 }
 
 // One `{ a }` or `{ a as b }` specifier: `spec.name` is the local name, and the
@@ -144,10 +144,10 @@ function bindImportedName(
   spec: ASTNode,
   fromStd: bool
 ): void {
-  const exportName = vec.vecGet(ref ast.strings, spec.strId);
+  const exportName = ast.strings.get(spec.strId);
 
   let symId: SymbolId = SYMBOL_NONE_ID;
-  switch (map.mapGet(ref source.exports, exportName)) {
+  switch (source.exports.get(exportName)) {
     case Option.Some { value: found }: { symId = found; }
     case Option.None: {
       // A name the source module declares but does not export gets its own
@@ -190,7 +190,7 @@ function bindImportedName(
   // redeclaration. Here the SymbolId settles it directly - an import binds the
   // source module's own id, so the same export reached twice is the same
   // integer, and a different one really is a different thing under one name.
-  switch (map.mapGet(ref tm.names, spec.name)) {
+  switch (tm.names.get(spec.name)) {
     case Option.Some { value: existing }: {
       if (existing == symId) {
         return;
@@ -204,8 +204,8 @@ function bindImportedName(
     }
     case Option.None: { }
   }
-  map.mapInsert(ref tm.names, spec.name, symId);
-  map.mapInsert(ref tm.importedFrom, spec.name, {
+  tm.names.insert(spec.name, symId);
+  tm.importedFrom.insert(spec.name, {
     moduleId: source.moduleId,
     exportName: exportName,
   });

@@ -89,7 +89,7 @@ export function checkCallColoring(
   if (!funcTypeIsAsync(ref prog, funcType)) {
     return;
   }
-  map.mapInsert(ref tm.asyncCalls, uint64(exprId), true);
+  tm.asyncCalls.insert(uint64(exprId), true);
   if (!awaited) {
     reportError(
       ref prog,
@@ -133,7 +133,7 @@ export function checkAwait(ref cx: Cx, expr: ASTNode): TypeId {
   cx.prog.awaitPending = false;
   // Rule 2, the TYPE half. `asyncCalls` was stamped by checkCallColoring, which
   // is the one place the callee's resolved signature is in hand.
-  if (!map.mapContainsKey(ref cx.tm.asyncCalls, uint64(expr.childA))) {
+  if (!cx.tm.asyncCalls.containsKey(uint64(expr.childA))) {
     reportError(
       cx.prog,
       `"await" takes a call to a function carrying a pausable kind, and "${operand.name}" is an ordinary function - drop the "await"`,

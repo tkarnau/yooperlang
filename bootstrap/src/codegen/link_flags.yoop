@@ -59,22 +59,22 @@ export function collectLinkRequests(ref graph: ModuleGraph): LinkRequests propag
   disposable seen: Map<string, bool> = map.mapNew(4, map.stringKeyOps());
   let i: usize = 0;
   while (i < graph.modules.len) {
-    const m = vec.vecGet(ref graph.modules, i);
+    const m = graph.modules.get(i);
     let f: usize = 0;
     while (f < m.files.len) {
-      const programNode = nodeAt(ref m.ast, vec.vecGet(ref m.files, f).root);
+      const programNode = nodeAt(ref m.ast, m.files.get(f).root);
       let d: usize = 0;
       while (d < programNode.childCount) {
         const declNode = nodeAt(ref m.ast, declOf(ref m.ast, childAt(ref m.ast, programNode, d)));
         if (declNode.kind == ASTNodeKind.EXTERN_BLOCK) {
-          const name = vec.vecGet(ref m.ast.strings, declNode.strId);
+          const name = m.ast.strings.get(declNode.strId);
           if (declNode.operator == TokenTags.LIBRARY) {
             // Order is stable rather than sorted, because a link line is
             // order-sensitive and first-seen is the one order a reader can
             // predict from the source.
-            if (!map.mapContainsKey(ref seen, name)) {
-              map.mapInsert(ref seen, name, true);
-              vec.vecPush(ref names, name);
+            if (!seen.containsKey(name)) {
+              seen.insert(name, true);
+              names.push(name);
             }
           } else if (isRuntimeHeader(name)) {
             namesRuntime = true;

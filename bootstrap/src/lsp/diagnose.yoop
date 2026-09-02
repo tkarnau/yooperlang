@@ -88,14 +88,14 @@ export type LspDiagnostic {
   the rest are lookups. See analysis.yoop for what is held and why.
 */
 export function ensureAnalysis(ref an: Analysis, ref doc: Document, stdRoot: string): void {
-  const uri = text.view(ref doc.uri);
+  const uri = doc.uri.view();
   if (analysisIsFor(ref an, uri, doc.version)) {
     return;
   }
   releaseCompile(ref an);
-  vec.vecClear(ref an.diags);
+  an.diags.clear();
   compileDocument(ref an, ref doc, stdRoot);
-  analysisIdentify(ref an, uri, text.view(ref doc.path), doc.version);
+  analysisIdentify(ref an, uri, doc.path.view(), doc.version);
 }
 
 /*
@@ -106,8 +106,8 @@ export function ensureAnalysis(ref an: Analysis, ref doc: Document, stdRoot: str
   that cannot even find the file produces one diagnostic saying so.
 */
 function compileDocument(ref an: Analysis, ref doc: Document, stdRoot: string): void {
-  const src = vec.vecAsArray(ref doc.content);
-  const path = text.view(ref doc.path);
+  const src = doc.content.asArray();
+  const path = doc.path.view();
   // The name the LOADER will know this file by, which is not always the one
   // the editor's URI spelled: the loader canonicalizes a path before it opens
   // anything, and on a filesystem with a symlinked directory in it - a temp
@@ -122,7 +122,7 @@ function compileDocument(ref an: Analysis, ref doc: Document, stdRoot: string): 
   // only show against the whole file.
   switch (parse(src)) {
     case Result.Err { error: e }: {
-      vec.vecPush(ref an.diags, {
+      an.diags.push({
         message: e.rawMessage,
         code: "",
         severity: SEVERITY_ERROR,
@@ -143,7 +143,7 @@ function compileDocument(ref an: Analysis, ref doc: Document, stdRoot: string): 
       // that does not parse. None of these has a location in THIS file, so
       // they land on its first character, which is where an editor shows a
       // whole-file problem.
-      vec.vecPush(ref an.diags, {
+      an.diags.push({
         message: e,
         code: "",
         severity: SEVERITY_ERROR,
@@ -171,9 +171,9 @@ function compileDocument(ref an: Analysis, ref doc: Document, stdRoot: string): 
 function collectDiagnostics(ref an: Analysis, src: uint8[], absPath: string): void {
   let i: usize = 0;
   while (i < an.prog.diagnostics.len) {
-    const d = vec.vecGet(ref an.prog.diagnostics, i);
+    const d = an.prog.diagnostics.get(i);
     if (belongsToDocument(ref d, absPath)) {
-      vec.vecPush(ref an.diags, {
+      an.diags.push({
         message: d.message,
         code: d.code,
         severity: lspSeverity(d.severity),
@@ -202,7 +202,7 @@ function loadGraphFor(
   if (fs.exists(path)) {
     let overlay: SourceOverlay = {
       path: absPath,
-      src: vec.vecAsArray(ref doc.content),
+      src: doc.content.asArray(),
     };
     return loadModuleGraphWithOverlay(path, stdRoot, overlay);
   }
@@ -214,7 +214,7 @@ function loadGraphFor(
   // spans in the AST point into exactly those bytes for as long as the graph
   // lives - so the document keeps its own copy and hands over a fresh one.
   let seed: Vec<uint8> = vec.vecNew(doc.content.len + 1);
-  vec.vecExtendFrom(ref seed, vec.vecAsArray(ref doc.content));
+  seed.extendFrom(doc.content.asArray());
   return loadModuleGraphFromSource(seed, path, stdRoot);
 }
 

@@ -116,7 +116,7 @@ function fillHandle(ref cx: Cx, call: ASTNode, ref meta: TaskMeta, handle: Opera
     emitExpr(ref cx, argId, ref value)?;
     const slotAddr = freshTemp(cx.e);
     emitGepFieldOfAddr(ref cx, slotAddr, meta.structName, handle, TASK_FIELD_ARG0 + i);
-    emitStoreToPtr(ref cx, vec.vecGet(ref meta.argTys, i), value, slotAddr);
+    emitStoreToPtr(ref cx, meta.argTys.get(i), value, slotAddr);
     i += 1;
   }
   return EmitResult.Ok;

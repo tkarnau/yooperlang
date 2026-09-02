@@ -79,12 +79,12 @@ export type JsonDoc implements Disposable propagates<disposable> {
     // go with it.
     let i: usize = 0;
     while (i < self.strings.len) {
-      let t: Text = vec.vecGet(ref self.strings, i);
-      Disposable.dispose(ref t);
+      let t: Text = self.strings.get(i);
+      t.dispose();
       i += 1;
     }
-    Disposable.dispose(ref self.strings);
-    Disposable.dispose(ref self.nodes);
+    self.strings.dispose();
+    self.nodes.dispose();
   }
 }
 
@@ -96,8 +96,8 @@ export function docNew(): JsonDoc propagates<disposable> {
     strings: vec.vecNew(8),
     root: 0,
   };
-  vec.vecPush(ref d.nodes, blankNode(JsonKind.NULL));
-  vec.vecPush(ref d.strings, text.make(0));
+  d.nodes.push(blankNode(JsonKind.NULL));
+  d.strings.push(text.make(0));
   return d;
 }
 
@@ -111,7 +111,7 @@ function blankNode(k: JsonKind): JsonNode {
 
 function appendNode(ref d: JsonDoc, node: JsonNode): JsonId {
   const id: JsonId = d.nodes.len;
-  vec.vecPush(ref d.nodes, node);
+  d.nodes.push(node);
   return id;
 }
 
@@ -123,7 +123,7 @@ export function internString(ref d: JsonDoc, s: string): usize {
     return 0;
   }
   const id: usize = d.strings.len;
-  vec.vecPush(ref d.strings, text.fromString(s));
+  d.strings.push(text.fromString(s));
   return id;
 }
 
@@ -135,7 +135,7 @@ export function internBytes(ref d: JsonDoc, src: uint8[]): usize {
     return 0;
   }
   const id: usize = d.strings.len;
-  vec.vecPush(ref d.strings, text.fromBytes(src));
+  d.strings.push(text.fromBytes(src));
   return id;
 }
 
@@ -143,8 +143,8 @@ export function stringAt(ref d: JsonDoc, strId: usize): string {
   if (strId == 0 || strId >= d.strings.len) {
     return "";
   }
-  let t: Text = vec.vecGet(ref d.strings, strId);
-  return text.view(ref t);
+  let t: Text = d.strings.get(strId);
+  return t.view();
 }
 
 // ----- building ------------------------------------------------------------
@@ -209,17 +209,17 @@ export function setRoot(ref d: JsonDoc, id: JsonId): void {
 function linkChild(ref d: JsonDoc, parent: JsonId, child: JsonId): void {
   if (parent == 0 || parent >= d.nodes.len) { return; }
   if (child == 0 || child >= d.nodes.len) { return; }
-  let p: JsonNode = vec.vecGet(ref d.nodes, parent);
+  let p: JsonNode = d.nodes.get(parent);
   if (p.firstChild == 0) {
     p.firstChild = child;
   } else {
-    let prev: JsonNode = vec.vecGet(ref d.nodes, p.lastChild);
+    let prev: JsonNode = d.nodes.get(p.lastChild);
     prev.nextSibling = child;
-    vec.vecSet(ref d.nodes, p.lastChild, prev);
+    d.nodes.set(p.lastChild, prev);
   }
   p.lastChild = child;
   p.childCount += 1;
-  vec.vecSet(ref d.nodes, parent, p);
+  d.nodes.set(parent, p);
 }
 
 export function arrayPush(ref d: JsonDoc, arr: JsonId, child: JsonId): void {
@@ -229,9 +229,9 @@ export function arrayPush(ref d: JsonDoc, arr: JsonId, child: JsonId): void {
 export function objectSet(ref d: JsonDoc, obj: JsonId, key: string, child: JsonId): void {
   if (child == 0 || child >= d.nodes.len) { return; }
   const keyId = internString(ref d, key);
-  let c: JsonNode = vec.vecGet(ref d.nodes, child);
+  let c: JsonNode = d.nodes.get(child);
   c.keyId = keyId;
-  vec.vecSet(ref d.nodes, child, c);
+  d.nodes.set(child, c);
   linkChild(ref d, obj, child);
 }
 
@@ -256,7 +256,7 @@ export function nodeAt(ref d: JsonDoc, id: JsonId): JsonNode {
   if (id >= d.nodes.len) {
     return blankNode(JsonKind.NULL);
   }
-  return vec.vecGet(ref d.nodes, id);
+  return d.nodes.get(id);
 }
 
 export function kindOf(ref d: JsonDoc, id: JsonId): JsonKind {
@@ -364,8 +364,8 @@ export function asBytes(ref d: JsonDoc, id: JsonId): uint8[] {
   if (n.kind != JsonKind.STRING || n.strId == 0 || n.strId >= d.strings.len) {
     return intr.arraySlice(intr.stringAsBytes(""), 0, 0);
   }
-  let t: Text = vec.vecGet(ref d.strings, n.strId);
-  return text.bytes(ref t);
+  let t: Text = d.strings.get(n.strId);
+  return t.bytes();
 }
 
 /*

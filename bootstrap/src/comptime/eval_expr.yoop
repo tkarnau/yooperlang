@@ -29,7 +29,7 @@ import { Program, TypedModule, TypeId, TYPE_ERROR_ID, Symbol, SymbolId, SYMBOL_N
 // body is not evaluated here yet, and reading a TypeParam as though it were
 // concrete would be worse than refusing the call that reached it.
 export function typeOfNode(ref cx: EvalCx, nodeId: NodeId): TypeId {
-  return vec.vecGet(ref cx.tm.resolvedTypes, nodeId);
+  return cx.tm.resolvedTypes.get(nodeId);
 }
 
 // The one refusal helper, so every message reads the same way.
@@ -57,7 +57,7 @@ export function evalExpr(ref cx: EvalCx, exprId: NodeId): Result<ValueId, Compti
       return Result.Ok { value: boolValue(cx.va, ty, expr.intVal != 0) };
     }
     case ASTNodeKind.STRING_LITERAL: {
-      return Result.Ok { value: strValue(cx.va, ty, vec.vecGet(ref cx.ast.strings, expr.strId)) };
+      return Result.Ok { value: strValue(cx.va, ty, cx.ast.strings.get(expr.strId)) };
     }
     case ASTNodeKind.IDENT: {
       return evalIdent(ref cx, expr, exprId);
@@ -299,7 +299,7 @@ function evalArrayLiteral(ref cx: EvalCx, expr: ASTNode, exprId: NodeId): Result
     const list = nodeAt(cx.ast, expr.childA);
     let i: usize = 0;
     while (i < list.childCount) {
-      vec.vecPush(ref parts, evalExprValue(ref cx, childAt(cx.ast, list, i))?);
+      parts.push(evalExprValue(ref cx, childAt(cx.ast, list, i))?);
       i += 1;
     }
   }
@@ -321,7 +321,7 @@ function evalStructLiteral(ref cx: EvalCx, expr: ASTNode, exprId: NodeId): Resul
   disposable parts: Vec<ValueId> = vec.vecNew(count);
   let f: usize = 0;
   while (f < count) {
-    vec.vecPush(ref parts, zeroOfType(ref cx, fieldTypeAtIndex(cx.prog, ty, f)));
+    parts.push(zeroOfType(ref cx, fieldTypeAtIndex(cx.prog, ty, f)));
     f += 1;
   }
 
@@ -338,7 +338,7 @@ function evalStructLiteral(ref cx: EvalCx, expr: ASTNode, exprId: NodeId): Resul
           `"${fieldNode.name}" is not a field of this struct`, fieldNode.sourceLoc
         )};
       }
-      vec.vecSet(ref parts, found.index, evalExprValue(ref cx, fieldNode.childA)?);
+      parts.set(found.index, evalExprValue(ref cx, fieldNode.childA)?);
       i += 1;
     }
   }
@@ -437,7 +437,7 @@ function fieldTypeAtIndex(ref prog: Program, structType: TypeId, i: usize): Type
       if (i >= f.len) {
         return TYPE_ERROR_ID;
       }
-      return vec.vecGet(ref f, i).typeId;
+      return f.get(i).typeId;
     }
     default: { return TYPE_ERROR_ID; }
   }

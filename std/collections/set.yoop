@@ -5,45 +5,50 @@
 // dummy values cost one byte per slot - negligible next to the
 // power-of-two-keyed arrays the map already maintains.
 //
-// All methods forward straight to the underlying Map. The wrapping
-// gives users an unambiguous Set-shaped API and lets us swap the
-// backing implementation later without changing callers.
+// The operations are the `Membership<K>` contract from
+// std/core/traits.yoop, called through the value (`s.insert(k)`,
+// `s.contains(k)`), and every one forwards straight to the underlying
+// Map. The wrapping gives users an unambiguous Set-shaped API and lets
+// us swap the backing implementation later without changing callers.
 
 import { Disposable, disposable } from "../core/kinds.yoop";
-import {
-    Map,
-    KeyOps,
-    mapNew,
-    mapInsert,
-    mapContainsKey,
-    mapRemove,
-    mapLen,
-} from "./map.yoop";
+import { Membership } from "../core/traits.yoop";
+import { Map, KeyOps, mapNew } from "./map.yoop";
 
-export type Set<K> implements Disposable propagates<disposable> {
+export type Set<K> implements (Disposable, Membership<K>) propagates<disposable> {
     inner: Map<K, bool>,
     function dispose(ref self): void {
-        Disposable.dispose(ref self.inner);
+        self.inner.dispose();
+    }
+
+    // Insert `k`. Returns true if `k` was already present.
+    function insert(ref self, k: K): bool {
+        return self.inner.insert(k, true);
+    }
+
+    function contains(ref self, k: K): bool {
+        return self.inner.containsKey(k);
+    }
+
+    function remove(ref self, k: K): bool {
+        return self.inner.remove(k);
+    }
+
+    // A method rather than a field, because the count lives on the map
+    // inside and a second copy of it would have to be kept in step.
+    function len(ref self): usize {
+        return self.inner.len;
+    }
+
+    function clear(ref self): void {
+        self.inner.clear();
+    }
+
+    function isEmpty(ref self): bool {
+        return self.inner.len == 0;
     }
 }
 
 export function setNew<K>(initial_cap: usize, ops: KeyOps<K>): Set<K> propagates<disposable> {
     return { inner: mapNew(initial_cap, ops) };
-}
-
-// Insert `k`. Returns true if `k` was already present.
-export function setInsert<K>(ref s: Set<K>, k: K): bool {
-    return mapInsert(ref s.inner, k, true);
-}
-
-export function setContains<K>(ref s: Set<K>, k: K): bool {
-    return mapContainsKey(ref s.inner, k);
-}
-
-export function setRemove<K>(ref s: Set<K>, k: K): bool {
-    return mapRemove(ref s.inner, k);
-}
-
-export function setLen<K>(ref s: Set<K>): usize {
-    return mapLen(ref s.inner);
 }

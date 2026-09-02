@@ -73,7 +73,7 @@ export function fillUnionFields(
     // obligation and a union has no idea which field is live. Filling
     // it keeps every `Field` construction site uniform rather than leaving one
     // that silently defaults.
-    vec.vecPush(ref fields, {
+    fields.push({
       name: fieldNode.name,
       typeId: resolveTypeAnnotation(ref prog, ref tm, ref ast, fieldNode.childA),
       carriedKind: carriedKindNameOf(ref ast, fieldNode.childA),
@@ -119,7 +119,7 @@ export function lookupUnionField(ref prog: Program, unionType: TypeId, name: str
     case Type.Union { decl: d, fields: f }: {
       let i: usize = 0;
       while (i < f.len) {
-        const field = vec.vecGet(ref f, i);
+        const field = f.get(i);
         if (str.stringEq(field.name, name)) {
           return { index: i, typeId: field.typeId, found: true };
         }
@@ -170,7 +170,7 @@ export function checkUnionLiteral(ref cx: Cx, expr: ASTNode, unionType: TypeId):
       // Codegen stores the value AS THIS FIELD'S TYPE, which is the whole
       // mechanism - the union's own LLVM type is a byte buffer and says nothing
       // about how to write into it. So the field node carries the type.
-      vec.vecSet(ref cx.tm.resolvedTypes, fieldId, found.typeId);
+      cx.tm.resolvedTypes.set(fieldId, found.typeId);
       const got = checkExpr(ref cx, fieldNode.childA, found.typeId);
       if (got != TYPE_ERROR_ID && !typeAccepts(cx.prog, found.typeId, got)) {
         reportError(

@@ -1,0 +1,3 @@
+# Illegal: `make().area()` borrows its receiver, and a call's result has no
+# address to borrow. The diagnostic lands on the call being borrowed.
+5:10: no address for a temporary

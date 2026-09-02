@@ -49,18 +49,18 @@ export function buildRangeCall(
 ): Result<ASTNode, ParsingError> {
   ps.usedRange = true;
 
-  let nsNode = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.IDENT);
+  let nsNode = ps.buildSourcedNode(ASTNodeKind.IDENT);
   nsNode.name = RANGE_NAMESPACE;
 
   disposable args: Vec<NodeId> = vec.vecNew(2);
-  vec.vecPush(ref args, startId);
-  vec.vecPush(ref args, endId);
+  args.push(startId);
+  args.push(endId);
   const loc = posToSourceLocation(ps.src, ps.pos, 1);
 
-  let call = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.CALL_EXPRESSION);
+  let call = ps.buildSourcedNode(ASTNodeKind.CALL_EXPRESSION);
   call.name = RANGE_CTOR;
-  call.childB = SelfLexing.pushNode(ref ps, nsNode);
-  call.childA = SelfLexing.buildListNode(ref ps, ref args, loc);
+  call.childB = ps.pushNode(nsNode);
+  call.childA = ps.buildListNode(ref args, loc);
   return Result.Ok { value: call };
 }
 
@@ -71,12 +71,12 @@ export function buildRangeCall(
 // declaration - the module graph does it to find its edges and pass B to bind
 // them. An import after the first decl would be silently ignored.
 export function buildRangeImport(ref ps: ParserState): NodeId {
-  let node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.IMPORT_DECL);
+  let node = ps.buildSourcedNode(ASTNodeKind.IMPORT_DECL);
   node.name = RANGE_NAMESPACE;
   node.strId = internString(ref ps, RANGE_STD_PATH);
   node.childStart = ps.ast.childIds.len;
   node.childCount = 0;
-  return SelfLexing.pushNode(ref ps, node);
+  return ps.pushNode(node);
 }
 
 // The precedence `..` binds at: looser than every arithmetic operator, tighter

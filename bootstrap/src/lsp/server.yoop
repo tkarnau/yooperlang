@@ -78,7 +78,7 @@ export function runLanguageServer(stdRoot: string): int {
           state.running = false;
         }
         case FrameStatus.MESSAGE: {
-          handleMessage(vec.vecAsArray(ref body), ref docs, ref state, stdRoot, ref an);
+          handleMessage(body.asArray(), ref docs, ref state, stdRoot, ref an);
         }
       }
     }
@@ -302,13 +302,13 @@ function answerHover(
     return;
   }
   disposable body: Text = buildHoverText(ref an, ref q);
-  if (text.isEmpty(ref body)) {
+  if (body.isEmpty()) {
     replyNull(ref msg, idNode);
     return;
   }
-  const src = vec.vecAsArray(ref doc.content);
+  const src = doc.content.asArray();
   disposable out: JsonDoc = json.docNew();
-  const _r = buildHoverResponse(ref out, ref msg, idNode, text.view(ref body),
+  const _r = buildHoverResponse(ref out, ref msg, idNode, body.view(),
                                 rangeOfSpan(src, q.node.pos, q.node.length));
   const _sent = sendMessage(ref out);
 }
@@ -344,9 +344,9 @@ function answerDefinition(
   // editor opens as a second tab beside the one the user is already looking
   // at. Every other answer has no better name available than the real path.
   disposable built: Text = pathToUri(q.site.absPath);
-  let uri: string = text.view(ref built);
-  if (str.stringEq(q.site.absPath, canonicalOr(text.view(ref doc.path)))) {
-    uri = text.view(ref doc.uri);
+  let uri: string = built.view();
+  if (str.stringEq(q.site.absPath, canonicalOr(doc.path.view()))) {
+    uri = doc.uri.view();
   }
   disposable out: JsonDoc = json.docNew();
   const _r = buildLocationResponse(ref out, ref msg, idNode, uri,
@@ -386,7 +386,7 @@ function answerDocumentSymbol(
   let mod: Module = analysisModule(ref an);
   let sf: SourceFile = analysisFile(ref an);
   disposable entries: Vec<OutlineEntry> = vec.vecNew(64);
-  collectOutline(ref mod.ast, sf.root, vec.vecAsArray(ref sf.src), ref entries);
+  collectOutline(ref mod.ast, sf.root, sf.src.asArray(), ref entries);
   disposable out: JsonDoc = json.docNew();
   const _r = buildDocumentSymbolResponse(ref out, ref msg, idNode, ref entries);
   const _sent = sendMessage(ref out);
@@ -405,10 +405,10 @@ function replyNull(ref msg: JsonDoc, idNode: JsonId): void {
 // template literal is a malloc nothing frees - see docs/writing_yoop.md 3.1.
 function replyUnimplemented(ref msg: JsonDoc, idNode: JsonId, method: string): void {
   disposable why: Text = text.make(48);
-  text.push(ref why, "unimplemented method \"");
-  text.push(ref why, method);
-  text.pushByte(ref why, '"');
-  replyError(ref msg, idNode, ERR_METHOD_NOT_FOUND, text.view(ref why));
+  why.push("unimplemented method \"");
+  why.push(method);
+  why.pushByte('"');
+  replyError(ref msg, idNode, ERR_METHOD_NOT_FOUND, why.view());
 }
 
 // The last element of an array node, or 0.
@@ -438,7 +438,7 @@ function publishFor(
   let doc: Document = storeGet(ref docs, slot);
   ensureAnalysis(ref an, ref doc, stdRoot);
   disposable out: JsonDoc = json.docNew();
-  const _p = buildPublishDiagnostics(ref out, text.view(ref doc.uri), doc.version, ref an.diags);
+  const _p = buildPublishDiagnostics(ref out, doc.uri.view(), doc.version, ref an.diags);
   const _sent = sendMessage(ref out);
   storeMarkPublished(ref docs, slot);
 }

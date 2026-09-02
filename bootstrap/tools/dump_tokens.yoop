@@ -27,7 +27,7 @@ function main(): int {
     return 1;
   }
 
-  switch (dumpTokens(vec.vecAsArray(ref src))) {
+  switch (dumpTokens(src.asArray())) {
     case Result.Err { error: e }: {
       log.error(e);
       return 1;
@@ -36,7 +36,7 @@ function main(): int {
       disposable out: Text = dump;
       // Straight to stdout with no logger prefix - the harness diffs this
       // byte for byte.
-      printf("%s", text.view(ref out));
+      printf("%s", out.view());
       return 0;
     }
   }

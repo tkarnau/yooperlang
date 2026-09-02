@@ -67,18 +67,18 @@ export type Instance propagates<disposable> {
 
 export function initGenerics(ref prog: Program): void {
   // Burn DeclId 0 so "not generic" is never a real decl.
-  vec.vecPush(ref prog.generics, {
+  prog.generics.push({
     name: "", module: 0, sort: GenericSort.STRUCT,
     params: vec.vecNew(0), template: TYPE_ERROR_ID, declNode: 0,
   });
   // And index 0 of the function instances, so "not inside a monomorphization"
   // is never a real one. Codegen reads that as NO_FUNC_INSTANCE.
-  vec.vecPush(ref prog.funcInstances, {
+  prog.funcInstances.push({
     origin: DECL_NONE_ID, args: vec.vecNew(0), funcType: TYPE_ERROR_ID, name: "",
   });
   // Same for the TYPE instances, which codegen reads as NO_TYPE_INSTANCE when
   // it emits a generic type's method once per instantiation.
-  vec.vecPush(ref prog.instances, {
+  prog.instances.push({
     origin: DECL_NONE_ID, args: vec.vecNew(0), typeId: TYPE_ERROR_ID, filled: true,
   });
 }
@@ -86,7 +86,7 @@ export function initGenerics(ref prog: Program): void {
 // One type instantiation, by index. Codegen walks these to emit a generic
 // type's methods once per instance.
 export function instanceAt(ref prog: Program, i: usize): Instance propagates<disposable> {
-  return vec.vecGet(ref prog.instances, i);
+  return prog.instances.get(i);
 }
 
 // The number of instantiations recorded, so codegen can walk them.
@@ -95,7 +95,7 @@ export function instanceCount(ref prog: Program): usize {
 }
 
 export function genericAt(ref prog: Program, id: DeclId): GenericDeclInfo propagates<disposable> {
-  return vec.vecGet(ref prog.generics, id);
+  return prog.generics.get(id);
 }
 
 // ----- the ambient type-parameter scope -------------------------------------
@@ -107,21 +107,21 @@ export function genericAt(ref prog: Program, id: DeclId): GenericDeclInfo propag
 // answer. One writer, and it is always paired.
 
 export function beginTypeParams(ref prog: Program, ref params: Vec<TypeId>, ref names: Vec<string>): void {
-  map.mapClear(ref prog.typeParams);
+  prog.typeParams.clear();
   let i: usize = 0;
   while (i < params.len && i < names.len) {
-    map.mapInsert(ref prog.typeParams, vec.vecGet(ref names, i), vec.vecGet(ref params, i));
+    prog.typeParams.insert(names.get(i), params.get(i));
     i += 1;
   }
 }
 
 export function endTypeParams(ref prog: Program): void {
-  map.mapClear(ref prog.typeParams);
+  prog.typeParams.clear();
 }
 
 // The TypeParam a name refers to, or TYPE_ERROR_ID outside a generic body.
 export function typeParamNamed(ref prog: Program, name: string): TypeId {
-  switch (map.mapGet(ref prog.typeParams, name)) {
+  switch (prog.typeParams.get(name)) {
     case Option.Some { value: t }: { return t; }
     case Option.None: { return TYPE_ERROR_ID; }
   }
@@ -156,10 +156,10 @@ export function instantiate(ref prog: Program, origin: DeclId, ref args: Vec<Typ
   const instanceName = instanceNameOf(ref prog, info.name, ref args);
 
   let copiedArgs: Vec<TypeId> = vec.vecNew(args.len);
-  vec.vecExtendFrom(ref copiedArgs, vec.vecAsArray(ref args));
+  copiedArgs.extendFrom(args.asArray());
 
   let shellArgs: Vec<TypeId> = vec.vecNew(args.len);
-  vec.vecExtendFrom(ref shellArgs, vec.vecAsArray(ref args));
+  shellArgs.extendFrom(args.asArray());
 
   let typeId: TypeId = TYPE_ERROR_ID;
   switch (info.sort) {
@@ -185,7 +185,7 @@ export function instantiate(ref prog: Program, origin: DeclId, ref args: Vec<Typ
     }
   }
 
-  vec.vecPush(ref prog.instances, {
+  prog.instances.push({
     origin: origin, args: copiedArgs, typeId: typeId, filled: false,
   });
 
@@ -218,7 +218,7 @@ function templateIsPopulated(ref prog: Program, template: TypeId): bool {
 function findInstance(ref prog: Program, origin: DeclId, ref args: Vec<TypeId>): TypeId {
   let i: usize = 0;
   while (i < prog.instances.len) {
-    let inst = vec.vecGet(ref prog.instances, i);
+    let inst = prog.instances.get(i);
     if (inst.origin == origin && sameTypeIds(ref inst.args, ref args)) {
       return inst.typeId;
     }
@@ -233,7 +233,7 @@ function sameTypeIds(ref a: Vec<TypeId>, ref b: Vec<TypeId>): bool {
   }
   let i: usize = 0;
   while (i < a.len) {
-    if (vec.vecGet(ref a, i) != vec.vecGet(ref b, i)) {
+    if (a.get(i) != b.get(i)) {
       return false;
     }
     i += 1;
@@ -254,13 +254,13 @@ export function materializeInstances(ref prog: Program): void {
     progressed = false;
     let i: usize = 0;
     while (i < prog.instances.len) {
-      let inst = vec.vecGet(ref prog.instances, i);
+      let inst = prog.instances.get(i);
       if (!inst.filled) {
         // Marked filled BEFORE the work, so an instance that reaches itself
         // (`Node<int>` holding a `Node<int>`) sees a registry hit rather than
         // recursing forever.
         inst.filled = true;
-        vec.vecSet(ref prog.instances, i, inst);
+        prog.instances.set(i, inst);
         fillInstance(ref prog, ref inst);
         progressed = true;
       }
@@ -276,11 +276,11 @@ function fillInstance(ref prog: Program, ref inst: Instance): void {
       let fields: Vec<Field> = vec.vecNew(f.len);
       let i: usize = 0;
       while (i < f.len) {
-        const field = vec.vecGet(ref f, i);
+        const field = f.get(i);
         // `carriedKind` survives substitution unchanged. It is a property of how
         // the field was WRITTEN, not of the type the parameter resolved to, so
         // `handle: disposable T` still carries it at `T = FileHandle`.
-        vec.vecPush(ref fields, {
+        fields.push({
           name: field.name,
           typeId: substitute(ref prog, field.typeId, ref info.params, ref inst.args),
           carriedKind: field.carriedKind,
@@ -302,19 +302,19 @@ function fillInstance(ref prog: Program, ref inst: Instance): void {
       let cases: Vec<VariantCase> = vec.vecNew(cs.len);
       let c: usize = 0;
       while (c < cs.len) {
-        let source = vec.vecGet(ref cs, c);
+        let source = cs.get(c);
         let fields: Vec<Field> = vec.vecNew(source.fields.len);
         let i: usize = 0;
         while (i < source.fields.len) {
-          const field = vec.vecGet(ref source.fields, i);
-          vec.vecPush(ref fields, {
+          const field = source.fields.get(i);
+          fields.push({
             name: field.name,
             typeId: substitute(ref prog, field.typeId, ref info.params, ref inst.args),
             carriedKind: field.carriedKind,
           });
           i += 1;
         }
-        vec.vecPush(ref cases, { name: source.name, ordinal: source.ordinal, fields: fields });
+        cases.push({ name: source.name, ordinal: source.ordinal, fields: fields });
         c += 1;
       }
       let methods: Map<string, TypeId> = substitutedMethods(ref prog, ref mm, ref info.params, ref inst.args);
@@ -341,7 +341,7 @@ function substitutedMethods(
   let out: Map<string, TypeId> = map.mapNew(0, map.stringKeyOps());
   let it: MapIter<string, TypeId> = map.mapIter(ref methods);
   for entry in it {
-    map.mapInsert(ref out, entry.key, substitute(ref prog, entry.value, ref params, ref args));
+    out.insert(entry.key, substitute(ref prog, entry.value, ref params, ref args));
   }
   return out;
 }
@@ -358,7 +358,7 @@ function substitutedTraits(
   let out: Vec<TypeId> = vec.vecNew(traits.len);
   let i: usize = 0;
   while (i < traits.len) {
-    vec.vecPush(ref out, substituteTrait(ref prog, vec.vecGet(ref traits, i), ref params, ref args));
+    out.push(substituteTrait(ref prog, traits.get(i), ref params, ref args));
     i += 1;
   }
   return out;
@@ -437,7 +437,7 @@ export type FuncInstance propagates<disposable> {
 export function instantiateFunction(ref prog: Program, origin: DeclId, ref args: Vec<TypeId>): usize {
   let i: usize = 0;
   while (i < prog.funcInstances.len) {
-    let inst = vec.vecGet(ref prog.funcInstances, i);
+    let inst = prog.funcInstances.get(i);
     if (inst.origin == origin && sameTypeIds(ref inst.args, ref args)) {
       return i;
     }
@@ -446,7 +446,7 @@ export function instantiateFunction(ref prog: Program, origin: DeclId, ref args:
 
   let info = genericAt(ref prog, origin);
   let copiedArgs: Vec<TypeId> = vec.vecNew(args.len);
-  vec.vecExtendFrom(ref copiedArgs, vec.vecAsArray(ref args));
+  copiedArgs.extendFrom(args.asArray());
 
   // The signature with every parameter replaced. Substitution reaches into
   // `Vec<T>` in a parameter or return type as readily as into a bare `T`.
@@ -462,7 +462,7 @@ export function instantiateFunction(ref prog: Program, origin: DeclId, ref args:
       let substituted: Vec<TypeId> = vec.vecNew(p.len);
       let a: usize = 0;
       while (a < p.len) {
-        vec.vecPush(ref substituted, substitute(ref prog, vec.vecGet(ref p, a), ref info.params, ref args));
+        substituted.push(substitute(ref prog, p.get(a), ref info.params, ref args));
         a += 1;
       }
       params = substituted;
@@ -476,7 +476,7 @@ export function instantiateFunction(ref prog: Program, origin: DeclId, ref args:
     params: params, ret: ret, variadic: false, isAsync: instAsync,
   });
 
-  vec.vecPush(ref prog.funcInstances, {
+  prog.funcInstances.push({
     origin: origin,
     args: copiedArgs,
     funcType: funcType,
@@ -486,7 +486,7 @@ export function instantiateFunction(ref prog: Program, origin: DeclId, ref args:
 }
 
 export function funcInstanceAt(ref prog: Program, index: usize): FuncInstance propagates<disposable> {
-  return vec.vecGet(ref prog.funcInstances, index);
+  return prog.funcInstances.get(index);
 }
 
 // Match a DECLARED type against an ACTUAL one, binding any type parameter it
@@ -508,9 +508,9 @@ export function inferTypeArgs(
 
   let p: usize = 0;
   while (p < params.len) {
-    if (vec.vecGet(ref params, p) == declared) {
-      if (vec.vecGet(ref bound, p) == TYPE_ERROR_ID) {
-        vec.vecSet(ref bound, p, actual);
+    if (params.get(p) == declared) {
+      if (bound.get(p) == TYPE_ERROR_ID) {
+        bound.set(p, actual);
       }
       return;
     }
@@ -564,7 +564,7 @@ function inferAcrossInstances(
   disposable aArgs: Vec<TypeId> = instanceArgsOf(ref prog, actual);
   let i: usize = 0;
   while (i < dArgs.len && i < aArgs.len) {
-    inferTypeArgs(ref prog, vec.vecGet(ref dArgs, i), vec.vecGet(ref aArgs, i), ref params, ref bound);
+    inferTypeArgs(ref prog, dArgs.get(i), aArgs.get(i), ref params, ref bound);
     i += 1;
   }
 }
@@ -577,10 +577,10 @@ function instanceArgsOf(ref prog: Program, id: TypeId): Vec<TypeId> propagates<d
   let out: Vec<TypeId> = vec.vecNew(2);
   switch (typeAt(ref prog, id)) {
     case Type.Struct { decl: d, fields: f, methods: mm, implementsTraits: it, generic: g }: {
-      vec.vecExtendFrom(ref out, vec.vecAsArray(ref g.args));
+      out.extendFrom(g.args.asArray());
     }
     case Type.Variant { decl: d, cases: cs, methods: mm, implementsTraits: it, generic: g }: {
-      vec.vecExtendFrom(ref out, vec.vecAsArray(ref g.args));
+      out.extendFrom(g.args.asArray());
     }
     default: { }
   }
@@ -597,9 +597,9 @@ export function substitute(ref prog: Program, id: TypeId, ref params: Vec<TypeId
   // decls that both call a parameter `T` never collide.
   let p: usize = 0;
   while (p < params.len) {
-    if (vec.vecGet(ref params, p) == id) {
+    if (params.get(p) == id) {
       if (p < args.len) {
-        return vec.vecGet(ref args, p);
+        return args.get(p);
       }
       return TYPE_ERROR_ID;
     }
@@ -636,7 +636,7 @@ export function substitute(ref prog: Program, id: TypeId, ref params: Vec<TypeId
       let params2: Vec<TypeId> = vec.vecNew(fp.len);
       let i: usize = 0;
       while (i < fp.len) {
-        vec.vecPush(ref params2, substitute(ref prog, vec.vecGet(ref fp, i), ref params, ref args));
+        params2.push(substitute(ref prog, fp.get(i), ref params, ref args));
         i += 1;
       }
       return internFunc(ref prog, ref params2, substitute(ref prog, fr, ref params, ref args), fv, fnAsync);
@@ -667,12 +667,12 @@ function substituteInstance(
   let changed = false;
   let i: usize = 0;
   while (i < g.args.len) {
-    const before = vec.vecGet(ref g.args, i);
+    const before = g.args.get(i);
     const after = substitute(ref prog, before, ref params, ref args);
     if (after != before) {
       changed = true;
     }
-    vec.vecPush(ref substituted, after);
+    substituted.push(after);
     i += 1;
   }
   if (!changed) {
@@ -714,7 +714,7 @@ export function isOpenInstance(ref prog: Program, id: TypeId): bool {
 function anyTypeParam(ref prog: Program, ref args: Vec<TypeId>): bool {
   let i: usize = 0;
   while (i < args.len) {
-    if (typeMentionsTypeParam(ref prog, vec.vecGet(ref args, i))) {
+    if (typeMentionsTypeParam(ref prog, args.get(i))) {
       return true;
     }
     i += 1;
@@ -801,7 +801,7 @@ export function firstTypeParamOwner(ref prog: Program, id: TypeId): DeclId {
 function ownerInArgs(ref prog: Program, ref args: Vec<TypeId>): DeclId {
   let i: usize = 0;
   while (i < args.len) {
-    const d = firstTypeParamOwner(ref prog, vec.vecGet(ref args, i));
+    const d = firstTypeParamOwner(ref prog, args.get(i));
     if (d != DECL_NONE_ID) {
       return d;
     }
@@ -816,7 +816,7 @@ function ownerInArgs(ref prog: Program, ref args: Vec<TypeId>): DeclId {
 export function findFuncInstance(ref prog: Program, origin: DeclId, ref args: Vec<TypeId>): usize {
   let i: usize = 1;
   while (i < prog.funcInstances.len) {
-    let inst = vec.vecGet(ref prog.funcInstances, i);
+    let inst = prog.funcInstances.get(i);
     if (inst.origin == origin && sameTypeIds(ref inst.args, ref args)) {
       return i;
     }
@@ -834,14 +834,14 @@ export function findFuncInstance(ref prog: Program, origin: DeclId, ref args: Ve
 // type to the linker. Readable for the same reason every other name here is.
 function instanceNameOf(ref prog: Program, base: string, ref args: Vec<TypeId>): string {
   disposable out: Text = text.make(32);
-  text.push(ref out, base);
+  out.push(base);
   let i: usize = 0;
   while (i < args.len) {
-    text.pushByte(ref out, '_');
-    text.push(ref out, mangledTypeName(ref prog, vec.vecGet(ref args, i)));
+    out.pushByte('_');
+    out.push(mangledTypeName(ref prog, args.get(i)));
     i += 1;
   }
-  switch (str.stringFromBytes(text.bytes(ref out))) {
+  switch (str.stringFromBytes(out.bytes())) {
     case Result.Ok { value: s }: { return s; }
     case Result.Err { error: e }: { return base; }
   }

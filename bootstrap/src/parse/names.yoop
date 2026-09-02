@@ -22,7 +22,7 @@ import { ParsingError } from "../diagnostics";
 
 // The current token's source text, or "" if there is no text to read.
 export function peekText(ref ps: ParserState): string {
-  const tok = SelfLexing.peek(ref ps);
+  const tok = ps.peek();
   if (tok.length <= 0) {
     return "";
   }
@@ -43,7 +43,7 @@ export function peekText(ref ps: ParserState): string {
 // lookahead twin of peekText, for the places that have to tell a contextual
 // keyword from an ordinary identifier BEFORE committing to a parse.
 export function peekAheadText(ref ps: ParserState, n: usize): string {
-  switch (SelfLexing.peekAhead(ref ps, n)) {
+  switch (ps.peekAhead(n)) {
     case Result.Err { error: e }: { return ""; }
     case Result.Ok { value: tok }: {
       if (tok.length <= 0) {
@@ -63,7 +63,7 @@ export function peekAheadIsWord(ref ps: ParserState, n: usize, word: string): bo
 }
 
 export function peekIsWord(ref ps: ParserState, word: string): bool {
-  if (SelfLexing.peek(ref ps).tag != TokenTags.IDENT) {
+  if (ps.peek().tag != TokenTags.IDENT) {
     return false;
   }
   return str.stringEq(peekText(ref ps), word);
@@ -134,10 +134,10 @@ function reservedNameHint(word: string): string {
 // nothing about what to do. Entering the loop anyway lets `parseIdentAsName`
 // report it properly. Same test, and same reason, as the reference's.
 export function atReservedUsedAsName(ref ps: ParserState): bool {
-  if (!isKeywordTag(SelfLexing.peek(ref ps).tag)) {
+  if (!isKeywordTag(ps.peek().tag)) {
     return false;
   }
-  switch (SelfLexing.peekAhead(ref ps, 1)) {
+  switch (ps.peekAhead(1)) {
     case Result.Err { error: e }: { return false; }
     case Result.Ok { value: tok }: {
       return tok.tag == TokenTags.COLON
@@ -151,7 +151,7 @@ export function parseIdentAsName(ref pState: ParserState): Result<string, Parsin
   // Named rather than left to `expect`. A reserved word in name position
   // reports as "expected IDENT, got FROM" otherwise, which names a TAG the
   // reader never wrote and is often several lines from where they are looking.
-  if (isKeywordTag(SelfLexing.peek(ref pState).tag)) {
+  if (isKeywordTag(pState.peek().tag)) {
     const word = peekText(ref pState);
     return Result.Err { error: SelfLexing.createParsingError(
       ref pState,
@@ -159,7 +159,7 @@ export function parseIdentAsName(ref pState: ParserState): Result<string, Parsin
       peekLengthUsize(ref pState),
     )};
   }
-  const identToken = SelfLexing.expect(ref pState, TokenTags.IDENT)?;
+  const identToken = pState.expect(TokenTags.IDENT)?;
   const src = pState.src;
   const nameResult = str.stringFromBytes(bytes.bytesSlice(
     src,
@@ -195,7 +195,7 @@ export function parseIdentAsName(ref pState: ParserState): Result<string, Parsin
 // MIRRORS a C ABI and has no say in what the names are, while ordinary Yoop
 // source does, so `function f(type: int32)` stays refused.
 export function parseIdentOrKeywordAsName(ref pState: ParserState): Result<string, ParsingError> {
-  const tok = SelfLexing.peek(ref pState);
+  const tok = pState.peek();
   if (!isIdentLikeTag(tok.tag)) {
     return Result.Err { error: SelfLexing.createParsingError(
       ref pState,
@@ -204,6 +204,6 @@ export function parseIdentOrKeywordAsName(ref pState: ParserState): Result<strin
     )};
   }
   const text = peekText(ref pState);
-  SelfLexing.advance(ref pState)?;
+  pState.advance()?;
   return Result.Ok { value: text };
 }

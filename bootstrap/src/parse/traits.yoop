@@ -20,7 +20,7 @@ module parse;
   as one - including the borrow machinery, which `ref self` needs and which
   already exists.
 
-  Only STATIC dispatch: `Display.toString(ref p)` resolves through the
+  Only STATIC dispatch: `p.toString()` resolves through the
   receiver's concrete type at compile time. No vtable, no indirect call. That is
   the form the bootstrap's own source uses almost exclusively.
 */
@@ -44,22 +44,22 @@ export const SELF_PARAM: string = "self";
 //   childA            typeParams list-node (0 = none)
 //   own childIds run  the METHOD_SIG nodes
 export function parseTraitDecl(ref ps: ParserState): Result<NodeId, ParsingError> {
-  SelfLexing.expect(ref ps, TokenTags.TRAIT)?;
-  let node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.TRAIT_DECL);
+  ps.expect(TokenTags.TRAIT)?;
+  let node = ps.buildSourcedNode(ASTNodeKind.TRAIT_DECL);
   node.name = parseIdentAsName(ref ps)?;
   node.childA = parseTypeParamList(ref ps)?;
   node.childD = parseExtendsClause(ref ps)?;
 
-  SelfLexing.expect(ref ps, TokenTags.LCURLY)?;
+  ps.expect(TokenTags.LCURLY)?;
   disposable ids: Vec<NodeId> = vec.vecNew(4);
   while (untilClosing(ref ps, TokenTags.RCURLY)) {
-    vec.vecPush(ref ids, parseMethodSig(ref ps, node.name, node.childA)?);
+    ids.push(parseMethodSig(ref ps, node.name, node.childA)?);
   }
-  SelfLexing.expect(ref ps, TokenTags.RCURLY)?;
+  ps.expect(TokenTags.RCURLY)?;
 
   spliceChildren(ref ps, ref node, ref ids);
 
-  return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
+  return Result.Ok { value: ps.pushNode(node) };
 }
 
 // One `function m(ref self): R;` inside a trait - a signature and no body.
@@ -77,7 +77,7 @@ function parseMethodSig(
   // would, on a method exactly as on a top-level declaration. A signature needs
   // no codegen at all, so this half has always been free.
   const prefixes = parseKindPrefixRun(ref ps)?;
-  let node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.METHOD_SIG);
+  let node = ps.buildSourcedNode(ASTNodeKind.METHOD_SIG);
   node.childE = prefixes;
   node.name = parseIdentAsName(ref ps)?;
   // 0, not the trait's parameters: `self` in a SIGNATURE annotates as the
@@ -85,10 +85,10 @@ function parseMethodSig(
   // the receiver's concrete type. Giving it arguments would mean resolving
   // `Joinable<T>` as a type, which a trait name is not.
   node.childB = parseMethodParams(ref ps, traitName, 0)?;
-  SelfLexing.expect(ref ps, TokenTags.COLON)?;
+  ps.expect(TokenTags.COLON)?;
   node.childC = parseTypeAnnotation(ref ps)?;
-  SelfLexing.expect(ref ps, TokenTags.SEMICOLON)?;
-  return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
+  ps.expect(TokenTags.SEMICOLON)?;
+  return Result.Ok { value: ps.pushNode(node) };
 }
 
 // `function m(ref self): R { ... }` inside a type body - a signature AND a body.
@@ -102,14 +102,14 @@ export function parseMethodDecl(
   // `async handle(ref self, ...)` - a kind prefix stands where `function` would,
   // on a method exactly as on a top-level declaration.
   const prefixes = parseKindPrefixRun(ref ps)?;
-  let node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.METHOD_DECL);
+  let node = ps.buildSourcedNode(ASTNodeKind.METHOD_DECL);
   node.childE = prefixes;
   node.name = parseIdentAsName(ref ps)?;
   node.childB = parseMethodParams(ref ps, ownerName, ownerTypeParams)?;
-  SelfLexing.expect(ref ps, TokenTags.COLON)?;
+  ps.expect(TokenTags.COLON)?;
   node.childC = parseTypeAnnotation(ref ps)?;
   node.childD = parseBlock(ref ps)?;
-  return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
+  return Result.Ok { value: ps.pushNode(node) };
 }
 
 // A method's parameter list, with `self`'s annotation filled in.
@@ -122,18 +122,18 @@ function parseMethodParams(
   ownerName: string,
   ownerTypeParams: NodeId
 ): Result<NodeId, ParsingError> {
-  SelfLexing.expect(ref ps, TokenTags.LPAREN)?;
+  ps.expect(TokenTags.LPAREN)?;
   const loc = posToSourceLocation(ps.src, ps.pos, 1);
 
   disposable ids: Vec<NodeId> = vec.vecNew(4);
   while (untilClosing(ref ps, TokenTags.RPAREN)) {
-    vec.vecPush(ref ids, parseMethodParam(ref ps, ownerName, ownerTypeParams)?);
-    if (SelfLexing.peek(ref ps).tag == TokenTags.COMMA) {
-      SelfLexing.advance(ref ps)?;
+    ids.push(parseMethodParam(ref ps, ownerName, ownerTypeParams)?);
+    if (ps.peek().tag == TokenTags.COMMA) {
+      ps.advance()?;
     }
   }
-  SelfLexing.expect(ref ps, TokenTags.RPAREN)?;
-  return Result.Ok { value: SelfLexing.buildListNode(ref ps, ref ids, loc) };
+  ps.expect(TokenTags.RPAREN)?;
+  return Result.Ok { value: ps.buildListNode(ref ids, loc) };
 }
 
 function parseMethodParam(
@@ -141,21 +141,21 @@ function parseMethodParam(
   ownerName: string,
   ownerTypeParams: NodeId
 ): Result<NodeId, ParsingError> {
-  if (SelfLexing.peek(ref ps).tag == TokenTags.DOTDOTDOT) {
+  if (ps.peek().tag == TokenTags.DOTDOTDOT) {
     return Result.Err { error: variadicNotAllowedHere(ref ps) };
   }
-  let node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.PARAM);
+  let node = ps.buildSourcedNode(ASTNodeKind.PARAM);
   node.childE = parseParamKindPrefix(ref ps)?;
   node.flagA = false;
-  if (SelfLexing.peek(ref ps).tag == TokenTags.REF) {
-    SelfLexing.advance(ref ps)?;
+  if (ps.peek().tag == TokenTags.REF) {
+    ps.advance()?;
     node.flagA = true;   // isRef
   }
   // `self` is a KEYWORD, not an identifier, so it does not come through
   // parseIdentAsName - which is also why it can never collide with a user's
   // parameter name.
-  if (SelfLexing.peek(ref ps).tag == TokenTags.SELF) {
-    SelfLexing.advance(ref ps)?;
+  if (ps.peek().tag == TokenTags.SELF) {
+    ps.advance()?;
     node.name = SELF_PARAM;
   } else {
     node.name = parseIdentAsName(ref ps)?;
@@ -163,21 +163,21 @@ function parseMethodParam(
 
   // The receiver, written bare. Its annotation is the enclosing type, made up
   // here so the rest of the compiler sees an ordinary annotated parameter.
-  if (str.stringEq(node.name, SELF_PARAM) && SelfLexing.peek(ref ps).tag != TokenTags.COLON) {
-    let annot = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.TYPE_ANNOTATION_TYPE_NAME);
+  if (str.stringEq(node.name, SELF_PARAM) && ps.peek().tag != TokenTags.COLON) {
+    let annot = ps.buildSourcedNode(ASTNodeKind.TYPE_ANNOTATION_TYPE_NAME);
     annot.name = ownerName;
     // Inside a GENERIC type, `self` is `Vec<T>` and not bare `Vec` - the
     // parameters are in scope, and a generic name without its arguments is an
     // error everywhere else too. This is why the owner's type params travel all
     // the way down here.
     annot.childA = selfTypeArgs(ref ps, ownerTypeParams)?;
-    node.childA = SelfLexing.pushNode(ref ps, annot);
-    return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
+    node.childA = ps.pushNode(annot);
+    return Result.Ok { value: ps.pushNode(node) };
   }
 
-  SelfLexing.expect(ref ps, TokenTags.COLON)?;
+  ps.expect(TokenTags.COLON)?;
   node.childA = parseTypeAnnotation(ref ps)?;
-  return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
+  return Result.Ok { value: ps.pushNode(node) };
 }
 
 // `implements A, B` after a type name - the traits the decl claims to satisfy.
@@ -201,24 +201,24 @@ function parseMethodParam(
 // is BUILD one: `Reader.from(ref s)` fills the fields from a concrete type's
 // methods, and that is the erasure machinery, refused by name.
 export function parseVtableDecl(ref ps: ParserState): Result<NodeId, ParsingError> {
-  SelfLexing.expect(ref ps, TokenTags.VTABLE)?;
-  let node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.VTABLE_DECL);
+  ps.expect(TokenTags.VTABLE)?;
+  let node = ps.buildSourcedNode(ASTNodeKind.VTABLE_DECL);
   node.name = parseIdentAsName(ref ps)?;
-  SelfLexing.expect(ref ps, TokenTags.FOR)?;
+  ps.expect(TokenTags.FOR)?;
   node.childA = parseTypeAnnotation(ref ps)?;
 
-  SelfLexing.expect(ref ps, TokenTags.LCURLY)?;
+  ps.expect(TokenTags.LCURLY)?;
   disposable ids: Vec<NodeId> = vec.vecNew(4);
   while (untilClosing(ref ps, TokenTags.RCURLY)) {
-    vec.vecPush(ref ids, parseFieldDecl(ref ps)?);
-    if (SelfLexing.peek(ref ps).tag == TokenTags.COMMA) {
-      SelfLexing.advance(ref ps)?;
+    ids.push(parseFieldDecl(ref ps)?);
+    if (ps.peek().tag == TokenTags.COMMA) {
+      ps.advance()?;
     }
   }
-  SelfLexing.expect(ref ps, TokenTags.RCURLY)?;
+  ps.expect(TokenTags.RCURLY)?;
 
   spliceChildren(ref ps, ref node, ref ids);
-  return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
+  return Result.Ok { value: ps.pushNode(node) };
 }
 
 // `trait Child extends Parent` / `trait Child extends A, B`.
@@ -230,49 +230,49 @@ export function parseVtableDecl(ref ps: ParserState): Result<NodeId, ParsingErro
 // at. No parenthesized form: the reference does not accept one here, and there
 // is nothing after the list for a comma to be ambiguous with.
 function parseExtendsClause(ref ps: ParserState): Result<NodeId, ParsingError> {
-  if (SelfLexing.peek(ref ps).tag != TokenTags.EXTENDS) {
+  if (ps.peek().tag != TokenTags.EXTENDS) {
     return Result.Ok { value: 0 };
   }
   const loc = posToSourceLocation(ps.src, ps.pos, 1);
-  SelfLexing.advance(ref ps)?;
+  ps.advance()?;
 
   disposable ids: Vec<NodeId> = vec.vecNew(2);
   while (true) {
-    vec.vecPush(ref ids, parseTypeAnnotation(ref ps)?);
-    if (SelfLexing.peek(ref ps).tag != TokenTags.COMMA) {
+    ids.push(parseTypeAnnotation(ref ps)?);
+    if (ps.peek().tag != TokenTags.COMMA) {
       break;
     }
-    SelfLexing.advance(ref ps)?;
+    ps.advance()?;
   }
-  return Result.Ok { value: SelfLexing.buildListNode(ref ps, ref ids, loc) };
+  return Result.Ok { value: ps.buildListNode(ref ids, loc) };
 }
 
 export function parseImplementsClause(ref ps: ParserState): Result<NodeId, ParsingError> {
-  if (SelfLexing.peek(ref ps).tag != TokenTags.IMPLEMENTS) {
+  if (ps.peek().tag != TokenTags.IMPLEMENTS) {
     return Result.Ok { value: 0 };
   }
   const loc = posToSourceLocation(ps.src, ps.pos, 1);
-  SelfLexing.advance(ref ps)?;
+  ps.advance()?;
 
   // `implements (A, B)` is the parenthesized form; both are one list.
-  const parenthesized = SelfLexing.peek(ref ps).tag == TokenTags.LPAREN;
+  const parenthesized = ps.peek().tag == TokenTags.LPAREN;
   if (parenthesized) {
-    SelfLexing.advance(ref ps)?;
+    ps.advance()?;
   }
 
   disposable ids: Vec<NodeId> = vec.vecNew(2);
   while (true) {
-    vec.vecPush(ref ids, parseTypeAnnotation(ref ps)?);
-    if (SelfLexing.peek(ref ps).tag != TokenTags.COMMA) {
+    ids.push(parseTypeAnnotation(ref ps)?);
+    if (ps.peek().tag != TokenTags.COMMA) {
       break;
     }
-    SelfLexing.advance(ref ps)?;
+    ps.advance()?;
   }
   if (parenthesized) {
-    SelfLexing.expect(ref ps, TokenTags.RPAREN)?;
+    ps.expect(TokenTags.RPAREN)?;
   }
 
-  return Result.Ok { value: SelfLexing.buildListNode(ref ps, ref ids, loc) };
+  return Result.Ok { value: ps.buildListNode(ref ids, loc) };
 }
 
 // The type-argument list for `self` inside a generic decl: one annotation per
@@ -290,10 +290,10 @@ function selfTypeArgs(ref ps: ParserState, ownerTypeParams: NodeId): Result<Node
   disposable ids: Vec<NodeId> = vec.vecNew(params.childCount);
   let i: usize = 0;
   while (i < params.childCount) {
-    let arg = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.TYPE_ANNOTATION_TYPE_NAME);
+    let arg = ps.buildSourcedNode(ASTNodeKind.TYPE_ANNOTATION_TYPE_NAME);
     arg.name = nodeAt(ref ps.ast, childAt(ref ps.ast, params, i)).name;
-    vec.vecPush(ref ids, SelfLexing.pushNode(ref ps, arg));
+    ids.push(ps.pushNode(arg));
     i += 1;
   }
-  return Result.Ok { value: SelfLexing.buildListNode(ref ps, ref ids, loc) };
+  return Result.Ok { value: ps.buildListNode(ref ids, loc) };
 }

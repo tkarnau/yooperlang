@@ -31,7 +31,27 @@ supplies the machinery for free).
 
 This separation is what makes `async` go away: `task` is a kind applied to a function,
 the return value implements the `Task<T>` trait, and concurrency-mode kinds on the
-binding site (`scoped`, `pooled`) decide when the compiler forces the `wait`.
+binding site (`joined`, `pooled`) decide when the compiler forces the `wait`.
+
+### Two invariants about dispatch
+
+Every call in Yooperlang is static unless the program built an erased value by
+name. Two rules keep it that way, and a feature that would break either is not
+a feature this language gets:
+
+1. **A generic is always monomorphized.** A bound is a compile-time promise
+   checked at every instantiation; a `T` never carries a hidden vtable, and
+   the compiler never falls back to dynamic dispatch when monomorphization is
+   inconvenient.
+2. **Erasure is a value the program builds, never a conversion the compiler
+   inserts.** A vtable value comes from a spelled construction site
+   (`Reader.from(ref s)`), has a visible layout, and is passed like any other
+   value. A concrete value does not become an erased one by being assigned or
+   passed where an erased one is expected.
+
+Method syntax is orthogonal to both. `x.m()` and `Trait.m(ref x)` are one
+static call resolved by `x`'s concrete type (section 5, "Calling a method");
+neither spelling can reach a function pointer that the program did not build.
 
 ---
 
@@ -370,7 +390,7 @@ value before overwriting it:
 ```js
 let disposable s: Text = text_from("a");
 let next: Text = replace(ref s, "a", "b");
-Disposable.dispose(ref s);      // the outgoing value, by hand
+s.dispose();      // the outgoing value, by hand
 s = next;
 ```
 
@@ -579,7 +599,7 @@ vtable Reader for Readable {
 }
 
 const r: Reader = Reader.from(ref my_tcp_stream);   // builder
-const n = Reader.read(ref r, ref buf);              // indirect dispatch
+const n = r.read(ref buf);              // indirect dispatch
 ```
 
 Two builtins on every vtable type:
@@ -597,7 +617,7 @@ Two builtins on every vtable type:
   share the same nominal vtable type, so one array can hold a mix of both.
   Arguments must be named functions (so their address is known statically),
   not runtime function-pointer values.
-- **`VTableName.method(ref v, ...)`** - dispatches through the vtable's
+- **`v.method(...)`** - dispatches through the vtable's
   method slot. Equivalent to `TraitName.method(ref v, ...)` where v is
   the vtable value; both forms produce the same IR.
 
@@ -891,7 +911,7 @@ function make_pass(scene: Scene): RenderPass propagates<gpu_buffer>;
    ```js
    let arr: DynArray<int32> = new_dynarray(4);
    use(arr);
-   Disposable.dispose(ref arr);   // satisfies the obligation
+   arr.dispose();   // satisfies the obligation
    ```
 
 3. **Transfer to the caller.** Bind with plain `let`/`const` and `return` it from a function whose return type also declares `propagates<K>`:
@@ -1360,7 +1380,7 @@ The typechecker looks for a trait named `Into` in the operand-Err type's
 `implementsTraits` whose single type-arg is the enclosing return's `Err`
 payload type. A miss produces a fix-it pointing at the missing impl;
 a hit rewrites the `?` failure branch to call
-`Into.into(ref operandErr)` and store the returned target value into the
+`operandErr.into()` and store the returned target value into the
 outer `Err` variant. The same-type fast path is unaffected - the
 conversion is paid only when the shapes actually differ.
 
@@ -1722,39 +1742,47 @@ Naming convention conveys allocation cost at the call site:
 ### `std/core/vec.yoop` - growable vector
 
 ```js
-type Vec<T> implements Disposable propagates<disposable> {
+type Vec<T> implements (Disposable, Sequence<T>, Growable<T>) propagates<disposable> {
     data: T[],
     len: usize,
     cap: usize,
     // dispose frees the backing buffer
 }
 
-vecNew<T>(initial_cap: usize): Vec<T> propagates<disposable>
-vecPush<T>(v: ref Vec<T>, value: T): void   // MAY REALLOCATE
-vecGet<T>(v: ref Vec<T>, i: usize): T
-vecSet<T>(v: ref Vec<T>, i: usize, value: T): void
-vecClear<T>(v: ref Vec<T>): void
-vecAsArray<T>(v: ref Vec<T>): T[]          // view; valid until next mutation
+vec.vecNew<T>(initial_cap: usize): Vec<T> propagates<disposable>
+vec.vecFromArray<T>(src: T[]): Vec<T> propagates<disposable>
+v.push(value: T): void            // MAY REALLOCATE
+v.get(i: usize): T
+v.set(i: usize, value: T): void
+v.clear(): void
+v.asArray(): T[]                  // view; valid until next mutation
+v.extendFrom(items: T[]): void    // MAY REALLOCATE
 ```
+
+The operations are methods declared by the `Sequence<T>` and `Growable<T>`
+traits in `std/core/traits.yoop`, so a generic bounded by them takes any
+implementation of the contract; `Vec` is the std one. Construction stays a
+free function because there is no receiver yet. `Map`, `Set` and `Deque`
+follow the same shape (`Mapping<K, V>`, `Membership<K>`, `DoubleEnded<T>`),
+and `Text` is a `TextBuilder`.
 
 `Vec<T>` propagates `disposable`, so every binding picks one of the
 standard discharge mechanisms:
 
 ```js
-disposable v: Vec<int32> = vecNew(4);   // auto-cleanup at scope end
+disposable v: Vec<int32> = vec.vecNew(4);   // auto-cleanup at scope end
 // or
-let v: Vec<int32> = vecNew(4);
+let v: Vec<int32> = vec.vecNew(4);
 // ... use ...
-Disposable.dispose(ref v);               // manual
+v.dispose();                                // manual
 // or
 function build(): Vec<int32> propagates<disposable> {
-    return vecNew(4);                   // transfer up
+    return vec.vecNew(4);                   // transfer up
 }
 ```
 
-`vecPush` is flagged "MAY REALLOCATE" in the API contract: when
-`len == cap`, the backing buffer doubles, and any prior `vecAsArray`
-view dangles.
+`push` is flagged "MAY REALLOCATE" in the API contract: when `len == cap`,
+the backing buffer doubles, and any prior `asArray` view dangles.
 
 ---
 

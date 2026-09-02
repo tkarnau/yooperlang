@@ -256,7 +256,7 @@ export type HeaderEntry { name: string, value: string }
 export type Headers implements Disposable propagates<disposable> {
     entries: Vec<HeaderEntry>,
     function dispose(ref self): void {
-        Disposable.dispose(ref self.entries);
+        self.entries.dispose();
     }
 }
 
@@ -267,17 +267,17 @@ export function headersNew(cap: usize): Headers propagates<disposable> {
 // Append. Duplicates are preserved; use `headersSet` to replace.
 export function headersAdd(ref h: Headers, name: string, value: string): void {
     let e: HeaderEntry = { name: name, value: value };
-    vec.vecPush(ref h.entries, e);
+    h.entries.push(e);
 }
 
 // Replace the first match in place and drop nothing else, or append when the
 // name is absent. Field names are compared case insensitively, per RFC 9110.
 export function headersSet(ref h: Headers, name: string, value: string): void {
-    let view: HeaderEntry[] = vec.vecAsArray(ref h.entries);
+    let view: HeaderEntry[] = h.entries.asArray();
     for (let i = 0; i < view.len; i += 1) {
         if (str.stringEqIgnoreAsciiCase(view[i].name, name)) {
             let replaced: HeaderEntry = { name: view[i].name, value: value };
-            vec.vecSet(ref h.entries, i, replaced);
+            h.entries.set(i, replaced);
             return;
         }
     }
@@ -287,7 +287,7 @@ export function headersSet(ref h: Headers, name: string, value: string): void {
 // First value for `name`, or `None`. A present-but-empty header returns
 // `Some { value: "" }`, which is why this is an Option and not a "" sentinel.
 export function headersGet(ref h: Headers, name: string): Option<string> {
-    let view: HeaderEntry[] = vec.vecAsArray(ref h.entries);
+    let view: HeaderEntry[] = h.entries.asArray();
     for e in view {
         if (str.stringEqIgnoreAsciiCase(e.name, name)) {
             return Option.Some { value: e.value };
@@ -317,7 +317,7 @@ export function headersLen(ref h: Headers): usize {
 }
 
 export function headersView(ref h: Headers): HeaderEntry[] {
-    return vec.vecAsArray(ref h.entries);
+    return h.entries.asArray();
 }
 
 // ----- Params -------------------------------------------------------------
@@ -332,7 +332,7 @@ export type Param { name: string, value: string }
 export type Params implements Disposable propagates<disposable> {
     entries: Vec<Param>,
     function dispose(ref self): void {
-        Disposable.dispose(ref self.entries);
+        self.entries.dispose();
     }
 }
 
@@ -342,15 +342,15 @@ export function paramsNew(cap: usize): Params propagates<disposable> {
 
 export function paramsAdd(ref p: Params, name: string, value: string): void {
     let e: Param = { name: name, value: value };
-    vec.vecPush(ref p.entries, e);
+    p.entries.push(e);
 }
 
 export function paramsClear(ref p: Params): void {
-    vec.vecClear(ref p.entries);
+    p.entries.clear();
 }
 
 export function paramsGet(ref p: Params, name: string): Option<string> {
-    let view: Param[] = vec.vecAsArray(ref p.entries);
+    let view: Param[] = p.entries.asArray();
     for e in view {
         if (str.stringEq(e.name, name)) {
             return Option.Some { value: e.value };
@@ -380,7 +380,7 @@ export function paramsLen(ref p: Params): usize {
 }
 
 export function paramsView(ref p: Params): Param[] {
-    return vec.vecAsArray(ref p.entries);
+    return p.entries.asArray();
 }
 
 // ----- Request ------------------------------------------------------------
@@ -404,9 +404,9 @@ export type Request implements Disposable propagates<disposable> {
     body:    uint8[],
 
     function dispose(ref self): void {
-        Disposable.dispose(ref self.headers);
-        Disposable.dispose(ref self.query);
-        Disposable.dispose(ref self.params);
+        self.headers.dispose();
+        self.query.dispose();
+        self.params.dispose();
     }
 }
 
@@ -479,7 +479,7 @@ export variant ResponseBody implements Disposable propagates<disposable> {
     Owned  { bytes: Bytes },
     function dispose(ref self): void {
         switch (self) {
-            case ResponseBody.Owned { bytes: b }: { Disposable.dispose(ref b); }
+            case ResponseBody.Owned { bytes: b }: { b.dispose(); }
             default: {}
         }
     }
@@ -491,8 +491,8 @@ export type Response implements Disposable propagates<disposable> {
     body:    ResponseBody,
 
     function dispose(ref self): void {
-        Disposable.dispose(ref self.headers);
-        Disposable.dispose(ref self.body);
+        self.headers.dispose();
+        self.body.dispose();
     }
 }
 
@@ -516,7 +516,7 @@ export function addHeader(ref resp: Response, name: string, value: string): void
 
 // Point the body at a borrowed string. Any previously owned body is freed.
 export function setBodyStatic(ref resp: Response, text: string): void {
-    Disposable.dispose(ref resp.body);
+    resp.body.dispose();
     resp.body = ResponseBody.Static { text: text };
 }
 
@@ -524,7 +524,7 @@ export function setBodyStatic(ref resp: Response, text: string): void {
 // inline (`setBodyBytes(ref resp, bytes.bytesFromVec(ref buf))`) so no
 // binding is left holding a value the response now owns.
 export function setBodyBytes(ref resp: Response, take: Bytes): void {
-    Disposable.dispose(ref resp.body);
+    resp.body.dispose();
     resp.body = ResponseBody.Owned { bytes: take };
 }
 

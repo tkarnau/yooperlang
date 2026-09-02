@@ -97,11 +97,11 @@ function checkStrips(
     disposable carried: Vec<string> = kindsOnParam(ref ast, param);
     let k: usize = 0;
     while (k < carried.len) {
-      const name = vec.vecGet(ref carried, k);
+      const name = carried.get(k);
       if (isRestrictiveKind(ref prog, name) &&
           !annotationCarries(ref ast, declNode.childC, name) &&
           !containsName(ref reported, name)) {
-        vec.vecPush(ref reported, name);
+        reported.push(name);
         reportTransition(ref prog, declNode, name, false, isMethod, ownerName, ref traitNames);
       }
       k += 1;
@@ -141,7 +141,7 @@ function checkConfers(
   disposable carried: Vec<string> = kindsOnAnnotation(ref ast, declNode.childC);
   let k: usize = 0;
   while (k < carried.len) {
-    const name = vec.vecGet(ref carried, k);
+    const name = carried.get(k);
     if (isConferredKind(ref prog, name) &&
         kindAuthorityOf(ref prog, name, true).len != 0 &&
         !mentionsKindElsewhere(ref ast, declNode, name)) {
@@ -266,7 +266,7 @@ function kindsOnAnnotation(ref ast: AST, annotId: NodeId): Vec<string> propagate
   const list = nodeAt(ref ast, annot.childB);
   let i: usize = 0;
   while (i < list.childCount) {
-    vec.vecPush(ref names, nodeAt(ref ast, childAt(ref ast, list, i)).name);
+    names.push(nodeAt(ref ast, childAt(ref ast, list, i)).name);
     i += 1;
   }
   return names;
@@ -283,7 +283,7 @@ function kindsOnParam(ref ast: AST, param: ASTNode): Vec<string> propagates<disp
   const list = nodeAt(ref ast, param.childE);
   let i: usize = 0;
   while (i < list.childCount) {
-    vec.vecPush(ref names, nodeAt(ref ast, childAt(ref ast, list, i)).name);
+    names.push(nodeAt(ref ast, childAt(ref ast, list, i)).name);
     i += 1;
   }
   return names;

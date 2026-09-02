@@ -54,7 +54,7 @@ export function moduleInitSymbol(moduleId: string, fileIndex: usize): string {
 // Taken during the GLOBALS pre-pass, which walks the graph topologically, so
 // this list is in dependency order by construction rather than by sorting.
 export function noteModuleInit(ref e: Emitter, moduleId: string, fileIndex: usize): void {
-  vec.vecPush(ref e.moduleInits, moduleInitSymbol(moduleId, fileIndex));
+  e.moduleInits.push(moduleInitSymbol(moduleId, fileIndex));
 }
 
 // Whether this module-level `let` needs a run-time store. The complement of
@@ -72,7 +72,7 @@ export function moduleGlobalNeedsStore(
 // The TypeId a module-level `let` was given, or TYPE_ERROR_ID when the name is
 // not a global at all. The one lookup every reader here shares.
 export function moduleGlobalTypeId(ref prog: Program, ref tm: TypedModule, name: string): TypeId {
-  switch (map.mapGet(ref tm.names, name)) {
+  switch (tm.names.get(name)) {
     case Option.None: { return TYPE_ERROR_ID; }
     case Option.Some { value: symId }: {
       switch (symbolAt(ref prog, symId)) {
@@ -141,7 +141,7 @@ export function emitModuleInitCalls(ref cx: Cx): void {
   disposable noArgs: Vec<CallArg> = vec.vecNew(0);
   let i: usize = 0;
   while (i < cx.e.moduleInits.len) {
-    emitCall(ref cx, 0, "void", "", vec.vecGet(ref cx.e.moduleInits, i), ref noArgs);
+    emitCall(ref cx, 0, "void", "", cx.e.moduleInits.get(i), ref noArgs);
     i += 1;
   }
 }

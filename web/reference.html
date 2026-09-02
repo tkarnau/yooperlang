@@ -923,13 +923,13 @@ function main(): int32 {
           </p>
 <pre data-copy="false"><code class="yoop">// leaks one string per line, plus one per interpolated number
 disposable lines: Vec&lt;string&gt; = vec.vecNew(64);
-vec.vecPush(ref lines, `  ret i32 ${value}\n`);
+lines.push(`  ret i32 ${value}\n`);
 
 // leaks nothing, and an enclosing arena reclaims it
 disposable out: Text = text.make(1024);
-text.push(ref out, "  ret i32 ");
-text.pushUint(ref out, value);      // formats digits straight into the buffer
-text.pushByte(ref out, '\n');</code></pre>
+out.push("  ret i32 ");
+out.pushUint(value);      // formats digits straight into the buffer
+out.pushByte('\n');</code></pre>
           <p class="small">
             Measured rather than theoretical: moving the bootstrap compiler's IR emitter from the
             first shape to the second took one compile from 3266 leaks and 244KB to 632 leaks and

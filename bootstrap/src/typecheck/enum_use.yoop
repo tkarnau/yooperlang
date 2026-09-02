@@ -53,7 +53,7 @@ export function checkEnumCaseAccess(
     );
     return TYPE_ERROR_ID;
   }
-  vec.vecSet(ref tm.resolvedTypes, expr.childA, enumType);
+  tm.resolvedTypes.set(expr.childA, enumType);
   return enumType;
 }
 
@@ -208,24 +208,24 @@ function checkEnumPattern(
   // names neither case and no source line. The reference emits exactly that.
   // The pattern carries the enum type so codegen knows the width to emit the
   // case value at, and which enum to read the value out of.
-  vec.vecSet(ref tm.resolvedTypes, patternId, scrutType);
+  tm.resolvedTypes.set(patternId, scrutType);
 
   // Marked covered even when the value check below refuses it, so one mistake
   // does not also produce "this switch does not cover X".
   if (usize(found.ordinal) < covered.len) {
-    if (vec.vecGet(ref covered, usize(found.ordinal))) {
+    if (covered.get(usize(found.ordinal))) {
       reportError(
         ref prog,
         `case "${pattern.name}" is matched twice in this switch`,
         pattern.sourceLoc
       );
     }
-    vec.vecSet(ref covered, usize(found.ordinal), true);
+    covered.set(usize(found.ordinal), true);
   }
 
   let v: usize = 0;
   while (v < seenValues.len) {
-    if (vec.vecGet(ref seenValues, v) == found.value) {
+    if (seenValues.get(v) == found.value) {
       reportError(
         ref prog,
         `case "${pattern.name}" has the same value as a case already matched in this switch, so the two arms cannot be told apart`,
@@ -235,7 +235,7 @@ function checkEnumPattern(
     }
     v += 1;
   }
-  vec.vecPush(ref seenValues, found.value);
+  seenValues.push(found.value);
 }
 
 // Whether an enum switch covers what it has to.
@@ -268,7 +268,7 @@ export function checkEnumExhaustive(
   let firstMissing: usize = 0;
   let i: usize = 0;
   while (i < covered.len) {
-    if (!vec.vecGet(ref covered, i)) {
+    if (!covered.get(i)) {
       if (missing == 0) {
         firstMissing = i;
       }

@@ -46,7 +46,7 @@ type SocketResult implements Disposable propagates<disposable> {
     socket: Socket,
     error:  string,
     function dispose(ref self): void {
-        Disposable.dispose(ref self.socket);
+        self.socket.dispose();
     }
 }
 

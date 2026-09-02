@@ -65,7 +65,7 @@ export function emitSwitch(ref cx: Cx, stmt: ASTNode, retTy: string, ref termina
   while (i < stmt.childCount) {
     const arm = nodeAt(cx.ast, childAt(cx.ast, stmt, i));
     const armLabel = freshLabel(cx.e);
-    vec.vecPush(ref armLabels, armLabel);
+    armLabels.push(armLabel);
     if (arm.flagA) {
       defaultLabel = armLabel;
     }
@@ -108,7 +108,7 @@ export function emitSwitch(ref cx: Cx, stmt: ASTNode, retTy: string, ref termina
   let armErr: EmitResult = EmitResult.Ok;
   while (a < stmt.childCount && !emitFailed(armErr)) {
     const arm = nodeAt(cx.ast, childAt(cx.ast, stmt, a));
-    emitLabel(ref cx, vec.vecGet(ref armLabels, a));
+    emitLabel(ref cx, armLabels.get(a));
 
     // The payload bindings come FIRST in the arm, so the body reads them as
     // ordinary locals. Only the first pattern of an arm can bind: several
@@ -186,7 +186,7 @@ function emitCaseLines(
         } else if (!overVariant) {
           value = patternOperand(nodeAt(cx.ast, patternId));
         }
-        emitSwitchCase(ref cx, scrutTy, value, vec.vecGet(ref armLabels, i));
+        emitSwitchCase(ref cx, scrutTy, value, armLabels.get(i));
         p += 1;
       }
     }

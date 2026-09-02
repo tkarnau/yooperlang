@@ -32,7 +32,7 @@ export function passARegisterShells(
   // redeclaration check in bindName is what keeps two of them from colliding.
   let f: usize = 0;
   while (f < m.files.len) {
-    const file = vec.vecGet(ref m.files, f);
+    const file = m.files.get(f);
     beginFile(ref prog, file.absPath);
     registerFileShells(ref prog, ref tm, m, file.root, moduleId, isEntry);
     f += 1;
@@ -75,7 +75,7 @@ function registerFileShells(
         // there emits the mangled name and fails to link), so the bootstrap
         // does not paper over it.
         if (isCExportDecl(ref m.ast, childId)) {
-          map.mapInsert(ref tm.externNames, declNode.name, true);
+          tm.externNames.insert(declNode.name, true);
         }
       }
       case ASTNodeKind.TYPE_DECL: {
@@ -169,13 +169,13 @@ function registerFileShells(
             );
           }
           if (!isIntrinsic) {
-            map.mapInsert(ref tm.externNames, externNode.name, true);
+            tm.externNames.insert(externNode.name, true);
           } else {
             registerIntrinsic(ref prog, externNode.name);
             // And per-module, which is what an UNQUALIFIED call site is judged
             // against - see TypedModule.intrinsicNames for the miscompile the
             // program-level list alone allows.
-            map.mapInsert(ref tm.intrinsicNames, externNode.name, true);
+            tm.intrinsicNames.insert(externNode.name, true);
           }
           x += 1;
         }
@@ -399,7 +399,7 @@ function registerGenericShell(
   let i: usize = 0;
   while (i < list.childCount) {
     const paramNode = nodeAt(ref ast, childAt(ref ast, list, i));
-    vec.vecPush(ref params, internType(ref prog, Type.TypeParam {
+    params.push(internType(ref prog, Type.TypeParam {
       name: paramNode.name, originDecl: declId, bounds: vec.vecNew(0),
     }));
     i += 1;
@@ -408,7 +408,7 @@ function registerGenericShell(
   // The template's own arguments ARE its parameters, which is what makes
   // `isOpenInstance` recognize it and codegen skip it.
   let templateArgs: Vec<TypeId> = vec.vecNew(params.len);
-  vec.vecExtendFrom(ref templateArgs, vec.vecAsArray(ref params));
+  templateArgs.extendFrom(params.asArray());
 
   let template: TypeId = TYPE_ERROR_ID;
   switch (sort) {
@@ -445,7 +445,7 @@ function registerGenericShell(
     }
   }
 
-  vec.vecPush(ref prog.generics, {
+  prog.generics.push({
     name: declNode.name,
     module: moduleId,
     sort: sort,
@@ -499,7 +499,7 @@ function bindName(
   exported: bool
 ): void {
   const symbolId = internSymbol(ref prog, sym);
-  if (map.mapInsert(ref tm.names, declNode.name, symbolId)) {
+  if (tm.names.insert(declNode.name, symbolId)) {
     reportError(
       ref prog,
       `"${declNode.name}" is declared more than once in this module`,
@@ -507,7 +507,7 @@ function bindName(
     );
   }
   if (exported) {
-    map.mapInsert(ref tm.exports, declNode.name, symbolId);
+    tm.exports.insert(declNode.name, symbolId);
   }
 }
 
@@ -559,7 +559,7 @@ function mergeComposedKinds(
     }
     let operandName = "";
     if (clause.strId < ast.strings.len) {
-      operandName = vec.vecGet(ref ast.strings, clause.strId);
+      operandName = ast.strings.get(clause.strId);
     }
     switch (lookupKind(ref prog, operandName)) {
       case Option.None: {
@@ -633,7 +633,7 @@ function clauseArgument(ref ast: AST, declNode: ASTNode, word: string): string {
       if (clause.strId >= ast.strings.len) {
         return "";
       }
-      return vec.vecGet(ref ast.strings, clause.strId);
+      return ast.strings.get(clause.strId);
     }
     i += 1;
   }

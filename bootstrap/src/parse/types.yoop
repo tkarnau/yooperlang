@@ -20,13 +20,13 @@ export function consumeClosingGt(ref ps: ParserState): Result<usize, ParsingErro
     ps.pendingGt = false;
     return Result.Ok { value: 0 };
   }
-  const tag = SelfLexing.peek(ref ps).tag;
+  const tag = ps.peek().tag;
   if (tag == TokenTags.GT) {
-    SelfLexing.advance(ref ps)?;
+    ps.advance()?;
     return Result.Ok { value: 0 };
   }
   if (tag == TokenTags.RSHIFT) {
-    SelfLexing.advance(ref ps)?;
+    ps.advance()?;
     ps.pendingGt = true;
     return Result.Ok { value: 0 };
   }
@@ -40,13 +40,13 @@ export function consumeClosingGt(ref ps: ParserState): Result<usize, ParsingErro
 // `<T, U>` after a type name (generics, etc). Returns the NodeId of a NODE_LIST holding the
 // TYPE_PARAM nodes, or 0 (the none sentinel) when there is no list.
 export function parseTypeParamList(ref ps: ParserState): Result<NodeId, ParsingError> {
-  if (SelfLexing.peek(ref ps).tag != TokenTags.LT) {
+  if (ps.peek().tag != TokenTags.LT) {
     return Result.Ok { value: 0 };
   }
   const loc = posToSourceLocation(ps.src, ps.pos, 1);
-  SelfLexing.advance(ref ps)?; // consume `<`
+  ps.advance()?; // consume `<`
 
-  if (SelfLexing.peek(ref ps).tag == TokenTags.GT) {
+  if (ps.peek().tag == TokenTags.GT) {
     return Result.Err { error: SelfLexing.createParsingError(
       ref ps,
       `empty type parameter list <> is not allowed`,
@@ -58,10 +58,10 @@ export function parseTypeParamList(ref ps: ParserState): Result<NodeId, ParsingE
   // run into the arena in one shot (see buildListNode).
   disposable ids: Vec<NodeId> = vec.vecNew(4);
   while (true) {
-    let tp = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.TYPE_PARAM);
+    let tp = ps.buildSourcedNode(ASTNodeKind.TYPE_PARAM);
     tp.name = parseIdentAsName(ref ps)?;
     tp.childA = parseTypeParamBounds(ref ps)?; // bounds list-node (0 = none)
-    vec.vecPush(ref ids, SelfLexing.pushNode(ref ps, tp));
+    ids.push(ps.pushNode(tp));
     // `<T implements Comparable<T>>` ends in a `>>` that the BOUND's own
     // argument list already consumed, leaving one `>` owed and the cursor past
     // this whole list. Same rule, same reason, as parseTypeArgList: while a `>`
@@ -70,14 +70,14 @@ export function parseTypeParamList(ref ps: ParserState): Result<NodeId, ParsingE
     if (ps.pendingGt) {
       break;
     }
-    if (SelfLexing.peek(ref ps).tag != TokenTags.COMMA) {
+    if (ps.peek().tag != TokenTags.COMMA) {
       break;
     }
-    SelfLexing.advance(ref ps)?; // consume `,`
+    ps.advance()?; // consume `,`
   }
   consumeClosingGt(ref ps)?;
 
-  return Result.Ok { value: SelfLexing.buildListNode(ref ps, ref ids, loc) };
+  return Result.Ok { value: ps.buildListNode(ref ids, loc) };
 }
 
 // `implements Display` / `implements (Renderable, Named)` after a type
@@ -91,28 +91,28 @@ export function parseTypeParamList(ref ps: ParserState): Result<NodeId, ParsingE
 // "these commas are mine" - which is the reference's rule, established by
 // probing it.
 function parseTypeParamBounds(ref ps: ParserState): Result<NodeId, ParsingError> {
-  if (SelfLexing.peek(ref ps).tag != TokenTags.IMPLEMENTS) {
+  if (ps.peek().tag != TokenTags.IMPLEMENTS) {
     return Result.Ok { value: 0 };
   }
   const loc = posToSourceLocation(ps.src, ps.pos, 1);
-  SelfLexing.advance(ref ps)?; // consume `implements`
+  ps.advance()?; // consume `implements`
 
   disposable ids: Vec<NodeId> = vec.vecNew(2);
-  if (SelfLexing.peek(ref ps).tag != TokenTags.LPAREN) {
-    vec.vecPush(ref ids, parseTypeAnnotation(ref ps)?);
-    return Result.Ok { value: SelfLexing.buildListNode(ref ps, ref ids, loc) };
+  if (ps.peek().tag != TokenTags.LPAREN) {
+    ids.push(parseTypeAnnotation(ref ps)?);
+    return Result.Ok { value: ps.buildListNode(ref ids, loc) };
   }
 
-  SelfLexing.advance(ref ps)?; // consume `(`
+  ps.advance()?; // consume `(`
   while (true) {
-    vec.vecPush(ref ids, parseTypeAnnotation(ref ps)?);
-    if (SelfLexing.peek(ref ps).tag != TokenTags.COMMA) {
+    ids.push(parseTypeAnnotation(ref ps)?);
+    if (ps.peek().tag != TokenTags.COMMA) {
       break;
     }
-    SelfLexing.advance(ref ps)?; // consume `,`
+    ps.advance()?; // consume `,`
   }
-  SelfLexing.expect(ref ps, TokenTags.RPAREN)?;
-  return Result.Ok { value: SelfLexing.buildListNode(ref ps, ref ids, loc) };
+  ps.expect(TokenTags.RPAREN)?;
+  return Result.Ok { value: ps.buildListNode(ref ids, loc) };
 }
 
 // The run of kind names before a type in an annotation, as a NODE_LIST of
@@ -122,10 +122,10 @@ function parseTypeParamBounds(ref ps: ParserState): Result<NodeId, ParsingError>
 // be the type itself, so it is a prefix. That is the same ambiguity the type
 // decl's own kind prefix resolves, and the same way.
 function parseKindPrefixes(ref ps: ParserState): Result<NodeId, ParsingError> {
-  if (SelfLexing.peek(ref ps).tag != TokenTags.IDENT) {
+  if (ps.peek().tag != TokenTags.IDENT) {
     return Result.Ok { value: 0 };
   }
-  if (SelfLexing.peekAhead(ref ps, 1)?.tag != TokenTags.IDENT) {
+  if (ps.peekAhead(1)?.tag != TokenTags.IDENT) {
     return Result.Ok { value: 0 };
   }
 
@@ -140,15 +140,15 @@ function parseKindPrefixes(ref ps: ParserState): Result<NodeId, ParsingError> {
   const loc = posToSourceLocation(ps.src, ps.pos, 1);
   disposable ids: Vec<NodeId> = vec.vecNew(2);
   while (
-    SelfLexing.peek(ref ps).tag == TokenTags.IDENT &&
-    SelfLexing.peekAhead(ref ps, 1)?.tag == TokenTags.IDENT &&
+    ps.peek().tag == TokenTags.IDENT &&
+    ps.peekAhead(1)?.tag == TokenTags.IDENT &&
     !peekAheadIsWord(ref ps, 1, PROPAGATES_KEYWORD)
   ) {
-    let node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.KIND_PREFIX);
+    let node = ps.buildSourcedNode(ASTNodeKind.KIND_PREFIX);
     node.name = parseIdentAsName(ref ps)?;
-    vec.vecPush(ref ids, SelfLexing.pushNode(ref ps, node));
+    ids.push(ps.pushNode(node));
   }
-  return Result.Ok { value: SelfLexing.buildListNode(ref ps, ref ids, loc) };
+  return Result.Ok { value: ps.buildListNode(ref ids, loc) };
 }
 
 // `<int, string>` after a type name in an ANNOTATION: the arguments a generic
@@ -158,13 +158,13 @@ function parseKindPrefixes(ref ps: ParserState): Result<NodeId, ParsingError> {
 // The mirror of parseTypeParamList - that one reads the DECLARATION's `<T, U>`
 // and produces names; this reads the USE's `<int, string>` and produces types.
 function parseTypeArgList(ref ps: ParserState): Result<NodeId, ParsingError> {
-  if (SelfLexing.peek(ref ps).tag != TokenTags.LT) {
+  if (ps.peek().tag != TokenTags.LT) {
     return Result.Ok { value: 0 };
   }
   const loc = posToSourceLocation(ps.src, ps.pos, 1);
-  SelfLexing.advance(ref ps)?; // consume `<`
+  ps.advance()?; // consume `<`
 
-  if (SelfLexing.peek(ref ps).tag == TokenTags.GT) {
+  if (ps.peek().tag == TokenTags.GT) {
     return Result.Err { error: SelfLexing.createParsingError(
       ref ps,
       `empty type argument list <> is not allowed`,
@@ -174,7 +174,7 @@ function parseTypeArgList(ref ps: ParserState): Result<NodeId, ParsingError> {
 
   disposable ids: Vec<NodeId> = vec.vecNew(2);
   while (true) {
-    vec.vecPush(ref ids, parseTypeAnnotation(ref ps)?);
+    ids.push(parseTypeAnnotation(ref ps)?);
     // A pending `>` CLOSES this list, so the real token stream must not be
     // consulted while one is owed. The element just parsed ended in a `>>` that
     // an inner list already consumed, which leaves the cursor sitting on
@@ -184,26 +184,26 @@ function parseTypeArgList(ref ps: ParserState): Result<NodeId, ParsingError> {
     if (ps.pendingGt) {
       break;
     }
-    if (SelfLexing.peek(ref ps).tag != TokenTags.COMMA) {
+    if (ps.peek().tag != TokenTags.COMMA) {
       break;
     }
-    SelfLexing.advance(ref ps)?; // consume `,`
+    ps.advance()?; // consume `,`
   }
   consumeClosingGt(ref ps)?;
 
-  return Result.Ok { value: SelfLexing.buildListNode(ref ps, ref ids, loc) };
+  return Result.Ok { value: ps.buildListNode(ref ids, loc) };
 }
 
 export function parseTypeDecl(ref ps: ParserState): Result<NodeId, ParsingError> {
-  SelfLexing.expect(ref ps, TokenTags.TYPE)?; // don't care about the token
-  let node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.TYPE_DECL);
+  ps.expect(TokenTags.TYPE)?; // don't care about the token
+  let node = ps.buildSourcedNode(ASTNodeKind.TYPE_DECL);
   node.name = parseIdentAsName(ref ps)?;
   node.childA = parseTypeParamList(ref ps)?; // typeParams list-node (0 = none)
 
   // node.kindPrefix
-  if (SelfLexing.peek(ref ps).tag == TokenTags.IDENT) {
+  if (ps.peek().tag == TokenTags.IDENT) {
     let afterIdx: usize = 1;
-    if (SelfLexing.peekAhead(ref ps, 1)?.tag == TokenTags.LPAREN) { // NOTE(tom): may be an incorrect to fail here
+    if (ps.peekAhead(1)?.tag == TokenTags.LPAREN) { // NOTE(tom): may be an incorrect to fail here
       const jRes = findMatchingRParen(ref ps, 1);
       switch (jRes) {
         case Option.None {}: {
@@ -219,7 +219,7 @@ export function parseTypeDecl(ref ps: ParserState): Result<NodeId, ParsingError>
       // contextual and lex as IDENT, so they are not listed by tag - an IDENT
       // here is already ambiguous with the prefix's own name and is resolved
       // by the LCURLY / EQ that eventually terminates the decl.
-      const after = SelfLexing.peekAhead(ref ps, afterIdx)?;
+      const after = ps.peekAhead(afterIdx)?;
       if (
         after.tag == TokenTags.IMPLEMENTS ||
         after.tag == TokenTags.LCURLY ||
@@ -245,38 +245,38 @@ export function parseTypeDecl(ref ps: ParserState): Result<NodeId, ParsingError>
   }
 
   // Transparent alias: `type Name = <annotation>;`
-  if (SelfLexing.peek(ref ps).tag == TokenTags.EQ) {
-    SelfLexing.advance(ref ps)?;
+  if (ps.peek().tag == TokenTags.EQ) {
+    ps.advance()?;
     node.childC = parseTypeAnnotation(ref ps)?;
-    SelfLexing.expect(ref ps, TokenTags.SEMICOLON)?;
-    return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
+    ps.expect(TokenTags.SEMICOLON)?;
+    return Result.Ok { value: ps.pushNode(node) };
   }
 
   // Struct body. The fields land in this node's OWN childIds run rather than
   // behind a NODE_LIST, because they are the TYPE_DECL's primary list - the
   // indirection is only for a kind's SECOND list (see arena.yoop).
-  SelfLexing.expect(ref ps, TokenTags.LCURLY)?;
+  ps.expect(TokenTags.LCURLY)?;
   disposable fieldIds: Vec<NodeId> = vec.vecNew(4);
   while (untilClosing(ref ps, TokenTags.RCURLY)) {
     // Fields and METHODS share the run. Splitting them here would mean two
     // lists on a node that has one, and every later pass already switches on
     // the member's kind anyway.
     if (atStructMethod(ref ps)) {
-      vec.vecPush(ref fieldIds, parseMethodDecl(ref ps, node.name, node.childA)?);
+      fieldIds.push(parseMethodDecl(ref ps, node.name, node.childA)?);
     } else {
-      vec.vecPush(ref fieldIds, parseFieldDecl(ref ps)?);
+      fieldIds.push(parseFieldDecl(ref ps)?);
     }
     // A trailing comma after the last field is allowed, so consume the
     // separator whenever there is one and let the loop condition decide.
-    if (SelfLexing.peek(ref ps).tag == TokenTags.COMMA) {
-      SelfLexing.advance(ref ps)?;
+    if (ps.peek().tag == TokenTags.COMMA) {
+      ps.advance()?;
     }
   }
-  SelfLexing.expect(ref ps, TokenTags.RCURLY)?;
+  ps.expect(TokenTags.RCURLY)?;
 
   spliceChildren(ref ps, ref node, ref fieldIds);
 
-  return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
+  return Result.Ok { value: ps.pushNode(node) };
 }
 
 // One `name: Type` inside a struct body, or inside a variant case's payload. A
@@ -292,7 +292,7 @@ export function atStructMethod(ref ps: ParserState): bool {
   if (atKindPrefixedMethod(ref ps, false)) {
     return true;
   }
-  return SelfLexing.peek(ref ps).tag == TokenTags.FUNCTION
+  return ps.peek().tag == TokenTags.FUNCTION
     && !followingTokenIs(ref ps, TokenTags.COLON);
 }
 
@@ -303,12 +303,12 @@ export function atStructMethod(ref ps: ParserState): bool {
 // keyword's grammar role does not reach a position where the next token is
 // always a `:` - and a struct mirroring a C ABI has no say in its own spelling.
 function parseFieldDecl(ref ps: ParserState): Result<NodeId, ParsingError> {
-  let node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.FIELD_DECL);
+  let node = ps.buildSourcedNode(ASTNodeKind.FIELD_DECL);
   node.name = parseIdentOrKeywordAsName(ref ps)?;
-  SelfLexing.expect(ref ps, TokenTags.COLON)?;
+  ps.expect(TokenTags.COLON)?;
   node.childA = parseTypeAnnotation(ref ps)?;
 
-  return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
+  return Result.Ok { value: ps.pushNode(node) };
 }
 
 // original js compiler had a custom shape for this, but we're going to fit it
@@ -317,12 +317,12 @@ export function parseTypeAnnotation(ref ps: ParserState): Result<NodeId, Parsing
   // TODO - clearance kind support like tainted uint8[], or cleared validated Foo
   // TODO - Function param types or wrapped type for attaching as an array
   // ref T
-  let peekTag = SelfLexing.peek(ref ps).tag;
+  let peekTag = ps.peek().tag;
   if (peekTag == TokenTags.REF) {
-    SelfLexing.advance(ref ps)?;
-    let refNode = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.TYPE_ANNOTATION_REF_TYPE);
+    ps.advance()?;
+    let refNode = ps.buildSourcedNode(ASTNodeKind.TYPE_ANNOTATION_REF_TYPE);
     refNode.childA = parseTypeAnnotation(ref ps)?;
-    return Result.Ok { value: SelfLexing.pushNode(ref ps, refNode) };
+    return Result.Ok { value: ps.pushNode(refNode) };
   }
   // A `(` opens one of two things, and the token after it decides which:
   //
@@ -341,9 +341,9 @@ export function parseTypeAnnotation(ref ps: ParserState): Result<NodeId, Parsing
     if (atFunctionTypeParams(ref ps)) {
       return parseFunctionTypeAnnotation(ref ps);
     }
-    SelfLexing.advance(ref ps)?;
+    ps.advance()?;
     let grouped = parseTypeAnnotation(ref ps)?;
-    SelfLexing.expect(ref ps, TokenTags.RPAREN)?;
+    ps.expect(TokenTags.RPAREN)?;
     return parseArraySuffixes(ref ps, grouped);
   }
 
@@ -355,7 +355,7 @@ export function parseTypeAnnotation(ref ps: ParserState): Result<NodeId, Parsing
   // kinds at all, so nothing reads it yet; keeping it means the limitation is
   // "not enforced" instead of "not parsed", and the day enforcement lands the
   // information is already where it needs to be.
-  let typeNameNode = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.TYPE_ANNOTATION_TYPE_NAME);
+  let typeNameNode = ps.buildSourcedNode(ASTNodeKind.TYPE_ANNOTATION_TYPE_NAME);
   typeNameNode.childB = parseKindPrefixes(ref ps)?;
   let name = parseIdentAsName(ref ps)?;
 
@@ -367,8 +367,8 @@ export function parseTypeAnnotation(ref ps: ParserState): Result<NodeId, Parsing
   // same way an import specifier keeps its export name. `flagA` is what says
   // there is one, because pool index 0 is a real string and so a `strId` of 0
   // cannot mean "absent".
-  if (SelfLexing.peek(ref ps).tag == TokenTags.DOT) {
-    SelfLexing.advance(ref ps)?; // consume `.`
+  if (ps.peek().tag == TokenTags.DOT) {
+    ps.advance()?; // consume `.`
     typeNameNode.flagA = true;
     typeNameNode.strId = internString(ref ps, name);
     name = parseIdentAsName(ref ps)?;
@@ -379,7 +379,7 @@ export function parseTypeAnnotation(ref ps: ParserState): Result<NodeId, Parsing
   // cannot appear in annotation position, so a `<` after a type name is always
   // a type-argument list.
   typeNameNode.childA = parseTypeArgList(ref ps)?;
-  let inner = SelfLexing.pushNode(ref ps, typeNameNode);
+  let inner = ps.pushNode(typeNameNode);
 
   return parseArraySuffixes(ref ps, inner);
 }
@@ -389,12 +389,12 @@ export function parseTypeAnnotation(ref ps: ParserState): Result<NodeId, Parsing
 // parenthesized group, which exists precisely to reach this.
 function parseArraySuffixes(ref ps: ParserState, inner: NodeId): Result<NodeId, ParsingError> {
   let node = inner;
-  while (SelfLexing.peek(ref ps).tag == TokenTags.LBRACKET) {
-    SelfLexing.advance(ref ps)?;
-    SelfLexing.expect(ref ps, TokenTags.RBRACKET)?;
-    let arrayNode = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.TYPE_ANNOTATION_ARRAY_TYPE);
+  while (ps.peek().tag == TokenTags.LBRACKET) {
+    ps.advance()?;
+    ps.expect(TokenTags.RBRACKET)?;
+    let arrayNode = ps.buildSourcedNode(ASTNodeKind.TYPE_ANNOTATION_ARRAY_TYPE);
     arrayNode.childA = node;
-    node = SelfLexing.pushNode(ref ps, arrayNode);
+    node = ps.pushNode(arrayNode);
   }
   return Result.Ok { value: node };
 }
@@ -402,7 +402,7 @@ function parseArraySuffixes(ref ps: ParserState, inner: NodeId): Result<NodeId, 
 // True when the `(` under the cursor opens a function type's parameter list
 // rather than a parenthesized type group. See parseTypeAnnotation for the rule.
 function atFunctionTypeParams(ref ps: ParserState): bool {
-  switch (SelfLexing.peekAhead(ref ps, 1)) {
+  switch (ps.peekAhead(1)) {
     case Result.Err { error: e }: { return false; }
     case Result.Ok { value: after }: {
       if (after.tag == TokenTags.RPAREN || after.tag == TokenTags.REF) {
@@ -411,7 +411,7 @@ function atFunctionTypeParams(ref ps: ParserState): bool {
       if (after.tag != TokenTags.IDENT) {
         return false;
       }
-      switch (SelfLexing.peekAhead(ref ps, 2)) {
+      switch (ps.peekAhead(2)) {
         case Result.Err { error: e2 }: { return false; }
         case Result.Ok { value: colon }: { return colon.tag == TokenTags.COLON; }
       }
@@ -428,21 +428,21 @@ function atFunctionTypeParams(ref ps: ParserState): bool {
 // with the same code. Their NAMES are parsed and then ignored by everything
 // downstream: two function types match on parameter types and return type.
 function parseFunctionTypeAnnotation(ref ps: ParserState): Result<NodeId, ParsingError> {
-  let node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.TYPE_ANNOTATION_FUNC_TYPE);
-  SelfLexing.expect(ref ps, TokenTags.LPAREN)?;
+  let node = ps.buildSourcedNode(ASTNodeKind.TYPE_ANNOTATION_FUNC_TYPE);
+  ps.expect(TokenTags.LPAREN)?;
   const loc = posToSourceLocation(ps.src, ps.pos, 1);
 
   disposable ids: Vec<NodeId> = vec.vecNew(2);
   while (untilClosing(ref ps, TokenTags.RPAREN)) {
-    vec.vecPush(ref ids, parseFunctionParam(ref ps)?);
-    if (SelfLexing.peek(ref ps).tag == TokenTags.COMMA) {
-      SelfLexing.advance(ref ps)?;
+    ids.push(parseFunctionParam(ref ps)?);
+    if (ps.peek().tag == TokenTags.COMMA) {
+      ps.advance()?;
     }
   }
-  SelfLexing.expect(ref ps, TokenTags.RPAREN)?;
-  node.childA = SelfLexing.buildListNode(ref ps, ref ids, loc);
+  ps.expect(TokenTags.RPAREN)?;
+  node.childA = ps.buildListNode(ref ids, loc);
 
-  SelfLexing.expect(ref ps, TokenTags.FATARROW)?;
+  ps.expect(TokenTags.FATARROW)?;
   node.childB = parseTypeAnnotation(ref ps)?;
-  return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
+  return Result.Ok { value: ps.pushNode(node) };
 }

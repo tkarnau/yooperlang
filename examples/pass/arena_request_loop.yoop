@@ -23,7 +23,7 @@ function handle(n: int32): int32 {
     let i: int32 = 0;
     let sum: int32 = 0;
     while (i < n) {
-        vec.vecPush(ref v, i);
+        v.push(i);
         sum = sum + i;
         i = i + 1;
     }

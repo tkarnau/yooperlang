@@ -26,9 +26,9 @@ export function parseModuleHeader(ref ps: ParserState): Result<string, ParsingEr
   if (!peekIsWord(ref ps, "module")) {
     return Result.Ok { value: "" };
   }
-  SelfLexing.advance(ref ps)?;
+  ps.advance()?;
   const name = parseIdentAsName(ref ps)?;
-  SelfLexing.expect(ref ps, TokenTags.SEMICOLON)?;
+  ps.expect(TokenTags.SEMICOLON)?;
   return Result.Ok { value: name };
 }
 

@@ -127,7 +127,7 @@ function reachesInlineFrom(
   if (alreadySeen(ref seen, ty)) {
     return false;
   }
-  vec.vecPush(ref seen, ty);
+  seen.push(ty);
 
   switch (typeAt(ref prog, ty)) {
     case Type.Struct { decl: d, fields: fs, methods: mm, implementsTraits: it, generic: g }: {
@@ -138,7 +138,7 @@ function reachesInlineFrom(
       // as its widest case - so any one of them closing the cycle is enough.
       let c: usize = 0;
       while (c < cs.len) {
-        let vcase = vec.vecGet(ref cs, c);
+        let vcase = cs.get(c);
         if (anyFieldReaches(ref prog, target, ref vcase.fields, ref seen)) {
           return true;
         }
@@ -165,7 +165,7 @@ function anyFieldReaches(
 ): bool {
   let i: usize = 0;
   while (i < fields.len) {
-    let fld = vec.vecGet(ref fields, i);
+    let fld = fields.get(i);
     if (reachesInlineFrom(ref prog, target, fld.typeId, ref seen)) {
       return true;
     }
@@ -177,7 +177,7 @@ function anyFieldReaches(
 function alreadySeen(ref seen: Vec<TypeId>, ty: TypeId): bool {
   let i: usize = 0;
   while (i < seen.len) {
-    if (vec.vecGet(ref seen, i) == ty) {
+    if (seen.get(i) == ty) {
       return true;
     }
     i += 1;
@@ -220,7 +220,7 @@ function fieldTypeByName(
     case Type.Variant { decl: d, cases: cs, methods: mm, implementsTraits: it, generic: g }: {
       let c: usize = 0;
       while (c < cs.len) {
-        let vcase = vec.vecGet(ref cs, c);
+        let vcase = cs.get(c);
         if (str.stringEq(vcase.name, caseName)) {
           return namedFieldType(ref vcase.fields, name);
         }
@@ -235,7 +235,7 @@ function fieldTypeByName(
 function namedFieldType(ref fields: Vec<Field>, name: string): TypeId {
   let i: usize = 0;
   while (i < fields.len) {
-    let fld = vec.vecGet(ref fields, i);
+    let fld = fields.get(i);
     if (str.stringEq(fld.name, name)) {
       return fld.typeId;
     }

@@ -63,13 +63,6 @@ Exports:
 
 - `Deque` - type
 - `dequeNew` - function
-- `dequePushBack` - function
-- `dequePushFront` - function
-- `dequePopFront` - function
-- `dequePopBack` - function
-- `dequeGet` - function
-- `dequeLen` - function
-- `dequeClear` - function
 
 ## `std/collections/map.yoop`
 
@@ -80,12 +73,6 @@ Exports:
 - `KeyOps` - type
 - `Map` - type
 - `mapNew` - function
-- `mapInsert` - function
-- `mapGet` - function
-- `mapContainsKey` - function
-- `mapRemove` - function
-- `mapLen` - function
-- `mapClear` - function
 - `MapEntry` - type
 - `MapIter` - type
 - `mapIter` - function
@@ -103,10 +90,6 @@ Exports:
 
 - `Set` - type
 - `setNew` - function
-- `setInsert` - function
-- `setContains` - function
-- `setRemove` - function
-- `setLen` - function
 
 ## `std/core/alloc.yoop`
 
@@ -296,23 +279,11 @@ the owned, growable string type.
 
 Exports:
 
+- `TextBuilder` - trait
 - `implements` - type Text
 - `make` - function
 - `fromString` - function
 - `fromBytes` - function
-- `reserve` - function
-- `pushBytes` - function
-- `push` - function
-- `pushByte` - function
-- `pushUint` - function
-- `pushInt` - function
-- `pushChar` - function
-- `pushText` - function
-- `clear` - function
-- `truncateBytes` - function
-- `view` - function
-- `bytes` - function
-- `isEmpty` - function
 - `seqLen` - function
 - `charCount` - function
 - `byteOffsetOfChar` - function
@@ -358,6 +329,11 @@ Exports:
 - `Iterable` - trait
 - `Into` - trait
 - `WithContext` - trait
+- `Sequence` - trait
+- `Growable` - trait
+- `Mapping` - trait
+- `Membership` - trait
+- `DoubleEnded` - trait
 
 ## `std/core/types.yoop`
 
@@ -376,12 +352,6 @@ Exports:
 
 - `Vec` - type
 - `vecNew` - function
-- `vecPush` - function
-- `vecGet` - function
-- `vecSet` - function
-- `vecClear` - function
-- `vecAsArray` - function
-- `vecExtendFrom` - function
 - `vecFromArray` - function
 - `VecIter` - type
 - `vecIter` - function
@@ -762,6 +732,7 @@ Exports:
 - `log` - function
 - `spawn` - function
 - `sendLine` - function
+- `sendArtifact` - function
 - `recvLine` - function
 - `childAlive` - function
 - `killChild` - function

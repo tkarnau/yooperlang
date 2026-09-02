@@ -28,11 +28,11 @@ export function emitExpr(ref cx: Cx, exprId: NodeId, ref out: Operand): EmitResu
   // A `ref` PARAMETER handed on as a borrow. Answered ahead of the walk rather
   // than after it, because the walk would emit a load of the borrowed object
   // and the whole point is that there is no instruction here at all.
-  if (map.mapContainsKey(ref cx.tm.reborrowUses, uint64(exprId))) {
+  if (cx.tm.reborrowUses.containsKey(uint64(exprId))) {
     return emitForwardBorrow(ref cx, exprId, ref out);
   }
   emitExprInner(ref cx, exprId, ref out)?;
-  if (map.mapContainsKey(ref cx.tm.derefUses, uint64(exprId))) {
+  if (cx.tm.derefUses.containsKey(uint64(exprId))) {
     // The node's own type is already the OPENED one - pass D rewrote it when it
     // recorded the use - so it is what the load reads.
     emitOpenBorrow(ref cx, typeOf(ref cx, exprId), ref out);
@@ -58,7 +58,7 @@ function emitExprInner(ref cx: Cx, exprId: NodeId, ref out: Operand): EmitResult
     case ASTNodeKind.STRING_LITERAL: {
       // A module-level constant, referenced by name.
       out = Operand.StrRef {
-        id: internStringConstant(cx.e, vec.vecGet(ref cx.ast.strings, expr.strId))
+        id: internStringConstant(cx.e, cx.ast.strings.get(expr.strId))
       };
       return EmitResult.Ok;
     }

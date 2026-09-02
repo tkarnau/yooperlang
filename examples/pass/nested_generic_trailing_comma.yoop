@@ -18,9 +18,9 @@ function main(): int32 {
   // there is no turbofish - the known generic-inference gap, not part of this
   // regression.
   let block: Map<string, int32> = map.mapNew(0, map.stringKeyOps());
-  vec.vecPush(ref s.blocks, block);
-  let first = vec.vecGet(ref s.blocks, 0);
-  map.mapInsert(ref first, "a", 7);
-  printf("blocks=%d a=%d\n", s.blocks.len, map.mapLen(ref first));
+  s.blocks.push(block);
+  let first = s.blocks.get(0);
+  first.insert("a", 7);
+  printf("blocks=%d a=%d\n", s.blocks.len, first.len);
   return 0;
 }

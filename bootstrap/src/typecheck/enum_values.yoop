@@ -95,7 +95,7 @@ function foldStringCase(
     );
     return "";
   }
-  return vec.vecGet(ref ast.strings, valueNode.strId);
+  return ast.strings.get(valueNode.strId);
 }
 
 // The constant an integer-backed case's expression folds to.
@@ -148,7 +148,7 @@ function foldIntCase(
         );
         return 0;
       }
-      return vec.vecGet(ref cases, usize(at)).value;
+      return cases.get(usize(at)).value;
     }
     case ASTNodeKind.BINARY_EXPRESSION: {
       if (!isEnumValueOperator(expr.operator)) {
@@ -238,7 +238,7 @@ function enumValueFits(ref prog: Program, underlying: TypeId, value: int64): boo
 export function enumCaseIndexNamed(ref cases: Vec<EnumCase>, name: string): int {
   let i: usize = 0;
   while (i < cases.len) {
-    if (str.stringEq(vec.vecGet(ref cases, i).name, name)) {
+    if (str.stringEq(cases.get(i).name, name)) {
       return int(i);
     }
     i += 1;

@@ -44,21 +44,21 @@ export function dumpTokens(src: uint8[]): Result<Text, string> {
 const JS_MAX_SAFE_INT: uint64 = 9007199254740991;
 
 function pushToken(t: ref Text, tok: Token): void {
-  text.push(ref t, tagName(tok.tag));
-  text.pushByte(ref t, 32);
-  text.pushUint(ref t, uint64(tok.start));
-  text.pushByte(ref t, 32);
-  text.pushInt(ref t, int64(tok.length));
+  t.push(tagName(tok.tag));
+  t.pushByte(32);
+  t.pushUint(uint64(tok.start));
+  t.pushByte(32);
+  t.pushInt(int64(tok.length));
 
   if (tok.tag == TokenTags.INTLITERAL || tok.tag == TokenTags.CHARLITERAL) {
-    text.push(ref t, " int=");
+    t.push(" int=");
     // Past 2^53 the JS reference's parseInt is a lossy double while this side
     // accumulates a real uint64. Both print `unsafe` there so the dump declares
     // the gap instead of failing parity over a known JS limitation.
     if (tok.intVal > JS_MAX_SAFE_INT) {
-      text.push(ref t, "unsafe");
+      t.push("unsafe");
     } else {
-      text.pushUint(ref t, tok.intVal);
+      t.pushUint(tok.intVal);
     }
   }
 
@@ -69,8 +69,8 @@ function pushToken(t: ref Text, tok: Token): void {
   // theory that it is not comparable is how a decoding bug goes unnoticed - see
   // float_literal.yoop.
   if (tok.tag == TokenTags.FLOATLITERAL) {
-    text.push(ref t, " float=");
+    t.push(" float=");
     pushFloatBitsHex(ref t, floatBits(tok.floatVal));
   }
-  text.pushByte(ref t, 10);
+  t.pushByte(10);
 }

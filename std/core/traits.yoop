@@ -5,7 +5,7 @@
 // is intentionally NOT defined here - it lives in std/core/kinds.yoop
 // alongside the disposable kind that requires it.
 
-import { Result } from "./types.yoop";
+import { Result, Option } from "./types.yoop";
 
 // ----- Readable ----------------------------------------------------------
 
@@ -135,4 +135,72 @@ export trait Into<T> {
 // it doubles as the cross-shape conversion, so one impl covers both.
 export trait WithContext<T> {
     function withContext(ref self, context: string): T;
+}
+
+// ----- container contracts ----------------------------------------------
+//
+// What a collection can DO, separate from what it is made of. `Vec<T>` is one
+// growable sequence with one memory policy; a bounded generic written over
+// `Growable<T>` takes any other implementation of the same contract, chosen
+// statically at the call site and monomorphized like every generic. That is
+// the point of putting the operations on traits rather than on the type:
+// another backing strategy (an arena-owned vector, a fixed-capacity one) is
+// a second implementer, not a second API.
+//
+// The traits are FLAT for now. `Growable<T>` should extend `Sequence<T>`, and
+// both a common `Collection<T>` carrying `clear` / `isEmpty`; the compiler
+// supports a generic parent in `extends` as of this tree, but the seed that
+// builds std does not yet, so the shared methods are repeated per trait and
+// `Vec<T>` implements `(Sequence<T>, Growable<T>)` until the seed is raised.
+// A caller is unaffected either way: `v.push(x)` names no trait.
+//
+// A length is a FIELD (`v.len`) on every std container that stores one, so
+// the contracts do not declare it; `Set<K>` has no such field and declares
+// `len` as a method instead.
+
+// An indexable sequence: read and write by position, and a borrowed view of
+// the populated part as a plain array.
+export trait Sequence<T> {
+    function clear(ref self): void;
+    function isEmpty(ref self): bool;
+    function get(ref self, i: usize): T;
+    function set(ref self, i: usize, value: T): void;
+    function asArray(ref self): T[];
+}
+
+// A sequence that grows at the end.
+export trait Growable<T> {
+    function push(ref self, value: T): void;
+    function extendFrom(ref self, items: T[]): void;
+}
+
+// A key-to-value association. `insert` reports whether it OVERWROTE.
+export trait Mapping<K, V> {
+    function clear(ref self): void;
+    function isEmpty(ref self): bool;
+    function insert(ref self, key: K, value: V): bool;
+    function get(ref self, key: K): Option<V>;
+    function containsKey(ref self, key: K): bool;
+    function remove(ref self, key: K): bool;
+}
+
+// A set of keys. `insert` reports whether the key was ALREADY present.
+export trait Membership<K> {
+    function clear(ref self): void;
+    function isEmpty(ref self): bool;
+    function len(ref self): usize;
+    function insert(ref self, key: K): bool;
+    function contains(ref self, key: K): bool;
+    function remove(ref self, key: K): bool;
+}
+
+// A queue open at both ends. `get` is by logical position from the front.
+export trait DoubleEnded<T> {
+    function clear(ref self): void;
+    function isEmpty(ref self): bool;
+    function pushBack(ref self, value: T): void;
+    function pushFront(ref self, value: T): void;
+    function popFront(ref self): Option<T>;
+    function popBack(ref self): Option<T>;
+    function get(ref self, i: usize): Option<T>;
 }

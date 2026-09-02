@@ -97,13 +97,13 @@ export function pathJoin(parts: string[]): string {
     let pieces: Vec<string> = vec.vecNew(parts.len * 2);
     let i: usize = 0;
     while (i < parts.len) {
-        if (i > 0) { vec.vecPush(ref pieces, "/"); }
-        vec.vecPush(ref pieces, parts[i]);
+        if (i > 0) { pieces.push("/"); }
+        pieces.push(parts[i]);
         i = i + 1;
     }
-    let arr: string[] = vec.vecAsArray(ref pieces);
+    let arr: string[] = pieces.asArray();
     let out: string = str.stringConcatAll(arr);
-    Disposable.dispose(ref pieces);
+    pieces.dispose();
     return out;
 }
 
@@ -157,7 +157,7 @@ export function writeFile(path: string, body: uint8[]): string {
 // Preferred when the caller already owns a reusable buffer (e.g. an HTTP
 // handler reusing its body buffer across requests).
 export function readFileInto(ref out: Vec<uint8>, path: string): string {
-    vec.vecClear(ref out);
+    out.clear();
     let f: unsafe_ptr = fopen(path, "rb");
     if (f == null) {
         let why: string = errno.message(errno.get());
@@ -194,7 +194,7 @@ export function readFileInto(ref out: Vec<uint8>, path: string): string {
         intr.heapFree(scratch);
         return `std/fs: short read from "${path}"`;
     }
-    vec.vecExtendFrom(ref out, scratch);
+    out.extendFrom(scratch);
     intr.heapFree(scratch);
     return "";
 }
@@ -205,7 +205,7 @@ export type ReadFileResult implements Disposable propagates<disposable> {
     data:  Vec<uint8>,
     error: string,
     function dispose(ref self): void {
-        Disposable.dispose(ref self.data);
+        self.data.dispose();
     }
 }
 

@@ -33,8 +33,8 @@ import { ValueArena, ValueId, ValueKind, ValueSlot, VALUE_NONE, newValueArena,
 // other assertion here needs one of.
 function pairOf(ref va: ValueArena, a: uint64, b: uint64): ValueId {
   disposable parts: Vec<ValueId> = vec.vecNew(2);
-  vec.vecPush(ref parts, intValue(ref va, 0, a));
-  vec.vecPush(ref parts, intValue(ref va, 0, b));
+  parts.push(intValue(ref va, 0, a));
+  parts.push(intValue(ref va, 0, b));
   return aggregateValue(ref va, ValueKind.STRUCT, 0, 0, ref parts);
 }
 
@@ -805,12 +805,12 @@ function foldLastConst(src: string): FoldOutcome {
   if (graph.modules.len == 0) {
     return { ok: false, bits: 0, message: "the source did not parse" };
   }
-  let m = vec.vecGet(ref graph.modules, 0);
-  let tm = vec.vecGet(ref prog.modules, 0);
+  let m = graph.modules.get(0);
+  let tm = prog.modules.get(0);
 
   let f: usize = 0;
   while (f < m.files.len) {
-    const programNode = nodeAt(ref m.ast, vec.vecGet(ref m.files, f).root);
+    const programNode = nodeAt(ref m.ast, m.files.get(f).root);
     let i: usize = 0;
     while (i < programNode.childCount) {
       const declId = declOf(ref m.ast, childAt(ref m.ast, programNode, i));
@@ -892,18 +892,18 @@ function precompiled(src: string): Precompiled propagates<disposable> {
   disposable messages: Text = text.make(64);
   let d: usize = 0;
   while (d < prog.diagnostics.len) {
-    text.push(ref messages, vec.vecGet(ref prog.diagnostics, d).message);
-    text.push(ref messages, "\n");
+    messages.push(prog.diagnostics.get(d).message);
+    messages.push("\n");
     d += 1;
   }
   if (prog.diagnostics.len > 0) {
-    return { ir: "", errors: text.view(ref messages) };
+    return { ir: "", errors: messages.view() };
   }
   switch (codegenProgram(ref prog, ref graph, defaultCodegenOptions())) {
     case Result.Ok { value: out }: {
       disposable emitted: Text = out.ir;
       disposable libs: Vec<string> = out.linkLibraries;
-      return { ir: text.view(ref emitted), errors: "" };
+      return { ir: emitted.view(), errors: "" };
     }
     case Result.Err { error: e }: { return { ir: "", errors: e }; }
   }
@@ -930,7 +930,7 @@ function occurrences(haystack: string, needle: string): usize {
 
 function graphOfSource(src: string): ModuleGraph {
   let srcBuf: Vec<uint8> = vec.vecNew(src.len + 1);
-  vec.vecExtendFrom(ref srcBuf, intr.stringAsBytes(src));
+  srcBuf.extendFrom(intr.stringAsBytes(src));
   switch (moduleFromSource("test", "test.yoop", srcBuf)) {
     case LoadModuleResult.Ok { value: m }: { return singleModuleGraph(m); }
     case LoadModuleResult.Err { error: e }: {

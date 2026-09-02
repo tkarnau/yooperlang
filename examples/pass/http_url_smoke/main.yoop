@@ -46,7 +46,7 @@ function run(): Result<int32, HttpError> {
     disposable segs: Vec<string> = vec.vecNew(4);
     let count: usize = url.pathSegments("/a/b%2Dc/", ref segs)?;
     printf(`segments=${count}`);
-    for s in vec.vecAsArray(ref segs) {
+    for s in segs.asArray() {
         printf(` [${s}]`);
     }
     printf("\n");

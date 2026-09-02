@@ -66,8 +66,8 @@ function emitCallExpr(ref cx: Cx, expr: ASTNode, exprId: NodeId, ref out: Operan
       const argId = childAt(cx.ast, list, i);
       let value: Operand = Operand.None;
       emitExpr(ref cx, argId, ref value)?;
-      vec.vecPush(ref args, { ty: typeOf(ref cx, argId), value: value });
-      vec.vecPush(ref argIds, argId);
+      args.push({ ty: typeOf(ref cx, argId), value: value });
+      argIds.push(argId);
       i += 1;
     }
   }
@@ -109,7 +109,7 @@ function emitCallExpr(ref cx: Cx, expr: ASTNode, exprId: NodeId, ref out: Operan
   // and calls through it. Pass D recorded which calls those are, because the
   // shape is identical to `ns.fn()` in the AST and only name resolution can
   // tell them apart.
-  if (map.mapContainsKey(ref cx.tm.indirectCalls, uint64(exprId))) {
+  if (cx.tm.indirectCalls.containsKey(uint64(exprId))) {
     let fnPtr: usize = 0;
 
     // With no base, the callee is a LOCAL holding a function value - so the
@@ -202,13 +202,13 @@ function promoteVarargs(
 ): EmitResult {
   let i: usize = fixedCount;
   while (i < args.len) {
-    const arg = vec.vecGet(ref args, i);
-    const argId = vec.vecGet(ref argIds, i);
+    const arg = args.get(i);
+    const argId = argIds.get(i);
     const promoted = promotedVarargTypeOf(ref cx, argId);
     if (promoted.len > 0 && !text.equals(promoted, arg.ty)) {
       const dest = freshTemp(cx.e);
       emitIntCast(ref cx, dest, varargWidenOp(ref cx, argId), arg.ty, arg.value, promoted);
-      vec.vecSet(ref args, i, { ty: promoted, value: Operand.Temp { id: dest } });
+      args.set(i, { ty: promoted, value: Operand.Temp { id: dest } });
     }
     i += 1;
   }

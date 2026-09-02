@@ -214,7 +214,7 @@ function checkVarDeclInner(ref cx: Cx, stmt: ASTNode, stmtId: NodeId): void {
       reportError(cx.prog, `"${stmt.name}" needs either a type annotation or an initializer`, stmt.sourceLoc);
     }
     bindLocal(ref cx, stmt, stmtId, declared);
-    vec.vecSet(ref cx.tm.resolvedTypes, stmtId, declared);
+    cx.tm.resolvedTypes.set(stmtId, declared);
     return;
   }
 
@@ -235,7 +235,7 @@ function checkVarDeclInner(ref cx: Cx, stmt: ASTNode, stmtId: NodeId): void {
   if (bind == TaskBind.IMMEDIATE) {
     checkTaskSpawnBinding(ref cx, stmt, bind);
     bindLocal(ref cx, stmt, stmtId, declared);
-    vec.vecSet(ref cx.tm.resolvedTypes, stmtId, declared);
+    cx.tm.resolvedTypes.set(stmtId, declared);
     return;
   }
 
@@ -258,7 +258,7 @@ function checkVarDeclInner(ref cx: Cx, stmt: ASTNode, stmtId: NodeId): void {
     checkTaskSpawnBinding(ref cx, stmt, bind);
   }
   bindLocal(ref cx, stmt, stmtId, finalType);
-  vec.vecSet(ref cx.tm.resolvedTypes, stmtId, finalType);
+  cx.tm.resolvedTypes.set(stmtId, finalType);
 }
 
 // What a handle binding owes: a FRESH spawn on the right, unless it is POOLED.
@@ -386,7 +386,7 @@ function bindLocal(ref cx: Cx, stmt: ASTNode, stmtId: NodeId, typeId: TypeId): v
 
 function recordBindingMarkers(ref cx: Cx, stmt: ASTNode, stmtId: NodeId, m: MarkerSet): void {
   scopeSetMarkers(cx.scope, stmt.name, m);
-  map.mapInsert(ref cx.tm.bindingMarkers, uint64(stmtId), m);
+  cx.tm.bindingMarkers.insert(uint64(stmtId), m);
 }
 
 // `ephemeral arenaScope(N) { ... }` - an anonymous region.
@@ -398,7 +398,7 @@ function recordBindingMarkers(ref cx: Cx, stmt: ASTNode, stmtId: NodeId, m: Mark
 // block with extra words.
 function checkKindRegion(ref cx: Cx, stmt: ASTNode, stmtId: NodeId): void {
   const subjectType = checkExpr(ref cx, stmt.childA, TYPE_ERROR_ID);
-  vec.vecSet(ref cx.tm.resolvedTypes, stmtId, subjectType);
+  cx.tm.resolvedTypes.set(stmtId, subjectType);
 
   const list = nodeAt(cx.ast, stmt.childC);
   let i: usize = 0;

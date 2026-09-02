@@ -15,8 +15,8 @@ suite function thePickBecomesOneWellFormedShellLine(): void {
   disposable cmd: Text = text.make(64);
   buildEditorCmd("/a/b.yoop", 12, 5, ref cmd);
   let test theory: Case = t.asserts("path, line and col land quoted behind the env fallback") {
-    theory.isSuccessful = str.stringEq(text.view(ref cmd),
+    theory.isSuccessful = str.stringEq(cmd.view(),
       "${YOOP_VIZWORLD_EDITOR:-code --goto} \"/a/b.yoop:12:5\" >/dev/null 2>&1 &");
-    theory.detail = `built: ${text.view(ref cmd)}`;
+    theory.detail = `built: ${cmd.view()}`;
   }
 }

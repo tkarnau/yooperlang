@@ -124,11 +124,11 @@ const BREAKS = [
     note: "A struct literal has no name in it, so it has no type of its own. Inference flows initializer to binding, and it will not run backwards guessing which struct you meant.",
   },
   {
-    id: "method_call_sugar",
+    id: "method_dot_temporary",
     episode: "traits",
-    title: "Call a trait method with a dot",
-    file: "examples/fail/traits_method_call_sugar.yoop",
-    note: "The call is `Greeter.greet(ref g)`, always. Note the fix-it below is out of date: it points at the bare `greet(ref g)` form, which is itself rejected, with a better message that names the trait for you.",
+    title: "Call a method on a temporary",
+    file: "examples/fail/method_dot_temporary.yoop",
+    note: "`g.greet()` is `Greeter.greet(ref g)`: the receiver is borrowed, so it has to be something with an address. A call's result has none, and the same rule that refuses `ref make()` refuses `make().area()`. Bind it to a name first.",
   },
   {
     id: "generic_bound_unsatisfied",

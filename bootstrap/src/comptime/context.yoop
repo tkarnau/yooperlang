@@ -68,7 +68,7 @@ export function scopeEnter(ref s: EvalScope): void {
 export function scopeLeave(ref s: EvalScope): void {
   // Dropped by shortening the Vec, which is how codegen's loop and block stacks
   // pop too - there is no `vecPop`, and a pop here wants nothing back.
-  while (s.bindings.len > 0 && vec.vecGet(ref s.bindings, s.bindings.len - 1).depth >= s.depth) {
+  while (s.bindings.len > 0 && s.bindings.get(s.bindings.len - 1).depth >= s.depth) {
     s.bindings.len -= 1;
   }
   if (s.depth > 0) {
@@ -77,7 +77,7 @@ export function scopeLeave(ref s: EvalScope): void {
 }
 
 export function bindLocal(ref s: EvalScope, name: string, slot: ValueId): void {
-  vec.vecPush(ref s.bindings, { name: name, slot: slot, depth: s.depth });
+  s.bindings.push({ name: name, slot: slot, depth: s.depth });
 }
 
 // The slot a name is bound to, searched INNERMOST FIRST so an inner block's
@@ -86,7 +86,7 @@ export function lookupLocal(ref s: EvalScope, name: string): Option<ValueId> {
   let i: usize = s.bindings.len;
   while (i > 0) {
     i -= 1;
-    const b = vec.vecGet(ref s.bindings, i);
+    const b = s.bindings.get(i);
     if (str.stringEq(b.name, name)) {
       return Option.Some { value: b.slot };
     }

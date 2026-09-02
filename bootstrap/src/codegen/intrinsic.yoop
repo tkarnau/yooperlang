@@ -58,7 +58,7 @@ export function isIntrinsicCall(ref cx: Cx, expr: ASTNode): bool {
   if (expr.childB != 0) {
     return true;
   }
-  return map.mapContainsKey(ref cx.tm.intrinsicNames, expr.name);
+  return cx.tm.intrinsicNames.containsKey(expr.name);
 }
 
 // Lower one intrinsic call. Ok on success, else the error that stopped

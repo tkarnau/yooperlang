@@ -258,7 +258,7 @@ function checkExpr(ref cx: Cx, exprId: NodeId, expected: TypeId): TypeId {
   }
 
   resolved = openBorrowIfWanted(ref cx, expr, exprId, expected, resolved);
-  vec.vecSet(ref cx.tm.resolvedTypes, exprId, resolved);
+  cx.tm.resolvedTypes.set(exprId, resolved);
   return resolved;
 }
 
@@ -302,7 +302,7 @@ function openBorrowIfWanted(
   if (!typeAccepts(cx.prog, expected, inner)) {
     return resolved;
   }
-  map.mapInsert(ref cx.tm.derefUses, uint64(exprId), true);
+  cx.tm.derefUses.insert(uint64(exprId), true);
   return inner;
 }
 
@@ -333,7 +333,7 @@ function reborrowIfWanted(ref cx: Cx, b: Binding, exprId: NodeId, expected: Type
   if (derefType(cx.prog, expected) != b.typeId) {
     return b.typeId;
   }
-  map.mapInsert(ref cx.tm.reborrowUses, uint64(exprId), true);
+  cx.tm.reborrowUses.insert(uint64(exprId), true);
   return expected;
 }
 

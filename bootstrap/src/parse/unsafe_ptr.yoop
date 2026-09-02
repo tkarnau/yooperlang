@@ -44,7 +44,7 @@ export const UNSAFE_PTR_OP_TO_ARRAY: string = "toArray";
 // four op names. Anything else is an ordinary identifier with a field access
 // after it, which is the caller's fall-through.
 export function atUnsafePtrOp(ref ps: ParserState): bool {
-  if (SelfLexing.peek(ref ps).tag != TokenTags.DOT) {
+  if (ps.peek().tag != TokenTags.DOT) {
     return false;
   }
   return isUnsafePtrOpName(peekAheadText(ref ps, 1));
@@ -60,25 +60,25 @@ function isUnsafePtrOpName(member: string): bool {
 // Everything after the `unsafe_ptr` the caller already consumed. `atUnsafePtrOp`
 // gated this, so the `.` and the op name are both known to be there.
 export function parseUnsafePtrOpRest(ref ps: ParserState): Result<ASTNode, ParsingError> {
-  let node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.UNSAFE_PTR_CAST);
-  SelfLexing.expect(ref ps, TokenTags.DOT)?;
+  let node = ps.buildSourcedNode(ASTNodeKind.UNSAFE_PTR_CAST);
+  ps.expect(TokenTags.DOT)?;
   node.name = parseIdentAsName(ref ps)?;
 
   // `toInt` is the one with no type argument: it answers with an integer, and
   // which integer is not a choice.
   if (!str.stringEq(node.name, UNSAFE_PTR_OP_TO_INT)) {
-    SelfLexing.expect(ref ps, TokenTags.LT)?;
+    ps.expect(TokenTags.LT)?;
     node.childB = parseTypeAnnotation(ref ps)?;
     consumeClosingGt(ref ps)?;
   }
 
-  SelfLexing.expect(ref ps, TokenTags.LPAREN)?;
+  ps.expect(TokenTags.LPAREN)?;
   node.childA = parseExpression(ref ps, 0)?;
   if (str.stringEq(node.name, UNSAFE_PTR_OP_TO_ARRAY)) {
-    SelfLexing.expect(ref ps, TokenTags.COMMA)?;
+    ps.expect(TokenTags.COMMA)?;
     node.childC = parseExpression(ref ps, 0)?;
   }
-  SelfLexing.expect(ref ps, TokenTags.RPAREN)?;
+  ps.expect(TokenTags.RPAREN)?;
 
   // The NODE rather than its id: the caller is in the middle of parsePrimary,
   // whose postfix loop pushes whatever it ends up with. Handing back an id here

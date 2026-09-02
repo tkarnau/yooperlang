@@ -240,7 +240,7 @@ export function declIsTaskBody(ref tm: TypedModule, declNode: ASTNode): bool {
   if (declNode.kind != ASTNodeKind.FUNCTION_DECL) {
     return false;
   }
-  return map.mapContainsKey(ref tm.taskNames, declNode.name);
+  return tm.taskNames.containsKey(declNode.name);
 }
 
 // `wait h` - join a handle and yield what it produced.

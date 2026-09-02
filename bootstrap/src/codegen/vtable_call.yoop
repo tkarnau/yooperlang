@@ -35,7 +35,7 @@ function emitVtableDispatch(
   emitVtableSlotLoad(ref cx, expr, slotIndex, ref ctx, ref fnPtr)?;
 
   disposable args: Vec<CallArg> = vec.vecNew(4);
-  vec.vecPush(ref args, { ty: "ptr", value: Operand.Temp { id: ctx } });
+  args.push({ ty: "ptr", value: Operand.Temp { id: ctx } });
   emitDispatchArgs(ref cx, expr, ref args)?;
 
   const retTy = typeOf(ref cx, exprId);
@@ -97,7 +97,7 @@ export function emitDispatchArgs(ref cx: Cx, expr: ASTNode, ref args: Vec<CallAr
     const argId = childAt(cx.ast, list, i);
     let value: Operand = Operand.None;
     emitExpr(ref cx, argId, ref value)?;
-    vec.vecPush(ref args, { ty: typeOf(ref cx, argId), value: value });
+    args.push({ ty: typeOf(ref cx, argId), value: value });
     i += 1;
   }
   return EmitResult.Ok;
@@ -123,7 +123,7 @@ export function slotSignature(ref cx: Cx, slotType: TypeId, ref params: Vec<stri
     case Type.Func { params: p, ret: r, variadic: v, isAsync: a }: {
       let i: usize = 0;
       while (i < p.len) {
-        vec.vecPush(ref params, llvmType(cx.prog, vec.vecGet(ref p, i)));
+        params.push(llvmType(cx.prog, p.get(i)));
         i += 1;
       }
       return llvmType(cx.prog, r);

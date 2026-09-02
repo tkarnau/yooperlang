@@ -20,8 +20,8 @@ function main(): int32 {
         let t: Text = text.fromString("arena-backed text");
         // Push past the initial capacity so at least one grow also lands in
         // the arena rather than falling back to malloc.
-        text.push(ref t, ", grown past its initial capacity");
-        printf("[%s]\n", text.view(ref t));
+        t.push(", grown past its initial capacity");
+        printf("[%s]\n", t.view());
     }
 
     if (mem.arenaUsed(ar) > 0) {

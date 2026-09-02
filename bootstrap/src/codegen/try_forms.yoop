@@ -60,7 +60,7 @@ function emitContextPayload(
     context = Operand.StrRef { id: internStringConstant(cx.e, "") };
   }
   const addr = emitCasePayloadAddr(ref cx, operandType, operandTy, slotId, got.errOrdinal);
-  if (map.mapContainsKey(ref cx.tm.tryContextConcat, uint64(exprId))) {
+  if (cx.tm.tryContextConcat.containsKey(uint64(exprId))) {
     return emitContextConcat(ref cx, context, addr);
   }
   return emitWithContextCall(ref cx, context, addr, got.errType, targetTy);
@@ -78,9 +78,9 @@ function emitContextConcat(ref cx: Cx, context: Operand, errAddr: usize): usize 
   emitLoadFromPtr(ref cx, errValue, "ptr", errAddr);
 
   disposable parts: Vec<Operand> = vec.vecNew(3);
-  vec.vecPush(ref parts, context);
-  vec.vecPush(ref parts, Operand.StrRef { id: internStringConstant(cx.e, CONTEXT_SEPARATOR) });
-  vec.vecPush(ref parts, Operand.Temp { id: errValue });
+  parts.push(context);
+  parts.push(Operand.StrRef { id: internStringConstant(cx.e, CONTEXT_SEPARATOR) });
+  parts.push(Operand.Temp { id: errValue });
 
   let joined: Operand = Operand.None;
   // DISCARDED deliberately, and written `_ =` so it reads that way. This helper
@@ -110,8 +110,8 @@ function emitWithContextCall(
   targetTy: string
 ): usize {
   disposable args: Vec<CallArg> = vec.vecNew(2);
-  vec.vecPush(ref args, { ty: REF_LLVM_TYPE, value: Operand.Temp { id: errAddr } });
-  vec.vecPush(ref args, { ty: "ptr", value: context });
+  args.push({ ty: REF_LLVM_TYPE, value: Operand.Temp { id: errAddr } });
+  args.push({ ty: "ptr", value: context });
   const dest = freshTemp(cx.e);
   emitCall(ref cx, dest, targetTy,
     moduleIdOf(cx.prog, nominalModuleOf(cx.prog, sourceErrType)),

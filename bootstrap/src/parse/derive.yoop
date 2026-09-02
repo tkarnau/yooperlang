@@ -82,7 +82,7 @@ export function expandDerives(ast: AST, root: NodeId): Result<AST, DeriveError> 
 
     disposable src: Text = txt.make(512);
     deriveDisplaySource(ref cur, declNode, ref src);
-    switch (parseInto(cur, txt.bytes(ref src))) {
+    switch (parseInto(cur, src.bytes())) {
       case Result.Err { error: pe }: {
         // The generated text is the compiler's, not the user's, so a parse
         // failure here is an internal bug rather than something to act on -
@@ -169,15 +169,15 @@ function graftDerived(ref ast: AST, declId: NodeId, wrapperRoot: NodeId): void {
   const start: usize = ast.childIds.len;
   let k: usize = 0;
   while (k < decl.childCount) {
-    vec.vecPush(ref ast.childIds, childAt(ref ast, decl, k));
+    ast.childIds.push(childAt(ref ast, decl, k));
     k += 1;
   }
-  vec.vecPush(ref ast.childIds, methodId);
+  ast.childIds.push(methodId);
   decl.childStart = start;
   decl.childCount = decl.childCount + 1;
 
   decl.childD = mergedImplements(ref ast, decl.childD, wrapperDecl.childD);
-  vec.vecSet(ref ast.nodes, declId, decl);
+  ast.nodes.set(declId, decl);
 }
 
 // `implements Display`, added only if it is not already claimed.
@@ -205,13 +205,13 @@ function mergedImplements(ref ast: AST, existing: NodeId, generated: NodeId): No
   const start: usize = ast.childIds.len;
   k = 0;
   while (k < list.childCount) {
-    vec.vecPush(ref ast.childIds, childAt(ref ast, list, k));
+    ast.childIds.push(childAt(ref ast, list, k));
     k += 1;
   }
-  vec.vecPush(ref ast.childIds, childAt(ref ast, gen, 0));
+  ast.childIds.push(childAt(ref ast, gen, 0));
   list.childStart = start;
   list.childCount = list.childCount + 1;
-  vec.vecSet(ref ast.nodes, existing, list);
+  ast.nodes.set(existing, list);
   return existing;
 }
 
@@ -223,7 +223,7 @@ function restampLocations(ref ast: AST, id: NodeId, loc: SourceLocation): void {
   }
   let n = nodeAt(ref ast, id);
   n.sourceLoc = loc;
-  vec.vecSet(ref ast.nodes, id, n);
+  ast.nodes.set(id, n);
   restampLocations(ref ast, n.childA, loc);
   restampLocations(ref ast, n.childB, loc);
   restampLocations(ref ast, n.childC, loc);

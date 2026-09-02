@@ -184,7 +184,7 @@ export function checkTryOp(ref cx: Cx, exprId: NodeId): TypeId {
     // Recorded rather than re-derived: codegen has both types in hand and could
     // compare them, but "these differ" and "these differ AND a conversion was
     // found" are not the same fact, and only pass D established the second.
-    map.mapInsert(ref cx.tm.tryIntoUses, uint64(exprId), true);
+    cx.tm.tryIntoUses.insert(uint64(exprId), true);
   }
 
   return got.okType;
@@ -223,10 +223,10 @@ function claimsAppliedTrait(
   disposable claimed: Vec<TypeId> = claimedTraitsOf(ref prog, source);
   let i: usize = 0;
   while (i < claimed.len) {
-    const t = vec.vecGet(ref claimed, i);
+    const t = claimed.get(i);
     if (str.stringEq(nominalNameOf(ref prog, t), traitName)) {
       disposable args: Vec<TypeId> = traitArgsOf(ref prog, t);
-      if (args.len == 1 && vec.vecGet(ref args, 0) == target) {
+      if (args.len == 1 && args.get(0) == target) {
         return true;
       }
     }

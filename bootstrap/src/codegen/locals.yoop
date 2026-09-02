@@ -65,7 +65,7 @@ export function localsNew(): FnLocals propagates<disposable> {
 
 export function localsPushBlock(ref l: FnLocals): void {
   let fresh: Vec<DeclaredName> = vec.vecNew(2);
-  vec.vecPush(ref l.blockNames, fresh);
+  l.blockNames.push(fresh);
 }
 
 // Undo the innermost block's declarations, innermost-last first so a name
@@ -74,18 +74,18 @@ export function localsPopBlock(ref l: FnLocals): void {
   if (l.blockNames.len == 0) {
     return;
   }
-  let names = vec.vecGet(ref l.blockNames, l.blockNames.len - 1);
+  let names = l.blockNames.get(l.blockNames.len - 1);
   let i: usize = names.len;
   while (i > 0) {
     i -= 1;
-    const d: DeclaredName = vec.vecGet(ref names, i);
+    const d: DeclaredName = names.get(i);
     if (d.hadPrev) {
-      map.mapInsert(ref l.slots, d.name, d.prev);
+      l.slots.insert(d.name, d.prev);
     } else {
-      map.mapRemove(ref l.slots, d.name);
+      l.slots.remove(d.name);
     }
   }
-  Disposable.dispose(ref names);
+  names.dispose();
   l.blockNames.len -= 1;
 }
 
@@ -95,16 +95,16 @@ function localsNoteName(ref l: FnLocals, name: string): void {
   if (l.blockNames.len == 0) {
     return;
   }
-  let top = vec.vecGet(ref l.blockNames, l.blockNames.len - 1);
-  switch (map.mapGet(ref l.slots, name)) {
+  let top = l.blockNames.get(l.blockNames.len - 1);
+  switch (l.slots.get(name)) {
     case Option.Some { value: old }: {
-      vec.vecPush(ref top, { name: name, hadPrev: true, prev: old });
+      top.push({ name: name, hadPrev: true, prev: old });
     }
     case Option.None: {
-      vec.vecPush(ref top, { name: name, hadPrev: false, prev: { ty: "", id: 0 } });
+      top.push({ name: name, hadPrev: false, prev: { ty: "", id: 0 } });
     }
   }
-  vec.vecSet(ref l.blockNames, l.blockNames.len - 1, top);
+  l.blockNames.set(l.blockNames.len - 1, top);
 }
 
 // Emits the alloca into the function prologue and records the slot.
@@ -113,7 +113,7 @@ export function declareLocal(ref cx: Cx, name: string, ty: string): LocalSlot {
   const info: LocalSlot = { ty: ty, id: cx.locals.nextSlot };
   emitAlloca(ref cx, name, info.id, ty);
   localsNoteName(cx.locals, name);
-  map.mapInsert(ref cx.locals.slots, name, info);
+  cx.locals.slots.insert(name, info);
   return info;
 }
 
@@ -123,12 +123,12 @@ export function declareLocal(ref cx: Cx, name: string, ty: string): LocalSlot {
 export function declareRefParam(ref cx: Cx, name: string, pointeeTy: string): LocalSlot {
   const info: LocalSlot = { ty: pointeeTy, id: ARG_PTR_SLOT };
   localsNoteName(cx.locals, name);
-  map.mapInsert(ref cx.locals.slots, name, info);
+  cx.locals.slots.insert(name, info);
   return info;
 }
 
 export function lookupLocal(ref l: FnLocals, name: string): Option<LocalSlot> {
-  return map.mapGet(ref l.slots, name);
+  return l.slots.get(name);
 }
 
 // The slot name compiler-introduced temporaries share. Each still gets a unique

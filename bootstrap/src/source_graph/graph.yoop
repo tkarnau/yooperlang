@@ -87,22 +87,22 @@ export function emptyModuleGraph(): ModuleGraph propagates<disposable> {
 export function disposeModuleGraph(ref g: ModuleGraph): void {
   let i: usize = 0;
   while (i < g.modules.len) {
-    let m: Module = vec.vecGet(ref g.modules, i);
+    let m: Module = g.modules.get(i);
     let f: usize = 0;
     while (f < m.files.len) {
-      let sf: SourceFile = vec.vecGet(ref m.files, f);
-      Disposable.dispose(ref sf.src);
-      Disposable.dispose(ref sf.imports);
+      let sf: SourceFile = m.files.get(f);
+      sf.src.dispose();
+      sf.imports.dispose();
       f += 1;
     }
-    Disposable.dispose(ref m.files);
+    m.files.dispose();
     // AST has no `dispose` either - it is three Vecs and a root - so its
     // storage is released the same way, one field at a time.
-    Disposable.dispose(ref m.ast.nodes);
-    Disposable.dispose(ref m.ast.childIds);
-    Disposable.dispose(ref m.ast.strings);
+    m.ast.nodes.dispose();
+    m.ast.childIds.dispose();
+    m.ast.strings.dispose();
     i += 1;
   }
-  Disposable.dispose(ref g.modules);
-  Disposable.dispose(ref g.autoLoadModuleIds);
+  g.modules.dispose();
+  g.autoLoadModuleIds.dispose();
 }

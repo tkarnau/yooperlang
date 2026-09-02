@@ -57,7 +57,7 @@ export function recordDeriveDisplay(
   if (declNode.name.len == 0) {
     return;
   }
-  map.mapInsert(ref prog.derivedDisplay, declNode.name, true);
+  prog.derivedDisplay.insert(declNode.name, true);
 }
 
 // Whether a type is one of those, asked with a TypeId because that is what the
@@ -65,7 +65,7 @@ export function recordDeriveDisplay(
 // name, which is the key pass A recorded.
 export function carriesDeriveDisplay(ref prog: Program, t: TypeId): bool {
   const name = formatType(ref prog, t);
-  switch (map.mapGet(ref prog.derivedDisplay, name)) {
+  switch (prog.derivedDisplay.get(name)) {
     case Option.Some { value: found }: { return found; }
     case Option.None: { return false; }
   }
@@ -87,18 +87,18 @@ export function bindDerivedDisplayTrait(ref prog: Program, ref tm: TypedModule, 
   if (site.nodeId == 0) {
     return;
   }
-  switch (map.mapGet(ref tm.names, DISPLAY_TRAIT)) {
+  switch (tm.names.get(DISPLAY_TRAIT)) {
     case Option.Some { value: bound }: { return; }
     case Option.None: { }
   }
   let i: usize = 0;
   while (i < prog.modules.len) {
-    let source = vec.vecGet(ref prog.modules, i);
-    switch (map.mapGet(ref source.exports, DISPLAY_TRAIT)) {
+    let source = prog.modules.get(i);
+    switch (source.exports.get(DISPLAY_TRAIT)) {
       case Option.Some { value: symId }: {
         switch (symbolAt(ref prog, symId)) {
           case Symbol.Trait { typeId: traitId }: {
-            map.mapInsert(ref tm.names, DISPLAY_TRAIT, symId);
+            tm.names.insert(DISPLAY_TRAIT, symId);
             return;
           }
           default: { }
@@ -134,7 +134,7 @@ type DeriveSite {
 function firstDeriveSite(ref ast: AST, m: Module): DeriveSite {
   let f: usize = 0;
   while (f < m.files.len) {
-    const file = vec.vecGet(ref m.files, f);
+    const file = m.files.get(f);
     const programNode = nodeAt(ref ast, file.root);
     let i: usize = 0;
     while (i < programNode.childCount) {

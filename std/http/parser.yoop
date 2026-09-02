@@ -32,7 +32,7 @@ export type ParsedRequest implements Disposable propagates<disposable> {
     bodyStart: usize,
     info:      HeadInfo,
     function dispose(ref self): void {
-        Disposable.dispose(ref self.request);
+        self.request.dispose();
     }
 }
 
@@ -53,7 +53,7 @@ export type ParsedResponse implements Disposable propagates<disposable> {
     bodyStart: usize,
     info:      HeadInfo,
     function dispose(ref self): void {
-        Disposable.dispose(ref self.headers);
+        self.headers.dispose();
     }
 }
 
@@ -163,7 +163,7 @@ export function parseRequestHead(buf: uint8[]): Result<ParsedRequest, HttpError>
         case Result.Err { error: e }: {
             // The request owns three Vecs by now; give them back before the
             // error leaves.
-            Disposable.dispose(ref req);
+            req.dispose();
             return Result.Err { error: e };
         }
     }
@@ -217,7 +217,7 @@ export function parseResponseHead(buf: uint8[]): Result<ParsedResponse, HttpErro
             };
         }
         case Result.Err { error: e }: {
-            Disposable.dispose(ref headers);
+            headers.dispose();
             return Result.Err { error: e };
         }
     }

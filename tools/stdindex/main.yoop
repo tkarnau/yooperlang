@@ -76,7 +76,7 @@ function strLess(a: string, b: string): bool {
 }
 
 function pushStr(ref out: Vec<uint8>, s: string) : void {
-    vec.vecExtendFrom(ref out, intr.stringAsBytes(s));
+    out.extendFrom(intr.stringAsBytes(s));
 }
 
 function endsWith(s: string, suffix: string): bool {
@@ -96,7 +96,7 @@ function readAll(path: string): string {
     disposable buf: Vec<uint8> = vec.vecNew(4096);
     let err: string = fs.readFileInto(ref buf, path);
     if (err.len > 0) { return ""; }
-    return intr.stringFromBytesUnchecked(vec.vecAsArray(ref buf));
+    return intr.stringFromBytesUnchecked(buf.asArray());
 }
 
 // ----- line walking -------------------------------------------------------
@@ -157,7 +157,7 @@ function paragraphFrom(src: string, ref at: usize, first: string): string {
         pushStr(ref buf, body);
         at = probe;
     }
-    return intr.stringFromBytesUnchecked(vec.vecAsArray(ref buf));
+    return intr.stringFromBytesUnchecked(buf.asArray());
 }
 
 // Drop the `<path> - ` prefix the header convention uses. It is redundant
@@ -330,17 +330,17 @@ type Mod {
 function sortedEntries(ref out: Vec<string>, dirPath: string): void {
     disposable d: fs.DirIter = fs.openDir(dirPath);
     for name in d {
-        vec.vecPush(ref out, name);
+        out.push(name);
     }
     // Insertion sort - these are directories of a few dozen entries.
     for (let i: usize = 1; i < out.len; i += 1) {
-        let cur: string = vec.vecGet(ref out, i);
+        let cur: string = out.get(i);
         let j: usize = i;
-        while (j > 0 && strLess(cur, vec.vecGet(ref out, j - 1))) {
-            vec.vecSet(ref out, j, vec.vecGet(ref out, j - 1));
+        while (j > 0 && strLess(cur, out.get(j - 1))) {
+            out.set(j, out.get(j - 1));
             j = j - 1;
         }
-        vec.vecSet(ref out, j, cur);
+        out.set(j, cur);
     }
 }
 
@@ -367,7 +367,7 @@ function dirModule(dirPath: string, importPath: string): Mod {
     let total: int32 = 0;
 
     for (let i: usize = 0; i < names.len; i += 1) {
-        let name: string = vec.vecGet(ref names, i);
+        let name: string = names.get(i);
         if (!endsWith(name, YOOP_SUFFIX)) { continue; }
         let full: string = joinPath(dirPath, name);
         let src: string = readAll(full);
@@ -387,8 +387,8 @@ function dirModule(dirPath: string, importPath: string): Mod {
     return {
         importPath: importPath,
         summary: summary,
-        detail: intr.stringFromBytesUnchecked(vec.vecAsArray(ref detail)),
-        exports: intr.stringFromBytesUnchecked(vec.vecAsArray(ref exports)),
+        detail: intr.stringFromBytesUnchecked(detail.asArray()),
+        exports: intr.stringFromBytesUnchecked(exports.asArray()),
         exportCount: total,
     };
 }
@@ -401,7 +401,7 @@ function fileModule(filePath: string, importPath: string): Mod {
         importPath: importPath,
         summary: headerSummary(src),
         detail: "",
-        exports: intr.stringFromBytesUnchecked(vec.vecAsArray(ref exports)),
+        exports: intr.stringFromBytesUnchecked(exports.asArray()),
         exportCount: n,
     };
 }
@@ -416,7 +416,7 @@ function isDirectoryModule(dirPath: string): bool {
     sortedEntries(ref names, dirPath);
     let sawYoop: bool = false;
     for (let i: usize = 0; i < names.len; i += 1) {
-        let name: string = vec.vecGet(ref names, i);
+        let name: string = names.get(i);
         if (!endsWith(name, YOOP_SUFFIX)) { continue; }
         sawYoop = true;
         let src: string = readAll(joinPath(dirPath, name));
@@ -432,7 +432,7 @@ function walk(ref mods: Vec<Mod>, dirPath: string, importBase: string): void {
     sortedEntries(ref names, dirPath);
 
     for (let i: usize = 0; i < names.len; i += 1) {
-        let name: string = vec.vecGet(ref names, i);
+        let name: string = names.get(i);
         let full: string = joinPath(dirPath, name);
         let meta: fs.FileMeta = fs.statPath(full);
         if (!meta.ok) { continue; }
@@ -440,7 +440,7 @@ function walk(ref mods: Vec<Mod>, dirPath: string, importBase: string): void {
         if (meta.isDir) {
             let sub: string = joinPath(importBase, name);
             if (isDirectoryModule(full)) {
-                vec.vecPush(ref mods, dirModule(full, sub));
+                mods.push(dirModule(full, sub));
             } else {
                 walk(ref mods, full, sub);
             }
@@ -448,7 +448,7 @@ function walk(ref mods: Vec<Mod>, dirPath: string, importBase: string): void {
         }
 
         if (!endsWith(name, YOOP_SUFFIX)) { continue; }
-        vec.vecPush(ref mods, fileModule(full, joinPath(importBase, name)));
+        mods.push(fileModule(full, joinPath(importBase, name)));
     }
 }
 
@@ -515,7 +515,7 @@ function main(): int32 {
     disposable out: Vec<uint8> = vec.vecNew(16384);
     render(ref out, ref mods);
 
-    let err: string = fs.writeFile(outPath, vec.vecAsArray(ref out));
+    let err: string = fs.writeFile(outPath, out.asArray());
     if (err.len > 0) {
         printf(`stdindex: writing ${outPath}: ${err}\n`);
         return 1;

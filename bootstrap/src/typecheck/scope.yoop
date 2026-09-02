@@ -78,12 +78,12 @@ function newBlock(): Map<string, Binding> propagates<disposable> {
 
 export function scopeNew(): LocalScope propagates<disposable> {
   let blocks: Vec<Map<string, Binding>> = vec.vecNew(4);
-  vec.vecPush(ref blocks, newBlock());
+  blocks.push(newBlock());
   return { blocks: blocks, loopDepth: 0, switchDepth: 0 };
 }
 
 export function scopePush(ref s: LocalScope): void {
-  vec.vecPush(ref s.blocks, newBlock());
+  s.blocks.push(newBlock());
 }
 
 // std/core/vec.yoop has no `vecPop`, so the block map is disposed by hand
@@ -93,8 +93,8 @@ export function scopePop(ref s: LocalScope): void {
   if (s.blocks.len <= 1) {
     return;
   }
-  let top = vec.vecGet(ref s.blocks, s.blocks.len - 1);
-  Disposable.dispose(ref top);
+  let top = s.blocks.get(s.blocks.len - 1);
+  top.dispose();
   s.blocks.len -= 1;
 }
 
@@ -146,27 +146,27 @@ export function scopeDeclareRefParam(
 // binding, a loop variable and a `?` handler binding have no annotation to read
 // and are left unknown on purpose. See typecheck/markers.yoop.
 export function scopeSetMarkers(ref s: LocalScope, name: string, m: MarkerSet): void {
-  let top = vec.vecGet(ref s.blocks, s.blocks.len - 1);
-  switch (map.mapGet(ref top, name)) {
+  let top = s.blocks.get(s.blocks.len - 1);
+  switch (top.get(name)) {
     case Option.Some { value: existing }: {
       let updated = existing;
       updated.markConf = m.conf;
       updated.markRestr = m.restr;
       updated.markKnown = m.known;
-      map.mapInsert(ref top, name, updated);
-      vec.vecSet(ref s.blocks, s.blocks.len - 1, top);
+      top.insert(name, updated);
+      s.blocks.set(s.blocks.len - 1, top);
     }
     case Option.None: { }
   }
 }
 
 function scopeDeclareBinding(ref s: LocalScope, name: string, b: Binding): bool {
-  let top = vec.vecGet(ref s.blocks, s.blocks.len - 1);
-  switch (map.mapGet(ref top, name)) {
+  let top = s.blocks.get(s.blocks.len - 1);
+  switch (top.get(name)) {
     case Option.Some { value: existing }: { return false; }
     case Option.None: {
-      map.mapInsert(ref top, name, b);
-      vec.vecSet(ref s.blocks, s.blocks.len - 1, top);
+      top.insert(name, b);
+      s.blocks.set(s.blocks.len - 1, top);
       return true;
     }
   }
@@ -178,8 +178,8 @@ export function scopeBinding(ref s: LocalScope, name: string): Option<Binding> {
   let i = s.blocks.len;
   while (i > 0) {
     i -= 1;
-    let b = vec.vecGet(ref s.blocks, i);
-    switch (map.mapGet(ref b, name)) {
+    let b = s.blocks.get(i);
+    switch (b.get(name)) {
       case Option.Some { value: bound }: { return Option.Some { value: bound }; }
       case Option.None: { }
     }

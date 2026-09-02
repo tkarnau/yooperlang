@@ -32,9 +32,9 @@ import { PLATFORM_LINUX, PLATFORM_MACOS, PLATFORM_WINDOWS } from "../link";
 suite function tlsGlueFollowsTheLibraryNames(): void {
   let test theory: Case = t.asserts("a program naming \"ssl\" gets yoop_tls.c") {
     disposable libs: Vec<string> = vec.vecNew(2);
-    vec.vecPush(ref libs, "ssl");
+    libs.push("ssl");
     disposable glue: Vec<string> = glueSources("/rt", ref libs);
-    theory.isSuccessful = glue.len == 1 && str.stringEq(vec.vecGet(ref glue, 0), "/rt/yoop_tls.c");
+    theory.isSuccessful = glue.len == 1 && str.stringEq(glue.get(0), "/rt/yoop_tls.c");
     theory.detail = `got ${glue.len} glue source(s), wanted 1 named /rt/yoop_tls.c`;
   }
 
@@ -42,7 +42,7 @@ suite function tlsGlueFollowsTheLibraryNames(): void {
   // cannot link without libcrypto, so a program that named one meant TLS.
   let test theory: Case = t.asserts("naming only \"crypto\" gets it too") {
     disposable libs: Vec<string> = vec.vecNew(2);
-    vec.vecPush(ref libs, "crypto");
+    libs.push("crypto");
     disposable glue: Vec<string> = glueSources("/rt", ref libs);
     theory.isSuccessful = glue.len == 1;
     theory.detail = `got ${glue.len} glue source(s), wanted 1`;
@@ -50,8 +50,8 @@ suite function tlsGlueFollowsTheLibraryNames(): void {
 
   let test theory: Case = t.asserts("a program naming neither gets no glue at all") {
     disposable libs: Vec<string> = vec.vecNew(2);
-    vec.vecPush(ref libs, "m");
-    vec.vecPush(ref libs, "framework:OpenGL");
+    libs.push("m");
+    libs.push("framework:OpenGL");
     disposable glue: Vec<string> = glueSources("/rt", ref libs);
     theory.isSuccessful = glue.len == 0;
     theory.detail = `got ${glue.len} glue source(s), wanted 0`;
@@ -199,7 +199,7 @@ suite function frameworksLowerPerPlatform(): void {
 suite function aLibraryNameIsOneArgumentWhateverItContains(): void {
   let test theory: Case = t.asserts("a name with a semicolon and spaces is one -l argument") {
     disposable libs: Vec<string> = vec.vecNew(1);
-    vec.vecPush(ref libs, "m; rm -rf ~");
+    libs.push("m; rm -rf ~");
     disposable args: Vec<string> = vec.vecNew(4);
     pushLinkLibrariesFor(ref args, ref libs, PLATFORM_LINUX);
     theory.isSuccessful = isExactly1(ref args, "-lm; rm -rf ~");
@@ -208,7 +208,7 @@ suite function aLibraryNameIsOneArgumentWhateverItContains(): void {
 
   let test theory: Case = t.asserts("a name with quotes and a subshell is one -l argument, unescaped") {
     disposable libs: Vec<string> = vec.vecNew(1);
-    vec.vecPush(ref libs, "a\" $(id) `id`");
+    libs.push("a\" $(id) `id`");
     disposable args: Vec<string> = vec.vecNew(4);
     pushLinkLibrariesFor(ref args, ref libs, PLATFORM_LINUX);
     theory.isSuccessful = isExactly1(ref args, "-la\" $(id) `id`");
@@ -218,14 +218,14 @@ suite function aLibraryNameIsOneArgumentWhateverItContains(): void {
   // The pair is two arguments, and a name is never split on its own spaces.
   let test theory: Case = t.asserts("ssl expands to two arguments and everything else to one each") {
     disposable libs: Vec<string> = vec.vecNew(3);
-    vec.vecPush(ref libs, "ssl");
-    vec.vecPush(ref libs, "sqlite3");
+    libs.push("ssl");
+    libs.push("sqlite3");
     disposable args: Vec<string> = vec.vecNew(4);
     pushLinkLibrariesFor(ref args, ref libs, PLATFORM_MACOS);
     theory.isSuccessful = args.len == 3
-      && str.stringEq(vec.vecGet(ref args, 0), "-lssl")
-      && str.stringEq(vec.vecGet(ref args, 1), "-lcrypto")
-      && str.stringEq(vec.vecGet(ref args, 2), "-lsqlite3");
+      && str.stringEq(args.get(0), "-lssl")
+      && str.stringEq(args.get(1), "-lcrypto")
+      && str.stringEq(args.get(2), "-lsqlite3");
     theory.detail = `got ${render(ref args)}, wanted [-lssl, -lcrypto, -lsqlite3]`;
   }
 }
@@ -258,9 +258,9 @@ suite function windowsLinkRulesDifferFromPosix(): void {
   // this is the rule that decides whether the compiler can link ITSELF here.
   let test theory: Case = t.asserts("m and pthread are dropped on Windows, kept on Linux") {
     disposable libs: Vec<string> = vec.vecNew(3);
-    vec.vecPush(ref libs, "m");
-    vec.vecPush(ref libs, "pthread");
-    vec.vecPush(ref libs, "sqlite3");
+    libs.push("m");
+    libs.push("pthread");
+    libs.push("sqlite3");
 
     disposable win: Vec<string> = vec.vecNew(4);
     pushLinkLibrariesFor(ref win, ref libs, PLATFORM_WINDOWS);
@@ -269,9 +269,9 @@ suite function windowsLinkRulesDifferFromPosix(): void {
 
     theory.isSuccessful = isExactly1(ref win, "-lsqlite3")
       && lin.len == 3
-      && str.stringEq(vec.vecGet(ref lin, 0), "-lm")
-      && str.stringEq(vec.vecGet(ref lin, 1), "-lpthread")
-      && str.stringEq(vec.vecGet(ref lin, 2), "-lsqlite3");
+      && str.stringEq(lin.get(0), "-lm")
+      && str.stringEq(lin.get(1), "-lpthread")
+      && str.stringEq(lin.get(2), "-lsqlite3");
     theory.detail = `windows ${render(ref win)}, linux ${render(ref lin)}`;
   }
 }
@@ -305,29 +305,29 @@ suite function theExecutableSuffixFollowsThePlatform(): void {
 
 // Exactly one element, and it is `a`.
 function isExactly1(ref v: Vec<string>, a: string): bool {
-  return v.len == 1 && str.stringEq(vec.vecGet(ref v, 0), a);
+  return v.len == 1 && str.stringEq(v.get(0), a);
 }
 
 // Exactly two elements, `a` then `b`.
 function isExactly2(ref v: Vec<string>, a: string, b: string): bool {
-  return v.len == 2 && str.stringEq(vec.vecGet(ref v, 0), a) && str.stringEq(vec.vecGet(ref v, 1), b);
+  return v.len == 2 && str.stringEq(v.get(0), a) && str.stringEq(v.get(1), b);
 }
 
 // `[a, b, c]` for a failure message. Built in a Text and borrowed out; the
 // detail line keeps it alive for as long as the report needs it.
 function render(ref v: Vec<string>): string {
   let out: Text = text.make(64);
-  text.push(ref out, "[");
+  out.push("[");
   let i: usize = 0;
   while (i < v.len) {
     if (i > 0) {
-      text.push(ref out, ", ");
+      out.push(", ");
     }
-    text.push(ref out, vec.vecGet(ref v, i));
+    out.push(v.get(i));
     i += 1;
   }
-  text.push(ref out, "]");
-  return text.view(ref out);
+  out.push("]");
+  return out.view();
 }
 
 // The position of `needle` in `v`, or `v.len` when it is absent. Same "an
@@ -335,7 +335,7 @@ function render(ref v: Vec<string>): string {
 function indexOf(ref v: Vec<string>, needle: string): usize {
   let i: usize = 0;
   while (i < v.len) {
-    if (str.stringEq(vec.vecGet(ref v, i), needle)) {
+    if (str.stringEq(v.get(i), needle)) {
       return i;
     }
     i += 1;
@@ -349,7 +349,7 @@ function indexOf(ref v: Vec<string>, needle: string): usize {
 function allEndWith(ref v: Vec<string>, suffix: string): bool {
   let i: usize = 0;
   while (i < v.len) {
-    const s = vec.vecGet(ref v, i);
+    const s = v.get(i);
     if (s.len < suffix.len) {
       return false;
     }

@@ -66,13 +66,13 @@ async roundTrip(ref s: TlsStream): string {
                 if (n <= 0) {
                     reading = false;
                 } else {
-                    vec.vecExtendFrom(ref acc, intr.arraySlice(window, 0, usize(n)));
+                    acc.extendFrom(intr.arraySlice(window, 0, usize(n)));
                 }
             }
             case Result.Err { error: e }: { return `read: ${e}`; }
         }
     }
-    let text: string = intr.stringFromBytesUnchecked(vec.vecAsArray(ref acc));
+    let text: string = intr.stringFromBytesUnchecked(acc.asArray());
     let at: usize = 0;
     let b: uint8[] = intr.stringAsBytes(text);
     for (let i: usize = 0; i + 3 < b.len; i += 1) {

@@ -955,7 +955,7 @@ yet", "unsupported extern ABI" - rather than mis-compiled.
   * `_` in a pattern (`case Res.Err { code: c, detail: _ }`) - names a payload
     field without binding it. Still NAMED, so a case that grows a field breaks
     its patterns loudly.
-  * `ref` at a call site (`vec.vecPush(ref out, x)`) - a BORROW. Writing it is
+  * `ref` at a call site (`vec.vecIter(ref out)`) - a BORROW. Writing it is
     required, not inferred: a `ref v: T` parameter is `ref T` in the signature,
     so passing a bare `v` is a type error and the reader can see at the call
     which arguments the callee may write through. ONE exception: a name that

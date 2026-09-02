@@ -16,7 +16,7 @@ import { Artifact, Control, ControlKind, Phase, noControl } from "./protocol.yoo
 
 function payloadOf(s: string): Vec<uint8> propagates<disposable> {
   let buf: Vec<uint8> = vec.vecNew(s.len + 1);
-  vec.vecExtendFrom(ref buf, intr.stringAsBytes(s));
+  buf.extendFrom(intr.stringAsBytes(s));
   return buf;
 }
 
@@ -36,7 +36,7 @@ suite function artifactsDigestIntoDrawableCounts(): void {
   scene.applyBlob(ref world, Artifact.MODULES, ref mods);
   let test theory: Case = t.asserts("the module map lands as islands and one bridge") {
     theory.isSuccessful = world.islands.len == 2 && world.edges.len == 1 &&
-      vec.vecGet(ref world.islands, 1).entry;
+      world.islands.get(1).entry;
     theory.detail = `islands ${world.islands.len}, edges ${world.edges.len}`;
   }
 
@@ -47,16 +47,16 @@ suite function artifactsDigestIntoDrawableCounts(): void {
   scene.applyBlob(ref world, Artifact.IR, ref ir);
   let test theory: Case = t.asserts("the IR scan finds one function of two blocks") {
     theory.isSuccessful = world.irFuncs.len == 1 && world.irBlocks.len == 2 &&
-      vec.vecGet(ref world.irBlocks, 0).instructions == 2 &&
-      vec.vecGet(ref world.irBlocks, 1).instructions == 1;
+      world.irBlocks.get(0).instructions == 2 &&
+      world.irBlocks.get(1).instructions == 1;
     theory.detail = `funcs ${world.irFuncs.len}, blocks ${world.irBlocks.len}`;
   }
 
   // Classification by reading the lines above: the add is arithmetic, the
   // br and the ret are branches, nothing touches memory.
   let test theory: Case = t.asserts("instructions classify into their op families") {
-    const entry = vec.vecGet(ref world.irBlocks, 0);
-    const next = vec.vecGet(ref world.irBlocks, 1);
+    const entry = world.irBlocks.get(0);
+    const next = world.irBlocks.get(1);
     theory.isSuccessful = entry.branches == 1 && entry.calls == 0 && entry.memOps == 0 &&
       next.branches == 1;
     theory.detail = `entry br=${entry.branches} call=${entry.calls} mem=${entry.memOps}, next br=${next.branches}`;
@@ -65,10 +65,10 @@ suite function artifactsDigestIntoDrawableCounts(): void {
   disposable blockLabel: Text = text.make(8);
   scene.sceneIrBlockLabel(ref world, 1, ref blockLabel);
   let test theory: Case = t.asserts("a labeled block keeps its label, the implicit one reads entry") {
-    const gotNext = str.stringEq(text.view(ref blockLabel), "next");
+    const gotNext = str.stringEq(blockLabel.view(), "next");
     scene.sceneIrBlockLabel(ref world, 0, ref blockLabel);
-    theory.isSuccessful = gotNext && str.stringEq(text.view(ref blockLabel), "entry");
-    theory.detail = `labels were "${text.view(ref blockLabel)}" and the earlier read`;
+    theory.isSuccessful = gotNext && str.stringEq(blockLabel.view(), "entry");
+    theory.detail = `labels were "${blockLabel.view()}" and the earlier read`;
   }
 
   disposable diags: Vec<uint8> = payloadOf(
@@ -129,8 +129,8 @@ suite function thePickLookupsWalkOffsetToArtifacts(): void {
   disposable label: Text = text.make(8);
   scene.sceneTokenText(ref world, 1, ref label);
   let test theory: Case = t.asserts("a token's label is its own source text") {
-    theory.isSuccessful = str.stringEq(text.view(ref label), "cd");
-    theory.detail = `label was "${text.view(ref label)}"`;
+    theory.isSuccessful = str.stringEq(label.view(), "cd");
+    theory.detail = `label was "${label.view()}"`;
   }
 }
 
@@ -146,8 +146,8 @@ suite function memoryMistakesAreFoundAndPlaced(): void {
 
   let test theory: Case = t.asserts("the loop malloc and the loose malloc classify apart") {
     theory.isSuccessful = world.smellLoop == 1 && world.smellOnce == 1 &&
-      vec.vecGet(ref world.astItems, 2).smell == 2 &&
-      vec.vecGet(ref world.astItems, 3).smell == 1;
+      world.astItems.get(2).smell == 2 &&
+      world.astItems.get(3).smell == 1;
     theory.detail = `loop=${world.smellLoop} once=${world.smellOnce}`;
   }
 
@@ -164,12 +164,12 @@ suite function memoryMistakesAreFoundAndPlaced(): void {
   }
 
   let test theory: Case = t.asserts("the placed leak knows what it is and what it says") {
-    const it = vec.vecGet(ref world.diagItems, 0);
+    const it = world.diagItems.get(0);
     disposable msg: Text = text.make(16);
     scene.sceneDiagMsg(ref world, 0, ref msg);
     theory.isSuccessful = it.leak && !it.error && it.line == 7 &&
-      str.stringEq(text.view(ref msg), "nothing disposes it");
-    theory.detail = `leak=${it.leak} line=${it.line} msg="${text.view(ref msg)}"`;
+      str.stringEq(msg.view(), "nothing disposes it");
+    theory.detail = `leak=${it.leak} line=${it.line} msg="${msg.view()}"`;
   }
 }
 
@@ -219,7 +219,7 @@ suite function theClosureStoresAndSwapsFiles(): void {
 
   let test theory: Case = t.asserts("the kept diagnostics re-place onto the new file") {
     theory.isSuccessful = world.diagItems.len == 1 &&
-      vec.vecGet(ref world.diagItems, 0).leak;
+      world.diagItems.get(0).leak;
     theory.detail = `placed=${world.diagItems.len}`;
   }
 }

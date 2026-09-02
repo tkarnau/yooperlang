@@ -22,7 +22,7 @@ function partitionYoop<T implements Comparable<T>>(arr: T[], low: usize, high: u
   let store = low;
   let j = low;
   for (j = low; j < high; j = j + 1) {
-    if (Comparable.compare(ref arr[j], pivot) <= 0) {
+    if (arr[j].compare(pivot) <= 0) {
       swap(arr, store, j);
       store = store + 1;
     }

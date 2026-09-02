@@ -92,9 +92,9 @@ export type TlsStream implements (Disposable, Readable, Writable) propagates<dis
         }
         sessionFree(ref self.ssl);
         ctxFree(ref self.ctx);
-        Disposable.dispose(ref self.outBuf);
-        Disposable.dispose(ref self.inBuf);
-        Disposable.dispose(ref self.conn);
+        self.outBuf.dispose();
+        self.inBuf.dispose();
+        self.conn.dispose();
     }
 
     // Plaintext out of the session. Same signature as TcpStream's, which is
@@ -168,7 +168,7 @@ async flushOut(ref s: TlsStream): string {
         let n: int64 = pull(ref s.ssl, ref window);
         if (n <= 0) { return ""; }
         let outView: uint8[] = intr.arraySlice(window, 0, usize(n));
-        switch (await Writable.write(ref s.conn, ref outView)) {
+        switch (await s.conn.write(ref outView)) {
             case Result.Ok { value: _w }: { }
             case Result.Err { error: e }: { return `tls send: ${e}`; }
         }
@@ -187,7 +187,7 @@ async pump(ref s: TlsStream, status: int32): string {
     if (status != TLS_WANT_READ) { return ""; }
 
     let window: uint8[] = bytes.bytesToArray(ref s.inBuf);
-    switch (await Readable.read(ref s.conn, ref window)) {
+    switch (await s.conn.read(ref window)) {
         case Result.Ok { value: n }: {
             if (n <= 0) {
                 pushEof(ref s.ssl);
@@ -246,7 +246,7 @@ export async tlsConnect(host: string, port: int32, ref cfg: TlsConfig): Result<T
     let cr: ConnectResult = tcp.tcpConnect(host, port);
     if (cr.error.len > 0) {
         let msg: string = cr.error;
-        Disposable.dispose(ref cr);
+        cr.dispose();
         sessionFree(ref ssl);
         ctxFree(ref ctx);
         return Result.Err { error: `${msg} (connecting to ${host}:${port})` };
@@ -273,7 +273,7 @@ export async tlsConnect(host: string, port: int32, ref cfg: TlsConfig): Result<T
         if (status == TLS_ERROR || status == TLS_CLOSED) {
             let detail: string = lastError();
             let vr: int64 = verifyResult(ref s.ssl);
-            Disposable.dispose(ref s);
+            s.dispose();
             if (vr != 0) {
                 // The far more useful message when it is a trust problem, and
                 // the common case for a first-time user.
@@ -285,7 +285,7 @@ export async tlsConnect(host: string, port: int32, ref cfg: TlsConfig): Result<T
         }
         let e: string = await pump(ref s, status);
         if (e.len > 0) {
-            Disposable.dispose(ref s);
+            s.dispose();
             return Result.Err { error: e };
         }
     }

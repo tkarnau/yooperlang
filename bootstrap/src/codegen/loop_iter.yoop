@@ -117,7 +117,7 @@ function emitIterNextCall(
   iterSlotId: usize
 ): usize {
   disposable args: Vec<CallArg> = vec.vecNew(1);
-  vec.vecPush(ref args, {
+  args.push({
     ty: ITER_RECEIVER_LLVM_TYPE,
     value: Operand.SlotAddr { name: TEMP_SLOT_NAME, id: iterSlotId },
   });

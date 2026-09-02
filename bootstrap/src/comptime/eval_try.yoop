@@ -69,7 +69,7 @@ export function evalTryOp(ref cx: EvalCx, expr: ASTNode, exprId: NodeId): Result
   const outPayload = convertErrPayload(ref cx, expr, exprId, payload, got.errType, want.errType)?;
   disposable parts: Vec<ValueId> = vec.vecNew(1);
   if (want.errType != TYPE_VOID_ID) {
-    vec.vecPush(ref parts, outPayload);
+    parts.push(outPayload);
   }
   const errValue = aggregateValue(
     cx.va, ValueKind.VARIANT, cx.fnRet, uint64(want.errOrdinal), ref parts);
@@ -112,15 +112,15 @@ function convertErrPayload(
       // One heap string per folded context, held for the compiler's lifetime,
       // which is what every other string in the arena costs too.
       disposable parts: Vec<string> = vec.vecNew(3);
-      vec.vecPush(ref parts, note.text);
-      vec.vecPush(ref parts, ": ");
-      vec.vecPush(ref parts, inner.text);
+      parts.push(note.text);
+      parts.push(": ");
+      parts.push(inner.text);
       return Result.Ok { value: strValue(
-        cx.va, toTy, str.stringConcatAll(vec.vecAsArray(ref parts))) };
+        cx.va, toTy, str.stringConcatAll(parts.asArray())) };
     }
     disposable args: Vec<ValueId> = vec.vecNew(2);
-    vec.vecPush(ref args, payload);
-    vec.vecPush(ref args, strValue(cx.va, note.typeId, note.text));
+    args.push(payload);
+    args.push(strValue(cx.va, note.typeId, note.text));
     return callMethodOn(ref cx, derefType(cx.prog, fromTy), "withContext", ref args, expr, exprId);
   }
 
@@ -131,13 +131,13 @@ function convertErrPayload(
   // A cross-shape `?`: the operand's error promises `Into<Target>`, and the
   // conversion runs in the FAILURE branch, so the success path costs nothing.
   disposable args: Vec<ValueId> = vec.vecNew(1);
-  vec.vecPush(ref args, payload);
+  args.push(payload);
   return callMethodOn(ref cx, derefType(cx.prog, fromTy), "into", ref args, expr, exprId);
 }
 
 // Which of the two context shapes pass D picked.
 function isConcatContext(ref cx: EvalCx, exprId: NodeId): bool {
-  switch (map.mapGet(ref cx.tm.tryContextConcat, uint64(exprId))) {
+  switch (cx.tm.tryContextConcat.get(uint64(exprId))) {
     case Option.Some { value: v }: { return v; }
     case Option.None: { return false; }
   }

@@ -12,25 +12,25 @@ import { Result } from "std/core/types.yoop";
 function main(): int32 {
     // Build and borrow. `view` is a borrow, not a copy - no allocation.
     disposable greeting: Text = text.fromString("hello");
-    text.push(ref greeting, ", world");
-    printf("build [%s] len=%zu\n", text.view(ref greeting), greeting.len);
+    greeting.push(", world");
+    printf("build [%s] len=%zu\n", greeting.view(), greeting.len);
 
     // Growth across several reallocations. cap is always len + 1 or more.
     disposable big: Text = text.make(0);
     let i: int32 = 0;
     while (i < 500) {
-        text.push(ref big, "ab");
+        big.push("ab");
         i = i + 1;
     }
-    printf("grow len=%zu viewLen=%zu\n", big.len, text.view(ref big).len);
+    printf("grow len=%zu viewLen=%zu\n", big.len, big.view().len);
 
     // All four UTF-8 widths: A, e-acute, euro sign, grinning face.
     disposable mixed: Text = text.make(0);
-    text.pushChar(ref mixed, 65);
-    text.pushChar(ref mixed, 233);
-    text.pushChar(ref mixed, 8364);
-    text.pushChar(ref mixed, 128512);
-    const m: string = text.view(ref mixed);
+    mixed.pushChar(65);
+    mixed.pushChar(233);
+    mixed.pushChar(8364);
+    mixed.pushChar(128512);
+    const m: string = mixed.view();
     printf("utf8 bytes=%zu chars=%zu\n", m.len, text.charCount(m));
 
     // Decode back out through the Iterable impl.
@@ -47,12 +47,12 @@ function main(): int32 {
     // Replacing codepoint 2 of a multi-byte string: a rebuild, not a poke.
     disposable rep: Text = text.replaceChar(m, 2, "*");
     printf("replaceChar bytes=%zu chars=%zu\n",
-        rep.len, text.charCount(text.view(ref rep)));
+        rep.len, text.charCount(rep.view()));
 
     // subChars lands on boundaries by construction.
     disposable sub: Text = text.subChars(m, 1, 3);
     printf("subChars bytes=%zu chars=%zu\n",
-        sub.len, text.charCount(text.view(ref sub)));
+        sub.len, text.charCount(sub.view()));
 
     // subBytes refuses rather than emitting invalid UTF-8.
     switch (text.subBytes(m, 0, 2)) {
@@ -70,21 +70,21 @@ function main(): int32 {
 
     // Transforms each return a fresh owned Text.
     disposable r: Text = text.replaceAll("a-b-c-d", "-", "==");
-    printf("replaceAll [%s]\n", text.view(ref r));
+    printf("replaceAll [%s]\n", r.view());
     disposable up: Text = text.toUpperAscii("mixed Case");
-    printf("upper [%s]\n", text.view(ref up));
+    printf("upper [%s]\n", up.view());
     disposable tr: Text = text.trim("   padded   ");
-    printf("trim [%s]\n", text.view(ref tr));
+    printf("trim [%s]\n", tr.view());
     let parts: string[] = ["one", "two", "three"];
     disposable j: Text = text.join(parts, ", ");
-    printf("join [%s]\n", text.view(ref j));
+    printf("join [%s]\n", j.view());
     disposable ps: Text = text.padStart("7", 4, "0");
-    printf("padStart [%s]\n", text.view(ref ps));
+    printf("padStart [%s]\n", ps.view());
 
     // clear keeps the buffer, so a reused Text stops allocating.
-    text.clear(ref r);
-    text.push(ref r, "reused");
-    printf("reuse [%s] len=%zu\n", text.view(ref r), r.len);
+    r.clear();
+    r.push("reused");
+    printf("reuse [%s] len=%zu\n", r.view(), r.len);
 
     // Text implements Display, so it interpolates directly rather than
     // needing an explicit view() at every use site.

@@ -1,0 +1,6 @@
+trait Shape { function area(ref self): int32; }
+type Rect implements Shape { w: int32, function area(ref self): int32 { return self.w; } }
+function make(): Rect { return { w: 3 }; }
+function main(): int32 {
+  return make().area();
+}

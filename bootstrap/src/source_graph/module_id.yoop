@@ -23,13 +23,13 @@ import { Result } from "std/core/types.yoop";
 export function moduleIdFor(absPath: string, index: usize): string {
   disposable id: Text = text.make(32);
   appendSanitizedBaseName(ref id, absPath);
-  text.pushByte(ref id, '_');
-  text.pushUint(ref id, uint64(index));
+  id.pushByte('_');
+  id.pushUint(uint64(index));
 
   // `text.view` borrows the Text's storage, which dies at the end of this
   // scope, and a Module holds its id for the whole compile - so this copy is
   // the point. One owned string per module in the graph.
-  switch (str.stringFromBytes(text.bytes(ref id))) {
+  switch (str.stringFromBytes(id.bytes())) {
     case Result.Ok { value: s }: { return s; }
     case Result.Err { error: e }: { return "module"; }
   }
@@ -54,13 +54,13 @@ function appendSanitizedBaseName(ref out: Text, absPath: string): void {
   }
 
   if (start >= end) {
-    text.push(ref out, "module");
+    out.push("module");
     return;
   }
 
   let j = start;
   while (j < end) {
-    text.pushByte(ref out, sanitizedByte(bytes[j]));
+    out.pushByte(sanitizedByte(bytes[j]));
     j += 1;
   }
 }

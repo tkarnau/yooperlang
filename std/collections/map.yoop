@@ -26,7 +26,7 @@
 
 import { Disposable, disposable } from "../core/kinds.yoop";
 import { Option } from "../core/types.yoop";
-import { Iterable, IterStep } from "../core/traits.yoop";
+import { Mapping, Iterable, IterStep } from "../core/traits.yoop";
 import { stringEq, stringHash } from "../core/strings.yoop";
 import { bytesEq } from "../core/bytes.yoop";
 import { nextPow2Floor8 } from "../core/numbers.yoop";
@@ -50,7 +50,7 @@ export type KeyOps<K> {
     eq:   (a: K, b: K) => bool,
 }
 
-export type Map<K, V> implements Disposable propagates<disposable> {
+export type Map<K, V> implements (Disposable, Mapping<K, V>) propagates<disposable> {
     keys:   K[],
     values: V[],
     states: uint8[],
@@ -66,6 +66,79 @@ export type Map<K, V> implements Disposable propagates<disposable> {
             self.cap = 0;
         }
     }
+
+    // ----- Mapping<K, V> --------------------------------------------------
+
+    // Insert or overwrite. Returns true on overwrite (existing key),
+    // false on fresh insert.
+    function insert(ref self, key: K, value: V): bool {
+        maybeGrow(ref self);
+        let idx: usize = findInsertSlot(ref self, key);
+        let st: uint8 = self.states[idx];
+        let was_present: bool = st == STATE_OCCUPIED;
+        self.keys[idx]   = key;
+        self.values[idx] = value;
+        if (st == STATE_EMPTY) {
+            self.used = self.used + 1;
+        }
+        self.states[idx] = STATE_OCCUPIED;
+        if (!was_present) {
+            self.len = self.len + 1;
+        }
+        return was_present;
+    }
+
+    // Lookup. Returns `Option.Some { value }` when present, `Option.None`
+    // otherwise.
+    function get(ref self, key: K): Option<V> {
+        let slot: Option<usize> = findSlot(ref self, key);
+        switch (slot) {
+            case Option.Some { value: idx }: { return Option.Some { value: self.values[idx] }; }
+            case Option.None: { return Option.None; }
+        }
+        return Option.None;
+    }
+
+    // Membership check.
+    function containsKey(ref self, key: K): bool {
+        let slot: Option<usize> = findSlot(ref self, key);
+        switch (slot) {
+            case Option.Some { value: _i }: { return true; }
+            case Option.None: { return false; }
+        }
+        return false;
+    }
+
+    // Remove the entry for `key`. Returns true if an entry was removed.
+    // Tombstone keeps probes correct; the slot will be reused on the next
+    // matching insert.
+    function remove(ref self, key: K): bool {
+        let slot: Option<usize> = findSlot(ref self, key);
+        switch (slot) {
+            case Option.Some { value: idx }: {
+                self.states[idx] = STATE_TOMBSTONE;
+                self.len = self.len - 1;
+                return true;
+            }
+            case Option.None: { return false; }
+        }
+        return false;
+    }
+
+    // Reset to empty without shrinking the backing buffers.
+    function clear(ref self): void {
+        let i: usize = 0;
+        while (i < self.cap) {
+            self.states[i] = STATE_EMPTY;
+            i = i + 1;
+        }
+        self.len  = 0;
+        self.used = 0;
+    }
+
+    function isEmpty(ref self): bool {
+        return self.len == 0;
+    }
 }
 
 // Hash a key into a bucket index for this map's current capacity.
@@ -77,7 +150,7 @@ function bucketOf<K, V>(ref m: Map<K, V>, key: K): usize {
 // Probe starting at `start` for the slot that either holds `key`
 // (returned as `Option.Some { value: index }`) or is the first empty
 // slot (returned as `Option.None` - see `findInsertSlot` for the
-// insert-time variant). Used by `mapGet` / `mapContainsKey`.
+// insert-time variant). Used by `get` / `containsKey`.
 function findSlot<K, V>(ref m: Map<K, V>, key: K): Option<usize> {
     if (m.cap == 0) { return Option.None; }
     let start: usize = bucketOf(ref m, key);
@@ -195,78 +268,6 @@ function maybeGrow<K, V>(ref m: Map<K, V>): void {
     }
 }
 
-// Insert or overwrite. Returns true on overwrite (existing key),
-// false on fresh insert.
-export function mapInsert<K, V>(ref m: Map<K, V>, key: K, value: V): bool {
-    maybeGrow(ref m);
-    let idx: usize = findInsertSlot(ref m, key);
-    let st: uint8 = m.states[idx];
-    let was_present: bool = st == STATE_OCCUPIED;
-    m.keys[idx]   = key;
-    m.values[idx] = value;
-    if (st == STATE_EMPTY) {
-        m.used = m.used + 1;
-    }
-    m.states[idx] = STATE_OCCUPIED;
-    if (!was_present) {
-        m.len = m.len + 1;
-    }
-    return was_present;
-}
-
-// Lookup. Returns `Option.Some { value }` when present, `Option.None`
-// otherwise.
-export function mapGet<K, V>(ref m: Map<K, V>, key: K): Option<V> {
-    let slot: Option<usize> = findSlot(ref m, key);
-    switch (slot) {
-        case Option.Some { value: idx }: { return Option.Some { value: m.values[idx] }; }
-        case Option.None: { return Option.None; }
-    }
-    return Option.None;
-}
-
-// Membership check.
-export function mapContainsKey<K, V>(ref m: Map<K, V>, key: K): bool {
-    let slot: Option<usize> = findSlot(ref m, key);
-    switch (slot) {
-        case Option.Some { value: _i }: { return true; }
-        case Option.None: { return false; }
-    }
-    return false;
-}
-
-// Remove the entry for `key`. Returns true if an entry was removed.
-// Tombstone keeps probes correct; the slot will be reused on the next
-// matching insert.
-export function mapRemove<K, V>(ref m: Map<K, V>, key: K): bool {
-    let slot: Option<usize> = findSlot(ref m, key);
-    switch (slot) {
-        case Option.Some { value: idx }: {
-            m.states[idx] = STATE_TOMBSTONE;
-            m.len = m.len - 1;
-            return true;
-        }
-        case Option.None: { return false; }
-    }
-    return false;
-}
-
-// Number of occupied entries (tombstones excluded).
-export function mapLen<K, V>(ref m: Map<K, V>): usize {
-    return m.len;
-}
-
-// Reset to empty without shrinking the backing buffers.
-export function mapClear<K, V>(ref m: Map<K, V>): void {
-    let i: usize = 0;
-    while (i < m.cap) {
-        m.states[i] = STATE_EMPTY;
-        i = i + 1;
-    }
-    m.len  = 0;
-    m.used = 0;
-}
-
 // ----- Iteration ------------------------------------------------------
 
 // A single (key, value) pair yielded by `for entry in mapIter(ref m)`.
@@ -275,7 +276,7 @@ export type MapEntry<K, V> { key: K, value: V }
 // `MapIter<K, V>` walks occupied slots in storage order, skipping
 // EMPTY/TOMBSTONE. It holds borrowing views of the map's backing
 // arrays (the fat pointers are copies; the heap data is shared). The
-// iterator is invalidated if the map mutates (a `mapInsert` that
+// iterator is invalidated if the map mutates (an `insert` that
 // triggers a rehash relocates the backing buffers, leaving the
 // view dangling) - keep the iter scoped tightly around its loop.
 export type MapIter<K, V> implements Iterable<MapEntry<K, V>> {

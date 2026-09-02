@@ -2,7 +2,7 @@
 //
 // The division of labour, which everything else here follows from:
 //
-//   `string` is the BORROWED view. Literals, `view(ref t)`, a slice of a
+//   `string` is the BORROWED view. Literals, `t.view()`, a slice of a
 //   buffer someone else owns. It is one pointer, it never allocates, it is
 //   never freed, and it is what you pass to anything that only reads.
 //
@@ -41,7 +41,26 @@ import { Allocator, currentAllocator, pushAllocator, popAllocator } from "./allo
 // free back through that same one, whatever is ambient at the time. A Text
 // built inside an arena scope frees into the arena; a malloc-backed one stays
 // malloc-backed even if it grows while an arena is installed.
-export type Text implements (Disposable, Display) propagates<disposable> {
+// What a text builder can do, as a contract rather than a set of free
+// functions: `t.push("x")`, `t.pushUint(n)`, `t.view()`. See the container
+// contracts in std/core/traits.yoop for why the operations live on a trait.
+export trait TextBuilder {
+    function reserve(ref self, wanted: usize): void;
+    function pushBytes(ref self, src: uint8[]): void;
+    function push(ref self, s: string): void;
+    function pushByte(ref self, b: uint8): void;
+    function pushUint(ref self, v: uint64): void;
+    function pushInt(ref self, v: int64): void;
+    function pushChar(ref self, cp: uint32): void;
+    function pushText(ref self, other: ref Text): void;
+    function clear(ref self): void;
+    function truncateBytes(ref self, newLen: usize): void;
+    function view(ref self): string;
+    function bytes(ref self): uint8[];
+    function isEmpty(ref self): bool;
+}
+
+export type Text implements (Disposable, Display, TextBuilder) propagates<disposable> {
     data: uint8[],
     len: usize,
     cap: usize,
@@ -53,7 +72,7 @@ export type Text implements (Disposable, Display) propagates<disposable> {
     // bytes into the concatenated result while the Text is still alive - and
     // it means interpolating a Text costs nothing beyond that copy.
     function toString(ref self): string {
-        return view(ref self);
+        return self.view();
     }
 
     function dispose(ref self): void {
@@ -64,6 +83,173 @@ export type Text implements (Disposable, Display) propagates<disposable> {
             self.cap = 0;
             self.len = 0;
         }
+    }
+
+    // ----- TextBuilder ---------------------------------------------------
+
+    // Ensure room for `wanted` bytes of CONTENT (the nul is accounted for on top).
+    // Grows by doubling, like Vec, so repeated appends stay amortized O(1).
+    function reserve(ref self, wanted: usize): void {
+        let need: usize = wanted + 1;
+        if (self.cap >= need) { return; }
+        let newCap: usize = self.cap * 2;
+        if (newCap < 8) { newCap = 8; }
+        while (newCap < need) { newCap = newCap * 2; }
+
+        // Grow through this Text's own allocator, not whatever is ambient now.
+        let prev: Allocator = pushAllocator(self.alloc);
+        let fresh: uint8[] = intr.ctxAlloc(newCap);
+        let i: usize = 0;
+        while (i < self.len) {
+            fresh[i] = self.data[i];
+            i = i + 1;
+        }
+        if (self.cap > 0) {
+            intr.ctxFree(self.data);
+        }
+        popAllocator(prev);
+        fresh[self.len] = 0;
+        self.data = fresh;
+        self.cap = newCap;
+    }
+
+    function pushBytes(ref self, src: uint8[]): void {
+        self.reserve(self.len + src.len);
+        let i: usize = 0;
+        while (i < src.len) {
+            self.data[self.len + i] = src[i];
+            i = i + 1;
+        }
+        self.len = self.len + src.len;
+        self.data[self.len] = 0;
+    }
+
+    // Append a borrowed string.
+    function push(ref self, s: string): void {
+        self.pushBytes(intr.stringAsBytes(s));
+    }
+
+    // Append one raw byte. No UTF-8 checking - this is the building block
+    // `pushChar` is written in terms of.
+    function pushByte(ref self, b: uint8): void {
+        self.reserve(self.len + 1);
+        self.data[self.len] = b;
+        self.len = self.len + 1;
+        self.data[self.len] = 0;
+    }
+
+    // Append a base-10 unsigned integer.
+    //
+    // Formats straight into the buffer rather than going through
+    // `format.uintToString`, whose result is a malloc'd `string` that ignores the
+    // allocator context and that nothing frees. Anything appending numbers in a
+    // loop (an IR emitter, a token dump) wants this instead.
+    function pushUint(ref self, v: uint64): void {
+        if (v == 0) {
+            self.pushByte('0');
+            return;
+        }
+        // Two passes so there is no scratch buffer at all: count the digits,
+        // reserve exactly that, then fill the run backwards in place.
+        let n: usize = 0;
+        let probe: uint64 = v;
+        while (probe > 0) {
+            n = n + 1;
+            probe = probe / 10;
+        }
+        self.reserve(self.len + n);
+        let rest: uint64 = v;
+        let i: usize = n;
+        while (i > 0) {
+            i = i - 1;
+            self.data[self.len + i] = uint8(48 + (rest % 10));
+            rest = rest / 10;
+        }
+        self.len = self.len + n;
+        self.data[self.len] = 0;
+    }
+
+    // Append a base-10 signed integer.
+    function pushInt(ref self, v: int64): void {
+        if (v < 0) {
+            self.pushByte('-');
+            // Negate in uint64 so int64 min does not overflow on the way.
+            self.pushUint(uint64(0) - uint64(v));
+            return;
+        }
+        self.pushUint(uint64(v));
+    }
+
+    // Append one Unicode codepoint, UTF-8 encoded. Surrogates and out-of-range
+    // scalars are replaced with U+FFFD rather than producing invalid UTF-8.
+    // UTF-8 encoding, per byte-count case:
+    //   1 byte:  0xxxxxxx
+    //   2 bytes: 110xxxxx 10xxxxxx
+    //   3 bytes: 1110xxxx 10xxxxxx 10xxxxxx
+    //   4 bytes: 11110xxx 10xxxxxx 10xxxxxx 10xxxxxx
+    // Each 10xxxxxx byte carries the next 6 bits, most significant first.
+
+    function pushChar(ref self, cp: uint32): void {
+        let c: uint32 = cp;
+
+        // Anything outside Unicode, or a lone surrogate, becomes U+FFFD.
+        if (c > MAX_CODEPOINT) { c = REPLACEMENT; }
+        if (c >= SURROGATE_START && c < SURROGATE_END) { c = REPLACEMENT; }
+
+        if (c < 0b1000_0000) {              // fits in 7 bits
+            self.pushByte(uint8(c));
+        } else if (c < 0b1000_0000_0000) {  // fits in 11 bits = 5 + 6
+            self.pushByte(uint8(TAG_2BYTE | (c >> 6)));
+            self.pushByte(uint8(TAG_CONT  | (c & CONT_BITS)));
+        } else if (c < 0b0001_0000_0000_0000_0000) {  // fits in 16 bits = 4 + 6 + 6
+            self.pushByte(uint8(TAG_3BYTE | (c >> 12)));
+            self.pushByte(uint8(TAG_CONT  | ((c >> 6) & CONT_BITS)));
+            self.pushByte(uint8(TAG_CONT  | (c & CONT_BITS)));
+        } else {                                       // up to 21 bits = 3 + 6 + 6 + 6
+            self.pushByte(uint8(TAG_4BYTE | (c >> 18)));
+            self.pushByte(uint8(TAG_CONT  | ((c >> 12) & CONT_BITS)));
+            self.pushByte(uint8(TAG_CONT  | ((c >> 6) & CONT_BITS)));
+            self.pushByte(uint8(TAG_CONT  | (c & CONT_BITS)));
+        }
+    }
+
+    // Append another Text's contents. `other` is untouched.
+    function pushText(ref self, other: ref Text): void {
+        self.pushBytes(other.bytes());
+    }
+
+    // Drop the contents, keep the buffer. Capacity is unchanged, so a Text reused
+    // across loop iterations stops allocating after the first few.
+    function clear(ref self): void {
+        self.len = 0;
+        if (self.cap > 0) { self.data[0] = 0; }
+    }
+
+    // Cut back to `newLen` BYTES. Longer than the current length is a no-op.
+    // Does not check that newLen lands on a codepoint boundary; use
+    // byteOffsetOfChar to compute a safe cut.
+    function truncateBytes(ref self, newLen: usize): void {
+        if (newLen >= self.len) { return; }
+        self.len = newLen;
+        self.data[self.len] = 0;
+    }
+
+    // Borrow the contents as a `string`. Free: no copy, no strlen, no allocation.
+    // The result is invalidated by anything that can reallocate (`push`,
+    // `reserve`, `dispose`), so do not hold it across a mutation.
+    function view(ref self): string {
+        // The intrinsic discards the fat pointer's len and relies on the nul that
+        // invariant 2 guarantees, so `data` can be handed over whole.
+        return intr.bytesAsStringUnchecked(self.data);
+    }
+
+    // Borrow the contents as bytes, excluding the nul.
+    function bytes(ref self): uint8[] {
+        return intr.arraySlice(self.data, 0, self.len);
+    }
+
+    function isEmpty(ref self): bool {
+        return self.len == 0;
     }
 }
 
@@ -84,7 +270,7 @@ export function make(capHint: usize): Text propagates<disposable> {
 export function fromString(s: string): Text propagates<disposable> {
     let src: uint8[] = intr.stringAsBytes(s);
     let t: Text = make(src.len);
-    pushBytes(ref t, src);
+    t.pushBytes(src);
     return t;
 }
 
@@ -92,115 +278,11 @@ export function fromString(s: string): Text propagates<disposable> {
 // UTF-8; use strings.stringFromBytes first if the source is untrusted.
 export function fromBytes(src: uint8[]): Text propagates<disposable> {
     let t: Text = make(src.len);
-    pushBytes(ref t, src);
+    t.pushBytes(src);
     return t;
 }
 
 // ----- capacity ------------------------------------------------------------
-
-// Ensure room for `wanted` bytes of CONTENT (the nul is accounted for on top).
-// Grows by doubling, like Vec, so repeated appends stay amortized O(1).
-export function reserve(t: ref Text, wanted: usize): void {
-    let need: usize = wanted + 1;
-    if (t.cap >= need) { return; }
-    let newCap: usize = t.cap * 2;
-    if (newCap < 8) { newCap = 8; }
-    while (newCap < need) { newCap = newCap * 2; }
-
-    // Grow through this Text's own allocator, not whatever is ambient now.
-    let prev: Allocator = pushAllocator(t.alloc);
-    let fresh: uint8[] = intr.ctxAlloc(newCap);
-    let i: usize = 0;
-    while (i < t.len) {
-        fresh[i] = t.data[i];
-        i = i + 1;
-    }
-    if (t.cap > 0) {
-        intr.ctxFree(t.data);
-    }
-    popAllocator(prev);
-    fresh[t.len] = 0;
-    t.data = fresh;
-    t.cap = newCap;
-}
-
-// ----- mutation ------------------------------------------------------------
-
-export function pushBytes(t: ref Text, src: uint8[]): void {
-    reserve(ref t, t.len + src.len);
-    let i: usize = 0;
-    while (i < src.len) {
-        t.data[t.len + i] = src[i];
-        i = i + 1;
-    }
-    t.len = t.len + src.len;
-    t.data[t.len] = 0;
-}
-
-// Append a borrowed string.
-export function push(t: ref Text, s: string): void {
-    pushBytes(ref t, intr.stringAsBytes(s));
-}
-
-// Append one raw byte. No UTF-8 checking - this is the building block
-// `pushChar` is written in terms of.
-export function pushByte(t: ref Text, b: uint8): void {
-    reserve(ref t, t.len + 1);
-    t.data[t.len] = b;
-    t.len = t.len + 1;
-    t.data[t.len] = 0;
-}
-
-// Append a base-10 unsigned integer.
-//
-// Formats straight into the buffer rather than going through
-// `format.uintToString`, whose result is a malloc'd `string` that ignores the
-// allocator context and that nothing frees. Anything appending numbers in a
-// loop (an IR emitter, a token dump) wants this instead.
-export function pushUint(t: ref Text, v: uint64): void {
-    if (v == 0) {
-        pushByte(ref t, '0');
-        return;
-    }
-    // Two passes so there is no scratch buffer at all: count the digits,
-    // reserve exactly that, then fill the run backwards in place.
-    let n: usize = 0;
-    let probe: uint64 = v;
-    while (probe > 0) {
-        n = n + 1;
-        probe = probe / 10;
-    }
-    reserve(ref t, t.len + n);
-    let rest: uint64 = v;
-    let i: usize = n;
-    while (i > 0) {
-        i = i - 1;
-        t.data[t.len + i] = uint8(48 + (rest % 10));
-        rest = rest / 10;
-    }
-    t.len = t.len + n;
-    t.data[t.len] = 0;
-}
-
-// Append a base-10 signed integer.
-export function pushInt(t: ref Text, v: int64): void {
-    if (v < 0) {
-        pushByte(ref t, '-');
-        // Negate in uint64 so int64 min does not overflow on the way.
-        pushUint(ref t, uint64(0) - uint64(v));
-        return;
-    }
-    pushUint(ref t, uint64(v));
-}
-
-// Append one Unicode codepoint, UTF-8 encoded. Surrogates and out-of-range
-// scalars are replaced with U+FFFD rather than producing invalid UTF-8.
-// UTF-8 encoding, per byte-count case:
-//   1 byte:  0xxxxxxx
-//   2 bytes: 110xxxxx 10xxxxxx
-//   3 bytes: 1110xxxx 10xxxxxx 10xxxxxx
-//   4 bytes: 11110xxx 10xxxxxx 10xxxxxx 10xxxxxx
-// Each 10xxxxxx byte carries the next 6 bits, most significant first.
 
 const TAG_2BYTE:  uint32 = 0b1100_0000;
 const TAG_3BYTE:  uint32 = 0b1110_0000;
@@ -213,70 +295,6 @@ const SURROGATE_START: uint32 = 0b1101_1000_0000_0000;            // 0xD800
 const SURROGATE_END:   uint32 = 0b1110_0000_0000_0000;            // 0xE000, exclusive
 const REPLACEMENT:     uint32 = 0b1111_1111_1111_1101;            // 0xFFFD
 
-export function pushChar(t: ref Text, cp: uint32): void {
-    let c: uint32 = cp;
-
-    // Anything outside Unicode, or a lone surrogate, becomes U+FFFD.
-    if (c > MAX_CODEPOINT) { c = REPLACEMENT; }
-    if (c >= SURROGATE_START && c < SURROGATE_END) { c = REPLACEMENT; }
-
-    if (c < 0b1000_0000) {              // fits in 7 bits
-        pushByte(ref t, uint8(c));
-    } else if (c < 0b1000_0000_0000) {  // fits in 11 bits = 5 + 6
-        pushByte(ref t, uint8(TAG_2BYTE | (c >> 6)));
-        pushByte(ref t, uint8(TAG_CONT  | (c & CONT_BITS)));
-    } else if (c < 0b0001_0000_0000_0000_0000) {  // fits in 16 bits = 4 + 6 + 6
-        pushByte(ref t, uint8(TAG_3BYTE | (c >> 12)));
-        pushByte(ref t, uint8(TAG_CONT  | ((c >> 6) & CONT_BITS)));
-        pushByte(ref t, uint8(TAG_CONT  | (c & CONT_BITS)));
-    } else {                                       // up to 21 bits = 3 + 6 + 6 + 6
-        pushByte(ref t, uint8(TAG_4BYTE | (c >> 18)));
-        pushByte(ref t, uint8(TAG_CONT  | ((c >> 12) & CONT_BITS)));
-        pushByte(ref t, uint8(TAG_CONT  | ((c >> 6) & CONT_BITS)));
-        pushByte(ref t, uint8(TAG_CONT  | (c & CONT_BITS)));
-    }
-}
-
-// Append another Text's contents. `other` is untouched.
-export function pushText(t: ref Text, other: ref Text): void {
-    pushBytes(ref t, bytes(ref other));
-}
-
-// Drop the contents, keep the buffer. Capacity is unchanged, so a Text reused
-// across loop iterations stops allocating after the first few.
-export function clear(t: ref Text): void {
-    t.len = 0;
-    if (t.cap > 0) { t.data[0] = 0; }
-}
-
-// Cut back to `newLen` BYTES. Longer than the current length is a no-op.
-// Does not check that newLen lands on a codepoint boundary; use
-// byteOffsetOfChar to compute a safe cut.
-export function truncateBytes(t: ref Text, newLen: usize): void {
-    if (newLen >= t.len) { return; }
-    t.len = newLen;
-    t.data[t.len] = 0;
-}
-
-// ----- views (no allocation) -----------------------------------------------
-
-// Borrow the contents as a `string`. Free: no copy, no strlen, no allocation.
-// The result is invalidated by anything that can reallocate (`push`,
-// `reserve`, `dispose`), so do not hold it across a mutation.
-export function view(t: ref Text): string {
-    // The intrinsic discards the fat pointer's len and relies on the nul that
-    // invariant 2 guarantees, so `data` can be handed over whole.
-    return intr.bytesAsStringUnchecked(t.data);
-}
-
-// Borrow the contents as bytes, excluding the nul.
-export function bytes(t: ref Text): uint8[] {
-    return intr.arraySlice(t.data, 0, t.len);
-}
-
-export function isEmpty(t: ref Text): bool {
-    return t.len == 0;
-}
 
 // ----- codepoints ----------------------------------------------------------
 
@@ -477,8 +495,8 @@ export function concat(a: string, b: string): Text propagates<disposable> {
     let sa: uint8[] = intr.stringAsBytes(a);
     let sb: uint8[] = intr.stringAsBytes(b);
     let t: Text = make(sa.len + sb.len);
-    pushBytes(ref t, sa);
-    pushBytes(ref t, sb);
+    t.pushBytes(sa);
+    t.pushBytes(sb);
     return t;
 }
 
@@ -486,8 +504,8 @@ export function join(parts: string[], sep: string): Text propagates<disposable> 
     let t: Text = make(0);
     let i: usize = 0;
     while (i < parts.len) {
-        if (i > 0) { push(ref t, sep); }
-        push(ref t, parts[i]);
+        if (i > 0) { t.push(sep); }
+        t.push(parts[i]);
         i = i + 1;
     }
     return t;
@@ -498,7 +516,7 @@ export function repeat(s: string, n: usize): Text propagates<disposable> {
     let t: Text = make(src.len * n);
     let i: usize = 0;
     while (i < n) {
-        pushBytes(ref t, src);
+        t.pushBytes(src);
         i = i + 1;
     }
     return t;
@@ -514,7 +532,7 @@ export function toLowerAscii(s: string): Text propagates<disposable> {
     while (i < src.len) {
         let c: uint8 = src[i];
         if (c >= 65 && c <= 90) { c = c + 32; }
-        pushByte(ref t, c);
+        t.pushByte(c);
         i = i + 1;
     }
     return t;
@@ -527,7 +545,7 @@ export function toUpperAscii(s: string): Text propagates<disposable> {
     while (i < src.len) {
         let c: uint8 = src[i];
         if (c >= 97 && c <= 122) { c = c - 32; }
-        pushByte(ref t, c);
+        t.pushByte(c);
         i = i + 1;
     }
     return t;
@@ -573,11 +591,11 @@ export function replaceAll(s: string, needle: string, repl: string): Text propag
     while (i < src.len) {
         let at: usize = indexOfFrom(s, needle, i);
         if (at >= src.len) {
-            pushBytes(ref t, intr.arraySlice(src, i, src.len));
+            t.pushBytes(intr.arraySlice(src, i, src.len));
             return t;
         }
-        pushBytes(ref t, intr.arraySlice(src, i, at));
-        pushBytes(ref t, rep);
+        t.pushBytes(intr.arraySlice(src, i, at));
+        t.pushBytes(rep);
         i = at + nee.len;
     }
     return t;
@@ -617,14 +635,14 @@ export function replaceChar(s: string, n: usize, repl: string): Text propagates<
     let start: usize = byteOffsetOfChar(s, n);
     let t: Text = make(src.len);
     if (start >= src.len) {
-        pushBytes(ref t, src);
+        t.pushBytes(src);
         return t;
     }
     let w: usize = seqLen(src[start]);
     if (w == 0) { w = 1; }
-    pushBytes(ref t, intr.arraySlice(src, 0, start));
-    push(ref t, repl);
-    pushBytes(ref t, intr.arraySlice(src, start + w, src.len));
+    t.pushBytes(intr.arraySlice(src, 0, start));
+    t.push(repl);
+    t.pushBytes(intr.arraySlice(src, start + w, src.len));
     return t;
 }
 
@@ -633,17 +651,17 @@ export function replaceChar(s: string, n: usize, repl: string): Text propagates<
 export function padStart(s: string, width: usize, fill: string): Text propagates<disposable> {
     let t: Text = make(width);
     if (fill.len > 0) {
-        while (t.len + s.len < width) { push(ref t, fill); }
+        while (t.len + s.len < width) { t.push(fill); }
     }
-    push(ref t, s);
+    t.push(s);
     return t;
 }
 
 export function padEnd(s: string, width: usize, fill: string): Text propagates<disposable> {
     let t: Text = make(width);
-    push(ref t, s);
+    t.push(s);
     if (fill.len > 0) {
-        while (t.len < width) { push(ref t, fill); }
+        while (t.len < width) { t.push(fill); }
     }
     return t;
 }

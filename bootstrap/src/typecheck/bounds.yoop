@@ -54,7 +54,7 @@ export function resolveTypeParamBounds(
   while (i < list.childCount && i < params.len) {
     const paramNode = nodeAt(ref ast, childAt(ref ast, list, i));
     if (paramNode.childA != 0) {
-      const paramId = vec.vecGet(ref params, i);
+      const paramId = params.get(i);
       disposable bounds: Vec<TypeId> =
         resolveBoundList(ref prog, ref tm, ref ast, paramNode);
       setTypeParamBounds(ref prog, paramId, paramNode.name, ref bounds);
@@ -76,7 +76,7 @@ function resolveBoundList(
     const annotId = childAt(ref ast, list, i);
     const t = resolveOneBound(ref prog, ref tm, ref ast, annotId, paramNode.name);
     if (t != TYPE_ERROR_ID) {
-      vec.vecPush(ref bounds, t);
+      bounds.push(t);
     }
     i += 1;
   }
@@ -140,7 +140,7 @@ function resolveOneBound(
     const argList = nodeAt(ref ast, annot.childA);
     let a: usize = 0;
     while (a < argList.childCount) {
-      vec.vecPush(ref args,
+      args.push(
         resolveTypeAnnotation(ref prog, ref tm, ref ast, childAt(ref ast, argList, a)));
       a += 1;
     }
@@ -157,7 +157,7 @@ function setTypeParamBounds(
   switch (typeAt(ref prog, paramId)) {
     case Type.TypeParam { name: n, originDecl: o, bounds: old }: {
       let copied: Vec<TypeId> = vec.vecNew(bounds.len);
-      vec.vecExtendFrom(ref copied, vec.vecAsArray(ref bounds));
+      copied.extendFrom(bounds.asArray());
       setType(ref prog, paramId, Type.TypeParam {
         name: n, originDecl: o, bounds: copied,
       });

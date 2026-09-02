@@ -11,13 +11,13 @@ import { TokenTags, posToSourceLocation } from "../lex";
 import * as str from "std/core/strings.yoop";
 
 function parseReturnStatement(ref ps: ParserState): ParsingResult {
-  SelfLexing.expect(ref ps, TokenTags.RETURN)?;
-  let node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.RETURN_STATEMENT);
-  if (SelfLexing.peek(ref ps).tag != TokenTags.SEMICOLON) {
+  ps.expect(TokenTags.RETURN)?;
+  let node = ps.buildSourcedNode(ASTNodeKind.RETURN_STATEMENT);
+  if (ps.peek().tag != TokenTags.SEMICOLON) {
     node.childA = parseExpression(ref ps, 0)?;
   }
-  SelfLexing.expect(ref ps, TokenTags.SEMICOLON)?;
-  return Result.Ok { value: SelfLexing.pushNode(ref ps, node ) };
+  ps.expect(TokenTags.SEMICOLON)?;
+  return Result.Ok { value: ps.pushNode(node ) };
 }
 
 // `_ = expr;` - evaluate for its EFFECTS and throw the value away.
@@ -30,16 +30,16 @@ function parseReturnStatement(ref ps: ParserState): ParsingResult {
 // are checked and emitted identically from here on, so every pass past the
 // parser handles the pair together.
 function parseDiscardStatement(ref ps: ParserState): ParsingResult {
-  SelfLexing.expect(ref ps, TokenTags.DISCARD)?;
-  let node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.DISCARD_STATEMENT);
-  SelfLexing.expect(ref ps, TokenTags.EQ)?;
+  ps.expect(TokenTags.DISCARD)?;
+  let node = ps.buildSourcedNode(ASTNodeKind.DISCARD_STATEMENT);
+  ps.expect(TokenTags.EQ)?;
   node.childA = parseExpression(ref ps, 0)?;
-  SelfLexing.expect(ref ps, TokenTags.SEMICOLON)?;
-  return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
+  ps.expect(TokenTags.SEMICOLON)?;
+  return Result.Ok { value: ps.pushNode(node) };
 }
 
 export function parseStatement(ref ps: ParserState): ParsingResult {
-  const peekTag = SelfLexing.peek(ref ps).tag;
+  const peekTag = ps.peek().tag;
 
   // A kind can precede two things in statement position, and the token after
   // the name is what tells them apart.
@@ -98,26 +98,26 @@ export function parseStatement(ref ps: ParserState): ParsingResult {
 //   childC = else branch: a BLOCK, or another IF_STATEMENT for `else if`
 //            (0 when there is no else)
 function parseIfStatement(ref ps: ParserState): ParsingResult {
-  SelfLexing.expect(ref ps, TokenTags.IF)?;
-  let node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.IF_STATEMENT);
+  ps.expect(TokenTags.IF)?;
+  let node = ps.buildSourcedNode(ASTNodeKind.IF_STATEMENT);
 
-  SelfLexing.expect(ref ps, TokenTags.LPAREN)?;
+  ps.expect(TokenTags.LPAREN)?;
   node.childA = parseExpression(ref ps, 0)?;
-  SelfLexing.expect(ref ps, TokenTags.RPAREN)?;
+  ps.expect(TokenTags.RPAREN)?;
   node.childB = parseBlock(ref ps)?;
 
-  if (SelfLexing.peek(ref ps).tag == TokenTags.ELSE) {
-    SelfLexing.advance(ref ps)?;
+  if (ps.peek().tag == TokenTags.ELSE) {
+    ps.advance()?;
     // `else if` chains by nesting an IF_STATEMENT in the else slot, so codegen
     // needs no special case for the chain.
-    if (SelfLexing.peek(ref ps).tag == TokenTags.IF) {
+    if (ps.peek().tag == TokenTags.IF) {
       node.childC = parseIfStatement(ref ps)?;
     } else {
       node.childC = parseBlock(ref ps)?;
     }
   }
 
-  return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
+  return Result.Ok { value: ps.pushNode(node) };
 }
 
 // `while (cond) { ... }`
@@ -125,36 +125,36 @@ function parseIfStatement(ref ps: ParserState): ParsingResult {
 //   childA = condition
 //   childB = body block
 function parseWhileStatement(ref ps: ParserState): ParsingResult {
-  SelfLexing.expect(ref ps, TokenTags.WHILE)?;
-  let node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.WHILE_STATEMENT);
+  ps.expect(TokenTags.WHILE)?;
+  let node = ps.buildSourcedNode(ASTNodeKind.WHILE_STATEMENT);
 
-  SelfLexing.expect(ref ps, TokenTags.LPAREN)?;
+  ps.expect(TokenTags.LPAREN)?;
   node.childA = parseExpression(ref ps, 0)?;
-  SelfLexing.expect(ref ps, TokenTags.RPAREN)?;
+  ps.expect(TokenTags.RPAREN)?;
   node.childB = parseBlock(ref ps)?;
 
-  return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
+  return Result.Ok { value: ps.pushNode(node) };
 }
 
 export function parseBlock(ref ps: ParserState): ParsingResult {
   // shape =>> { statements[] }
-  SelfLexing.expect(ref ps, TokenTags.LCURLY)?;
+  ps.expect(TokenTags.LCURLY)?;
   const loc = posToSourceLocation(ps.src, ps.pos, 1);
-  let node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.BLOCK);
+  let node = ps.buildSourcedNode(ASTNodeKind.BLOCK);
 
   // parse rest of statements
   disposable ids: Vec<NodeId> = vec.vecNew(4);
   while (untilClosing(ref ps, TokenTags.RCURLY)) {
     // eat statements and add to body...
-    vec.vecPush(ref ids, parseStatement(ref ps)?);
+    ids.push(parseStatement(ref ps)?);
   }
   // child start nodeId...
   // child count
-  node.childA = SelfLexing.buildListNode(ref ps, ref ids, loc);
-  SelfLexing.expect(ref ps, TokenTags.RCURLY)?;
+  node.childA = ps.buildListNode(ref ids, loc);
+  ps.expect(TokenTags.RCURLY)?;
 
   // push node into ps...
-  return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
+  return Result.Ok { value: ps.pushNode(node) };
 }
 
 // `for (let i = 0; i < n; i = i + 1) { ... }`
@@ -172,22 +172,22 @@ export function parseBlock(ref ps: ParserState): ParsingResult {
 //   childD = the step expression
 //   childE = the body block
 function parseForStatement(ref ps: ParserState): ParsingResult {
-  SelfLexing.expect(ref ps, TokenTags.FOR)?;
+  ps.expect(TokenTags.FOR)?;
 
   // Two loops share the keyword, and the token right after it is what tells
   // them apart: `for (` is the counted form, anything else is `for x in xs`.
   // Cheaper and clearer than a lookahead for `in`, since the counted form
   // ALWAYS parenthesizes.
-  if (SelfLexing.peek(ref ps).tag != TokenTags.LPAREN) {
+  if (ps.peek().tag != TokenTags.LPAREN) {
     return parseForInLoop(ref ps);
   }
 
-  let node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.FOR_LOOP);
-  SelfLexing.expect(ref ps, TokenTags.LPAREN)?;
+  let node = ps.buildSourcedNode(ASTNodeKind.FOR_LOOP);
+  ps.expect(TokenTags.LPAREN)?;
 
   // `const` cannot be stepped, so refuse it by name rather than letting the
   // step fail later with something less obvious.
-  if (SelfLexing.peek(ref ps).tag == TokenTags.CONST) {
+  if (ps.peek().tag == TokenTags.CONST) {
     return Result.Err { error: SelfLexing.createParsingError(
       ref ps,
       `a for-loop counter must be declared with "let" - "const" cannot be stepped`,
@@ -195,21 +195,21 @@ function parseForStatement(ref ps: ParserState): ParsingResult {
     )};
   }
 
-  node.flagA = SelfLexing.peek(ref ps).tag == TokenTags.LET;
+  node.flagA = ps.peek().tag == TokenTags.LET;
   if (node.flagA) {
-    SelfLexing.advance(ref ps)?;
+    ps.advance()?;
   }
   node.name = parseIdentAsName(ref ps)?;
-  if (node.flagA && SelfLexing.peek(ref ps).tag == TokenTags.COLON) {
-    SelfLexing.advance(ref ps)?;
+  if (node.flagA && ps.peek().tag == TokenTags.COLON) {
+    ps.advance()?;
     node.childA = parseTypeAnnotation(ref ps)?;
   }
-  SelfLexing.expect(ref ps, TokenTags.EQ)?;
+  ps.expect(TokenTags.EQ)?;
   node.childB = parseExpression(ref ps, 0)?;
-  SelfLexing.expect(ref ps, TokenTags.SEMICOLON)?;
+  ps.expect(TokenTags.SEMICOLON)?;
 
   node.childC = parseExpression(ref ps, 0)?;
-  SelfLexing.expect(ref ps, TokenTags.SEMICOLON)?;
+  ps.expect(TokenTags.SEMICOLON)?;
 
   // The step is an implicit assignment to the counter, so only the right-hand
   // side is stored. `i = i + 1` today; the compound forms (`i += 1`) lower to
@@ -225,25 +225,25 @@ function parseForStatement(ref ps: ParserState): ParsingResult {
   // `i = i + 1` or the compound form `i += 1`. Both end up as the same stored
   // right-hand side, so the compound spelling needs no new node kind - the same
   // trick the JS reference uses in its step slot.
-  const stepCompound = binaryOpOfCompound(SelfLexing.peek(ref ps).tag);
+  const stepCompound = binaryOpOfCompound(ps.peek().tag);
   if (stepCompound != TokenTags.NOTOKEN) {
-    SelfLexing.advance(ref ps)?;
-    let counterRead = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.IDENT);
+    ps.advance()?;
+    let counterRead = ps.buildSourcedNode(ASTNodeKind.IDENT);
     counterRead.name = node.name;
-    let combined = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.BINARY_EXPRESSION);
+    let combined = ps.buildSourcedNode(ASTNodeKind.BINARY_EXPRESSION);
     combined.operator = stepCompound;
-    combined.childA = SelfLexing.pushNode(ref ps, counterRead);
+    combined.childA = ps.pushNode(counterRead);
     combined.childB = parseExpression(ref ps, 0)?;
-    node.childD = SelfLexing.pushNode(ref ps, combined);
+    node.childD = ps.pushNode(combined);
   } else {
-    SelfLexing.expect(ref ps, TokenTags.EQ)?;
+    ps.expect(TokenTags.EQ)?;
     node.childD = parseExpression(ref ps, 0)?;
   }
 
-  SelfLexing.expect(ref ps, TokenTags.RPAREN)?;
+  ps.expect(TokenTags.RPAREN)?;
   node.childE = parseBlock(ref ps)?;
 
-  return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
+  return Result.Ok { value: ps.pushNode(node) };
 }
 
 // `for name in <expr> { ... }` - walk an array, element by element.
@@ -257,9 +257,9 @@ function parseForStatement(ref ps: ParserState): ParsingResult {
 // nothing for a mismatch to mean. It is also always a fresh binding, so there
 // is no `let` to write either.
 function parseForInLoop(ref ps: ParserState): ParsingResult {
-  let node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.FOR_IN_LOOP);
+  let node = ps.buildSourcedNode(ASTNodeKind.FOR_IN_LOOP);
   node.name = parseIdentAsName(ref ps)?;
-  SelfLexing.expect(ref ps, TokenTags.IN)?;
+  ps.expect(TokenTags.IN)?;
   // The iterable runs right up to the body's `{`, so a trailing `a.b` path
   // must not take that brace for a variant payload. See ParserState's
   // inForInIterExpr.
@@ -269,16 +269,16 @@ function parseForInLoop(ref ps: ParserState): ParsingResult {
   ps.inForInIterExpr = savedForIn;
   node.childA = iterableId;
   node.childB = parseBlock(ref ps)?;
-  return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
+  return Result.Ok { value: ps.pushNode(node) };
 }
 
 // `break;` / `continue;` - just the keyword. Whether one is legal HERE is a
 // typecheck question (it needs an enclosing loop), not a parse one.
 function parseLoopJump(ref ps: ParserState, kind: ASTNodeKind): ParsingResult {
-  let node = SelfLexing.buildSourcedNode(ref ps, kind);
-  SelfLexing.advance(ref ps)?;
-  SelfLexing.expect(ref ps, TokenTags.SEMICOLON)?;
-  return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
+  let node = ps.buildSourcedNode(kind);
+  ps.advance()?;
+  ps.expect(TokenTags.SEMICOLON)?;
+  return Result.Ok { value: ps.pushNode(node) };
 }
 
 // `switch (expr) { case A, B: { ... } default: { ... } }`
@@ -294,55 +294,55 @@ function parseLoopJump(ref ps: ParserState, kind: ASTNodeKind): ParsingResult {
 // Arms do NOT fall through - each is its own block - so no `break` is needed or
 // accepted as an arm terminator.
 function parseSwitchStatement(ref ps: ParserState): ParsingResult {
-  SelfLexing.expect(ref ps, TokenTags.SWITCH)?;
-  let node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.SWITCH_STATEMENT);
-  SelfLexing.expect(ref ps, TokenTags.LPAREN)?;
+  ps.expect(TokenTags.SWITCH)?;
+  let node = ps.buildSourcedNode(ASTNodeKind.SWITCH_STATEMENT);
+  ps.expect(TokenTags.LPAREN)?;
   node.childA = parseExpression(ref ps, 0)?;
-  SelfLexing.expect(ref ps, TokenTags.RPAREN)?;
-  SelfLexing.expect(ref ps, TokenTags.LCURLY)?;
+  ps.expect(TokenTags.RPAREN)?;
+  ps.expect(TokenTags.LCURLY)?;
 
   disposable armIds: Vec<NodeId> = vec.vecNew(4);
   while (untilClosing(ref ps, TokenTags.RCURLY)) {
-    vec.vecPush(ref armIds, parseSwitchArm(ref ps)?);
+    armIds.push(parseSwitchArm(ref ps)?);
   }
-  SelfLexing.expect(ref ps, TokenTags.RCURLY)?;
+  ps.expect(TokenTags.RCURLY)?;
 
   spliceChildren(ref ps, ref node, ref armIds);
 
-  return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
+  return Result.Ok { value: ps.pushNode(node) };
 }
 
 function parseSwitchArm(ref ps: ParserState): ParsingResult {
-  let arm = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.SWITCH_ARM);
+  let arm = ps.buildSourcedNode(ASTNodeKind.SWITCH_ARM);
   const loc = posToSourceLocation(ps.src, ps.pos, 1);
 
-  if (SelfLexing.peek(ref ps).tag == TokenTags.DEFAULT) {
-    SelfLexing.advance(ref ps)?;
+  if (ps.peek().tag == TokenTags.DEFAULT) {
+    ps.advance()?;
     arm.flagA = true;
     disposable none: Vec<NodeId> = vec.vecNew(0);
-    arm.childA = SelfLexing.buildListNode(ref ps, ref none, loc);
+    arm.childA = ps.buildListNode(ref none, loc);
   } else {
-    SelfLexing.expect(ref ps, TokenTags.CASE)?;
+    ps.expect(TokenTags.CASE)?;
     // `case 1, 2:` and `case Result.Ok { value: v }, Result.None:` - several
     // patterns share one arm either way.
     disposable patternIds: Vec<NodeId> = vec.vecNew(2);
     while (true) {
       if (peekIsVariantPattern(ref ps)) {
-        vec.vecPush(ref patternIds, parseVariantPattern(ref ps)?);
+        patternIds.push(parseVariantPattern(ref ps)?);
       } else {
-        vec.vecPush(ref patternIds, parseLiteralPattern(ref ps)?);
+        patternIds.push(parseLiteralPattern(ref ps)?);
       }
-      if (SelfLexing.peek(ref ps).tag != TokenTags.COMMA) {
+      if (ps.peek().tag != TokenTags.COMMA) {
         break;
       }
-      SelfLexing.advance(ref ps)?;
+      ps.advance()?;
     }
-    arm.childA = SelfLexing.buildListNode(ref ps, ref patternIds, loc);
+    arm.childA = ps.buildListNode(ref patternIds, loc);
   }
 
-  SelfLexing.expect(ref ps, TokenTags.COLON)?;
+  ps.expect(TokenTags.COLON)?;
   arm.childB = parseBlock(ref ps)?;
-  return Result.Ok { value: SelfLexing.pushNode(ref ps, arm) };
+  return Result.Ok { value: ps.pushNode(arm) };
 }
 
 // Integer literals, and char literals - which ARE integer literals, already
@@ -355,52 +355,52 @@ function parseSwitchArm(ref ps: ParserState): ParsingResult {
 // integer pattern against a bool one, and the value alone cannot tell them
 // apart. Nothing else on a LITERAL_PATTERN uses that slot.
 function parseLiteralPattern(ref ps: ParserState): ParsingResult {
-  let node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.LITERAL_PATTERN);
+  let node = ps.buildSourcedNode(ASTNodeKind.LITERAL_PATTERN);
   let negate = false;
-  if (SelfLexing.peek(ref ps).tag == TokenTags.TRUE || SelfLexing.peek(ref ps).tag == TokenTags.FALSE) {
-    const boolTok = SelfLexing.advance(ref ps)?;
+  if (ps.peek().tag == TokenTags.TRUE || ps.peek().tag == TokenTags.FALSE) {
+    const boolTok = ps.advance()?;
     node.operator = boolTok.tag;
     if (boolTok.tag == TokenTags.TRUE) {
       node.intVal = 1;
     }
-    return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
+    return Result.Ok { value: ps.pushNode(node) };
   }
-  if (SelfLexing.peek(ref ps).tag == TokenTags.MINUS) {
-    SelfLexing.advance(ref ps)?;
+  if (ps.peek().tag == TokenTags.MINUS) {
+    ps.advance()?;
     negate = true;
   }
-  if (SelfLexing.peek(ref ps).tag == TokenTags.CHARLITERAL) {
-    node.intVal = SelfLexing.advance(ref ps)?.intVal;
+  if (ps.peek().tag == TokenTags.CHARLITERAL) {
+    node.intVal = ps.advance()?.intVal;
     node.flagA = negate;
-    return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
+    return Result.Ok { value: ps.pushNode(node) };
   }
   // A float pattern is refused BY NAME, matching the reference. A jump table
   // dispatches on an integer, and testing floats for equality is a different
   // operation with a different answer - `case 0.1` would never match a value
   // arrived at by arithmetic.
-  if (SelfLexing.peek(ref ps).tag == TokenTags.FLOATLITERAL) {
+  if (ps.peek().tag == TokenTags.FLOATLITERAL) {
     return Result.Err { error: SelfLexing.createParsingError(
       ref ps,
       "float literals are not allowed in switch patterns",
       peekLengthUsize(ref ps),
     )};
   }
-  const tok = SelfLexing.expect(ref ps, TokenTags.INTLITERAL)?;
+  const tok = ps.expect(TokenTags.INTLITERAL)?;
   node.intVal = tok.intVal;
   node.flagA = negate;
-  return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
+  return Result.Ok { value: ps.pushNode(node) };
 }
 
 // Two identifiers then a `:` or `=`: a kind-prefixed binding.
 function atKindPrefixedBinding(ref ps: ParserState): bool {
-  if (SelfLexing.peek(ref ps).tag != TokenTags.IDENT) {
+  if (ps.peek().tag != TokenTags.IDENT) {
     return false;
   }
   // Walk the prefix run - several kinds may stack - and look at what follows
   // the last identifier.
   let i: usize = 1;
   while (true) {
-    switch (SelfLexing.peekAhead(ref ps, i)) {
+    switch (ps.peekAhead(i)) {
       case Result.Err { error: e }: { return false; }
       case Result.Ok { value: tok }: {
         if (tok.tag == TokenTags.COLON || tok.tag == TokenTags.EQ) {
@@ -424,16 +424,16 @@ function atKindPrefixedBinding(ref ps: ParserState): bool {
 // a bare one, and stopping at `(` would refuse the spelling every std user
 // actually writes - values from std must come through a namespace.
 function atKindPrefixedBlock(ref ps: ParserState): bool {
-  if (SelfLexing.peek(ref ps).tag != TokenTags.IDENT) {
+  if (ps.peek().tag != TokenTags.IDENT) {
     return false;
   }
-  switch (SelfLexing.peekAhead(ref ps, 1)) {
+  switch (ps.peekAhead(1)) {
     case Result.Err { error: e }: { return false; }
     case Result.Ok { value: second }: {
       if (second.tag != TokenTags.IDENT) {
         return false;
       }
-      switch (SelfLexing.peekAhead(ref ps, 2)) {
+      switch (ps.peekAhead(2)) {
         case Result.Err { error: e2 }: { return false; }
         case Result.Ok { value: third }: {
           return third.tag == TokenTags.LPAREN || third.tag == TokenTags.DOT;
@@ -460,13 +460,13 @@ function atKindPrefixedBlock(ref ps: ParserState): bool {
 // The `;` form is what `ephemeral makeGuard(1); ephemeral makeGuard(2);` needs
 // to pop 2 before 1.
 function parseKindRegion(ref ps: ParserState): ParsingResult {
-  let node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.KIND_REGION);
+  let node = ps.buildSourcedNode(ASTNodeKind.KIND_REGION);
   node.childC = parseKindPrefixes(ref ps)?;
   node.childA = parseExpression(ref ps, 0)?;
-  if (SelfLexing.peek(ref ps).tag == TokenTags.SEMICOLON) {
-    SelfLexing.advance(ref ps)?;
-    return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
+  if (ps.peek().tag == TokenTags.SEMICOLON) {
+    ps.advance()?;
+    return Result.Ok { value: ps.pushNode(node) };
   }
   node.childB = parseBlock(ref ps)?;
-  return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
+  return Result.Ok { value: ps.pushNode(node) };
 }

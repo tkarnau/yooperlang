@@ -304,7 +304,7 @@ export function emitFunctionOpen(
   headerPart(ref cx, "(");
   let i: usize = 0;
   while (i < params.len) {
-    const p = vec.vecGet(ref params, i);
+    const p = params.get(i);
     if (i > 0) {
       headerPart(ref cx, ", ");
     }
@@ -351,7 +351,7 @@ function declareDbgIntrinsic(ref e: Emitter): void {
     return;
   }
   e.declaredDbgIntrinsic = true;
-  text.push(ref e.globals, "declare void @llvm.dbg.declare(metadata, metadata, metadata)\n");
+  e.globals.push("declare void @llvm.dbg.declare(metadata, metadata, metadata)\n");
 }
 
 //   define internal void @main_0__module_init0() {
@@ -398,7 +398,7 @@ export function emitCoroFunctionOpen(
   headerPart(ref cx, "(");
   let i: usize = 0;
   while (i < params.len) {
-    const p = vec.vecGet(ref params, i);
+    const p = params.get(i);
     headerPart(ref cx, p.ty);
     headerPart(ref cx, " %");
     headerPart(ref cx, p.name);
@@ -464,7 +464,7 @@ export function emitCallVariadic(
   part(ref cx, " (");
   let f: usize = 0;
   while (f < fixedTys.len) {
-    part(ref cx, vec.vecGet(ref fixedTys, f));
+    part(ref cx, fixedTys.get(f));
     part(ref cx, ", ");
     f += 1;
   }
@@ -498,7 +498,7 @@ function callTail(
   part(ref cx, "(");
   let i: usize = 0;
   while (i < args.len) {
-    const a = vec.vecGet(ref args, i);
+    const a = args.get(i);
     if (i > 0) {
       part(ref cx, ", ");
     }
@@ -536,7 +536,7 @@ export function emitCallIndirect(
   part(ref cx, "(");
   let i: usize = 0;
   while (i < args.len) {
-    const a = vec.vecGet(ref args, i);
+    const a = args.get(i);
     if (i > 0) {
       part(ref cx, ", ");
     }

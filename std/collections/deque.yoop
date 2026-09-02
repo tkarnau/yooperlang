@@ -14,6 +14,7 @@
 
 import { Disposable, disposable } from "../core/kinds.yoop";
 import { Option } from "../core/types.yoop";
+import { DoubleEnded } from "../core/traits.yoop";
 import * as intr from "../core/intrinsics.yoop";
 import { Allocator, currentAllocator, pushAllocator, popAllocator } from "../core/alloc.yoop";
 import { nextPow2Floor8 } from "../core/numbers.yoop";
@@ -21,7 +22,7 @@ import { nextPow2Floor8 } from "../core/numbers.yoop";
 // Container-owned, like Vec: the Deque remembers the allocator it was built
 // with and routes grows and the final free back through it, so a Deque built
 // inside an arena scope draws from (and frees into) the arena.
-export type Deque<T> implements Disposable propagates<disposable> {
+export type Deque<T> implements (Disposable, DoubleEnded<T>) propagates<disposable> {
     data: T[],
     head: usize,
     len:  usize,
@@ -34,6 +35,63 @@ export type Deque<T> implements Disposable propagates<disposable> {
             popAllocator(prev);
             self.cap = 0;
         }
+    }
+
+    // ----- DoubleEnded<T> ------------------------------------------------
+
+    // Append at the back. O(1) amortized.
+    function pushBack(ref self, value: T): void {
+        if (self.len >= self.cap) { grow(ref self); }
+        let mask: usize = self.cap - 1;
+        let idx: usize = (self.head + self.len) & mask;
+        self.data[idx] = value;
+        self.len = self.len + 1;
+    }
+
+    // Prepend at the front. O(1) amortized.
+    function pushFront(ref self, value: T): void {
+        if (self.len >= self.cap) { grow(ref self); }
+        let mask: usize = self.cap - 1;
+        // head moves backwards (modulo cap).
+        self.head = (self.head + self.cap - 1) & mask;
+        self.data[self.head] = value;
+        self.len = self.len + 1;
+    }
+
+    // Remove + return the front element. `None` when empty.
+    function popFront(ref self): Option<T> {
+        if (self.len == 0) { return Option.None; }
+        let v: T = self.data[self.head];
+        let mask: usize = self.cap - 1;
+        self.head = (self.head + 1) & mask;
+        self.len = self.len - 1;
+        return Option.Some { value: v };
+    }
+
+    // Remove + return the back element. `None` when empty.
+    function popBack(ref self): Option<T> {
+        if (self.len == 0) { return Option.None; }
+        let mask: usize = self.cap - 1;
+        let idx: usize = (self.head + self.len - 1) & mask;
+        let v: T = self.data[idx];
+        self.len = self.len - 1;
+        return Option.Some { value: v };
+    }
+
+    // Read by logical index (`0` is the front). Out-of-bounds yields `None`.
+    function get(ref self, i: usize): Option<T> {
+        if (i >= self.len) { return Option.None; }
+        let mask: usize = self.cap - 1;
+        return Option.Some { value: self.data[(self.head + i) & mask] };
+    }
+
+    function clear(ref self): void {
+        self.head = 0;
+        self.len  = 0;
+    }
+
+    function isEmpty(ref self): bool {
+        return self.len == 0;
     }
 }
 
@@ -62,57 +120,3 @@ function grow<T>(ref d: Deque<T>): void {
     d.cap  = new_cap;
 }
 
-// Append at the back. O(1) amortized.
-export function dequePushBack<T>(ref d: Deque<T>, value: T): void {
-    if (d.len >= d.cap) { grow(ref d); }
-    let mask: usize = d.cap - 1;
-    let idx: usize = (d.head + d.len) & mask;
-    d.data[idx] = value;
-    d.len = d.len + 1;
-}
-
-// Prepend at the front. O(1) amortized.
-export function dequePushFront<T>(ref d: Deque<T>, value: T): void {
-    if (d.len >= d.cap) { grow(ref d); }
-    let mask: usize = d.cap - 1;
-    // head moves backwards (modulo cap).
-    d.head = (d.head + d.cap - 1) & mask;
-    d.data[d.head] = value;
-    d.len = d.len + 1;
-}
-
-// Remove + return the front element. `None` when empty.
-export function dequePopFront<T>(ref d: Deque<T>): Option<T> {
-    if (d.len == 0) { return Option.None; }
-    let v: T = d.data[d.head];
-    let mask: usize = d.cap - 1;
-    d.head = (d.head + 1) & mask;
-    d.len = d.len - 1;
-    return Option.Some { value: v };
-}
-
-// Remove + return the back element. `None` when empty.
-export function dequePopBack<T>(ref d: Deque<T>): Option<T> {
-    if (d.len == 0) { return Option.None; }
-    let mask: usize = d.cap - 1;
-    let idx: usize = (d.head + d.len - 1) & mask;
-    let v: T = d.data[idx];
-    d.len = d.len - 1;
-    return Option.Some { value: v };
-}
-
-// Read by logical index (`0` is the front). Out-of-bounds yields `None`.
-export function dequeGet<T>(ref d: Deque<T>, i: usize): Option<T> {
-    if (i >= d.len) { return Option.None; }
-    let mask: usize = d.cap - 1;
-    return Option.Some { value: d.data[(d.head + i) & mask] };
-}
-
-export function dequeLen<T>(ref d: Deque<T>): usize {
-    return d.len;
-}
-
-export function dequeClear<T>(ref d: Deque<T>): void {
-    d.head = 0;
-    d.len  = 0;
-}

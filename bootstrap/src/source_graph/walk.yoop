@@ -153,8 +153,8 @@ function loadGraphFrom(
   let autoLoads: Map<string, string> = map.mapNew(0, map.stringKeyOps());
   const autoErr = loadAutoloads(ref loader, ref autoLoads, stdRoot);
   if (autoErr.len > 0) {
-    Disposable.dispose(ref loader.byPath);
-    Disposable.dispose(ref loader.onStack);
+    loader.byPath.dispose();
+    loader.onStack.dispose();
     return LoadGraphResult.Err { error: autoErr };
   }
 
@@ -163,8 +163,8 @@ function loadGraphFrom(
   // is MOVED into the graph (the one-owner discipline the rest of this module
   // follows), and on failure the compile ends in the next breath - see
   // main.yoop - so reclaiming the modules loaded so far would buy nothing.
-  Disposable.dispose(ref loader.byPath);
-  Disposable.dispose(ref loader.onStack);
+  loader.byPath.dispose();
+  loader.onStack.dispose();
 
   switch (loaded) {
     case Result.Err { error: e }: {
@@ -191,15 +191,15 @@ function loadAutoloads(ref st: Loader, ref out: Map<string, string>, stdRoot: st
   disposable entries: Vec<AutoloadEntry> = autoloadEntries(stdRoot);
   let i: usize = 0;
   while (i < entries.len) {
-    const entry = vec.vecGet(ref entries, i);
+    const entry = entries.get(i);
     if (fs.exists(entry.path)) {
       const abs = fs.normalizePath(entry.path);
       if (abs.len > 0) {
         switch (loadUnit(ref st, abs, entry.path, false)) {
           case Result.Err { error: e }: { return e; }
           case Result.Ok { value: index }: {
-            const mod = vec.vecGet(ref st.modules, index);
-            map.mapInsert(ref out, entry.key, mod.id);
+            const mod = st.modules.get(index);
+            out.insert(entry.key, mod.id);
           }
         }
       }
@@ -217,14 +217,14 @@ function loadAutoloads(ref st: Loader, ref out: Map<string, string>, stdRoot: st
 // is what makes `import "./ast/node.yoop"` and `import "./ast"` reach the same
 // module - and what lets the second importer of either be a lookup.
 function loadUnit(ref st: Loader, absPath: string, blamePath: string, isEntry: bool): LoadUnitResult {
-  switch (map.mapGet(ref st.byPath, absPath)) {
+  switch (st.byPath.get(absPath)) {
     case Option.Some { value: known }: { return Result.Ok { value: known }; }
     case Option.None: { }
   }
-  if (map.mapContainsKey(ref st.onStack, absPath)) {
+  if (st.onStack.containsKey(absPath)) {
     return Result.Err { error: `import cycle detected involving ${absPath}` };
   }
-  map.mapInsert(ref st.onStack, absPath, true);
+  st.onStack.insert(absPath, true);
 
   let mod: Module;
   switch (loadEntryOrOwningModule(ref st, absPath, blamePath, isEntry)) {
@@ -243,7 +243,7 @@ function loadUnit(ref st: Loader, absPath: string, blamePath: string, isEntry: b
   }
 
   markFilesOnStack(ref st, ref mod, false);
-  map.mapRemove(ref st.onStack, absPath);
+  st.onStack.remove(absPath);
 
   const index = st.modules.len;
   mod.id = moduleIdFor(moduleIdentityPath(ref mod, absPath), index);
@@ -251,14 +251,14 @@ function loadUnit(ref st: Loader, absPath: string, blamePath: string, isEntry: b
   // any of them - or of the directory - finds it.
   let f: usize = 0;
   while (f < mod.files.len) {
-    map.mapInsert(ref st.byPath, vec.vecGet(ref mod.files, f).absPath, index);
+    st.byPath.insert(mod.files.get(f).absPath, index);
     f += 1;
   }
   if (mod.dir.len > 0) {
-    map.mapInsert(ref st.byPath, mod.dir, index);
+    st.byPath.insert(mod.dir, index);
   }
-  map.mapInsert(ref st.byPath, absPath, index);
-  vec.vecPush(ref st.modules, mod);
+  st.byPath.insert(absPath, index);
+  st.modules.push(mod);
   return Result.Ok { value: index };
 }
 
@@ -294,11 +294,11 @@ function moduleIdentityPath(ref mod: Module, absPath: string): string {
 function markFilesOnStack(ref st: Loader, ref mod: Module, on: bool): void {
   let f: usize = 0;
   while (f < mod.files.len) {
-    const path = vec.vecGet(ref mod.files, f).absPath;
+    const path = mod.files.get(f).absPath;
     if (on) {
-      map.mapInsert(ref st.onStack, path, true);
+      st.onStack.insert(path, true);
     } else {
-      map.mapRemove(ref st.onStack, path);
+      st.onStack.remove(path);
     }
     f += 1;
   }
@@ -321,8 +321,8 @@ function loadImportsOf(ref st: Loader, ref mod: Module): string {
 function loadImportsOfFile(ref st: Loader, ref mod: Module, fileIndex: usize): string {
   // The file is read back out of the Vec each time an edge is pushed, because
   // `imports` has to be written to the entry IN the Vec and not to a copy.
-  const absPath = vec.vecGet(ref mod.files, fileIndex).absPath;
-  const programNode = nodeAt(ref mod.ast, vec.vecGet(ref mod.files, fileIndex).root);
+  const absPath = mod.files.get(fileIndex).absPath;
+  const programNode = nodeAt(ref mod.ast, mod.files.get(fileIndex).root);
 
   let i: usize = 0;
   while (i < programNode.childCount) {
@@ -332,7 +332,7 @@ function loadImportsOfFile(ref st: Loader, ref mod: Module, fileIndex: usize): s
       break;   // imports-first: the parser guarantees the run is contiguous
     }
 
-    const sourcePath = vec.vecGet(ref mod.ast.strings, decl.strId);
+    const sourcePath = mod.ast.strings.get(decl.strId);
     let targetAbs: string;
     switch (resolveImportTarget(absPath, sourcePath, st.stdRoot)) {
       case Result.Err { error: e }: { return e; }
@@ -350,13 +350,13 @@ function loadImportsOfFile(ref st: Loader, ref mod: Module, fileIndex: usize): s
     switch (loadUnit(ref st, targetAbs, absPath, false)) {
       case Result.Err { error: e }: { return e; }
       case Result.Ok { value: targetIndex }: {
-        let file = vec.vecGet(ref mod.files, fileIndex);
-        vec.vecPush(ref file.imports, {
+        let file = mod.files.get(fileIndex);
+        file.imports.push({
           nodeId: declId,
           resolvedModuleIndex: targetIndex,
-          resolvedModuleId: vec.vecGet(ref st.modules, targetIndex).id,
+          resolvedModuleId: st.modules.get(targetIndex).id,
         });
-        vec.vecSet(ref mod.files, fileIndex, file);
+        mod.files.set(fileIndex, file);
       }
     }
     i += 1;

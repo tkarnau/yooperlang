@@ -36,25 +36,25 @@ import { ParsingError } from "../diagnostics";
 //                           is the tag order and therefore ABI, then any
 //                           METHOD_DECLs
 export function parseVariantDecl(ref ps: ParserState): Result<NodeId, ParsingError> {
-  SelfLexing.expect(ref ps, TokenTags.VARIANT)?;
-  let node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.VARIANT_DECL);
+  ps.expect(TokenTags.VARIANT)?;
+  let node = ps.buildSourcedNode(ASTNodeKind.VARIANT_DECL);
   node.name = parseIdentAsName(ref ps)?;
   node.childA = parseTypeParamList(ref ps)?;
   // Same slot a TYPE_DECL uses, so pass C reads the clause the one way.
   node.childD = parseImplementsClause(ref ps)?;
   node.childF = parsePropagatesClause(ref ps)?;
 
-  SelfLexing.expect(ref ps, TokenTags.LCURLY)?;
+  ps.expect(TokenTags.LCURLY)?;
   disposable caseIds: Vec<NodeId> = vec.vecNew(4);
   while (untilClosing(ref ps, TokenTags.RCURLY)) {
     if (atVariantMethod(ref ps)) {
-      vec.vecPush(ref caseIds, parseMethodDecl(ref ps, node.name, node.childA)?);
+      caseIds.push(parseMethodDecl(ref ps, node.name, node.childA)?);
       continue;
     }
     const caseId = parseVariantCase(ref ps)?;
-    vec.vecPush(ref caseIds, caseId);
-    if (SelfLexing.peek(ref ps).tag == TokenTags.COMMA) {
-      SelfLexing.advance(ref ps)?;
+    caseIds.push(caseId);
+    if (ps.peek().tag == TokenTags.COMMA) {
+      ps.advance()?;
       continue;
     }
     // A case with no `,` after it may only be the LAST member. Without this,
@@ -65,7 +65,7 @@ export function parseVariantDecl(ref ps: ParserState): Result<NodeId, ParsingErr
     // symptom is a switch that is not exhaustive until an arm is added for a
     // case nobody wrote. Refused by name, with the record spelling in the
     // message, because that is the edit to make.
-    if (SelfLexing.peek(ref ps).tag != TokenTags.RCURLY) {
+    if (ps.peek().tag != TokenTags.RCURLY) {
       const caseName = nodeAt(ref ps.ast, caseId).name;
       return Result.Err { error: SelfLexing.createParsingError(
         ref ps,
@@ -74,13 +74,13 @@ export function parseVariantDecl(ref ps: ParserState): Result<NodeId, ParsingErr
       )};
     }
   }
-  SelfLexing.expect(ref ps, TokenTags.RCURLY)?;
+  ps.expect(TokenTags.RCURLY)?;
 
   // Spliced only now: parsing a case appends its own field run to the shared
   // pool, so a partial splice would interleave the two.
   spliceChildren(ref ps, ref node, ref caseIds);
 
-  return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
+  return Result.Ok { value: ps.pushNode(node) };
 }
 
 // Is the member at the cursor a METHOD rather than a case?
@@ -100,7 +100,7 @@ function atVariantMethod(ref ps: ParserState): bool {
   if (atKindPrefixedMethod(ref ps, true)) {
     return true;
   }
-  if (SelfLexing.peek(ref ps).tag != TokenTags.FUNCTION) {
+  if (ps.peek().tag != TokenTags.FUNCTION) {
     return false;
   }
   // Nothing following `function` at all reads as a method, so the failure is
@@ -118,26 +118,26 @@ function atVariantMethod(ref ps: ParserState): bool {
 //                           role does not reach a variant body
 //   own childIds run        its FIELD_DECLs, empty for a payload-less case
 function parseVariantCase(ref ps: ParserState): Result<NodeId, ParsingError> {
-  let node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.VARIANT_CASE);
+  let node = ps.buildSourcedNode(ASTNodeKind.VARIANT_CASE);
   node.name = parseIdentOrKeywordAsName(ref ps)?;
 
-  if (SelfLexing.peek(ref ps).tag != TokenTags.LCURLY) {
-    return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
+  if (ps.peek().tag != TokenTags.LCURLY) {
+    return Result.Ok { value: ps.pushNode(node) };
   }
 
-  SelfLexing.advance(ref ps)?;
+  ps.advance()?;
   disposable fieldIds: Vec<NodeId> = vec.vecNew(2);
   while (untilClosing(ref ps, TokenTags.RCURLY)) {
-    vec.vecPush(ref fieldIds, parseFieldDecl(ref ps)?);
-    if (SelfLexing.peek(ref ps).tag == TokenTags.COMMA) {
-      SelfLexing.advance(ref ps)?;
+    fieldIds.push(parseFieldDecl(ref ps)?);
+    if (ps.peek().tag == TokenTags.COMMA) {
+      ps.advance()?;
     }
   }
-  SelfLexing.expect(ref ps, TokenTags.RCURLY)?;
+  ps.expect(TokenTags.RCURLY)?;
 
   spliceChildren(ref ps, ref node, ref fieldIds);
 
-  return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
+  return Result.Ok { value: ps.pushNode(node) };
 }
 
 // `case Result.Ok { value: v }:` / `case Result.None:`
@@ -149,22 +149,22 @@ function parseVariantCase(ref ps: ParserState): Result<NodeId, ParsingError> {
 //   childA    a NODE_LIST of STRUCT_LITERAL_FIELD, whose values are the BINDING
 //             names (each an IDENT). 0 when the case has no payload to bind.
 export function parseVariantPattern(ref ps: ParserState): Result<NodeId, ParsingError> {
-  let node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.VARIANT_PATTERN);
+  let node = ps.buildSourcedNode(ASTNodeKind.VARIANT_PATTERN);
 
-  let base = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.IDENT);
+  let base = ps.buildSourcedNode(ASTNodeKind.IDENT);
   base.name = parseIdentAsName(ref ps)?;
-  node.childB = SelfLexing.pushNode(ref ps, base);
+  node.childB = ps.pushNode(base);
 
-  SelfLexing.expect(ref ps, TokenTags.DOT)?;
+  ps.expect(TokenTags.DOT)?;
   // The case NAME, which the declaration was free to spell with a reserved
   // word, so the pattern has to be able to write it back. The VARIANT name on
   // the left of the `.` is an ordinary identifier and stays one.
   node.name = parseIdentOrKeywordAsName(ref ps)?;
 
-  if (SelfLexing.peek(ref ps).tag == TokenTags.LCURLY) {
+  if (ps.peek().tag == TokenTags.LCURLY) {
     node.childA = parsePatternFields(ref ps)?;
   }
-  return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
+  return Result.Ok { value: ps.pushNode(node) };
 }
 
 // `{ value: v, error: _ }` - the BINDINGS a pattern introduces.
@@ -187,21 +187,21 @@ export function parseVariantPattern(ref ps: ParserState): Result<NodeId, Parsing
 // downstream knows which was written.
 function parsePatternFields(ref ps: ParserState): Result<NodeId, ParsingError> {
   const loc = posToSourceLocation(ps.src, ps.pos, 1);
-  SelfLexing.expect(ref ps, TokenTags.LCURLY)?;
+  ps.expect(TokenTags.LCURLY)?;
 
   disposable ids: Vec<NodeId> = vec.vecNew(4);
   while (untilClosing(ref ps, TokenTags.RCURLY)) {
-    let field = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.STRUCT_LITERAL_FIELD);
+    let field = ps.buildSourcedNode(ASTNodeKind.STRUCT_LITERAL_FIELD);
     // The FIELD name mirrors the declaration and may be a reserved word; the
     // BINDING below is a new local in the arm's scope and may not, because
     // there a keyword would shadow a grammar role. Same split as the reference.
     field.name = parseIdentOrKeywordAsName(ref ps)?;
 
-    let binding = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.IDENT);
-    if (SelfLexing.peek(ref ps).tag == TokenTags.COLON) {
-      SelfLexing.advance(ref ps)?;
-      if (SelfLexing.peek(ref ps).tag == TokenTags.DISCARD) {
-        SelfLexing.advance(ref ps)?;
+    let binding = ps.buildSourcedNode(ASTNodeKind.IDENT);
+    if (ps.peek().tag == TokenTags.COLON) {
+      ps.advance()?;
+      if (ps.peek().tag == TokenTags.DISCARD) {
+        ps.advance()?;
         binding.name = DISCARD_BINDING;
       } else {
         binding.name = parseIdentAsName(ref ps)?;
@@ -209,16 +209,16 @@ function parsePatternFields(ref ps: ParserState): Result<NodeId, ParsingError> {
     } else {
       binding.name = field.name;
     }
-    field.childA = SelfLexing.pushNode(ref ps, binding);
+    field.childA = ps.pushNode(binding);
 
-    vec.vecPush(ref ids, SelfLexing.pushNode(ref ps, field));
-    if (SelfLexing.peek(ref ps).tag == TokenTags.COMMA) {
-      SelfLexing.advance(ref ps)?;
+    ids.push(ps.pushNode(field));
+    if (ps.peek().tag == TokenTags.COMMA) {
+      ps.advance()?;
     }
   }
-  SelfLexing.expect(ref ps, TokenTags.RCURLY)?;
+  ps.expect(TokenTags.RCURLY)?;
 
-  return Result.Ok { value: SelfLexing.buildListNode(ref ps, ref ids, loc) };
+  return Result.Ok { value: ps.buildListNode(ref ids, loc) };
 }
 
 // The name a `_` binding carries. Spelled out rather than left empty so a
@@ -229,5 +229,5 @@ export const DISCARD_BINDING: string = "_";
 // True when the arm's pattern is a variant one rather than an integer literal.
 // `case Result.Ok` starts with an IDENT; `case 1` and `case -1` do not.
 export function peekIsVariantPattern(ref ps: ParserState): bool {
-  return SelfLexing.peek(ref ps).tag == TokenTags.IDENT;
+  return ps.peek().tag == TokenTags.IDENT;
 }

@@ -144,7 +144,7 @@ function emitErrReturn(
     if (contextOf(ref cx, exprId) != 0) {
       moved = emitContextPayload(ref cx, exprId, operandType, operandTy, slotId,
         ref got, errTy);
-    } else if (map.mapContainsKey(ref cx.tm.tryIntoUses, uint64(exprId))) {
+    } else if (cx.tm.tryIntoUses.containsKey(uint64(exprId))) {
       moved = emitIntoCall(ref cx, operandType, operandTy, slotId, got.errOrdinal,
         got.errType, errTy);
     } else {
@@ -200,7 +200,7 @@ function emitIntoCall(
 ): usize {
   const addr = emitCasePayloadAddr(ref cx, operandType, operandTy, slotId, errOrdinal);
   disposable args: Vec<CallArg> = vec.vecNew(1);
-  vec.vecPush(ref args, { ty: REF_LLVM_TYPE, value: Operand.Temp { id: addr } });
+  args.push({ ty: REF_LLVM_TYPE, value: Operand.Temp { id: addr } });
   const dest = freshTemp(cx.e);
   emitCall(ref cx, dest, targetTy,
     moduleIdOf(cx.prog, nominalModuleOf(cx.prog, sourceErrType)),

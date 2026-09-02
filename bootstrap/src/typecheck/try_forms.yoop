@@ -50,7 +50,7 @@ function checkTryContext(
     return false;
   }
   if (isStringPrimType(ref prog, got.errType) && isStringPrimType(ref prog, want.errType)) {
-    map.mapInsert(ref tm.tryContextConcat, uint64(exprId), true);
+    tm.tryContextConcat.insert(uint64(exprId), true);
     return true;
   }
   if (!claimsAppliedTrait(ref prog, got.errType, WITH_CONTEXT_TRAIT,

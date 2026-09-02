@@ -64,11 +64,11 @@ export function float32Bits(x: float64): uint64 {
 // than returned as a string, because the codegen caller is on an emit path and
 // one malloc per instruction is the thing that rule exists to stop.
 export function pushFloatBitsHex(ref out: Text, bits: uint64): void {
-  text.push(ref out, "0x");
+  out.push("0x");
   let i: usize = 0;
   while (i < 16) {
     const shift: uint64 = uint64((15 - i) * 4);
-    text.pushByte(ref out, hexDigit((bits >> shift) & 0xF));
+    out.pushByte(hexDigit((bits >> shift) & 0xF));
     i += 1;
   }
 }

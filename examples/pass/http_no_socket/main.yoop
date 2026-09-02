@@ -55,7 +55,7 @@ type MemReader implements Readable {
 type MemWriter implements Writable propagates<disposable> {
     sink: Vec<uint8>,
     async write(ref self, ref buf: uint8[]): Result<c_ssize_t, string> {
-        vec.vecExtendFrom(ref self.sink, buf);
+        self.sink.extendFrom(buf);
         return Result.Ok { value: c_ssize_t(buf.len) };
     }
     function flush(ref self): FlushOutcome {
@@ -94,7 +94,7 @@ async runOne(label: string, request: string): void {
         ref r, ref w, ref d, http.defaultConfig(), 1);
 
     // The response, exactly as it would have gone onto a wire.
-    let out: string = intr.stringFromBytesUnchecked(vec.vecAsArray(ref mw.sink));
+    let out: string = intr.stringFromBytesUnchecked(mw.sink.asArray());
     printf(`${label} served=${served} bytes=${mw.sink.len}\n`);
     printf(`${label} status=${firstLine(out)}\n`);
     printf(`${label} body=${afterHead(out)}\n`);

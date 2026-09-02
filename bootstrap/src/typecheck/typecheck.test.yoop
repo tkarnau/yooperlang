@@ -144,7 +144,7 @@ suite function reservedTypeIdsComeFirst(): void {
 // an empty Program, which fails whichever assertion asked about it.
 function checkSource(src: string): Program {
   let srcBuf: Vec<uint8> = vec.vecNew(src.len + 1);
-  vec.vecExtendFrom(ref srcBuf, intr.stringAsBytes(src));
+  srcBuf.extendFrom(intr.stringAsBytes(src));
 
   switch (moduleFromSource("test", "test.yoop", srcBuf)) {
     case LoadModuleResult.Err { error: e }: {
@@ -165,8 +165,8 @@ function hasName(ref prog: Program, name: string): bool {
   if (prog.modules.len == 0) {
     return false;
   }
-  let tm = vec.vecGet(ref prog.modules, 0);
-  return map.mapContainsKey(ref tm.names, name);
+  let tm = prog.modules.get(0);
+  return tm.names.containsKey(name);
 }
 
 // Locals: the parts that never reach an executable, so a slice fixture cannot
@@ -1140,7 +1140,7 @@ function errorCount(ref prog: Program): usize {
   let n: usize = 0;
   let i: usize = 0;
   while (i < prog.diagnostics.len) {
-    switch (vec.vecGet(ref prog.diagnostics, i).severity) {
+    switch (prog.diagnostics.get(i).severity) {
       case Severity.ERROR: { n = n + 1; }
       default: {}
     }
@@ -1153,7 +1153,7 @@ function firstDiagnostic(ref prog: Program): string {
   if (prog.diagnostics.len == 0) {
     return "";
   }
-  return vec.vecGet(ref prog.diagnostics, 0).message;
+  return prog.diagnostics.get(0).message;
 }
 
 // True when any diagnostic names `needle`. A refusal with the wrong message
@@ -1161,7 +1161,7 @@ function firstDiagnostic(ref prog: Program): string {
 function diagnosticsMention(ref prog: Program, needle: string): bool {
   let i: usize = 0;
   while (i < prog.diagnostics.len) {
-    const message = vec.vecGet(ref prog.diagnostics, i).message;
+    const message = prog.diagnostics.get(i).message;
     if (str.stringIndexOf(message, needle) < message.len) {
       return true;
     }
@@ -1385,7 +1385,7 @@ suite function diagnosticsNameTheFileTheyCameFrom(): void {
 
   let test theory: Case = t.asserts("an error carries the file it was found in") {
     theory.isSuccessful = prog.diagnostics.len > 0
-      && str.stringEq(vec.vecGet(ref prog.diagnostics, 0).filePath, "entry.yoop");
+      && str.stringEq(prog.diagnostics.get(0).filePath, "entry.yoop");
     theory.detail = `the diagnostic names file "${firstDiagnosticFile(ref prog)}", wanted "entry.yoop"`;
   }
 
@@ -1396,7 +1396,7 @@ suite function diagnosticsNameTheFileTheyCameFrom(): void {
   );
   let test theory: Case = t.asserts("an error in an imported module names THAT file") {
     theory.isSuccessful = inLib.diagnostics.len > 0
-      && str.stringEq(vec.vecGet(ref inLib.diagnostics, 0).filePath, "lib.yoop");
+      && str.stringEq(inLib.diagnostics.get(0).filePath, "lib.yoop");
     theory.detail = `the diagnostic names file "${firstDiagnosticFile(ref inLib)}", wanted "lib.yoop"`;
   }
 }
@@ -1408,7 +1408,7 @@ function firstDiagnosticLine(ref prog: Program): usize {
   if (prog.diagnostics.len == 0) {
     return 0;
   }
-  const first = vec.vecGet(ref prog.diagnostics, 0);
+  const first = prog.diagnostics.get(0);
   return first.sourceLoc.line;
 }
 
@@ -1416,7 +1416,7 @@ function firstDiagnosticFile(ref prog: Program): string {
   if (prog.diagnostics.len == 0) {
     return "";
   }
-  return vec.vecGet(ref prog.diagnostics, 0).filePath;
+  return prog.diagnostics.get(0).filePath;
 }
 
 suite function onlyTheEntryModuleMayDeclareMain(): void {
@@ -1452,8 +1452,8 @@ function symbolIdIn(ref prog: Program, index: usize, name: string): usize {
   if (index >= prog.modules.len) {
     return 0;
   }
-  let tm = vec.vecGet(ref prog.modules, index);
-  switch (map.mapGet(ref tm.names, name)) {
+  let tm = prog.modules.get(index);
+  switch (tm.names.get(name)) {
     case Option.Some { value: symId }: { return symId; }
     case Option.None: { return 0; }
   }
@@ -1480,7 +1480,7 @@ function checkTwoModules(libSrc: string, entrySrc: string): Program propagates<d
   // Every IMPORT_DECL in the entry resolves to the one library module. The edge
   // list belongs to the FILE, so it is read back out of the Vec and written
   // whole - pushing into a copy would leave the module with no edges at all.
-  let entryFile = vec.vecGet(ref entry.files, 0);
+  let entryFile = entry.files.get(0);
   const program = nodeAt(ref entry.ast, entryFile.root);
   let i: usize = 0;
   while (i < program.childCount) {
@@ -1488,18 +1488,18 @@ function checkTwoModules(libSrc: string, entrySrc: string): Program propagates<d
     if (nodeAt(ref entry.ast, declId).kind != ASTNodeKind.IMPORT_DECL) {
       break;
     }
-    vec.vecPush(ref entryFile.imports, {
+    entryFile.imports.push({
       nodeId: declId,
       resolvedModuleIndex: 0,
       resolvedModuleId: "lib_0",
     });
     i += 1;
   }
-  vec.vecSet(ref entry.files, 0, entryFile);
+  entry.files.set(0, entryFile);
 
   let modules: Vec<Module> = vec.vecNew(2);
-  vec.vecPush(ref modules, lib);
-  vec.vecPush(ref modules, entry);
+  modules.push(lib);
+  modules.push(entry);
   let autoLoads: Map<string, string> = map.mapNew(0, map.stringKeyOps());
   let graph: ModuleGraph = {
     modules: modules,
@@ -1511,7 +1511,7 @@ function checkTwoModules(libSrc: string, entrySrc: string): Program propagates<d
 
 function bufferOf(src: string): Vec<uint8> propagates<disposable> {
   let buf: Vec<uint8> = vec.vecNew(src.len + 1);
-  vec.vecExtendFrom(ref buf, intr.stringAsBytes(src));
+  buf.extendFrom(intr.stringAsBytes(src));
   return buf;
 }
 
@@ -1522,7 +1522,7 @@ function parseFailureProgram(message: string): Program propagates<disposable> {
   // initProgram is where the arenas and their reserved slots are decided, and a
   // literal here went stale every time one of them was added.
   let prog = initProgram();
-  vec.vecPush(ref prog.diagnostics, errorAt(message, { pos: 0, line: 0, column: 0, length: 0 }));
+  prog.diagnostics.push(errorAt(message, { pos: 0, line: 0, column: 0, length: 0 }));
   return prog;
 }
 
@@ -6043,8 +6043,8 @@ function unionTypeIdOf(ref prog: Program, name: string): TypeId {
   if (prog.modules.len == 0) {
     return TYPE_ERROR_ID;
   }
-  let tm = vec.vecGet(ref prog.modules, 0);
-  switch (map.mapGet(ref tm.names, name)) {
+  let tm = prog.modules.get(0);
+  switch (tm.names.get(name)) {
     case Option.None: { return TYPE_ERROR_ID; }
     case Option.Some { value: symId }: {
       switch (symbolAt(ref prog, symId)) {
@@ -6915,5 +6915,50 @@ suite function aDottedCallKeepsTheAsyncColoring(): void {
   let test theory: Case = t.asserts("a dotted call to a coroutine still has to be awaited") {
     theory.isSuccessful = diagnosticsMention(ref bare, "await");
     theory.detail = `wanted the coloring refusal, got: ${firstDiagnostic(ref bare)}`;
+  }
+}
+
+// ----- generic parents in an extends chain -------------------------------------
+
+// `trait Growable<T> extends Sequence<T>` names the parent in terms of the
+// child's own T, so applying the child has to apply the parent too. Before it
+// did, an impl was checked against a parent still talking about the template's
+// T, and a bound on the child handed back the parent's raw T.
+suite function applyingATraitAppliesItsGenericParents(): void {
+  const CHAIN = "trait Collection<T> { function clear(ref self): void; } trait Sequence<T> extends Collection<T> { function get(ref self, i: usize): T; } trait Growable<T> extends Sequence<T> { function push(ref self, v: T): void; } ";
+  const IMPL = "type Buf<T> implements Growable<T> { data: T[], len: usize, function clear(ref self): void { self.len = 0; } function get(ref self, i: usize): T { return self.data[i]; } function push(ref self, v: T): void { self.data[self.len] = v; self.len = self.len + 1; } } ";
+
+  let ok = checkSource(`${CHAIN}${IMPL}function main(): int { let b: Buf<int32> = { data: [0, 0], len: 0 }; b.push(4); return b.get(0); }`);
+  let test theory: Case = t.asserts("an impl of the child satisfies the parent's methods at the impl's own T") {
+    theory.isSuccessful = ok.diagnostics.len == 0;
+    theory.detail = `reported ${ok.diagnostics.len}: ${firstDiagnostic(ref ok)}`;
+  }
+
+  let bound = checkSource(`${CHAIN}${IMPL}function first<C implements Growable<int32>>(ref c: C): int32 { c.clear(); c.push(3); return c.get(0) + 1; } function main(): int { let b: Buf<int32> = { data: [0, 0], len: 0 }; return first(ref b); }`);
+  let test theory: Case = t.asserts("a bound on the child reaches the parent's method with the argument substituted") {
+    theory.isSuccessful = bound.diagnostics.len == 0;
+    theory.detail = `reported ${bound.diagnostics.len}: ${firstDiagnostic(ref bound)}`;
+  }
+
+  let wrong = checkSource(`${CHAIN}type Bad implements Growable<int32> { n: int32, function clear(ref self): void { } function get(ref self, i: usize): bool { return true; } function push(ref self, v: int32): void { } } function main(): int { return 0; }`);
+  let test theory: Case = t.asserts("a parent method implemented at the wrong type is still refused") {
+    theory.isSuccessful = diagnosticsMention(ref wrong, "Bad.get") && diagnosticsMention(ref wrong, "int32");
+    theory.detail = `wanted a signature refusal naming Bad.get and int32, got: ${firstDiagnostic(ref wrong)}`;
+  }
+}
+
+// A call node that is an ARGUMENT is checked twice - once for inference, once
+// against the parameter. The second look at a rewritten dotted call must not
+// resolve the synthesized trait by NAME, because the trait need not be
+// importable where the call is written: here `Growable` lives in the library
+// and the caller imported only the type.
+suite function aRewrittenDottedCallSurvivesASecondCheck(): void {
+  let asArgument = checkTwoModules(
+    "trait Growable { function items(ref self): int32[]; } export type Bag implements Growable { xs: int32[], function items(ref self): int32[] { return self.xs; } } export function bagNew(): Bag { return { xs: [1, 2, 3] }; }",
+    "import { Bag, bagNew } from \"./lib.yoop\";\nfunction total<T>(xs: T[]): usize { return xs.len; }\nfunction main(): int { let b: Bag = bagNew(); return int32(total(b.items())); }"
+  );
+  let test theory: Case = t.asserts("a dotted call handed straight to a generic checks clean without the trait in scope") {
+    theory.isSuccessful = asArgument.diagnostics.len == 0;
+    theory.detail = `reported ${asArgument.diagnostics.len}: ${firstDiagnostic(ref asArgument)}`;
   }
 }

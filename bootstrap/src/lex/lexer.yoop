@@ -94,7 +94,7 @@ export function lexNext(ref tables: LexTables, ref src: uint8[], pos: usize): Re
   let ch = src[p];
 
   // common language token?
-  for tokenScanObj in vec.vecAsArray(ref tables.scan) {
+  for tokenScanObj in tables.scan.asArray() {
     if (p + (tokenScanObj.str.len - 1) >= src.len) {
       continue; // not enough string left
     }
@@ -171,9 +171,9 @@ export function tokenize(src: uint8[]): Result<Token[], string> {
         return Result.Err { error: `lexer error at ${e.pos}: ${e.error}` };
       }
       case Result.Ok { value: v } : {
-        vec.vecPush(ref tokens, v.token); // push either way for now...
+        tokens.push(v.token); // push either way for now...
         if (v.token.tag == TokenTags.EOF) {
-          return Result.Ok { value: vec.vecAsArray(ref tokens) };
+          return Result.Ok { value: tokens.asArray() };
         }
         pos = v.nextPos;
       }

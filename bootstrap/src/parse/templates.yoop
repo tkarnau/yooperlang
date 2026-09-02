@@ -44,8 +44,8 @@ const INTERP_OPEN: uint8 = '{';
 // parser's prefix switch, so a template literal takes postfix (`` `x`.len ``)
 // through the same loop as anything else.
 export function parseTemplateLiteral(ref ps: ParserState): Result<ASTNode, ParsingError> {
-  const tok = SelfLexing.peek(ref ps);
-  let node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.TEMPLATE_LITERAL);
+  const tok = ps.peek();
+  let node = ps.buildSourcedNode(ASTNodeKind.TEMPLATE_LITERAL);
 
   // Read through a local: `ps.src` is a `ref uint8[]`, and indexing a borrow
   // directly is not supported. strings.yoop does the same.
@@ -72,10 +72,10 @@ export function parseTemplateLiteral(ref ps: ParserState): Result<ASTNode, Parsi
     }
 
     if (i > runStart) {
-      vec.vecPush(ref ids, stringPart(ref ps, runStart, i)?);
+      ids.push(stringPart(ref ps, runStart, i)?);
     }
     const part = parseInterpolation(ref ps, i + 2)?;
-    vec.vecPush(ref ids, part.id);
+    ids.push(part.id);
     i = part.end;
     runStart = i;
   }
@@ -83,14 +83,14 @@ export function parseTemplateLiteral(ref ps: ParserState): Result<ASTNode, Parsi
   // The trailing literal run. `` `${x}` `` has none, and emits no empty part -
   // an empty STRING_PART would cost a concat operand that contributes nothing.
   if (close > runStart) {
-    vec.vecPush(ref ids, stringPart(ref ps, runStart, close)?);
+    ids.push(stringPart(ref ps, runStart, close)?);
   }
 
   // Put the cursor back at the byte after the closing backtick and prime. Until
   // this runs the parser is parked mid-template, wherever the last
   // interpolation left it.
   ps.pos = tok.start + usize(tok.length);
-  SelfLexing.advance(ref ps)?;
+  ps.advance()?;
 
   spliceChildren(ref ps, ref node, ref ids);
   return Result.Ok { value: node };
@@ -109,7 +109,7 @@ function stringPart(ref ps: ParserState, start: usize, end: usize): Result<NodeI
     posToSourceLocation(ps.src, start, end - start)
   );
   node.strId = internString(ref ps, decodeStringRange(ref ps, start, end)?);
-  return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
+  return Result.Ok { value: ps.pushNode(node) };
 }
 
 // An EXPR_PART plus where its closing brace ended, so the scan above can pick
@@ -127,13 +127,13 @@ function parseInterpolation(ref ps: ParserState, at: usize): Result<Interpolatio
   );
 
   ps.pos = at;
-  SelfLexing.advance(ref ps)?;              // prime on the expression's first token
+  ps.advance()?;              // prime on the expression's first token
   node.childA = parseExpression(ref ps, 0)?;
 
   // Peeked, never consumed. Consuming it would lex one token of raw template
   // text as code, and an unterminated one would be reported as a lex error in
   // the middle of a string.
-  const closing = SelfLexing.peek(ref ps);
+  const closing = ps.peek();
   if (closing.tag != TokenTags.RCURLY) {
     return Result.Err { error: SelfLexing.createParsingError(
       ref ps,
@@ -143,7 +143,7 @@ function parseInterpolation(ref ps: ParserState, at: usize): Result<Interpolatio
   }
 
   return Result.Ok { value: {
-    id: SelfLexing.pushNode(ref ps, node),
+    id: ps.pushNode(node),
     end: closing.start + 1,
   }};
 }

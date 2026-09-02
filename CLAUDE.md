@@ -122,7 +122,7 @@ curly quotes), **no fancy markdown tables**. Use American English. For example, 
 Every built `string` is a raw malloc that ignores the allocator context, that
 nothing frees, and that `--track-heap` cannot even see. `disposable` on a
 `Vec<string>` frees the vector, not the strings. Anything accumulating text in a
-loop takes a `Text` (`text.push`, `text.pushUint`, `text.view`). Full version,
+loop takes a `Text` (`t.push`, `t.pushUint`, `t.view()`). Full version,
 with the measurements, in
 [docs/writing_yoop.md](docs/writing_yoop.md) section 3.1.
 
@@ -181,7 +181,7 @@ check on a change, and say so when you do.
 
 ## Run / test
 
-- `npm test` - every Node-driven suite. 506 tests, about two minutes. Needs
+- `npm test` - every Node-driven suite. 507 tests, about two minutes. Needs
   `clang` and a seed.
 - `npm run test:unit` - fast, needs no seed: the C runtime's own tests, the std
   index check, and the stage comparison the fixpoint is decided by. The last of
@@ -194,7 +194,7 @@ check on a change, and say so when you do.
   This is what says whether a program WORKS, and it is the only thing in the
   tree that can catch a MISCOMPILE. It can do that only because the
   expectations were derived by READING each program - see the rule above.
-- `npm run test:fail` - the DIAGNOSTIC corpus, 78 tests: every fixture under
+- `npm run test:fail` - the DIAGNOSTIC corpus, 79 tests: every fixture under
   `examples/fail/` carrying a hand-written `.expected-errors`, each line of
   which is a `<line>:<column>: <substring>` the compiler has to report.
 - `npm run test:lsp` - the language server, driven over a real pipe the way an
@@ -287,7 +287,7 @@ check on a change, and say so when you do.
   emits; SKIPS when neither is on PATH). `YOOP_SLICE_CONCURRENCY`,
   `YOOP_PASS_CONCURRENCY` and `YOOP_FAIL_CONCURRENCY` override how many fixtures
   those suites run at once.
-- Every Yoop unit test at once, 1519 of them, in ONE build of the graph:
+- Every Yoop unit test at once, 1523 of them, in ONE build of the graph:
 
       YOOP_STD_ROOT=$PWD/std YOOP_RUNTIME_ROOT=$PWD/runtime \
         $(node scripts/seed.mjs) --test bootstrap/src

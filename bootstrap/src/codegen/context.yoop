@@ -116,11 +116,11 @@ export type CallArg {
 // calling an emitX function, not assembling text by hand.
 
 export function part(ref cx: Cx, s: string): void {
-  text.push(ref cx.e.fn, s);
+  cx.e.fn.push(s);
 }
 
 export function startInstr(ref cx: Cx): void {
-  text.push(ref cx.e.fn, "  ");
+  cx.e.fn.push("  ");
   cx.e.inInstr = true;
 }
 
@@ -132,11 +132,11 @@ export function startInstr(ref cx: Cx): void {
 // the flag `startInstr` sets is what tells the two apart.
 export function endInstr(ref cx: Cx): void {
   if (cx.e.inInstr && cx.e.hasDbgLoc) {
-    text.push(ref cx.e.fn, ", !dbg !");
-    text.pushUint(ref cx.e.fn, uint64(cx.e.dbgLoc));
+    cx.e.fn.push(", !dbg !");
+    cx.e.fn.pushUint(uint64(cx.e.dbgLoc));
   }
   cx.e.inInstr = false;
-  text.pushByte(ref cx.e.fn, 10);
+  cx.e.fn.pushByte(10);
 }
 
 // End a line that is PART of an instruction rather than the whole of it.
@@ -148,7 +148,7 @@ export function endInstr(ref cx: Cx): void {
 // a wrong line number.
 export function endInstrContinued(ref cx: Cx): void {
   cx.e.inInstr = false;
-  text.pushByte(ref cx.e.fn, 10);
+  cx.e.fn.pushByte(10);
 }
 
 // Point the emitter at a source position for the instructions that follow.
@@ -166,64 +166,64 @@ export function setDebugLine(ref cx: Cx, loc: SourceLocation): void {
 
 // `%t7`
 export function temp(ref cx: Cx, id: usize): void {
-  text.push(ref cx.e.fn, "%t");
-  text.pushUint(ref cx.e.fn, uint64(id));
+  cx.e.fn.push("%t");
+  cx.e.fn.pushUint(uint64(id));
 }
 
 // `%count.1.addr` - a local's stack slot. Spelled out from the name plus the
 // uniquing number so no string is built per use.
 export function slot(ref cx: Cx, name: string, id: usize): void {
-  text.pushByte(ref cx.e.fn, '%');
-  text.push(ref cx.e.fn, name);
+  cx.e.fn.pushByte('%');
+  cx.e.fn.push(name);
   // The reserved id: a `ref` parameter's slot is the incoming pointer, which
   // LLVM already named `%<name>.arg`. See ARG_PTR_SLOT in locals.yoop.
   if (id == ARG_PTR_SLOT) {
-    text.push(ref cx.e.fn, ".arg");
+    cx.e.fn.push(".arg");
     return;
   }
-  text.pushByte(ref cx.e.fn, '.');
-  text.pushUint(ref cx.e.fn, uint64(id));
-  text.push(ref cx.e.fn, ".addr");
+  cx.e.fn.pushByte('.');
+  cx.e.fn.pushUint(uint64(id));
+  cx.e.fn.push(".addr");
 }
 
 // The same slot name, into the prologue buffer.
 export function prologueSlot(ref cx: Cx, name: string, id: usize): void {
-  text.pushByte(ref cx.e.prologue, '%');
-  text.push(ref cx.e.prologue, name);
-  text.pushByte(ref cx.e.prologue, '.');
-  text.pushUint(ref cx.e.prologue, uint64(id));
-  text.push(ref cx.e.prologue, ".addr");
+  cx.e.prologue.pushByte('%');
+  cx.e.prologue.push(name);
+  cx.e.prologue.pushByte('.');
+  cx.e.prologue.pushUint(uint64(id));
+  cx.e.prologue.push(".addr");
 }
 
 // `L3`
 export function label(ref cx: Cx, id: usize): void {
-  text.push(ref cx.e.fn, "L");
-  text.pushUint(ref cx.e.fn, uint64(id));
+  cx.e.fn.push("L");
+  cx.e.fn.pushUint(uint64(id));
 }
 
 // Allocas go to the prologue so they sit at the top of `entry:` and dominate
 // every use, even when the declaration was inside a branch.
 export function prologuePart(ref cx: Cx, s: string): void {
-  text.push(ref cx.e.prologue, s);
+  cx.e.prologue.push(s);
 }
 
 // A plain number in the instruction stream (a field index, an element count).
 export function num(ref cx: Cx, v: usize): void {
-  text.pushUint(ref cx.e.fn, uint64(v));
+  cx.e.fn.pushUint(uint64(v));
 }
 
 export function prologueUint(ref cx: Cx, v: usize): void {
-  text.pushUint(ref cx.e.prologue, uint64(v));
+  cx.e.prologue.pushUint(uint64(v));
 }
 
 // The `define ...` line and `entry:` go straight to the module buffer, because
 // the prologue and the instruction stream are appended AFTER them.
 export function headerPart(ref cx: Cx, s: string): void {
-  text.push(ref cx.e.body, s);
+  cx.e.body.push(s);
 }
 
 export function headerEnd(ref cx: Cx): void {
-  text.pushByte(ref cx.e.body, 10);
+  cx.e.body.pushByte(10);
 }
 
 export function operand(ref cx: Cx, op: Operand): void {

@@ -41,14 +41,14 @@ export function discoverStdRoot(exePath: string): string {
   disposable candidates: Vec<string> = stdRootCandidates(exePath);
   let i: usize = 0;
   while (i < candidates.len) {
-    const candidate = vec.vecGet(ref candidates, i);
+    const candidate = candidates.get(i);
     if (fs.exists(candidate)) {
       return candidate;
     }
     i += 1;
   }
   if (candidates.len > 0) {
-    return vec.vecGet(ref candidates, 0);
+    return candidates.get(0);
   }
   return "";
 }
@@ -62,9 +62,9 @@ function stdRootCandidates(exePath: string): Vec<string> propagates<disposable> 
     return out;
   }
   const binDir = fs.dirName(exePath);
-  vec.vecPush(ref out, fs.pathJoin([binDir, "..", "lib", "std"]));   // bin/ + lib/
-  vec.vecPush(ref out, fs.pathJoin([binDir, "lib", "std"]));         // flat
-  vec.vecPush(ref out, fs.pathJoin([binDir, "..", "std"]));          // beside bin/
+  out.push(fs.pathJoin([binDir, "..", "lib", "std"]));   // bin/ + lib/
+  out.push(fs.pathJoin([binDir, "lib", "std"]));         // flat
+  out.push(fs.pathJoin([binDir, "..", "std"]));          // beside bin/
   return out;
 }
 

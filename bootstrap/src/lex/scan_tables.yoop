@@ -32,6 +32,12 @@ module lex;
 import { Vec }, * as vec from "std/core/vec.yoop";
 import { Disposable, disposable } from "std/core/kinds.yoop";
 import { Comparable, quickSort } from "../utils";
+// `Sequence` is named here only so the SEED can build this file: a dotted call
+// handed straight to a generic (`quickSort(scan.asArray(), ...)`) is checked
+// twice by the v0.3.1 checker, and its second look resolves the trait by name.
+// This tree's checker records the trait instead. Remove once the seed is
+// raised past that fix.
+import { Sequence } from "std/core/traits.yoop";
 
 export type SortedTokenDefinition implements Comparable<SortedTokenDefinition> {
   str: string, // the value in source code that points to a tag
@@ -63,8 +69,8 @@ export type LexTables implements Disposable propagates<disposable> {
   scan: Vec<SortedTokenDefinition>,     // sorted longest spelling first
   keywords: Vec<KeywordDefinition>,     // in declaration order; order is free
   function dispose(ref self): void {
-    Disposable.dispose(ref self.scan);
-    Disposable.dispose(ref self.keywords);
+    self.scan.dispose();
+    self.keywords.dispose();
   }
 }
 
@@ -80,7 +86,7 @@ export function lexTablesNew(): LexTables propagates<disposable> {
   // `vecAsArray` is a VIEW over the vector's own storage, so this sorts the
   // vector in place. Nothing pushes afterwards, which is the rule that view
   // comes with.
-  quickSort(vec.vecAsArray(ref scan), 0, scan.len - 1);
+  quickSort(scan.asArray(), 0, scan.len - 1);
 
   let keywords: Vec<KeywordDefinition> = vec.vecNew(48);
   fillKeywordList(ref keywords);
@@ -91,52 +97,52 @@ export function lexTablesNew(): LexTables propagates<disposable> {
 // `lexTablesNew` is what puts it in scanning order, so a new entry goes
 // wherever its neighbours are rather than wherever its length says.
 function fillTokenScanList(ref out: Vec<SortedTokenDefinition>): void {
-  vec.vecPush(ref out, { str: "(", tag: TokenTags.LPAREN });
-  vec.vecPush(ref out, { str: ")", tag: TokenTags.RPAREN });
-  vec.vecPush(ref out, { str: ";", tag: TokenTags.SEMICOLON });
-  vec.vecPush(ref out, { str: "=", tag: TokenTags.EQ });
-  vec.vecPush(ref out, { str: "{", tag: TokenTags.LCURLY });
-  vec.vecPush(ref out, { str: "}", tag: TokenTags.RCURLY });
-  vec.vecPush(ref out, { str: ":", tag: TokenTags.COLON });
-  vec.vecPush(ref out, { str: ",", tag: TokenTags.COMMA });
-  vec.vecPush(ref out, { str: "?", tag: TokenTags.QUESTION });
-  vec.vecPush(ref out, { str: "==", tag: TokenTags.EQEQ });
-  vec.vecPush(ref out, { str: "!=", tag: TokenTags.NEQ });
-  vec.vecPush(ref out, { str: "!", tag: TokenTags.BANG });
-  vec.vecPush(ref out, { str: "^", tag: TokenTags.CARET });
-  vec.vecPush(ref out, { str: "~", tag: TokenTags.TILDE });
-  vec.vecPush(ref out, { str: "<=", tag: TokenTags.LTE });
-  vec.vecPush(ref out, { str: ">=", tag: TokenTags.GTE });
-  vec.vecPush(ref out, { str: "<", tag: TokenTags.LT });
-  vec.vecPush(ref out, { str: ">", tag: TokenTags.GT });
-  vec.vecPush(ref out, { str: "&&", tag: TokenTags.ANDAND });
-  vec.vecPush(ref out, { str: "&", tag: TokenTags.AMP });
-  vec.vecPush(ref out, { str: "||", tag: TokenTags.OROR });
-  vec.vecPush(ref out, { str: "|", tag: TokenTags.PIPE });
-  vec.vecPush(ref out, { str: "<<", tag: TokenTags.LSHIFT });
-  vec.vecPush(ref out, { str: ">>", tag: TokenTags.RSHIFT });
-  vec.vecPush(ref out, { str: "+", tag: TokenTags.PLUS });
-  vec.vecPush(ref out, { str: "-", tag: TokenTags.MINUS });
-  vec.vecPush(ref out, { str: "*", tag: TokenTags.MULT });
-  vec.vecPush(ref out, { str: "/", tag: TokenTags.DIVIDE });
-  vec.vecPush(ref out, { str: "%", tag: TokenTags.MODULUS });
+  out.push({ str: "(", tag: TokenTags.LPAREN });
+  out.push({ str: ")", tag: TokenTags.RPAREN });
+  out.push({ str: ";", tag: TokenTags.SEMICOLON });
+  out.push({ str: "=", tag: TokenTags.EQ });
+  out.push({ str: "{", tag: TokenTags.LCURLY });
+  out.push({ str: "}", tag: TokenTags.RCURLY });
+  out.push({ str: ":", tag: TokenTags.COLON });
+  out.push({ str: ",", tag: TokenTags.COMMA });
+  out.push({ str: "?", tag: TokenTags.QUESTION });
+  out.push({ str: "==", tag: TokenTags.EQEQ });
+  out.push({ str: "!=", tag: TokenTags.NEQ });
+  out.push({ str: "!", tag: TokenTags.BANG });
+  out.push({ str: "^", tag: TokenTags.CARET });
+  out.push({ str: "~", tag: TokenTags.TILDE });
+  out.push({ str: "<=", tag: TokenTags.LTE });
+  out.push({ str: ">=", tag: TokenTags.GTE });
+  out.push({ str: "<", tag: TokenTags.LT });
+  out.push({ str: ">", tag: TokenTags.GT });
+  out.push({ str: "&&", tag: TokenTags.ANDAND });
+  out.push({ str: "&", tag: TokenTags.AMP });
+  out.push({ str: "||", tag: TokenTags.OROR });
+  out.push({ str: "|", tag: TokenTags.PIPE });
+  out.push({ str: "<<", tag: TokenTags.LSHIFT });
+  out.push({ str: ">>", tag: TokenTags.RSHIFT });
+  out.push({ str: "+", tag: TokenTags.PLUS });
+  out.push({ str: "-", tag: TokenTags.MINUS });
+  out.push({ str: "*", tag: TokenTags.MULT });
+  out.push({ str: "/", tag: TokenTags.DIVIDE });
+  out.push({ str: "%", tag: TokenTags.MODULUS });
   // Compound-assignment two-char operators.
-  vec.vecPush(ref out, { str: "+=", tag: TokenTags.PLUSEQ });
-  vec.vecPush(ref out, { str: "-=", tag: TokenTags.MINUSEQ });
-  vec.vecPush(ref out, { str: "*=", tag: TokenTags.MULTEQ });
-  vec.vecPush(ref out, { str: "/=", tag: TokenTags.DIVIDEEQ });
-  vec.vecPush(ref out, { str: "%=", tag: TokenTags.MODULUSEQ });
+  out.push({ str: "+=", tag: TokenTags.PLUSEQ });
+  out.push({ str: "-=", tag: TokenTags.MINUSEQ });
+  out.push({ str: "*=", tag: TokenTags.MULTEQ });
+  out.push({ str: "/=", tag: TokenTags.DIVIDEEQ });
+  out.push({ str: "%=", tag: TokenTags.MODULUSEQ });
   // Function value type separator. The sort puts this before `=`
   // and before `>=` / `>`; the lexer's existing logic handles the
   // disambiguation against `==`.
-  vec.vecPush(ref out, { str: "=>", tag: TokenTags.FATARROW });
-  vec.vecPush(ref out, { str: ".", tag: TokenTags.DOT });
-  vec.vecPush(ref out, { str: "..", tag: TokenTags.DOTDOT });
-  vec.vecPush(ref out, { str: "...", tag: TokenTags.DOTDOTDOT });
-  vec.vecPush(ref out, { str: "[", tag: TokenTags.LBRACKET });
-  vec.vecPush(ref out, { str: "]", tag: TokenTags.RBRACKET });
+  out.push({ str: "=>", tag: TokenTags.FATARROW });
+  out.push({ str: ".", tag: TokenTags.DOT });
+  out.push({ str: "..", tag: TokenTags.DOTDOT });
+  out.push({ str: "...", tag: TokenTags.DOTDOTDOT });
+  out.push({ str: "[", tag: TokenTags.LBRACKET });
+  out.push({ str: "]", tag: TokenTags.RBRACKET });
   // Attribute prefix `@`.
-  vec.vecPush(ref out, { str: "@", tag: TokenTags.AT });
+  out.push({ str: "@", tag: TokenTags.AT });
 }
 
 // Mirrors the JS lexer's `keywordTagList` exactly - src/parity.test.js fails if
@@ -147,50 +153,50 @@ function fillTokenScanList(ref out: Vec<SortedTokenDefinition>): void {
 //     keeps them usable as ordinary names. Use `peekIsWord` to match one.
 //   * `_` lexes to DISCARD - bare underscores are discarded.
 function fillKeywordList(ref out: Vec<KeywordDefinition>): void {
-  vec.vecPush(ref out, { str: "let",            tag: TokenTags.LET });
-  vec.vecPush(ref out, { str: "function",       tag: TokenTags.FUNCTION });
-  vec.vecPush(ref out, { str: "const",          tag: TokenTags.CONST });
-  vec.vecPush(ref out, { str: "return",         tag: TokenTags.RETURN });
-  vec.vecPush(ref out, { str: "if",             tag: TokenTags.IF });
-  vec.vecPush(ref out, { str: "else",           tag: TokenTags.ELSE });
-  vec.vecPush(ref out, { str: "while",          tag: TokenTags.WHILE });
-  vec.vecPush(ref out, { str: "for",            tag: TokenTags.FOR });
-  vec.vecPush(ref out, { str: "in",             tag: TokenTags.IN });
-  vec.vecPush(ref out, { str: "type",           tag: TokenTags.TYPE });
-  vec.vecPush(ref out, { str: "import",         tag: TokenTags.IMPORT });
-  vec.vecPush(ref out, { str: "export",         tag: TokenTags.EXPORT });
-  vec.vecPush(ref out, { str: "extern",         tag: TokenTags.EXTERN });
-  vec.vecPush(ref out, { str: "from",           tag: TokenTags.FROM });
-  vec.vecPush(ref out, { str: "as",             tag: TokenTags.AS });
-  vec.vecPush(ref out, { str: "ref",            tag: TokenTags.REF });
-  vec.vecPush(ref out, { str: "break",          tag: TokenTags.BREAK });
-  vec.vecPush(ref out, { str: "continue",       tag: TokenTags.CONTINUE });
-  vec.vecPush(ref out, { str: "true",           tag: TokenTags.TRUE });
-  vec.vecPush(ref out, { str: "false",          tag: TokenTags.FALSE });
-  vec.vecPush(ref out, { str: "trait",          tag: TokenTags.TRAIT });
-  vec.vecPush(ref out, { str: "implements",     tag: TokenTags.IMPLEMENTS });
-  vec.vecPush(ref out, { str: "self",           tag: TokenTags.SELF });
-  vec.vecPush(ref out, { str: "extends",        tag: TokenTags.EXTENDS });
-  vec.vecPush(ref out, { str: "vtable",         tag: TokenTags.VTABLE });
-  vec.vecPush(ref out, { str: "appliesTo",      tag: TokenTags.APPLIESTO });
-  vec.vecPush(ref out, { str: "mustCall",       tag: TokenTags.MUSTCALL });
-  vec.vecPush(ref out, { str: "ownsBlock",      tag: TokenTags.OWNSBLOCK });
-  vec.vecPush(ref out, { str: "beforeScopeEnd", tag: TokenTags.BEFORESCOPEEND });
-  vec.vecPush(ref out, { str: "mustNotEscape",  tag: TokenTags.MUSTNOTESCAPE });
-  vec.vecPush(ref out, { str: "mustNotShare",   tag: TokenTags.MUSTNOTSHARE });
-  vec.vecPush(ref out, { str: "forbids",        tag: TokenTags.FORBIDS });
-  vec.vecPush(ref out, { str: "acrossScopes",   tag: TokenTags.ACROSSSCOPES });
-  vec.vecPush(ref out, { str: "globalState",    tag: TokenTags.GLOBALSTATE });
-  vec.vecPush(ref out, { str: "wait",           tag: TokenTags.WAIT });
-  vec.vecPush(ref out, { str: "switch",         tag: TokenTags.SWITCH });
-  vec.vecPush(ref out, { str: "case",           tag: TokenTags.CASE });
-  vec.vecPush(ref out, { str: "default",        tag: TokenTags.DEFAULT });
-  vec.vecPush(ref out, { str: "enum",           tag: TokenTags.ENUM });
-  vec.vecPush(ref out, { str: "variant",        tag: TokenTags.VARIANT });
-  vec.vecPush(ref out, { str: "union",          tag: TokenTags.UNION });
-  vec.vecPush(ref out, { str: "null",           tag: TokenTags.NULL });
-  vec.vecPush(ref out, { str: "await",          tag: TokenTags.AWAIT });
-  vec.vecPush(ref out, { str: "_",              tag: TokenTags.DISCARD });
+  out.push({ str: "let",            tag: TokenTags.LET });
+  out.push({ str: "function",       tag: TokenTags.FUNCTION });
+  out.push({ str: "const",          tag: TokenTags.CONST });
+  out.push({ str: "return",         tag: TokenTags.RETURN });
+  out.push({ str: "if",             tag: TokenTags.IF });
+  out.push({ str: "else",           tag: TokenTags.ELSE });
+  out.push({ str: "while",          tag: TokenTags.WHILE });
+  out.push({ str: "for",            tag: TokenTags.FOR });
+  out.push({ str: "in",             tag: TokenTags.IN });
+  out.push({ str: "type",           tag: TokenTags.TYPE });
+  out.push({ str: "import",         tag: TokenTags.IMPORT });
+  out.push({ str: "export",         tag: TokenTags.EXPORT });
+  out.push({ str: "extern",         tag: TokenTags.EXTERN });
+  out.push({ str: "from",           tag: TokenTags.FROM });
+  out.push({ str: "as",             tag: TokenTags.AS });
+  out.push({ str: "ref",            tag: TokenTags.REF });
+  out.push({ str: "break",          tag: TokenTags.BREAK });
+  out.push({ str: "continue",       tag: TokenTags.CONTINUE });
+  out.push({ str: "true",           tag: TokenTags.TRUE });
+  out.push({ str: "false",          tag: TokenTags.FALSE });
+  out.push({ str: "trait",          tag: TokenTags.TRAIT });
+  out.push({ str: "implements",     tag: TokenTags.IMPLEMENTS });
+  out.push({ str: "self",           tag: TokenTags.SELF });
+  out.push({ str: "extends",        tag: TokenTags.EXTENDS });
+  out.push({ str: "vtable",         tag: TokenTags.VTABLE });
+  out.push({ str: "appliesTo",      tag: TokenTags.APPLIESTO });
+  out.push({ str: "mustCall",       tag: TokenTags.MUSTCALL });
+  out.push({ str: "ownsBlock",      tag: TokenTags.OWNSBLOCK });
+  out.push({ str: "beforeScopeEnd", tag: TokenTags.BEFORESCOPEEND });
+  out.push({ str: "mustNotEscape",  tag: TokenTags.MUSTNOTESCAPE });
+  out.push({ str: "mustNotShare",   tag: TokenTags.MUSTNOTSHARE });
+  out.push({ str: "forbids",        tag: TokenTags.FORBIDS });
+  out.push({ str: "acrossScopes",   tag: TokenTags.ACROSSSCOPES });
+  out.push({ str: "globalState",    tag: TokenTags.GLOBALSTATE });
+  out.push({ str: "wait",           tag: TokenTags.WAIT });
+  out.push({ str: "switch",         tag: TokenTags.SWITCH });
+  out.push({ str: "case",           tag: TokenTags.CASE });
+  out.push({ str: "default",        tag: TokenTags.DEFAULT });
+  out.push({ str: "enum",           tag: TokenTags.ENUM });
+  out.push({ str: "variant",        tag: TokenTags.VARIANT });
+  out.push({ str: "union",          tag: TokenTags.UNION });
+  out.push({ str: "null",           tag: TokenTags.NULL });
+  out.push({ str: "await",          tag: TokenTags.AWAIT });
+  out.push({ str: "_",              tag: TokenTags.DISCARD });
 }
 
 // The SOURCE spelling of a tag, for diagnostics: `+` rather than `PLUS`.
@@ -206,12 +212,12 @@ function fillKeywordList(ref out: Vec<KeywordDefinition>): void {
 // hands back are literals, so they outlive the tables.
 export function tagSpelling(tag: TokenTags): string {
   disposable tables: LexTables = lexTablesNew();
-  for d in vec.vecAsArray(ref tables.scan) {
+  for d in tables.scan.asArray() {
     if (d.tag == tag) {
       return d.str;
     }
   }
-  for k in vec.vecAsArray(ref tables.keywords) {
+  for k in tables.keywords.asArray() {
     if (k.tag == tag) {
       return k.str;
     }

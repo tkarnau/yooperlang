@@ -67,7 +67,7 @@ function main(): int32 {
   // back a null context; refusing here beats faulting on the first glClear.
   if (ctx.handle == null) {
     log.error(`vizworld: no GL context: ${sdl.lastError()}`);
-    Disposable.dispose(ref win);
+    win.dispose();
     sdl.quit();
     return 1;
   }
@@ -164,14 +164,14 @@ function main(): int32 {
           progressed = true;
         }
       } else if (wire.wireTakeLine(ref w, ref line)) {
-        const c: Control = proto.parseControl(text.view(ref line));
+        const c: Control = proto.parseControl(line.view());
         if (c.kind == ControlKind.BLOB) {
           awaitingBlob = true;
           blobKind = c.artifact;
           blobSize = c.size;
         } else if (c.kind == ControlKind.FILE) {
           scene.sceneStoreFilePath(ref world, c.modIdx, c.fileIdx,
-            text.view(ref line), c.pathAt);
+            line.view(), c.pathAt);
           storeBlobs = 2;
         } else {
           // The gate's verdict is drawable once typecheck's gate arrives -
@@ -319,7 +319,7 @@ function main(): int32 {
       const shownAst = scene.sceneShownAst(ref world);
       let ni: usize = 0;
       while (ni < shownAst) {
-        const n = vec.vecGet(ref world.astItems, ni);
+        const n = world.astItems.get(ni);
         const p = layout.astPos(n.depth, n.slot, n.slots);
         const t = camera.rayHit(cam.x, cam.y, cam.z, ax2, ay2, az2, p.x, p.y, p.z, 0.55);
         if (t > 0.0 && t < bestT) {
@@ -342,7 +342,7 @@ function main(): int32 {
         const t = camera.rayHit(cam.x, cam.y, cam.z, ax2, ay2, az2, p.x, p.y, p.z, 0.5);
         if (t > 0.0 && t < bestT) {
           bestT = t;
-          const tok = vec.vecGet(ref world.tokens, ti);
+          const tok = world.tokens.get(ti);
           pick.active = true;
           pick.kind = PickKind.TOKEN;
           pick.tokenIdx = ti;
@@ -357,7 +357,7 @@ function main(): int32 {
       const shownIslands = scene.sceneShownIslands(ref world);
       let ii: usize = 0;
       while (ii < shownIslands) {
-        const isle = vec.vecGet(ref world.islands, ii);
+        const isle = world.islands.get(ii);
         const ip = layout.islandPos(ii, world.islands.len, isle.entry);
         const t = camera.rayHit(cam.x, cam.y, cam.z, ax2, ay2, az2,
           ip.x, ip.y, ip.z, layout.islandRadius(isle.loc) + 0.4);
@@ -379,7 +379,7 @@ function main(): int32 {
         const t = camera.rayHit(cam.x, cam.y, cam.z, ax2, ay2, az2, sp.x, sp.y, sp.z, 0.5);
         if (t > 0.0 && t < bestT) {
           bestT = t;
-          const it = vec.vecGet(ref world.diagItems, di);
+          const it = world.diagItems.get(di);
           pick.active = true;
           pick.kind = PickKind.DIAG;
           pick.diagIdx = di;
@@ -399,11 +399,11 @@ function main(): int32 {
       let fi: usize = 0;
       let seen: usize = 0;
       while (fi < world.irFuncs.len && seen < shownBlocks) {
-        const fun = vec.vecGet(ref world.irFuncs, fi);
+        const fun = world.irFuncs.get(fi);
         const fp = layout.irFunctionPos(fi);
         let bi: usize = 0;
         while (bi < fun.blockCount && seen < shownBlocks) {
-          const blk = vec.vecGet(ref world.irBlocks, fun.blockStart + bi);
+          const blk = world.irBlocks.get(fun.blockStart + bi);
           const bp = layout.irBlockPos(fp, bi);
           const h = layout.irTowerHeight(blk.instructions);
           const t = camera.rayHit(cam.x, cam.y, cam.z, ax2, ay2, az2,
@@ -462,15 +462,15 @@ function main(): int32 {
       let armed = false;
       if (pick.kind == PickKind.WALL || pick.kind == PickKind.NODE ||
           pick.kind == PickKind.TOKEN) {
-        text.clear(ref openPath);
-        text.push(ref openPath, world.entryFile);
+        openPath.clear();
+        openPath.push(world.entryFile);
         openLine = pick.line + 1;
         openCol = pick.col + 1;
         armed = true;
       } else if (pick.kind == PickKind.DIAG && pick.diagIdx < world.diagItems.len) {
-        const it = vec.vecGet(ref world.diagItems, pick.diagIdx);
-        text.clear(ref openPath);
-        text.push(ref openPath, world.entryFile);
+        const it = world.diagItems.get(pick.diagIdx);
+        openPath.clear();
+        openPath.push(world.entryFile);
         openLine = it.line;
         openCol = it.col;
         armed = true;
@@ -486,12 +486,12 @@ function main(): int32 {
       if (armed) {
         openDelay = 0.6;
         toastClock = 2.6;
-        text.clear(ref toastT);
-        text.push(ref toastT, "opening ");
-        pushPathTail(ref toastT, text.view(ref openPath), 36);
-        text.push(ref toastT, " line ");
-        text.pushUint(ref toastT, uint64(openLine));
-        text.push(ref toastT, "...");
+        toastT.clear();
+        toastT.push("opening ");
+        pushPathTail(ref toastT, openPath.view(), 36);
+        toastT.push(" line ");
+        toastT.pushUint(uint64(openLine));
+        toastT.push("...");
       }
     }
     heldEditor = editorDown;
@@ -499,7 +499,7 @@ function main(): int32 {
     if (openDelay > 0.0) {
       openDelay -= dt;
       if (openDelay <= 0.0) {
-        editor.openInEditor(text.view(ref openPath), openLine, openCol, ref scratch);
+        editor.openInEditor(openPath.view(), openLine, openCol, ref scratch);
       }
     }
     if (toastClock > 0.0) {
@@ -544,15 +544,15 @@ function main(): int32 {
       toastAlpha = 1.0;
     }
     draw.drawHud(ref world, ref shown, usingPinned, float32(winW), float32(winH),
-      text.view(ref toastT), toastAlpha, ref scratch);
+      toastT.view(), toastAlpha, ref scratch);
     sdl.swapWindow(ref win);
   }
 
   // Leaving tells the plugin its window is gone: a build still waiting at a
   // gate sees the empty line and aborts rather than hanging.
   wire.wireSendLine("bye");
-  Disposable.dispose(ref ctx);
-  Disposable.dispose(ref win);
+  ctx.dispose();
+  win.dispose();
   sdl.quit();
   return 0;
 }
@@ -579,7 +579,7 @@ function pushPathTail(ref out: Text, s2: string, keep: usize): void {
   if (bytes.len > keep) {
     start = bytes.len - keep;
   }
-  text.pushBytes(ref out, intr.arraySlice(bytes, start, bytes.len));
+  out.pushBytes(intr.arraySlice(bytes, start, bytes.len));
 }
 
 function pulse(clock: float32): float32 {

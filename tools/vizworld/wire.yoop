@@ -35,8 +35,8 @@ export type Wire implements Disposable propagates<disposable> {
   atEof: bool,
 
   function dispose(ref self): void {
-    Disposable.dispose(ref self.buf);
-    Disposable.dispose(ref self.scratch);
+    self.buf.dispose();
+    self.scratch.dispose();
   }
 }
 
@@ -63,7 +63,7 @@ export function wirePump(ref w: Wire): void {
     if (n < 0) {
       return;
     }
-    vec.vecExtendFrom(ref w.buf, intr.arraySlice(w.scratch.data, 0, usize(n)));
+    w.buf.extendFrom(intr.arraySlice(w.scratch.data, 0, usize(n)));
     if (usize(n) < w.scratch.cap) {
       return;
     }
@@ -77,12 +77,12 @@ export function wireEof(ref w: Wire): bool {
 // One line into `out` (cleared first), without its newline. False when no
 // complete line is buffered yet.
 export function wireTakeLine(ref w: Wire, ref out: Text): bool {
-  const bytes: uint8[] = vec.vecAsArray(ref w.buf);
+  const bytes: uint8[] = w.buf.asArray();
   let i = w.pos;
   while (i < w.buf.len) {
     if (bytes[i] == 10) {
-      text.clear(ref out);
-      text.pushBytes(ref out, intr.arraySlice(bytes, w.pos, i));
+      out.clear();
+      out.pushBytes(intr.arraySlice(bytes, w.pos, i));
       w.pos = i + 1;
       compact(ref w);
       return true;
@@ -98,9 +98,9 @@ export function wireTakeBlob(ref w: Wire, n: usize, ref out: Vec<uint8>): bool {
   if (w.buf.len - w.pos < n + 1) {
     return false;
   }
-  vec.vecClear(ref out);
-  vec.vecExtendFrom(ref out,
-    intr.arraySlice(vec.vecAsArray(ref w.buf), w.pos, w.pos + n));
+  out.clear();
+  out.extendFrom(
+    intr.arraySlice(w.buf.asArray(), w.pos, w.pos + n));
   w.pos += n + 1;
   compact(ref w);
   return true;
@@ -111,8 +111,8 @@ export function wireTakeBlob(ref w: Wire, n: usize, ref out: Vec<uint8>): bool {
 // child gone its own way.
 export function wireSendLine(line: string): void {
   disposable framed: Text = text.fromString(line);
-  text.push(ref framed, "\n");
-  const payload: uint8[] = text.bytes(ref framed);
+  framed.push("\n");
+  const payload: uint8[] = framed.bytes();
   const ignored = write(STDOUT_FD, payload.ptr, payload.len);
 }
 
@@ -121,14 +121,14 @@ function compact(ref w: Wire): void {
     return;
   }
   if (w.pos >= w.buf.len) {
-    vec.vecClear(ref w.buf);
+    w.buf.clear();
     w.pos = 0;
     return;
   }
   disposable tail: Vec<uint8> = vec.vecNew(w.buf.len - w.pos);
-  vec.vecExtendFrom(ref tail,
-    intr.arraySlice(vec.vecAsArray(ref w.buf), w.pos, w.buf.len));
-  vec.vecClear(ref w.buf);
-  vec.vecExtendFrom(ref w.buf, vec.vecAsArray(ref tail));
+  tail.extendFrom(
+    intr.arraySlice(w.buf.asArray(), w.pos, w.buf.len));
+  w.buf.clear();
+  w.buf.extendFrom(tail.asArray());
   w.pos = 0;
 }

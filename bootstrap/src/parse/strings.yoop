@@ -18,7 +18,7 @@ import { ParsingError } from "../diagnostics";
 // the index in `strId` rather than the text, which is what keeps ASTNode a
 // fixed-size struct.
 export function internString(ref ps: ParserState, text: string): usize {
-  vec.vecPush(ref ps.ast.strings, text);
+  ps.ast.strings.push(text);
   return ps.ast.strings.len - 1;
 }
 
@@ -47,7 +47,7 @@ export function decodeStringRange(
   while (i < end) {
     const ch = src[i];
     if (ch != '\\') {
-      vec.vecPush(ref out, ch);
+      out.push(ch);
       i += 1;
       continue;
     }
@@ -59,18 +59,18 @@ export function decodeStringRange(
       )};
     }
     switch (src[i]) {
-      case 'n':  { vec.vecPush(ref out, 10); }
-      case 'r':  { vec.vecPush(ref out, 13); }
-      case 't':  { vec.vecPush(ref out, 9); }
-      case '0':  { vec.vecPush(ref out, 0); }
-      case '\\': { vec.vecPush(ref out, 92); }
-      case '"':  { vec.vecPush(ref out, 34); }
-      case '\'': { vec.vecPush(ref out, 39); }
-      case '`':  { vec.vecPush(ref out, 96); }
+      case 'n':  { out.push(10); }
+      case 'r':  { out.push(13); }
+      case 't':  { out.push(9); }
+      case '0':  { out.push(0); }
+      case '\\': { out.push(92); }
+      case '"':  { out.push(34); }
+      case '\'': { out.push(39); }
+      case '`':  { out.push(96); }
       // `\${` is a literal dollar-brace. Only a template literal can produce
       // one, and templates.yoop already relies on the escape covering the byte
       // after it when it decides what opens an interpolation.
-      case '$':  { vec.vecPush(ref out, 36); }
+      case '$':  { out.push(36); }
       default: {
         return Result.Err { error: SelfLexing.createParsingError(
           ref ps, `unknown escape in string literal: \\${src[i]}`, Option.None,
@@ -80,7 +80,7 @@ export function decodeStringRange(
     i += 1;
   }
 
-  switch (str.stringFromBytes(vec.vecAsArray(ref out))) {
+  switch (str.stringFromBytes(out.asArray())) {
     case Result.Err { error: e }: {
       return Result.Err { error: SelfLexing.createParsingError(
         ref ps, `invalid string literal bytes: ${e}`, Option.None,

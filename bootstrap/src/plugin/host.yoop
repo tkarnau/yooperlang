@@ -79,11 +79,11 @@ export type PluginHost implements Disposable propagates<disposable> {
 
   function dispose(ref self): void {
     releasePlugin(ref self);
-    Disposable.dispose(ref self.tokensT);
-    Disposable.dispose(ref self.astJsonT);
-    Disposable.dispose(ref self.modulesJsonT);
-    Disposable.dispose(ref self.diagnosticsJsonT);
-    Disposable.dispose(ref self.irT);
+    self.tokensT.dispose();
+    self.astJsonT.dispose();
+    self.modulesJsonT.dispose();
+    self.diagnosticsJsonT.dispose();
+    self.irT.dispose();
   }
 }
 
@@ -100,7 +100,7 @@ export function pluginHostInactive(): PluginHost propagates<disposable> {
 export function releasePlugin(ref h: PluginHost): void {
   if (h.held) {
     disposeModuleGraph(ref h.graph);
-    Disposable.dispose(ref h.prog);
+    h.prog.dispose();
     h.held = false;
   }
   h.active = false;
@@ -135,7 +135,7 @@ export function pluginFromLoad(loaded: LoadGraphResult, path: string): PluginHos
       let errors: usize = 0;
       let d: usize = 0;
       while (d < host.prog.diagnostics.len) {
-        const diag = vec.vecGet(ref host.prog.diagnostics, d);
+        const diag = host.prog.diagnostics.get(d);
         switch (diag.severity) {
           case Severity.ERROR: {
             errors += 1;
@@ -188,8 +188,8 @@ export function runPluginStart(ref h: PluginHost, entry: string, out: string): i
   h.bridge.outPath = out;
   disposable va: ValueArena = newValueArena();
   disposable bound: Vec<ValueId> = vec.vecNew(2);
-  vec.vecPush(ref bound, strValue(ref va, primTypeIdOfName("string"), entry));
-  vec.vecPush(ref bound, strValue(ref va, primTypeIdOfName("string"), out));
+  bound.push(strValue(ref va, primTypeIdOfName("string"), entry));
+  bound.push(strValue(ref va, primTypeIdOfName("string"), out));
   return reportRefusal(ref h, "onStart", invokeHook(ref h, "onStart", ref va, ref bound));
 }
 
@@ -213,13 +213,13 @@ export function runPluginFinish(ref h: PluginHost, ok: int32): void {
   h.bridge.buildOk = ok;
   disposable va: ValueArena = newValueArena();
   disposable bound: Vec<ValueId> = vec.vecNew(1);
-  vec.vecPush(ref bound, intValue(ref va, primTypeIdOfName("int32"), uint64(ok)));
+  bound.push(intValue(ref va, primTypeIdOfName("int32"), uint64(ok)));
   const ignored = invokeHook(ref h, "onFinish", ref va, ref bound);
 }
 
 function invokeHook(ref h: PluginHost, hookName: string, ref va: ValueArena, ref bound: Vec<ValueId>): int32 {
-  let mods: Module[] = vec.vecAsArray(ref h.graph.modules);
-  let tms: TypedModule[] = vec.vecAsArray(ref h.prog.modules);
+  let mods: Module[] = h.graph.modules.asArray();
+  let tms: TypedModule[] = h.prog.modules.asArray();
   const ei = h.graph.entryIndex;
   const declId = findFunctionDeclIn(ref mods[ei], hookName);
   if (declId == 0) {
@@ -270,30 +270,30 @@ export function refreshParseArtifacts(ref h: PluginHost, ref graph: ModuleGraph)
   if (!h.active) {
     return;
   }
-  let mods: Module[] = vec.vecAsArray(ref graph.modules);
+  let mods: Module[] = graph.modules.asArray();
   const ei = graph.entryIndex;
-  let files: SourceFile[] = vec.vecAsArray(ref mods[ei].files);
-  const srcArr: uint8[] = vec.vecAsArray(ref files[0].src);
+  let files: SourceFile[] = mods[ei].files.asArray();
+  const srcArr: uint8[] = files[0].src.asArray();
 
-  text.clear(ref h.tokensT);
+  h.tokensT.clear();
   switch (dumpTokens(srcArr)) {
     case Result.Ok { value: dumped }: {
       disposable owned: Text = dumped;
-      text.push(ref h.tokensT, text.view(ref owned));
+      h.tokensT.push(owned.view());
     }
     case Result.Err { error: e }: {}
   }
 
-  text.clear(ref h.astJsonT);
+  h.astJsonT.clear();
   disposable payload: Text = dumpAstJson(ref mods[ei].ast, files[0].root,
     files[0].absPath, srcArr);
-  text.push(ref h.astJsonT, text.view(ref payload));
+  h.astJsonT.push(payload.view());
 
   buildModulesJson(ref h, ref graph);
 
-  h.bridge.tokensText = text.view(ref h.tokensT);
-  h.bridge.astJson = text.view(ref h.astJsonT);
-  h.bridge.modulesJson = text.view(ref h.modulesJsonT);
+  h.bridge.tokensText = h.tokensT.view();
+  h.bridge.astJson = h.astJsonT.view();
+  h.bridge.modulesJson = h.modulesJsonT.view();
 
   streamAllFiles(ref h, ref graph);
 }
@@ -315,35 +315,35 @@ function streamAllFiles(ref h: PluginHost, ref graph: ModuleGraph): void {
   if (h.bridge.procHandle < 0) {
     return;
   }
-  let mods: Module[] = vec.vecAsArray(ref graph.modules);
+  let mods: Module[] = graph.modules.asArray();
   let m: usize = 0;
   while (m < graph.modules.len) {
-    let files: SourceFile[] = vec.vecAsArray(ref mods[m].files);
+    let files: SourceFile[] = mods[m].files.asArray();
     let f: usize = 0;
     while (f < mods[m].files.len) {
       disposable header: Text = text.make(64);
-      text.push(ref header, "file ");
-      text.pushUint(ref header, uint64(m));
-      text.push(ref header, " ");
-      text.pushUint(ref header, uint64(f));
-      text.push(ref header, " ");
-      text.push(ref header, files[f].absPath);
-      if (yoop_proc_write_line(h.bridge.procHandle, text.view(ref header)) != 0) {
+      header.push("file ");
+      header.pushUint(uint64(m));
+      header.push(" ");
+      header.pushUint(uint64(f));
+      header.push(" ");
+      header.push(files[f].absPath);
+      if (yoop_proc_write_line(h.bridge.procHandle, header.view()) != 0) {
         return;
       }
-      const srcArr: uint8[] = vec.vecAsArray(ref files[f].src);
+      const srcArr: uint8[] = files[f].src.asArray();
       disposable toks: Text = text.make(256);
       switch (dumpTokens(srcArr)) {
         case Result.Ok { value: dumped }: {
           disposable owned: Text = dumped;
-          text.push(ref toks, text.view(ref owned));
+          toks.push(owned.view());
         }
         case Result.Err { error: e }: {}
       }
-      const ignoredToks = yoop_proc_write_blob(h.bridge.procHandle, "tokens", text.view(ref toks));
+      const ignoredToks = yoop_proc_write_blob(h.bridge.procHandle, "tokens", toks.view());
       disposable payload: Text = dumpAstJson(ref mods[m].ast, files[f].root,
         files[f].absPath, srcArr);
-      const ignoredAst = yoop_proc_write_blob(h.bridge.procHandle, "ast", text.view(ref payload));
+      const ignoredAst = yoop_proc_write_blob(h.bridge.procHandle, "ast", payload.view());
       f += 1;
     }
     m += 1;
@@ -361,7 +361,7 @@ export function refreshDiagnostics(ref h: PluginHost, ref prog: Program): void {
   const arr = json.addArray(ref d);
   let i: usize = 0;
   while (i < prog.diagnostics.len) {
-    const diag = vec.vecGet(ref prog.diagnostics, i);
+    const diag = prog.diagnostics.get(i);
     const obj = json.addObject(ref d);
     json.objectSetString(ref d, obj, "file", diag.filePath);
     json.objectSetInt(ref d, obj, "line", int64(diag.sourceLoc.line + 1));
@@ -380,9 +380,9 @@ export function refreshDiagnostics(ref h: PluginHost, ref prog: Program): void {
   }
   json.setRoot(ref d, arr);
   disposable out: Text = json.serializeDoc(ref d);
-  text.clear(ref h.diagnosticsJsonT);
-  text.push(ref h.diagnosticsJsonT, text.view(ref out));
-  h.bridge.diagnosticsJson = text.view(ref h.diagnosticsJsonT);
+  h.diagnosticsJsonT.clear();
+  h.diagnosticsJsonT.push(out.view());
+  h.bridge.diagnosticsJson = h.diagnosticsJsonT.view();
 }
 
 // After codegen: the emitted IR, whole. A copy rather than a view because the
@@ -391,9 +391,9 @@ export function refreshIr(ref h: PluginHost, ref irText: Text): void {
   if (!h.active) {
     return;
   }
-  text.clear(ref h.irT);
-  text.push(ref h.irT, text.view(ref irText));
-  h.bridge.irText = text.view(ref h.irT);
+  h.irT.clear();
+  h.irT.push(irText.view());
+  h.bridge.irText = h.irT.view();
 }
 
 // The module map: every module of the graph with its size, and one edge per
@@ -404,7 +404,7 @@ function buildModulesJson(ref h: PluginHost, ref graph: ModuleGraph): void {
   const root = json.addObject(ref d);
   const nodes = json.addArray(ref d);
   const edges = json.addArray(ref d);
-  let mods: Module[] = vec.vecAsArray(ref graph.modules);
+  let mods: Module[] = graph.modules.asArray();
   let m: usize = 0;
   while (m < graph.modules.len) {
     const node = json.addObject(ref d);
@@ -415,10 +415,10 @@ function buildModulesJson(ref h: PluginHost, ref graph: ModuleGraph): void {
     json.objectSetBool(ref d, node, "entry", m == graph.entryIndex);
     json.arrayPush(ref d, nodes, node);
 
-    let files: SourceFile[] = vec.vecAsArray(ref mods[m].files);
+    let files: SourceFile[] = mods[m].files.asArray();
     let f: usize = 0;
     while (f < mods[m].files.len) {
-      let imps: ImportEdge[] = vec.vecAsArray(ref files[f].imports);
+      let imps: ImportEdge[] = files[f].imports.asArray();
       let k: usize = 0;
       while (k < files[f].imports.len) {
         const e = json.addObject(ref d);
@@ -435,18 +435,18 @@ function buildModulesJson(ref h: PluginHost, ref graph: ModuleGraph): void {
   json.objectSet(ref d, root, "edges", edges);
   json.setRoot(ref d, root);
   disposable out: Text = json.serializeDoc(ref d);
-  text.clear(ref h.modulesJsonT);
-  text.push(ref h.modulesJsonT, text.view(ref out));
+  h.modulesJsonT.clear();
+  h.modulesJsonT.push(out.view());
 }
 
 // Lines of a module, counted as newlines across its files' bytes - the same
 // number an editor's gutter would end on.
 function moduleLines(ref m: Module): usize {
   let lines: usize = 0;
-  let files: SourceFile[] = vec.vecAsArray(ref m.files);
+  let files: SourceFile[] = m.files.asArray();
   let f: usize = 0;
   while (f < m.files.len) {
-    const bytes: uint8[] = vec.vecAsArray(ref files[f].src);
+    const bytes: uint8[] = files[f].src.asArray();
     let i: usize = 0;
     while (i < bytes.len) {
       if (bytes[i] == 10) {
@@ -480,8 +480,8 @@ function validateHooks(ref h: PluginHost): string {
 }
 
 function checkHook(ref h: PluginHost, name: string, wantParams: usize, wantRet: TypeId, shape: string): string {
-  let mods: Module[] = vec.vecAsArray(ref h.graph.modules);
-  let tms: TypedModule[] = vec.vecAsArray(ref h.prog.modules);
+  let mods: Module[] = h.graph.modules.asArray();
+  let tms: TypedModule[] = h.prog.modules.asArray();
   const ei = h.graph.entryIndex;
   const declId = findFunctionDeclIn(ref mods[ei], name);
   if (declId == 0) {

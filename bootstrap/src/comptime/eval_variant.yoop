@@ -42,7 +42,7 @@ export function evalVariantConstructor(
   disposable parts: Vec<ValueId> = vec.vecNew(found.fieldCount);
   let f: usize = 0;
   while (f < found.fieldCount) {
-    vec.vecPush(ref parts, VALUE_NONE);
+    parts.push(VALUE_NONE);
     f += 1;
   }
 
@@ -57,7 +57,7 @@ export function evalVariantConstructor(
           `"${fieldNode.name}" is not a field of case "${expr.name}"`, fieldNode.sourceLoc
         )};
       }
-      vec.vecSet(ref parts, at.index, evalExprValue(ref cx, fieldNode.childA)?);
+      parts.set(at.index, evalExprValue(ref cx, fieldNode.childA)?);
       i += 1;
     }
   }
@@ -67,9 +67,9 @@ export function evalVariantConstructor(
   // a VALUE_NONE left in the run would be a slot nothing can read.
   let p: usize = 0;
   while (p < found.fieldCount) {
-    if (vec.vecGet(ref parts, p) == VALUE_NONE) {
+    if (parts.get(p) == VALUE_NONE) {
       const at = variantCaseFieldAtIndex(cx.prog, variantTy, usize(found.ordinal), p);
-      vec.vecSet(ref parts, p, zeroOfType(ref cx, at));
+      parts.set(p, zeroOfType(ref cx, at));
     }
     p += 1;
   }

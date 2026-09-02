@@ -26,7 +26,7 @@ export trait Disposable {
 //
 //     let disposable s: Text = textFrom("a");
 //     let next: Text = replace(ref s, "a", "b");
-//     Disposable.dispose(ref s);          // the outgoing value, by hand
+//     s.dispose();                        // the outgoing value, by hand
 //     s = next;
 //
 // That loop is the shape that motivates the mutable form at all. Reading the
