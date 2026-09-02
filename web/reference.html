@@ -453,13 +453,13 @@ type Channel implements (Disposable, Iterable&lt;Message&gt;) {
   // fields, then method bodies
 }</code></pre>
 
-        <h3 id="traits-calls">Calls are trait-qualified</h3>
+        <h3 id="traits-calls">Calling a method</h3>
         <p>
-          <code>Disposable.dispose(ref x)</code>. Not <code>x.dispose()</code>, and not a bare
-          <code>dispose(ref x)</code>; both are rejected with a fix-it. The trait name at the
-          call site is what lets a trait method name freely coincide with a module-level free
-          function, or with a method from another trait the same type implements, with no
-          ambiguity and no resolution order to learn.
+          <code>x.dispose()</code> or <code>Disposable.dispose(ref x)</code>; the two are one
+          call. The dotted form borrows the receiver, so it needs something with an address
+          (a binding, a field path, an element) and <code>f().dispose()</code> is refused.
+          A bare <code>dispose(ref x)</code> is never a method call, which is what lets a
+          trait method name coincide with a module-level free function.
         </p>
         <div class="callout callout-warn">
           <div class="callout-title">known gap</div>

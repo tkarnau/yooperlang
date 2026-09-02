@@ -1,0 +1,9 @@
+import { Text } from "std/core/text.yoop";
+
+function doSomething(ref t: Text): void {
+  
+}
+
+function main(): int32 {
+  return 0;
+}

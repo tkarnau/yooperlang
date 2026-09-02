@@ -1505,3 +1505,18 @@ function fixture(name: string): string {
   }
   return `tests/codegen/${name}`;
 }
+
+// A dotted call is the qualified call after pass D, so the two spellings have
+// to lower to the SAME instructions - one static call to the receiver's own
+// method symbol, with the receiver's address first.
+suite function aDottedCallLowersAsTheQualifiedOne(): void {
+  const M: string = "trait Shape { function area(ref self): int32; } type Rect implements Shape { w: int32, h: int32, function area(ref self): int32 { return self.w * self.h; } } ";
+
+  let test theory: Case = t.asserts("`r.area()` and `Shape.area(ref r)` emit identical IR") {
+    disposable dotted: Emitted = emitSource(`${M}function main(): int32 { let r: Rect = { w: 2, h: 3 }; return r.area(); }`);
+    disposable qualified: Emitted = emitSource(`${M}function main(): int32 { let r: Rect = { w: 2, h: 3 }; return Shape.area(ref r); }`);
+    theory.isSuccessful = dotted.error.len == 0 && qualified.error.len == 0 &&
+      text.equals(text.view(ref dotted.ir), text.view(ref qualified.ir));
+    theory.detail = `dotted said "${dotted.error}", qualified said "${qualified.error}"; the two spellings lowered differently`;
+  }
+}

@@ -190,8 +190,8 @@ The whole command line:
     --track-heap        emit the allocation and free counters around the heap
                         intrinsics. A no-op in an ordinary build, so a program
                         pays nothing for the flag it did not pass.
-    --warn-disposable   report the unhandled-disposable warning, which is
-                        silent otherwise.
+    --warn-disposable   report the unhandled-disposable and unhandled-owned
+                        warnings, which are silent otherwise.
     --warn-std          report warnings found in files under the std root,
                         which are silenced otherwise so a program's own
                         diagnostics are what the build prints.
@@ -794,8 +794,17 @@ yet", "unsupported extern ABI" - rather than mis-compiled.
     `Shape.area(ref r)` is resolved at COMPILE time by the receiver's concrete
     type, so the emitted call is as direct as an ordinary one. A variant takes
     methods the same way a struct does. There are no INHERENT methods: a method
-    a trait does not require is refused, which keeps `Trait.method(ref x)` the
-    only spelling a call ever needs.
+    a trait does not require is refused.
+  * `r.area()` - the same call THROUGH its receiver. Pass D rewrites it in the
+    arena into the qualified shape (`childB` an IDENT naming the trait the
+    receiver's type implements, argument 0 a `ref` of the receiver) and checks
+    that, so codegen, the discharge walk, comptime and the language server see
+    one shape (`typecheck/check_method.yoop`). The receiver is BORROWED, so it
+    needs an address, and a temporary is refused by the `ref` rule. A vtable
+    value dispatches through its slot and a bounded type parameter through its
+    bound, both by the same rewrite. Refused BY NAME: a method no implemented
+    trait declares, and a type parameter whose bounds declare the method twice
+    - the qualified spelling is the fix-it.
   * DISPLAY dispatch in interpolation - `${p}` on a type carrying
     `toString(ref self): string` becomes a CALL, and the method renders. Having
     the METHOD is the test rather than naming Display: there are no inherent

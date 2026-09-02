@@ -181,20 +181,20 @@ check on a change, and say so when you do.
 
 ## Run / test
 
-- `npm test` - every Node-driven suite. 482 tests, about two minutes. Needs
+- `npm test` - every Node-driven suite. 506 tests, about two minutes. Needs
   `clang` and a seed.
 - `npm run test:unit` - fast, needs no seed: the C runtime's own tests, the std
   index check, and the stage comparison the fixpoint is decided by. The last of
   those links two tiny C programs and SKIPS without `clang`.
 - `npm run test:e2e` - the five suites that build and run real programs
   (`slice`, `pass`, `fail`, `selfhost`, `lsp`). Requires `clang` on PATH.
-- `npm run test:pass` - the PROGRAM corpus, 247 tests: every example under
+- `npm run test:pass` - the PROGRAM corpus, 248 tests: every example under
   `examples/pass/` and `examples/tour/` built and run with the bootstrap and
   checked against a hand-written `.expected` beside it (stdout, then `exit=N`).
   This is what says whether a program WORKS, and it is the only thing in the
   tree that can catch a MISCOMPILE. It can do that only because the
   expectations were derived by READING each program - see the rule above.
-- `npm run test:fail` - the DIAGNOSTIC corpus, 77 tests: every fixture under
+- `npm run test:fail` - the DIAGNOSTIC corpus, 78 tests: every fixture under
   `examples/fail/` carrying a hand-written `.expected-errors`, each line of
   which is a `<line>:<column>: <substring>` the compiler has to report.
 - `npm run test:lsp` - the language server, driven over a real pipe the way an
@@ -275,17 +275,19 @@ check on a change, and say so when you do.
     accident - so the publish pays for the compile and every request after it
     is a lookup.
 - `--warn-disposable` opts a BUILD into the `unhandled-disposable` warning
-  (silent otherwise). It finds real leaks but has two known false positives -
+  (silent otherwise), and into `unhandled-owned`: an `owned string` that
+  nothing frees or hands on, the leak class section 3.1 of the writing guide
+  is about. It finds real leaks but has two known false positives -
   see [docs/writing_yoop.md](docs/writing_yoop.md) section 4. `unreachable-code`
   is ON by default and needs no flag: it inherits `alwaysDiverges`'s
   conservatism, so it can only ever MISS dead code, never flag live code.
-- Bootstrap suites: `npm run test:slice` (205 fixtures taken to an executable),
+- Bootstrap suites: `npm run test:slice` (206 fixtures taken to an executable),
   `npm run test:selfhost` (6 tests: the three-stage build and its fixpoint),
   and `npm run test:debug` (3 tests: gdb or lldb reads the DWARF the bootstrap
   emits; SKIPS when neither is on PATH). `YOOP_SLICE_CONCURRENCY`,
   `YOOP_PASS_CONCURRENCY` and `YOOP_FAIL_CONCURRENCY` override how many fixtures
   those suites run at once.
-- Every Yoop unit test at once, 1453 of them, in ONE build of the graph:
+- Every Yoop unit test at once, 1519 of them, in ONE build of the graph:
 
       YOOP_STD_ROOT=$PWD/std YOOP_RUNTIME_ROOT=$PWD/runtime \
         $(node scripts/seed.mjs) --test bootstrap/src

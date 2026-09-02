@@ -1340,15 +1340,16 @@ suite function namespaceMembersRespectExport(): void {
   }
 
   // `p.x(...)` on a struct local reaches the qualified-call path too, since the
-  // parser cannot tell the two apart. It has to say something better than
-  // "has no export".
+  // parser cannot tell the two apart. It is a METHOD call on a value now, and
+  // `x` is a field, so the answer says that rather than "has no export".
   let notNamespace = checkTwoModules(
     "export type Point { x: int, y: int }",
     "import { Point } from \"./lib.yoop\";\nfunction main(): int { const p: Point = { x: 1, y: 2 }; return p.x(); }"
   );
-  let test theory: Case = t.asserts("qualifying a call with something that is not a namespace says so") {
-    theory.isSuccessful = diagnosticsMention(ref notNamespace, "not an imported namespace");
-    theory.detail = `wanted a not-a-namespace diagnostic, got: ${firstDiagnostic(ref notNamespace)}`;
+  let test theory: Case = t.asserts("calling a field that is not a function value says it is a field") {
+    theory.isSuccessful = diagnosticsMention(ref notNamespace, "is a field of Point") &&
+      diagnosticsMention(ref notNamespace, "not a method");
+    theory.detail = `wanted a field-not-method diagnostic, got: ${firstDiagnostic(ref notNamespace)}`;
   }
 
   let unknownBase = checkTwoModules(
@@ -2492,6 +2493,85 @@ suite function unhandledDisposableWarnsOnlyWhenNothingHandlesIt(): void {
   let test theory: Case = t.asserts("passing it by `ref` is NOT a handoff") {
     theory.isSuccessful = diagnosticsMention(ref borrowed, "nothing handles it");
     theory.detail = "a binding that was only ever borrowed went unwarned";
+  }
+}
+
+// `unhandled-owned` - the same question asked of the other leak class: a
+// binding carrying the `owned` marker that nothing frees or hands on. Also
+// ADVISORY, and gated by the same flag.
+//
+// The one rule that is sharper than the disposable warning's is asserted on
+// its own: a by-value pass to a parameter that does not ask for `owned` is a
+// READ, because that parameter cannot forward the value to any sink requiring
+// the marker. The kind and a bodyless minting extern are declared inline, the
+// way std declares them, since these tests load no std.
+suite function unhandledOwnedWarnsWhenAnOwnedStringIsDropped(): void {
+  const DECL = "kind owned { appliesTo binding parameter field return; conferred; }\nextern \"C\" from \"mint.h\" { function mint(n: usize): owned string; }\nfunction release(s: owned string): void { }\nfunction read(s: string): void { }\ntype Box { held: string, }\n";
+
+  let bare = checkSource(`${DECL}function main(): int32 { let s: owned string = mint(1); return 0; }`);
+  let test theory: Case = t.asserts("an owned binding that is never used is warned about") {
+    theory.isSuccessful = diagnosticsMention(ref bare, "carries kind 'owned' and is dropped here");
+    theory.detail = `wanted an unhandled-owned warning, got: ${firstDiagnostic(ref bare)}`;
+  }
+  let test theory: Case = t.asserts("it is advisory rather than an error") {
+    theory.isSuccessful = errorCount(ref bare) == 0;
+    theory.detail = "a dropped owned string was reported as an error";
+  }
+
+  // The marker is INHERITED by an unannotated binding, and a by-value pass to
+  // a plain `string` parameter is a read: `read` cannot have taken it.
+  let onlyRead = checkSource(`${DECL}function main(): int32 { const s = mint(1); read(s); return 0; }`);
+  let test theory: Case = t.asserts("passing it to a parameter that does not ask for owned is a read, not a handoff") {
+    theory.isSuccessful = diagnosticsMention(ref onlyRead, "carries kind 'owned' and is dropped here");
+    theory.detail = `an owned string that was only ever read went unwarned: ${firstDiagnostic(ref onlyRead)}`;
+  }
+
+  // A parameter declared `owned` is a sink that may free it - `strFree` is
+  // exactly this shape - so the pass hands off there.
+  let freed = checkSource(`${DECL}function main(): int32 { let s: owned string = mint(1); release(s); return 0; }`);
+  let test theory: Case = t.asserts("passing it to a parameter declared owned answers it") {
+    theory.isSuccessful = !diagnosticsMention(ref freed, "is dropped here");
+    theory.detail = `a freed owned string was still warned about: ${firstDiagnostic(ref freed)}`;
+  }
+
+  let returned = checkSource(`${DECL}function keep(): owned string { let s: owned string = mint(1); return s; }\nfunction main(): int32 { return 0; }`);
+  let test theory: Case = t.asserts("returning it answers it") {
+    theory.isSuccessful = !diagnosticsMention(ref returned, "is dropped here");
+    theory.detail = `a returned owned string was still warned about: ${firstDiagnostic(ref returned)}`;
+  }
+
+  // Stored into an aggregate: the aggregate's owner is now responsible, and the
+  // pass errs toward silence on every handoff it cannot follow.
+  let stored = checkSource(`${DECL}function main(): int32 { let s: owned string = mint(1); const b: Box = { held: s }; return 0; }`);
+  let test theory: Case = t.asserts("storing it into a struct answers it") {
+    theory.isSuccessful = !diagnosticsMention(ref stored, "is dropped here");
+    theory.detail = `a stored owned string was still warned about: ${firstDiagnostic(ref stored)}`;
+  }
+
+  // An annotation is the authority: `const t: string = mint(1)` DROPS the
+  // marker on purpose, and a binding that carries nothing owes nothing.
+  let plain = checkSource(`${DECL}function main(): int32 { const t: string = mint(1); read(t); return 0; }`);
+  let test theory: Case = t.asserts("a binding annotated as a plain string carries no obligation") {
+    theory.isSuccessful = !diagnosticsMention(ref plain, "is dropped here");
+    theory.detail = `a plain-annotated binding was warned about: ${firstDiagnostic(ref plain)}`;
+  }
+
+  // The TEMPORARY case: no binding at all, built for the call and dropped after
+  // it. Reported at the argument, by the call check, since nothing else ever
+  // names the value.
+  let temporary = checkSource(`${DECL}function main(): int32 { read(mint(1)); return 0; }`);
+  let test theory: Case = t.asserts("an owned temporary passed to a parameter that does not ask for owned is warned about") {
+    theory.isSuccessful = diagnosticsMention(ref temporary, "argument 1 of \"read\" is an owned string built for this call");
+    theory.detail = `wanted the temporary warning, got: ${firstDiagnostic(ref temporary)}`;
+  }
+  let test theory: Case = t.asserts("the temporary warning is advisory too") {
+    theory.isSuccessful = errorCount(ref temporary) == 0;
+    theory.detail = "a dropped owned temporary was reported as an error";
+  }
+  let temporaryFreed = checkSource(`${DECL}function main(): int32 { release(mint(1)); return 0; }`);
+  let test theory: Case = t.asserts("an owned temporary passed to a parameter declared owned is not") {
+    theory.isSuccessful = temporaryFreed.diagnostics.len == 0;
+    theory.detail = `a freed temporary reported: ${firstDiagnostic(ref temporaryFreed)}`;
   }
 }
 
@@ -6725,5 +6805,115 @@ suite function aModulesMutableStateIsWrittenOnlyInsideIt(): void {
   let test theory: Case = t.asserts("reading an imported module-level let is still fine") {
     theory.isSuccessful = crossRead.diagnostics.len == 0;
     theory.detail = `a cross-module read reported: ${firstDiagnostic(ref crossRead)}`;
+  }
+}
+
+// ----- dotted method calls -----------------------------------------------------
+
+// `r.area()` is `Shape.area(ref r)`: the receiver is borrowed, the trait is
+// found from its type, and the call is rewritten into the qualified shape.
+suite function aMethodMayBeCalledThroughItsReceiver(): void {
+  const M = "trait Shape { function area(ref self): int; function scale(ref self, k: int): void; } type Rect implements Shape { w: int, h: int, function area(ref self): int { return self.w * self.h; } function scale(ref self, k: int): void { self.w = self.w * k; } } ";
+
+  let plain = checkSource(`${M}function main(): int { let r: Rect = { w: 2, h: 3 }; r.scale(2); return r.area(); }`);
+  let test theory: Case = t.asserts("a dotted call on a local checks clean") {
+    theory.isSuccessful = plain.diagnostics.len == 0;
+    theory.detail = `reported ${plain.diagnostics.len}: ${firstDiagnostic(ref plain)}`;
+  }
+
+  let paths = checkSource(`${M}type Box { r: Rect, } function main(): int { let b: Box = { r: { w: 1, h: 1 } }; let xs: Rect[] = [ { w: 1, h: 2 } ]; return b.r.area() + xs[0].area(); }`);
+  let test theory: Case = t.asserts("a field path and an element are receivers too") {
+    theory.isSuccessful = paths.diagnostics.len == 0;
+    theory.detail = `reported ${paths.diagnostics.len}: ${firstDiagnostic(ref paths)}`;
+  }
+
+  let onSelf = checkSource(`${M}trait Twice { function twice(ref self): int; } type Sq implements (Shape, Twice) { s: int, function area(ref self): int { return self.s * self.s; } function scale(ref self, k: int): void { } function twice(ref self): int { return self.area() * 2; } } function main(): int { return 0; }`);
+  let test theory: Case = t.asserts("`self.m()` inside a method resolves on the receiver's own type") {
+    theory.isSuccessful = onSelf.diagnostics.len == 0;
+    theory.detail = `reported ${onSelf.diagnostics.len}: ${firstDiagnostic(ref onSelf)}`;
+  }
+
+  // A borrowed parameter is re-borrowed, exactly as `Shape.area(ref t)` would.
+  let viaRef = checkSource(`${M}function measure(ref r: Rect): int { return r.area(); } function main(): int { let r: Rect = { w: 2, h: 3 }; return measure(ref r); }`);
+  let test theory: Case = t.asserts("a `ref` parameter is a receiver without a second `ref`") {
+    theory.isSuccessful = viaRef.diagnostics.len == 0;
+    theory.detail = `reported ${viaRef.diagnostics.len}: ${firstDiagnostic(ref viaRef)}`;
+  }
+
+  let unknown = checkSource(`${M}function main(): int { let r: Rect = { w: 1, h: 1 }; return r.volume(); }`);
+  let test theory: Case = t.asserts("a method the type does not have is refused by name") {
+    theory.isSuccessful = diagnosticsMention(ref unknown, "no method \"volume\"");
+    theory.detail = `wanted a no-method refusal naming volume, got: ${firstDiagnostic(ref unknown)}`;
+  }
+
+  // The receiver is BORROWED, so it needs an address - the same rule `ref f()`
+  // already has.
+  let temp = checkSource(`${M}function mk(): Rect { return { w: 1, h: 1 }; } function main(): int { return mk().area(); }`);
+  let test theory: Case = t.asserts("a temporary cannot be a receiver") {
+    theory.isSuccessful = diagnosticsMention(ref temp, "no address for a temporary");
+    theory.detail = `wanted the ref-of-temporary refusal, got: ${firstDiagnostic(ref temp)}`;
+  }
+
+  // A function-typed FIELD still wins: `o.hash(1)` is an indirect call through
+  // the field, and nothing about the dotted form changes that.
+  let viaField = checkSource("type Ops { hash: (k: int) => int, } function h(k: int): int { return k; } function main(): int { const o: Ops = { hash: h }; return o.hash(1); }");
+  let test theory: Case = t.asserts("a call through a function-typed field is still an indirect call") {
+    theory.isSuccessful = viaField.diagnostics.len == 0;
+    theory.detail = `reported ${viaField.diagnostics.len}: ${firstDiagnostic(ref viaField)}`;
+  }
+}
+
+suite function aDottedCallDispatchesThroughBoundsAndVtables(): void {
+  const M = "trait Shape { function area(ref self): int; } type Rect implements Shape { w: int, h: int, function area(ref self): int { return self.w * self.h; } } ";
+
+  let bound = checkSource(`${M}function measure<T implements Shape>(ref t: T): int { return t.area(); } function main(): int { let r: Rect = { w: 2, h: 3 }; return measure(ref r); }`);
+  let test theory: Case = t.asserts("a type parameter dispatches through its bound") {
+    theory.isSuccessful = bound.diagnostics.len == 0;
+    theory.detail = `reported ${bound.diagnostics.len}: ${firstDiagnostic(ref bound)}`;
+  }
+
+  let unbound = checkSource(`${M}function measure<T>(ref t: T): int { return t.area(); } function main(): int { return 0; }`);
+  let test theory: Case = t.asserts("a type parameter with no such bound is refused, naming the parameter") {
+    theory.isSuccessful = diagnosticsMention(ref unbound, "no bound declaring a method \"area\"");
+    theory.detail = `wanted a no-bound refusal, got: ${firstDiagnostic(ref unbound)}`;
+  }
+
+  // Two bounds that each declare `m` is the one ambiguity the dotted form can
+  // have, and the qualified form is how it is resolved.
+  let ambiguous = checkSource("trait A { function m(ref self): int; } trait B { function m(ref self): int; } function f<T implements (A, B)>(ref t: T): int { return t.m(); } function main(): int { return 0; }");
+  let test theory: Case = t.asserts("a method two bounds declare is refused, pointing at the qualified form") {
+    theory.isSuccessful = diagnosticsMention(ref ambiguous, "more than one bound") &&
+      diagnosticsMention(ref ambiguous, "trait-qualified");
+    theory.detail = `wanted an ambiguity refusal, got: ${firstDiagnostic(ref ambiguous)}`;
+  }
+
+  let erased = checkSource(`${M}vtable SV for Shape { area: () => int, } function total(ref v: SV): int { return v.area(); } function main(): int { let r: Rect = { w: 1, h: 1 }; let v: SV = SV.from(ref r); return total(ref v); }`);
+  let test theory: Case = t.asserts("a vtable value dispatches through its slot") {
+    theory.isSuccessful = erased.diagnostics.len == 0;
+    theory.detail = `reported ${erased.diagnostics.len}: ${firstDiagnostic(ref erased)}`;
+  }
+
+  // `Child.parentMethod(ref x)` is legal, and so is its dotted twin: the
+  // declaring trait is the parent, found through the flattened list.
+  let inherited = checkSource("trait P { function m(ref self): int; } trait C extends P { function n(ref self): int; } type X implements C { v: int, function m(ref self): int { return self.v; } function n(ref self): int { return 0; } } function main(): int { let x: X = { v: 1 }; return x.m(); }");
+  let test theory: Case = t.asserts("a method declared on a parent trait is reachable") {
+    theory.isSuccessful = inherited.diagnostics.len == 0;
+    theory.detail = `reported ${inherited.diagnostics.len}: ${firstDiagnostic(ref inherited)}`;
+  }
+}
+
+suite function aDottedCallKeepsTheAsyncColoring(): void {
+  const M = `${ASYNC_KIND}trait Src { async read(ref self): int; } type S implements Src { n: int, async read(ref self): int { return self.n; } } `;
+
+  let awaited = checkSource(`${M}async go(ref s: S): int { return await s.read(); } function main(): int { return 0; }`);
+  let test theory: Case = t.asserts("`await s.read()` drives the coroutine like the qualified form") {
+    theory.isSuccessful = awaited.diagnostics.len == 0;
+    theory.detail = `reported ${awaited.diagnostics.len}: ${firstDiagnostic(ref awaited)}`;
+  }
+
+  let bare = checkSource(`${M}async go(ref s: S): int { return s.read(); } function main(): int { return 0; }`);
+  let test theory: Case = t.asserts("a dotted call to a coroutine still has to be awaited") {
+    theory.isSuccessful = diagnosticsMention(ref bare, "await");
+    theory.detail = `wanted the coloring refusal, got: ${firstDiagnostic(ref bare)}`;
   }
 }

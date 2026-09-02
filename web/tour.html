@@ -187,11 +187,11 @@ echo $?</code></pre>
           takes on behavior.
         </p>
         <p>
-          Calls are trait-qualified, <code>Greeter.greet(ref g)</code> rather than
-          <code>g.greet()</code>. It is more typing. What you get for it is that two traits
-          on one type can both have a <code>greet</code> with no ambiguity and no resolution
-          order to learn. Generics monomorphize against the bound, so <code>announce</code>
-          becomes one machine function per type you actually call it with.
+          A call is written through the receiver, <code>g.greet()</code>, or trait-qualified,
+          <code>Greeter.greet(ref g)</code>; they are the same call, and the dotted form
+          borrows the receiver. Generics monomorphize against the bound, so
+          <code>announce</code> becomes one machine function per type you actually call it
+          with.
         </p>
         <div data-episode="traits"></div>
       </section>

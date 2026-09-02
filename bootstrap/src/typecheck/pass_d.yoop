@@ -3,8 +3,11 @@ module typecheck;
 // Pass D - check function bodies and decorate every node codegen will read.
 //
 // Decoration is the dense `TypedModule.resolvedTypes` vector indexed by NodeId
-// (decision D2): the AST stays the parser's immutable output and the types live
-// beside it. Codegen may assume every node it visits has a concrete TypeId here.
+// (decision D2): the AST stays the parser's output and the types live beside
+// it. Codegen may assume every node it visits has a concrete TypeId here. ONE
+// exception rewrites the arena: a dotted method call (`r.area()`) is rewritten
+// into the qualified shape it is sugar for, which appends nodes - so the module
+// arrives by REFERENCE, and check_method.yoop grows the decoration to match.
 //
 // THIS FILE IS THE DRIVER, and nothing else. It walks a module's files, finds
 // the things that HAVE bodies (functions, methods, and the initializer of a
@@ -29,7 +32,7 @@ import { Vec }, * as vec from "std/core/vec.yoop";
 import { disposable } from "std/core/kinds.yoop";
 import { AST, ASTNode, ASTNodeKind, NodeId, childAt, declOf, nodeAt } from "../ast";
 import { Module } from "../source_graph";
-export function passDCheckBodies(ref prog: Program, ref tm: TypedModule, m: Module): void {
+export function passDCheckBodies(ref prog: Program, ref tm: TypedModule, ref m: Module): void {
   // One decoration slot per arena node, so a NodeId indexes straight in.
   // TYPE_ERROR_ID doubles as "nothing resolved here".
   vec.vecClear(ref tm.resolvedTypes);
@@ -43,7 +46,7 @@ export function passDCheckBodies(ref prog: Program, ref tm: TypedModule, m: Modu
   while (f < m.files.len) {
     const file = vec.vecGet(ref m.files, f);
     beginFile(ref prog, file.absPath);
-    checkFileBodies(ref prog, ref tm, m, file.root);
+    checkFileBodies(ref prog, ref tm, ref m, file.root);
     f += 1;
   }
 
@@ -53,13 +56,14 @@ export function passDCheckBodies(ref prog: Program, ref tm: TypedModule, m: Modu
   // discharge.yoop.
   computeDischarges(ref prog, ref tm, m);
 
-  // And which obligations nothing answered. After the discharge walk, because
-  // it reads what that left behind. Advisory: `--warn-disposable` decides
-  // whether the build prints them. See unhandled.yoop.
+  // And which obligations nothing answered - a propagated kind nobody handles,
+  // and an `owned` string nothing frees or hands on. After the discharge walk,
+  // because it reads what that left behind. Advisory: `--warn-disposable`
+  // decides whether the build prints them. See unhandled.yoop.
   reportUnhandledDisposables(ref prog, ref tm, m);
 }
 
-function checkFileBodies(ref prog: Program, ref tm: TypedModule, m: Module, root: NodeId): void {
+function checkFileBodies(ref prog: Program, ref tm: TypedModule, ref m: Module, root: NodeId): void {
   const programNode = nodeAt(ref m.ast, root);
   let i: usize = 0;
   while (i < programNode.childCount) {

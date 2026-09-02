@@ -1,0 +1,10 @@
+area=6
+scaled=24
+field=5
+elem=36
+variant=16
+vtable=24
+bound=24
+close 7
+done
+exit=0

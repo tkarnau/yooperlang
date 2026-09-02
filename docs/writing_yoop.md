@@ -56,8 +56,11 @@ The short list. Most broken builds are one of these.
    if/else, a loop, a switch arm, or a block-owning kind.
 7. **`ref` is explicit at both ends.** `function f(x: ref T)` is called as
    `f(ref x)`.
-8. **Trait methods are called trait-qualified**: `Display.toString(ref x)`, never
-   `x.toString()` and never bare `toString(ref x)`.
+8. **A method is called through its receiver or trait-qualified**: `x.toString()`
+   and `Display.toString(ref x)` are the same call, and the dotted form borrows
+   the receiver (`x.m()` means `ref x`, so `f().m()` is refused). Bare
+   `toString(ref x)` is never legal. Write the trait-qualified form when the
+   receiver is a type parameter with two bounds that both declare the method.
 9. **A struct used as a variant payload must be declared before the variant**, in
    the same file. Otherwise you get a misleading "type has no field" error.
 
@@ -320,6 +323,27 @@ leak, which is why it is not on by default:
 
 `ref x` is a borrow and never counts as handling the obligation; passing `x` by
 value does, because the callee may have taken it.
+
+The same flag turns on `unhandled-owned`, which is the same question asked of
+the other leak class: a binding carrying std's `owned` marker (what
+`stringConcat`, `padStart` and every other bare-string builder returns; see
+3.1) that nothing frees with `strFree`, returns, stores into an aggregate, or
+passes to a parameter declared `owned`. An unannotated `const s =
+str.stringConcat(a, b)` inherits the marker and is a candidate too. This one is
+sharper than the disposable warning in one place: passing the binding by value
+to a plain `string` parameter does NOT count as handing it on, because that
+parameter cannot forward the value to any sink that requires `owned`, so the
+callee cannot have taken it. The compiler reads that off the callee's
+signature; a method, a generic or `printf` has none in that table, so those
+still count as a transfer and the warning errs toward silence. A temporary
+gets the same treatment: `log.info(str.stringConcat(a, b))` builds the string
+for the call and drops it after, and is reported at the argument. The arena
+false positive above does not apply to it, since a built string ignores the
+allocator context. It has one of its own: a plain `string` parameter whose
+callee STORES the value for the rest of the program (an interner, a table the
+compile keeps) reads as a drop, because the signature cannot say it kept it.
+The fix it usually wants is not `strFree` but section 3.1: build the text as a
+`Text`.
 
 ### 4.1b Never RETURN a `disposable` binding
 

@@ -28,7 +28,7 @@ import * as fs from "std/fs.yoop";
 import { AST, dumpAstJson } from "./ast";
 import { parse } from "./parse";
 import { loadModuleGraph, loadModuleGraphFromSource, LoadGraphResult, discoverStdRoot } from "./source_graph";
-import { typecheckProgram, Program, UNHANDLED_DISPOSABLE } from "./typecheck";
+import { typecheckProgram, Program, UNHANDLED_DISPOSABLE, UNHANDLED_OWNED } from "./typecheck";
 import { Diagnostic, Severity, formatLocation } from "./diagnostics";
 import { codegenProgram, CodegenOptions, defaultCodegenOptions } from "./codegen";
 import { runPrecompilePass } from "./comptime";
@@ -500,6 +500,8 @@ function parseCommandLine(ref extras: Vec<string>): CliArgs {
   ownership model is ADVISORY: the warning finds real leaks and has two known
   false-positive classes it cannot tell from one. On by default it would teach
   people to stop reading warnings, which costs more than it finds.
+  `unhandled-owned` - an `owned string` nothing frees or hands on - is the same
+  advisory asked of the other leak class, and rides the same flag.
 */
 function reportDiagnostics(ref prog: Program, warn: WarnOptions): usize {
   let errors: usize = 0;
@@ -526,7 +528,8 @@ function warningIsWanted(ref d: Diagnostic, warn: WarnOptions): bool {
   if (!warn.std && isUnderStdRoot(d.filePath, warn.stdRoot)) {
     return false;
   }
-  if (str.stringEq(d.code, UNHANDLED_DISPOSABLE) && !warn.disposable) {
+  if (!warn.disposable &&
+      (str.stringEq(d.code, UNHANDLED_DISPOSABLE) || str.stringEq(d.code, UNHANDLED_OWNED))) {
     return false;
   }
   return true;

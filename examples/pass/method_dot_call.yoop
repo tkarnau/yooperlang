@@ -1,0 +1,35 @@
+// A dotted method call through an async method: `await c.next()` is
+// `await Src.next(ref c)`. The coroutine is driven the same way, and the
+// borrow means the counter really advances between the two awaits.
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+trait Src {
+    async next(ref self): int32;
+}
+
+type Counter implements Src {
+    n: int32,
+    async next(ref self): int32 {
+        self.n = self.n + 1;
+        return self.n;
+    }
+}
+
+task run(): int32 {
+    let c: Counter = { n: 0 };
+    let a: int32 = await c.next();
+    let b: int32 = await c.next();
+    return a + b;
+}
+
+function main(): int32 {
+    const v: int32 = run();
+    printf("sum=%d\n", v);
+    return 0;
+}
+
+// expected output:
+// sum=3

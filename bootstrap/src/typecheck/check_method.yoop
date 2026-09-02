@@ -1,0 +1,288 @@
+module typecheck;
+
+// `x.method(args)` - a trait method called THROUGH the receiver.
+//
+// The dotted form is sugar for the trait-qualified one and nothing more:
+//
+//   ps.peek()                    is   SelfLexing.peek(ref ps)
+//   self.items.dispose()         is   Disposable.dispose(ref self.items)
+//   r.read(ref buf)              is   Reader.read(ref r, ref buf)
+//
+// It is implemented as exactly that rewrite. Once the receiver's type says
+// which trait declares the method, the CALL node is rewritten IN THE ARENA into
+// the shape the qualified form parses to - `childB` an IDENT naming the trait,
+// argument 0 a `ref` of what was left of the dot - and handed to the same
+// checker. Everything downstream (the discharge walk that spots a hand-written
+// dispose, codegen's symbol choice, the comptime evaluator, the language server)
+// reads the qualified shape it already knew, and none of them learns the dotted
+// form exists.
+//
+// The rewrite is the one place in pass D that appends nodes, so it also grows
+// the dense decoration vector to cover them.
+//
+// What is NOT sugar: the receiver is always borrowed. `x.m()` means `ref x`, so
+// `x` has to be something with an address - a binding, a field path, an element.
+// `f().m()` is refused for the same reason `ref f()` is.
+
+import { Vec }, * as vec from "std/core/vec.yoop";
+import * as map from "std/collections/map.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import { ASTNode, ASTNodeKind, NodeId, childAt, nodeAt, createASTNode, appendNode, appendChildRun, replaceNode } from "../ast";
+import { SourceLocation } from "../diagnostics";
+import { Option } from "std/core/types.yoop";
+
+// Whether the base of a `base.member(...)` call is a VALUE rather than a name
+// that qualifies - a namespace, a trait, a vtable. Asked after the base has
+// already failed to be a function-typed field's owner.
+//
+// A local wins over everything, because a namespace only ever lives at module
+// level and a local shadows it. Past that, a name that resolves to a trait, a
+// vtable or a namespace is a qualifier; a module-level const or global is a
+// value; an unknown name is neither, and the caller reports it.
+function isMethodReceiver(ref cx: Cx, base: ASTNode): bool {
+  if (base.kind != ASTNodeKind.IDENT) {
+    return true;
+  }
+  switch (scopeLookup(cx.scope, base.name)) {
+    case Option.Some { value: t }: { return true; }
+    case Option.None: { }
+  }
+  if (traitTypeNamed(cx.prog, cx.tm, base.name) != TYPE_ERROR_ID) {
+    return false;
+  }
+  if (vtableTypeNamed(cx.prog, cx.tm, base.name) != TYPE_ERROR_ID) {
+    return false;
+  }
+  const symId = lookupOwnName(cx.tm, base.name);
+  if (symId != SYMBOL_NONE_ID) {
+    switch (symbolAt(cx.prog, symId)) {
+      case Symbol.Namespace { module: mi }: { return false; }
+      default: { }
+    }
+  }
+  return moduleLevelValueType(cx.prog, cx.tm, base.name) != TYPE_ERROR_ID;
+}
+
+// The rewrite, then the qualified checker.
+function checkMethodCall(
+  ref cx: Cx,
+  expr: ASTNode,
+  exprId: NodeId,
+  base: ASTNode
+): TypeId {
+  // `ref <base>`, as a node of its own. Checked once here to learn the
+  // receiver's type; the qualified checker checks it again as argument 0, the
+  // same double look the explicit form already gets.
+  let refNode = createASTNode(ASTNodeKind.REF_EXPRESSION, base.sourceLoc);
+  refNode.childA = expr.childB;
+  const refId = appendNode(cx.ast, refNode);
+  growDecoration(ref cx);
+
+  const borrowed = checkExpr(ref cx, refId, TYPE_ERROR_ID);
+  if (borrowed == TYPE_ERROR_ID) {
+    checkCallArgs(ref cx, expr);
+    return TYPE_ERROR_ID;   // checkRefExpr said why
+  }
+  const receiverType = receiverTypeOf(cx.prog, borrowed);
+
+  const traitType = declaringTraitOf(ref cx, expr, receiverType);
+  if (traitType == TYPE_ERROR_ID) {
+    checkCallArgs(ref cx, expr);
+    return TYPE_ERROR_ID;   // declaringTraitOf said why
+  }
+
+  // The argument list with the receiver in front. A NEW list rather than an
+  // edit of the old one: a list is a run in the shared child pool, and there
+  // is no room in front of a run that is already there.
+  disposable ids: Vec<NodeId> = vec.vecNew(4);
+  vec.vecPush(ref ids, refId);
+  let listLoc: SourceLocation = expr.sourceLoc;
+  if (expr.childA != 0) {
+    const old = nodeAt(cx.ast, expr.childA);
+    listLoc = old.sourceLoc;
+    let i: usize = 0;
+    while (i < old.childCount) {
+      vec.vecPush(ref ids, childAt(cx.ast, old, i));
+      i += 1;
+    }
+  }
+  let listNode = createASTNode(ASTNodeKind.NODE_LIST, listLoc);
+  appendChildRun(cx.ast, ref listNode, ref ids);
+  const listId = appendNode(cx.ast, listNode);
+
+  // The qualifier the writer did not write. Its span is EMPTY so the language
+  // server never lands on it: the member token already belongs to the call.
+  let traitIdent = createASTNode(ASTNodeKind.IDENT, emptySpanAt(expr.sourceLoc));
+  traitIdent.name = nominalNameOf(cx.prog, traitType);
+  const traitId = appendNode(cx.ast, traitIdent);
+  growDecoration(ref cx);
+
+  let call = expr;
+  call.childA = listId;
+  call.childB = traitId;
+  replaceNode(cx.ast, exprId, call);
+
+  return checkTraitCall(ref cx, call, exprId, traitIdent, traitType);
+}
+
+// The trait that declares `expr.name` for a receiver of `receiverType`, or
+// TYPE_ERROR_ID with the reason reported.
+//
+// Three receiver shapes, in the order the qualified checker tells them apart:
+//
+//   a type parameter   the trait is one of its BOUNDS
+//   a vtable value     the trait is the one the vtable erases
+//   a nominal type     the trait is one it IMPLEMENTS
+//
+// A type's method table is keyed by name alone, so a struct can never own two
+// methods called `m`; the only ambiguity possible is a type parameter with two
+// bounds that each declare one, and that is refused with the spelling that
+// says which.
+function declaringTraitOf(ref cx: Cx, expr: ASTNode, receiverType: TypeId): TypeId {
+  if (isTypeParam(cx.prog, receiverType)) {
+    disposable bounds: Vec<TypeId> = boundsOf(cx.prog, receiverType);
+    const found = traitDeclaring(ref cx, ref bounds, expr.name);
+    if (found.count == 0) {
+      reportError(
+        cx.prog,
+        `type parameter "${typeParamNameOf(cx.prog, receiverType)}" has no bound declaring a method "${expr.name}"`,
+        expr.sourceLoc
+      );
+      return TYPE_ERROR_ID;
+    }
+    if (found.count > 1) {
+      reportError(
+        cx.prog,
+        `"${expr.name}" is declared by more than one bound of "${typeParamNameOf(cx.prog, receiverType)}" (${nominalNameOf(cx.prog, found.first)} and ${nominalNameOf(cx.prog, found.second)}) - write the trait-qualified form to say which`,
+        expr.sourceLoc
+      );
+      return TYPE_ERROR_ID;
+    }
+    return found.first;
+  }
+
+  const erased = vtableTraitOf(cx.prog, receiverType);
+  if (erased != TYPE_ERROR_ID) {
+    return erased;
+  }
+
+  if (lookupMethod(cx.prog, receiverType, expr.name) == TYPE_ERROR_ID) {
+    // `p.x()` where `x` is a FIELD. Reached only when the field is not a
+    // function value - that case was taken as an indirect call before this -
+    // so the answer is what the field holds.
+    const field = lookupField(cx.prog, receiverType, expr.name);
+    if (field.found) {
+      reportError(
+        cx.prog,
+        `"${expr.name}" is a field of ${formatType(cx.prog, receiverType)} holding ${formatType(cx.prog, field.typeId)}, not a method - only a field holding a function value can be called`,
+        expr.sourceLoc
+      );
+      return TYPE_ERROR_ID;
+    }
+    reportError(
+      cx.prog,
+      `${formatType(cx.prog, receiverType)} has no method "${expr.name}" - a method is one declared by a trait the type implements`,
+      expr.sourceLoc
+    );
+    return TYPE_ERROR_ID;
+  }
+  disposable traits: Vec<TypeId> = implementedTraitsOf(cx.prog, receiverType);
+  const found = traitDeclaring(ref cx, ref traits, expr.name);
+  if (found.count == 0) {
+    // The method table says yes and the implements list says no. Nothing
+    // produces that today - there are no inherent methods - so it is reported
+    // as what it would be rather than guessed around.
+    reportError(
+      cx.prog,
+      `${formatType(cx.prog, receiverType)} has a method "${expr.name}" that no trait it implements declares`,
+      expr.sourceLoc
+    );
+    return TYPE_ERROR_ID;
+  }
+  return found.first;
+}
+
+// How many of `traits` declare `name`, and the first two that do.
+//
+// A trait that declares the method in its OWN table counts; one that only
+// reaches it through `extends` does not, so a list holding both `Child` and
+// the `Parent` that declares the method answers ONE, and names the parent.
+// When no trait owns it and one inherits it, the inheriting one is the answer
+// - `Child.parentMethod(ref x)` is a legal spelling and this is its dotted
+// twin.
+type TraitMatch {
+  count: usize,
+  first: TypeId,
+  second: TypeId,
+}
+
+function traitDeclaring(ref cx: Cx, ref traits: Vec<TypeId>, name: string): TraitMatch {
+  let out: TraitMatch = { count: 0, first: TYPE_ERROR_ID, second: TYPE_ERROR_ID };
+  let inherited: TypeId = TYPE_ERROR_ID;
+  let i: usize = 0;
+  while (i < traits.len) {
+    const t = vec.vecGet(ref traits, i);
+    if (traitOwnsMethod(cx.prog, t, name)) {
+      if (out.count == 0) {
+        out.first = t;
+      } else if (out.count == 1) {
+        out.second = t;
+      }
+      out.count += 1;
+    } else if (inherited == TYPE_ERROR_ID && lookupMethod(cx.prog, t, name) != TYPE_ERROR_ID) {
+      inherited = t;
+    }
+    i += 1;
+  }
+  if (out.count == 0 && inherited != TYPE_ERROR_ID) {
+    out.count = 1;
+    out.first = inherited;
+  }
+  return out;
+}
+
+// Whether `traitType` declares `name` itself, parents not counted.
+function traitOwnsMethod(ref prog: Program, traitType: TypeId, name: string): bool {
+  switch (typeAt(ref prog, traitType)) {
+    case Type.Trait { decl: d, methods: mm, typeParams: tp, extendsTraits: et }: {
+      return map.mapContainsKey(ref mm, name);
+    }
+    default: { return false; }
+  }
+}
+
+// A COPY of a nominal type's implemented traits, already flattened through
+// `extends` by pass C. A copy for the reason `boundsOf` gives: a Vec read out
+// of the type arena shares the arena's storage.
+function implementedTraitsOf(ref prog: Program, id: TypeId): Vec<TypeId> propagates<disposable> {
+  let out: Vec<TypeId> = vec.vecNew(2);
+  switch (typeAt(ref prog, id)) {
+    case Type.Struct { decl: d, fields: f, methods: mm, implementsTraits: it, generic: g }: {
+      vec.vecExtendFrom(ref out, vec.vecAsArray(ref it));
+    }
+    case Type.Variant { decl: d, cases: cs, methods: mm, implementsTraits: it, generic: g }: {
+      vec.vecExtendFrom(ref out, vec.vecAsArray(ref it));
+    }
+    case Type.ValueEnum { decl: d, underlying: u, cases: cs, isOpen: o,
+                          methods: mm, implementsTraits: it }: {
+      vec.vecExtendFrom(ref out, vec.vecAsArray(ref it));
+    }
+    default: { }
+  }
+  return out;
+}
+
+// One decoration slot per arena node, kept true across the nodes this file
+// appends. Pass D sized the vector once at the top of the module; a node added
+// after that would otherwise be read past its end.
+function growDecoration(ref cx: Cx): void {
+  while (cx.tm.resolvedTypes.len < cx.ast.nodes.len) {
+    vec.vecPush(ref cx.tm.resolvedTypes, TYPE_ERROR_ID);
+  }
+}
+
+// The same position with no extent. A synthesized node that carries one is
+// found by nothing that searches by offset.
+function emptySpanAt(loc: SourceLocation): SourceLocation {
+  return { pos: loc.pos, line: loc.line, column: loc.column, length: 0 };
+}

@@ -65,11 +65,26 @@ has to be settled before any sweep:
 - `string` is everywhere in std and the compiler. Each edit is boring but there
   are many.
 
-## The cheap first step, if the sweep is too big to want yet
+## The cheap first step, which exists
 
 The `owned` kind already marks exactly the values that leak, so a smell WARNING
-("an `owned string` is dropped here without `strFree` or a transfer") catches
-them where they happen with no language change. That is the advisory end of the
-same lever; borrow-only `string` is the structural end. Doing the warning first
-also measures how often the owned role is actually used, which is the data the
-sweep decision wants.
+catches them where they happen with no language change. That is the advisory
+end of the same lever; borrow-only `string` is the structural end. It is
+`unhandled-owned` in `bootstrap/src/typecheck/unhandled.yoop`, gated by
+`--warn-disposable` like its sibling, and docs/writing_yoop.md section 4.1a
+says what it counts as a transfer. Method bodies are outside its walk, the same
+as the disposable warning's.
+
+It also gives the measurement the sweep decision wants. Build a compiler with
+`--warn-disposable` against the tree and count the class:
+
+    YOOP_STD_ROOT=$PWD/std YOOP_RUNTIME_ROOT=$PWD/runtime \
+      build/dev/bin/yoopiler_boot bootstrap/src/main.yoop -o /tmp/x \
+      --emit-ir --warn-disposable --warn-std 2>&1 | grep -c 'unhandled-owned'
+
+First reading, September 2026, over the whole compiler graph with std: 16
+sites, none of them a binding. Every one is a temporary handed to a plain
+`string` parameter that keeps it for the compile (`setDebugNode` in the DWARF
+emitter, `strValue` in the comptime evaluator), and std itself has zero. So
+the owned role is barely used at the binding level at all, which is the
+argument that the sweep is smaller than it looks.

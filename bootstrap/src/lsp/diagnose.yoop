@@ -31,10 +31,10 @@ module lsp;
   server to remember which URIs it has published to so that it can clear them
   again, and nothing here does that yet.
 
-  WARNINGS ARE NOT FILTERED, unlike a build's. `unhandled-disposable` is
-  silenced in a build unless `--warn-disposable` says otherwise, because it has
-  two known false-positive classes and teaching people to stop reading warnings
-  costs more than it finds. An editor is the other case: it is where an
+  WARNINGS ARE NOT FILTERED, unlike a build's. `unhandled-disposable` and
+  `unhandled-owned` are silenced in a build unless `--warn-disposable` says
+  otherwise, because the first has two known false-positive classes and
+  teaching people to stop reading warnings costs more than it finds. An editor is the other case: it is where an
   advisory belongs, the reader can see the line, and the path filter above
   already drops everything std says about itself.
 */

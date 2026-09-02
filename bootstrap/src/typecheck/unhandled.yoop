@@ -37,21 +37,60 @@ module typecheck;
   scope, where not disposing is the point, and a copy read back out of a
   container, where disposing would double-free. Neither is suppressed here -
   they are the reason the warning is opt-in rather than on by default.
+
+  `unhandled-owned` - the same question asked of the OTHER leak class.
+
+      let s: owned string = str.stringConcat(a, b);   // a raw malloc
+      log.info(s);                                    // read, never freed
+
+  `owned` is std's provenance marker for "this string's storage was allocated"
+  (std/core/kinds.yoop), and it is exactly the set of values the writing guide
+  keeps warning about: a built `string` that nothing frees and `--track-heap`
+  cannot even see. So the same walk asks, of every binding that carries the
+  marker, whether anything ever frees it or hands it on. Nothing here names
+  `strFree`: a free is a by-value pass to a parameter declared `owned`, which is
+  a transfer like any other.
+
+  One rule is SHARPER than the disposable one, and the marker is what pays for
+  it. Passing an owned binding by value to a parameter that does not ask for
+  `owned` is a READ, not a handoff: the callee's slot cannot forward the value
+  to any sink that requires the marker (that is what conferred means), so it
+  cannot have taken responsibility for freeing it. The slot each argument flowed
+  into is stamped by `checkCallMarkers`; an argument with no stamp - a method, a
+  generic, `printf` - reads as unknown and counts as a transfer, which is the
+  erring-toward-silence direction again.
+
+  A binding is not the only place the drop happens. `log.info(stringConcat(a,
+  b))` builds and drops the value with no name to report against, so that case
+  is reported at the ARGUMENT, by `warnOwnedTemporary` in markers.yoop where
+  the value's and the slot's markers are both in hand. Same code, same rule.
+
+  The two are gated together by `--warn-disposable`, and the arena false positive
+  does not apply to this one: a built string ignores the allocator context, so
+  an arena reclaims nothing of it.
 */
 
 import { Vec }, * as vec from "std/core/vec.yoop";
+import * as map from "std/collections/map.yoop";
 import * as str from "std/core/strings.yoop";
+import { Option } from "std/core/types.yoop";
 import { disposable } from "std/core/kinds.yoop";
 import { AST, ASTNode, ASTNodeKind, NodeId, childAt, declOf, nodeAt } from "../ast";
 import { Module } from "../source_graph";
 
 export const UNHANDLED_DISPOSABLE: string = "unhandled-disposable";
+export const UNHANDLED_OWNED: string = "unhandled-owned";
 
 // One binding under consideration, while its function is being walked.
 type Candidate {
   binding: NodeId,   // the LET_DECL / CONST_DECL
   name: string,
   kindName: string,  // the kind whose obligation is unanswered
+  // The kind's marker bit when the obligation is the `owned` one, and 0 for a
+  // propagated kind. It is what lets `noteUse` tell a read from a handoff at a
+  // call: a propagated kind has no marker, so a by-value pass has to be read as
+  // a transfer there.
+  marker: uint64,
   handled: bool,     // a transfer or a manual discharge was found
 }
 
@@ -85,24 +124,34 @@ export function reportUnhandledDisposables(ref prog: Program, ref tm: TypedModul
 
 function checkBodyForUnhandled(ref prog: Program, ref tm: TypedModule, ref ast: AST, bodyId: NodeId): void {
   disposable candidates: Vec<Candidate> = vec.vecNew(4);
-  collectCandidates(ref prog, ref tm, ref ast, bodyId, ref candidates);
+  const ownedBit = ownedMarkerBit(ref prog);
+  collectCandidates(ref prog, ref tm, ref ast, bodyId, ownedBit, ref candidates);
   if (candidates.len == 0) {
     return;
   }
   markDischarged(ref tm, ref candidates);
-  markTransfers(ref ast, bodyId, ref candidates);
+  markTransfers(ref tm, ref ast, bodyId, ref candidates);
 
   let i: usize = 0;
   while (i < candidates.len) {
     const c = vec.vecGet(ref candidates, i);
     if (!c.handled) {
       const decl = nodeAt(ref ast, c.binding);
-      reportWarning(
-        ref prog,
-        `"${c.name}" carries kind '${c.kindName}' but nothing handles it - add the '${c.kindName}' keyword to auto-clean it at scope exit, call its cleanup directly, or return it`,
-        decl.sourceLoc,
-        UNHANDLED_DISPOSABLE
-      );
+      if (c.marker != 0) {
+        reportWarning(
+          ref prog,
+          `"${c.name}" carries kind '${c.kindName}' and is dropped here - nothing frees it or hands it on. Free it (strFree), return it, pass it to a parameter declared '${c.kindName}', or build it as a Text instead`,
+          decl.sourceLoc,
+          UNHANDLED_OWNED
+        );
+      } else {
+        reportWarning(
+          ref prog,
+          `"${c.name}" carries kind '${c.kindName}' but nothing handles it - add the '${c.kindName}' keyword to auto-clean it at scope exit, call its cleanup directly, or return it`,
+          decl.sourceLoc,
+          UNHANDLED_DISPOSABLE
+        );
+      }
     }
     i += 1;
   }
@@ -113,11 +162,18 @@ function checkBodyForUnhandled(ref prog: Program, ref tm: TypedModule, ref ast: 
 // A binding that DECLARES the kind is not a candidate at all rather than one
 // marked handled: it is the ordinary way to answer the obligation, and there is
 // nothing to report about it.
+//
+// The `owned` obligation is read off the binding's MARKERS rather than its type
+// - the same set `bindLocal` established, kept on the module for this walk -
+// so an unannotated `const s = str.stringConcat(a, b)` is a candidate too: it
+// inherited the marker from its initializer. Writing `owned` on the binding
+// itself is only the marker, not an answer, so there is no keyword exemption.
 function collectCandidates(
   ref prog: Program,
   ref tm: TypedModule,
   ref ast: AST,
   nodeId: NodeId,
+  ownedBit: uint64,
   ref out: Vec<Candidate>
 ): void {
   if (nodeId == 0) {
@@ -129,11 +185,26 @@ function collectCandidates(
     const kindName = propagatedKindOf(ref prog, declared);
     if (kindName.len > 0 && !declaresKind(ref ast, node, kindName)) {
       vec.vecPush(ref out, {
-        binding: nodeId, name: node.name, kindName: kindName, handled: false
+        binding: nodeId, name: node.name, kindName: kindName, marker: 0, handled: false
+      });
+    }
+    if (ownedBit != 0 && bindingCarries(ref tm, nodeId, ownedBit)) {
+      vec.vecPush(ref out, {
+        binding: nodeId, name: node.name, kindName: OWNED_KIND, marker: ownedBit, handled: false
       });
     }
   }
-  walkChildren(ref ast, node, nodeId, ref out, ref prog, ref tm);
+  walkChildren(ref ast, node, nodeId, ownedBit, ref out, ref prog, ref tm);
+}
+
+// Whether the binding at `declId` was established to carry the conferred bit.
+// An unknown set carries nothing here: the permissive reading everywhere else
+// means "satisfies every bound", and for a warning that becomes "say nothing".
+function bindingCarries(ref tm: TypedModule, declId: NodeId, bit: uint64): bool {
+  switch (map.mapGet(ref tm.bindingMarkers, uint64(declId))) {
+    case Option.Some { value: m }: { return m.known && (m.conf & bit) != 0; }
+    case Option.None: { return false; }
+  }
 }
 
 // The recursion, shared by the collect walk. Every named slot and the node's
@@ -142,19 +213,20 @@ function walkChildren(
   ref ast: AST,
   node: ASTNode,
   nodeId: NodeId,
+  ownedBit: uint64,
   ref out: Vec<Candidate>,
   ref prog: Program,
   ref tm: TypedModule
 ): void {
-  collectCandidates(ref prog, ref tm, ref ast, node.childA, ref out);
-  collectCandidates(ref prog, ref tm, ref ast, node.childB, ref out);
-  collectCandidates(ref prog, ref tm, ref ast, node.childC, ref out);
-  collectCandidates(ref prog, ref tm, ref ast, node.childD, ref out);
-  collectCandidates(ref prog, ref tm, ref ast, node.childE, ref out);
-  collectCandidates(ref prog, ref tm, ref ast, node.childF, ref out);
+  collectCandidates(ref prog, ref tm, ref ast, node.childA, ownedBit, ref out);
+  collectCandidates(ref prog, ref tm, ref ast, node.childB, ownedBit, ref out);
+  collectCandidates(ref prog, ref tm, ref ast, node.childC, ownedBit, ref out);
+  collectCandidates(ref prog, ref tm, ref ast, node.childD, ownedBit, ref out);
+  collectCandidates(ref prog, ref tm, ref ast, node.childE, ownedBit, ref out);
+  collectCandidates(ref prog, ref tm, ref ast, node.childF, ownedBit, ref out);
   let i: usize = 0;
   while (i < node.childCount) {
-    collectCandidates(ref prog, ref tm, ref ast, childAt(ref ast, node, i), ref out);
+    collectCandidates(ref prog, ref tm, ref ast, childAt(ref ast, node, i), ownedBit, ref out);
     i = i + 1;
   }
 }
@@ -212,34 +284,39 @@ function markDischarged(ref tm: TypedModule, ref candidates: Vec<Candidate>): vo
                    through a borrow and hands nothing on. Reading it as a
                    transfer silenced every leak that happened to get printed,
                    which is most of them.
+    f(x)           for an OWNED candidate only, when the parameter it reaches
+                   is known and does not ask for `owned`: the callee cannot
+                   have taken it (see the header). A propagated kind has no
+                   marker to ask this with, so for it a by-value pass stays a
+                   transfer.
 */
-function markTransfers(ref ast: AST, nodeId: NodeId, ref candidates: Vec<Candidate>): void {
+function markTransfers(ref tm: TypedModule, ref ast: AST, nodeId: NodeId, ref candidates: Vec<Candidate>): void {
   if (nodeId == 0) {
     return;
   }
   const node = nodeAt(ref ast, nodeId);
 
-  noteUse(ref ast, node.childA, ref candidates, borrowsChildA(node.kind));
-  noteUse(ref ast, node.childB, ref candidates, false);
-  noteUse(ref ast, node.childC, ref candidates, false);
-  noteUse(ref ast, node.childD, ref candidates, false);
-  noteUse(ref ast, node.childE, ref candidates, false);
-  noteUse(ref ast, node.childF, ref candidates, false);
+  noteUse(ref tm, ref ast, node.childA, ref candidates, borrowsChildA(node.kind));
+  noteUse(ref tm, ref ast, node.childB, ref candidates, false);
+  noteUse(ref tm, ref ast, node.childC, ref candidates, false);
+  noteUse(ref tm, ref ast, node.childD, ref candidates, false);
+  noteUse(ref tm, ref ast, node.childE, ref candidates, false);
+  noteUse(ref tm, ref ast, node.childF, ref candidates, false);
   let i: usize = 0;
   while (i < node.childCount) {
-    noteUse(ref ast, childAt(ref ast, node, i), ref candidates, false);
+    noteUse(ref tm, ref ast, childAt(ref ast, node, i), ref candidates, false);
     i = i + 1;
   }
 
-  markTransfers(ref ast, node.childA, ref candidates);
-  markTransfers(ref ast, node.childB, ref candidates);
-  markTransfers(ref ast, node.childC, ref candidates);
-  markTransfers(ref ast, node.childD, ref candidates);
-  markTransfers(ref ast, node.childE, ref candidates);
-  markTransfers(ref ast, node.childF, ref candidates);
+  markTransfers(ref tm, ref ast, node.childA, ref candidates);
+  markTransfers(ref tm, ref ast, node.childB, ref candidates);
+  markTransfers(ref tm, ref ast, node.childC, ref candidates);
+  markTransfers(ref tm, ref ast, node.childD, ref candidates);
+  markTransfers(ref tm, ref ast, node.childE, ref candidates);
+  markTransfers(ref tm, ref ast, node.childF, ref candidates);
   let c: usize = 0;
   while (c < node.childCount) {
-    markTransfers(ref ast, childAt(ref ast, node, c), ref candidates);
+    markTransfers(ref tm, ref ast, childAt(ref ast, node, c), ref candidates);
     c = c + 1;
   }
 }
@@ -251,7 +328,7 @@ function borrowsChildA(kind: ASTNodeKind): bool {
          kind == ASTNodeKind.EXPR_PART;
 }
 
-function noteUse(ref ast: AST, exprId: NodeId, ref candidates: Vec<Candidate>, excluded: bool): void {
+function noteUse(ref tm: TypedModule, ref ast: AST, exprId: NodeId, ref candidates: Vec<Candidate>, excluded: bool): void {
   if (exprId == 0 || excluded) {
     return;
   }
@@ -262,11 +339,22 @@ function noteUse(ref ast: AST, exprId: NodeId, ref candidates: Vec<Candidate>, e
   let i: usize = 0;
   while (i < candidates.len) {
     let c = vec.vecGet(ref candidates, i);
-    if (str.stringEq(c.name, expr.name)) {
+    if (str.stringEq(c.name, expr.name) && !(c.marker != 0 && slotOnlyReads(ref tm, exprId, c.marker))) {
       c.handled = true;
       vec.vecSet(ref candidates, i, c);
     }
     i = i + 1;
+  }
+}
+
+// True when `exprId` is a call argument whose parameter is KNOWN and does not
+// ask for the marker - a slot that cannot take responsibility for the value.
+// An argument with no stamp, or an unknown slot, answers false: nothing
+// established what the callee does, so the pass counts it as a handoff.
+function slotOnlyReads(ref tm: TypedModule, exprId: NodeId, bit: uint64): bool {
+  switch (map.mapGet(ref tm.argSlots, uint64(exprId))) {
+    case Option.Some { value: slot }: { return slot.known && (slot.conf & bit) == 0; }
+    case Option.None: { return false; }
   }
 }
 

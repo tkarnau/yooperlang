@@ -2,11 +2,12 @@ module typecheck;
 
 // The calls written with a DOT on the left, and how each resolves its callee.
 //
-// Four things wear that shape and they resolve four different ways, which is why
+// Five things wear that shape and they resolve five different ways, which is why
 // they are one file rather than one function:
 //
 //   mathx.scale(2)      a NAMESPACE import - resolved against that module's exports
 //   Shape.area(ref r)   a TRAIT method - resolved by the receiver's concrete type
+//   r.area()            the same call through its RECEIVER - in check_method.yoop
 //   errno.get()         an ambient BRIDGE - resolved by spelling, nothing declares it
 //   VT.method(ref v)    a vtable dispatch - in vtable_use.yoop, not here
 //
@@ -51,14 +52,13 @@ function checkQualifiedCall(
     return checkIndirectCall(ref cx, expr, exprId, throughField, expected);
   }
 
-  if (base.kind != ASTNodeKind.IDENT) {
-    checkCallArgs(ref cx, expr);
-    reportError(
-      cx.prog,
-      "only an imported namespace may qualify a call so far - methods are not supported by the bootstrap typechecker yet",
-      base.sourceLoc
-    );
-    return TYPE_ERROR_ID;
+  // `r.area()`, `self.items.dispose()`, `xs[i].scale(2)` - the base is a VALUE
+  // and the member is a trait method on its type. Rewritten into the qualified
+  // shape below and checked as one; see check_method.yoop. Decided before the
+  // name lookups because a local shadows a namespace, and a field path or an
+  // element can be nothing but a value.
+  if (isMethodReceiver(ref cx, base)) {
+    return checkMethodCall(ref cx, expr, exprId, base);
   }
 
   // `Display.toString(ref p)` - the base is a TRAIT, not a namespace, and the
@@ -123,22 +123,9 @@ function checkQualifiedCall(
 // reported - an Option rather than a sentinel, because ModuleId 0 is the first
 // module loaded and so is never spare.
 function namespaceModuleOf(ref cx: Cx, base: ASTNode): Option<ModuleId> {
-  // A LOCAL first, because `p.x()` on a struct value reaches this path too -
-  // the parser cannot tell it from `ns.fn()`. Without this it would be reported
-  // as an unknown name, since a namespace only ever lives at module level, and
-  // the reader would go hunting for a typo in a name that is right there.
-  switch (scopeLookup(cx.scope, base.name)) {
-    case Option.Some { value: localType }: {
-      reportError(
-        cx.prog,
-        `"${base.name}" is a local of type ${formatType(cx.prog, localType)}, not an imported namespace - calling a method on a value is not supported by the bootstrap typechecker yet`,
-        base.sourceLoc
-      );
-      return Option.None;
-    }
-    case Option.None: { }
-  }
-
+  // A local never reaches here: `isMethodReceiver` sends `p.x()` on a struct
+  // value to the method checker first, so a name that lands here is either a
+  // module-level one or unknown.
   const symId = lookupOwnName(cx.tm, base.name);
   if (symId == SYMBOL_NONE_ID) {
     reportError(cx.prog, `unknown name "${base.name}"`, base.sourceLoc);

@@ -389,6 +389,11 @@ export function checkCallMarkers(
     const slot = vec.vecGet(ref cx.prog.sigParams, sm.paramStart + a);
     const value = exprMarkers(ref cx, argId);
     const loc = nodeAt(cx.ast, argId).sourceLoc;
+    // What this argument flowed INTO, for unhandled.yoop: a by-value pass of an
+    // `owned` binding to a slot that does not ask for `owned` is a read, not a
+    // handoff, and the slot is the one thing that can say so.
+    map.mapInsert(ref cx.tm.argSlots, uint64(argId), slot);
+    warnOwnedTemporary(ref cx, argId, value, slot, a, calleeName);
     if (markerFlowViolates(value, slot)) {
       reportMarkerFlow(
         cx.prog, value, slot, loc,
@@ -406,6 +411,63 @@ export function checkCallMarkers(
       );
     }
     a += 1;
+  }
+}
+
+// `unhandled-owned`, the TEMPORARY case. An owned value built by a call and
+// handed straight to a parameter that does not ask for `owned` is dropped the
+// moment the call returns: the callee cannot forward it to any sink requiring
+// the marker, and nothing else ever names it. The BINDING case is
+// unhandled.yoop's; this is the same drop with no binding to report against,
+// so it is reported at the argument. Advisory, gated with its sibling.
+//
+//     log.info(str.stringConcat(a, b));   // built, read, leaked
+//     strFree(str.stringConcat(a, b));    // fine - the slot asks for owned
+//
+// Only a CALL argument qualifies: an IDENT is a binding (unhandled.yoop's
+// business, and the same drop would otherwise be reported twice), and a literal
+// carries nothing.
+function warnOwnedTemporary(
+  ref cx: Cx,
+  argId: NodeId,
+  value: MarkerSet,
+  slot: MarkerSet,
+  index: usize,
+  calleeName: string
+): void {
+  if (!value.known || value.conf == 0 || !slot.known) {
+    return;
+  }
+  if (nodeAt(cx.ast, argId).kind != ASTNodeKind.CALL_EXPRESSION) {
+    return;
+  }
+  const bit = ownedMarkerBit(cx.prog);
+  if (bit == 0 || (value.conf & bit) == 0 || (slot.conf & bit) != 0) {
+    return;
+  }
+  reportWarning(
+    cx.prog,
+    `argument ${index + 1} of "${calleeName}" is an owned string built for this call and dropped after it - the parameter is not declared 'owned', so nothing frees it. Bind it and free it (strFree), or build it as a Text instead`,
+    nodeAt(cx.ast, argId).sourceLoc,
+    UNHANDLED_OWNED
+  );
+}
+
+// The marker bit of std's `owned` kind - "this storage was allocated" - or 0
+// when the graph declares no such kind, or declares it as something other than
+// a conferred marker. Looked up by name because this pass only reads the
+// registry; std is what declares it.
+export const OWNED_KIND: string = "owned";
+
+export function ownedMarkerBit(ref prog: Program): uint64 {
+  switch (lookupKind(ref prog, OWNED_KIND)) {
+    case Option.Some { value: info }: {
+      if (info.conferred) {
+        return info.markerBit;
+      }
+      return 0;
+    }
+    case Option.None: { return 0; }
   }
 }
 
