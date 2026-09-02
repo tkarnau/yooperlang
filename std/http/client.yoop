@@ -80,7 +80,7 @@ export type ClientResponse implements Disposable propagates<disposable> {
 }
 
 export function responseBytes(ref r: ClientResponse): uint8[] {
-    return vec.vecAsArray(ref r.body);
+    return r.body.asArray();
 }
 
 // The body as text. Not UTF-8 validated, for the same reason the server side
@@ -196,8 +196,8 @@ async readResponseHead(
         if (n == 0) {
             return Result.Err { error: errIo("peer closed before the response head was complete") };
         }
-        vec.vecExtendFrom(ref buf, intr.arraySlice(window, 0, n));
-        let at: usize = findHeadEnd(vec.vecAsArray(ref buf));
+        buf.extendFrom(intr.arraySlice(window, 0, n));
+        let at: usize = findHeadEnd(buf.asArray());
         if (at != buf.len) { return Result.Ok { value: at }; }
         if (buf.len > c.maxHeadBytes) {
             return Result.Err {
@@ -266,7 +266,7 @@ export async sendOn(
     // -- write the request --
     disposable out: Vec<uint8> = vec.vecNew(512 + req.body.len);
     serializeRequest(ref req, ref u, ref c, ref out);
-    let outView: uint8[] = vec.vecAsArray(ref out);
+    let outView: uint8[] = out.asArray();
     switch (await w.write(ref outView)) {
         case Result.Ok { value: _n }: { }
         case Result.Err { error: e }: { return Result.Err { error: errIo(e) }; }
@@ -277,7 +277,7 @@ export async sendOn(
     disposable scratch: Bytes = bytes.bytesFromRaw(intr.heapAlloc(c.readChunk), c.readChunk);
     let _headEnd: usize = await readResponseHead(ref r, ref buf, ref scratch, ref c)?;
 
-    let disposable head: ParsedResponse = parseResponseHead(vec.vecAsArray(ref buf))?;
+    let disposable head: ParsedResponse = parseResponseHead(buf.asArray())?;
 
     // -- read the body --
     // Whatever came in with the head is already body; the rest is read either
@@ -325,9 +325,9 @@ async readRest(
     let window: uint8[] = bytes.bytesToArray(ref scratch);
 
     // Under Content-Length the bytes that came in with the head ARE body.
-    let seen: uint8[] = vec.vecAsArray(ref buf);
+    let seen: uint8[] = buf.asArray();
     if (seen.len > head.bodyStart) {
-        vec.vecExtendFrom(ref body, intr.arraySlice(seen, head.bodyStart, seen.len));
+        body.extendFrom(intr.arraySlice(seen, head.bodyStart, seen.len));
     }
 
     let want: usize = 0;
@@ -356,7 +356,7 @@ async readRest(
             }
             break;
         }
-        vec.vecExtendFrom(ref body, intr.arraySlice(window, 0, n));
+        body.extendFrom(intr.arraySlice(window, 0, n));
         if (body.len > c.maxResponseBytes) {
             return Result.Err {
                 error: httpError(payloadTooLarge(),
@@ -396,7 +396,7 @@ async readChunkedRest(
         // Re-take the view each pass: the read below can grow and therefore
         // MOVE the Vec's buffer.
         let done: bool = chunkedFeed(
-            vec.vecAsArray(ref buf), ref reader, ref body, c.maxResponseBytes)?;
+            buf.asArray(), ref reader, ref body, c.maxResponseBytes)?;
         if (done) { return Result.Ok { value: body.len }; }
 
         if (buf.len > rawLimit) {
@@ -412,7 +412,7 @@ async readChunkedRest(
                 error: errIo("peer closed before the chunked body was complete"),
             };
         }
-        vec.vecExtendFrom(ref buf, intr.arraySlice(window, 0, n));
+        buf.extendFrom(intr.arraySlice(window, 0, n));
     }
 }
 

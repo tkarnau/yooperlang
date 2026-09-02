@@ -63,7 +63,7 @@ export function passCFillShells(
 function checkEachFileRecursion(ref prog: Program, ref tm: TypedModule, m: Module): void {
   let f: usize = 0;
   while (f < m.files.len) {
-    const file = vec.vecGet(ref m.files, f);
+    const file = m.files.get(f);
     beginFile(ref prog, file.absPath);
     const programNode = nodeAt(ref m.ast, file.root);
     let i: usize = 0;
@@ -100,7 +100,7 @@ function fillEachFile(
 ): void {
   let f: usize = 0;
   while (f < m.files.len) {
-    const file = vec.vecGet(ref m.files, f);
+    const file = m.files.get(f);
     beginFile(ref prog, file.absPath);
     fillFileShells(ref prog, ref tm, m, file.root, moduleId, phase);
     f += 1;
@@ -288,8 +288,8 @@ function fillExternSignature(
   disposable params: Vec<TypeId> = vec.vecNew(names.len);
   let i: usize = 0;
   while (i < names.len) {
-    vec.vecPush(ref params, internType(ref prog, Type.TypeParam {
-      name: vec.vecGet(ref names, i), originDecl: 0, bounds: vec.vecNew(0),
+    params.push(internType(ref prog, Type.TypeParam {
+      name: names.get(i), originDecl: 0, bounds: vec.vecNew(0),
     }));
     i += 1;
   }
@@ -304,7 +304,7 @@ function typeParamNames(ref ast: AST, declNode: ASTNode): Vec<string> propagates
   const list = nodeAt(ref ast, declNode.childA);
   let i: usize = 0;
   while (i < list.childCount) {
-    vec.vecPush(ref names, nodeAt(ref ast, childAt(ref ast, list, i)).name);
+    names.push(nodeAt(ref ast, childAt(ref ast, list, i)).name);
     i += 1;
   }
   return names;
@@ -351,9 +351,9 @@ function fillFunctionSignature(
       // passing a bare `v` a type error rather than a silent copy. The body
       // still sees a plain `Vec<T>`; bindParams unwraps it. See pass_d.yoop.
       if (paramNode.flagA) {
-        vec.vecPush(ref params, internRef(ref prog, annotated));
+        params.push(internRef(ref prog, annotated));
       } else {
-        vec.vecPush(ref params, annotated);
+        params.push(annotated);
       }
       p += 1;
     }
@@ -446,7 +446,7 @@ function fillStructFields(
     checkFieldKindUse(ref prog, ref ast, declNode, fieldNode, carried);
     const fieldType = resolveTypeAnnotation(ref prog, ref tm, ref ast, fieldNode.childA);
     checkFieldTypeKindUse(ref prog, ref ast, declNode, fieldNode, fieldType, carried);
-    vec.vecPush(ref fields, {
+    fields.push({
       name: fieldNode.name,
       typeId: fieldType,
       carriedKind: carried,
@@ -476,12 +476,12 @@ function genericInstOf(ref prog: Program, typeId: TypeId): GenericInst propagate
   switch (typeAt(ref prog, typeId)) {
     case Type.Struct { decl: d, fields: f, methods: mm, implementsTraits: it, generic: g }: {
       let args: Vec<TypeId> = vec.vecNew(g.args.len);
-      vec.vecExtendFrom(ref args, vec.vecAsArray(ref g.args));
+      args.extendFrom(g.args.asArray());
       return { origin: g.origin, args: args };
     }
     case Type.Variant { decl: d, cases: cs, methods: mm, implementsTraits: it, generic: g }: {
       let args: Vec<TypeId> = vec.vecNew(g.args.len);
-      vec.vecExtendFrom(ref args, vec.vecAsArray(ref g.args));
+      args.extendFrom(g.args.asArray());
       return { origin: g.origin, args: args };
     }
     default: {
@@ -522,7 +522,7 @@ function fillVariantCases(
     let f: usize = 0;
     while (f < caseNode.childCount) {
       const fieldNode = nodeAt(ref ast, childAt(ref ast, caseNode, f));
-      vec.vecPush(ref fields, {
+      fields.push({
         name: fieldNode.name,
         typeId: resolveTypeAnnotation(ref prog, ref tm, ref ast, fieldNode.childA),
         carriedKind: carriedKindNameOf(ref ast, fieldNode.childA),
@@ -530,7 +530,7 @@ function fillVariantCases(
       f += 1;
     }
 
-    vec.vecPush(ref cases, { name: caseNode.name, ordinal: int(cases.len), fields: fields });
+    cases.push({ name: caseNode.name, ordinal: int(cases.len), fields: fields });
     c += 1;
   }
 
@@ -708,7 +708,7 @@ function constIntValue(ref ast: AST, exprId: NodeId, ref out: int64): bool {
 }
 
 export function lookupOwnName(ref tm: TypedModule, name: string): SymbolId {
-  switch (map.mapGet(ref tm.names, name)) {
+  switch (tm.names.get(name)) {
     case Option.Some { value: symId }: { return symId; }
     case Option.None: { return SYMBOL_NONE_ID; }
   }
@@ -745,16 +745,16 @@ export function checkFunctionKinds(
     switch (lookupKind(ref prog, prefix.name)) {
       case Option.Some { value: info }: {
         if (info.pausable) {
-          map.mapInsert(ref tm.pausableNames, declNode.name, true);
+          tm.pausableNames.insert(declNode.name, true);
         }
         if (info.providesTask) {
-          map.mapInsert(ref tm.taskNames, declNode.name, true);
+          tm.taskNames.insert(declNode.name, true);
           // The same fact, program-wide and keyed by SYMBOL, for the call side:
           // `pooled h = worker(1)` in another module has to read it, and a
           // per-module name table cannot answer that.
           const symId = lookupOwnName(ref tm, declNode.name);
           if (symId != SYMBOL_NONE_ID) {
-            map.mapInsert(ref prog.taskSymbols, uint64(symId), true);
+            prog.taskSymbols.insert(uint64(symId), true);
           }
           checkTaskDecl(ref prog, ref tm, declNode);
         }
@@ -886,14 +886,14 @@ function fillVtable(
     // A vtable slot is a function pointer, so it never carries a kind - but the
     // slot has to be filled, and filling it from the annotation costs nothing
     // and stays right if that ever changes.
-    vec.vecPush(ref fields, {
+    fields.push({
       name: fieldNode.name,
       typeId: vtableSlotType(
         ref prog, declNode.name, traitId, traitAnnot.name, fieldNode, declared
       ),
       carriedKind: carriedKindNameOf(ref ast, fieldNode.childA),
     });
-    vec.vecPush(ref methodOrder, fieldNode.name);
+    methodOrder.push(fieldNode.name);
     i += 1;
   }
   checkVtableCoversTrait(ref prog, declNode, traitId, traitAnnot.name, ref methodOrder);
@@ -948,8 +948,8 @@ function vtableSlotType(
           }
           let p: usize = 0;
           while (p < slotParams.len) {
-            const want = vec.vecGet(ref mParams, p + 1);
-            const got = vec.vecGet(ref slotParams, p);
+            const want = mParams.get(p + 1);
+            const got = slotParams.get(p);
             if (!typeAccepts(ref prog, want, got)) {
               reportError(
                 ref prog,
@@ -1021,7 +1021,7 @@ function checkVtableCoversTrait(
 function containsName(ref names: Vec<string>, needle: string): bool {
   let i: usize = 0;
   while (i < names.len) {
-    if (str.stringEq(vec.vecGet(ref names, i), needle)) {
+    if (str.stringEq(names.get(i), needle)) {
       return true;
     }
     i += 1;
@@ -1033,7 +1033,7 @@ function containsName(ref names: Vec<string>, needle: string): bool {
 function checkEachFileTraits(ref prog: Program, ref tm: TypedModule, m: Module): void {
   let f: usize = 0;
   while (f < m.files.len) {
-    const file = vec.vecGet(ref m.files, f);
+    const file = m.files.get(f);
     beginFile(ref prog, file.absPath);
     const programNode = nodeAt(ref m.ast, file.root);
     let i: usize = 0;
@@ -1104,7 +1104,7 @@ function checkMethodClearances(
   disposable traitNames: Vec<string> = vec.vecNew(traits.len);
   let t: usize = 0;
   while (t < traits.len) {
-    vec.vecPush(ref traitNames, nominalNameOf(ref prog, vec.vecGet(ref traits, t)));
+    traitNames.push(nominalNameOf(ref prog, traits.get(t)));
     t += 1;
   }
   let i: usize = 0;

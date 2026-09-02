@@ -34,7 +34,7 @@ function checkCall(ref cx: Cx, expr: ASTNode, exprId: NodeId, expected: TypeId):
     case Option.Some { value: localType }: {
       switch (typeAt(cx.prog, localType)) {
         case Type.Func { params: p, ret: r, variadic: v, isAsync: fnAsync }: {
-          map.mapInsert(ref cx.tm.indirectCalls, uint64(exprId), true);
+          cx.tm.indirectCalls.insert(uint64(exprId), true);
           checkArgsAgainstFunc(ref cx, expr, exprId, localType, expr.name);
           return r;
         }
@@ -115,7 +115,7 @@ function instantiateCallee(
   disposable bound: Vec<TypeId> = vec.vecNew(info.params.len);
   let b: usize = 0;
   while (b < info.params.len) {
-    vec.vecPush(ref bound, TYPE_ERROR_ID);
+    bound.push(TYPE_ERROR_ID);
     b += 1;
   }
 
@@ -145,7 +145,7 @@ function instantiateCallee(
             continue;
           }
           const got = checkExpr(ref cx, argId, TYPE_ERROR_ID);
-          inferTypeArgs(cx.prog, vec.vecGet(ref p, a), got, ref info.params, ref bound);
+          inferTypeArgs(cx.prog, p.get(a), got, ref info.params, ref bound);
           a += 1;
         }
       }
@@ -159,7 +159,7 @@ function instantiateCallee(
   // is the whole message.
   let u: usize = 0;
   while (u < bound.len) {
-    if (vec.vecGet(ref bound, u) == TYPE_ERROR_ID) {
+    if (bound.get(u) == TYPE_ERROR_ID) {
       reportError(
         cx.prog,
         `cannot infer "${typeParamNameAt(cx.prog, ref info.params, u)}" for "${calleeName}" - annotate the binding it goes to`,
@@ -180,7 +180,7 @@ function instantiateCallee(
   }
 
   const instance = instantiateFunction(cx.prog, declId, ref bound);
-  map.mapInsert(ref cx.tm.calleeInstance, uint64(exprId), instance);
+  cx.tm.calleeInstance.insert(uint64(exprId), instance);
   return funcInstanceAt(cx.prog, instance).funcType;
 }
 
@@ -189,7 +189,7 @@ function typeParamNameAt(ref prog: Program, ref params: Vec<TypeId>, i: usize): 
   if (i >= params.len) {
     return "?";
   }
-  switch (typeAt(ref prog, vec.vecGet(ref params, i))) {
+  switch (typeAt(ref prog, params.get(i))) {
     case Type.TypeParam { name: n, originDecl: o, bounds: bs }: { return n; }
     default: { return "?"; }
   }
@@ -247,7 +247,7 @@ function checkAgainstSignature(
   // and keys it on the callee's declared return being `Task<T>`; the bootstrap
   // keys it on the KIND clause that produces that return, which is the same
   // fact one step earlier.
-  const spawns = map.mapContainsKey(ref cx.prog.taskSymbols, uint64(symId));
+  const spawns = cx.prog.taskSymbols.containsKey(uint64(symId));
   if (spawns) {
     cx.prog.callWasAwaited = true;
   }
@@ -320,7 +320,7 @@ function checkArgsAgainstFunc(
       // arity error below says so once, rather than once per extra argument.
       let want: TypeId = TYPE_ERROR_ID;
       if (a < params.len) {
-        want = vec.vecGet(ref params, a);
+        want = params.get(a);
       }
       const got = checkExpr(ref cx, argId, want);
       if (want != TYPE_ERROR_ID && got != TYPE_ERROR_ID && !typeAccepts(cx.prog, want, got)) {
@@ -371,7 +371,7 @@ function checkIndirectCall(
 ): TypeId {
   // Recorded for codegen: the callee is the FIELD's contents, so there is no
   // symbol to look up and nothing else can tell it that.
-  map.mapInsert(ref cx.tm.indirectCalls, uint64(exprId), true);
+  cx.tm.indirectCalls.insert(uint64(exprId), true);
   checkArgsAgainstFunc(ref cx, expr, exprId, funcType, expr.name);
   switch (typeAt(cx.prog, funcType)) {
     case Type.Func { params: p, ret: r, variadic: v, isAsync: fnAsync }: { return r; }
@@ -397,7 +397,7 @@ function fieldFuncTypeOf(ref cx: Cx, expr: ASTNode, base: ASTNode): TypeId {
           // DECORATE the base. Codegen reads the field out of this value, and
           // it needs both the aggregate's LLVM type and the field's position -
           // neither of which it can get without the base's resolved type.
-          vec.vecSet(ref cx.tm.resolvedTypes, expr.childB, t);
+          cx.tm.resolvedTypes.set(expr.childB, t);
         }
         return field;
       }

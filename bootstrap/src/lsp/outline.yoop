@@ -62,7 +62,7 @@ export function collectOutline(
   src: uint8[],
   ref out: Vec<OutlineEntry>
 ): void {
-  vec.vecClear(ref out);
+  out.clear();
   const program = nodeAt(ref ast, root);
   disposable members: Vec<NodeId> = vec.vecNew(16);
   let i: usize = 0;
@@ -71,7 +71,7 @@ export function collectOutline(
     const entry = nodeAt(ref ast, entryId);
     const kind = symbolKindOf(entry.kind);
     if (kind != 0 && entry.name.len > 0) {
-      vec.vecPush(ref out, {
+      out.push({
         name: entry.name,
         kind: kind,
         range: rangeOfSpan(src, entry.sourceLoc.pos, entry.sourceLoc.length),
@@ -101,10 +101,10 @@ function pushMembers(
   // Copied out before the walk: `childSlots` clears the buffer it is given,
   // and a NODE_LIST below needs it again.
   disposable direct: Vec<NodeId> = vec.vecNew(scratch.len + 1);
-  vec.vecExtendFrom(ref direct, vec.vecAsArray(ref scratch));
+  direct.extendFrom(scratch.asArray());
   let i: usize = 0;
   while (i < direct.len) {
-    const childId = vec.vecGet(ref direct, i);
+    const childId = direct.get(i);
     const child = nodeAt(ref ast, childId);
     // A list node is the parser's indirection for a second variable-arity run,
     // so its own children are the members rather than it being one.
@@ -115,7 +115,7 @@ function pushMembers(
     }
     const kind = memberSymbolKindOf(child.kind);
     if (kind != 0 && child.name.len > 0) {
-      vec.vecPush(ref out, {
+      out.push({
         name: child.name,
         kind: kind,
         range: rangeOfSpan(src, child.sourceLoc.pos, child.sourceLoc.length),

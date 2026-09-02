@@ -91,24 +91,28 @@ function checkMethodCall(
     return TYPE_ERROR_ID;   // declaringTraitOf said why
   }
 
-  // The argument list with the receiver in front. A NEW list rather than an
-  // edit of the old one: a list is a run in the shared child pool, and there
-  // is no room in front of a run that is already there.
+  // The argument list with the receiver in front. A list is a run in the
+  // shared child pool and there is no room in front of a run already there,
+  // so the ids are collected and appended as a NEW run - but the list NODE is
+  // the one the parser made, repointed at that run, so the rewrite costs one
+  // node fewer per call. The old run stays in the pool, unreferenced.
   disposable ids: Vec<NodeId> = vec.vecNew(4);
-  vec.vecPush(ref ids, refId);
-  let listLoc: SourceLocation = expr.sourceLoc;
-  if (expr.childA != 0) {
-    const old = nodeAt(cx.ast, expr.childA);
-    listLoc = old.sourceLoc;
+  ids.push(refId);
+  let listId: NodeId = expr.childA;
+  if (listId != 0) {
+    let list = nodeAt(cx.ast, listId);
     let i: usize = 0;
-    while (i < old.childCount) {
-      vec.vecPush(ref ids, childAt(cx.ast, old, i));
+    while (i < list.childCount) {
+      ids.push(childAt(cx.ast, list, i));
       i += 1;
     }
+    appendChildRun(cx.ast, ref list, ref ids);
+    replaceNode(cx.ast, listId, list);
+  } else {
+    let listNode = createASTNode(ASTNodeKind.NODE_LIST, expr.sourceLoc);
+    appendChildRun(cx.ast, ref listNode, ref ids);
+    listId = appendNode(cx.ast, listNode);
   }
-  let listNode = createASTNode(ASTNodeKind.NODE_LIST, listLoc);
-  appendChildRun(cx.ast, ref listNode, ref ids);
-  const listId = appendNode(cx.ast, listNode);
 
   // The qualifier the writer did not write. Its span is EMPTY so the language
   // server never lands on it: the member token already belongs to the call.
@@ -121,6 +125,7 @@ function checkMethodCall(
   call.childA = listId;
   call.childB = traitId;
   replaceNode(cx.ast, exprId, call);
+  cx.tm.methodTraits.insert(uint64(exprId), traitType);
 
   return checkTraitCall(ref cx, call, exprId, traitIdent, traitType);
 }
@@ -221,7 +226,7 @@ function traitDeclaring(ref cx: Cx, ref traits: Vec<TypeId>, name: string): Trai
   let inherited: TypeId = TYPE_ERROR_ID;
   let i: usize = 0;
   while (i < traits.len) {
-    const t = vec.vecGet(ref traits, i);
+    const t = traits.get(i);
     if (traitOwnsMethod(cx.prog, t, name)) {
       if (out.count == 0) {
         out.first = t;
@@ -245,7 +250,7 @@ function traitDeclaring(ref cx: Cx, ref traits: Vec<TypeId>, name: string): Trai
 function traitOwnsMethod(ref prog: Program, traitType: TypeId, name: string): bool {
   switch (typeAt(ref prog, traitType)) {
     case Type.Trait { decl: d, methods: mm, typeParams: tp, extendsTraits: et }: {
-      return map.mapContainsKey(ref mm, name);
+      return mm.containsKey(name);
     }
     default: { return false; }
   }
@@ -258,14 +263,14 @@ function implementedTraitsOf(ref prog: Program, id: TypeId): Vec<TypeId> propaga
   let out: Vec<TypeId> = vec.vecNew(2);
   switch (typeAt(ref prog, id)) {
     case Type.Struct { decl: d, fields: f, methods: mm, implementsTraits: it, generic: g }: {
-      vec.vecExtendFrom(ref out, vec.vecAsArray(ref it));
+      out.extendFrom(it.asArray());
     }
     case Type.Variant { decl: d, cases: cs, methods: mm, implementsTraits: it, generic: g }: {
-      vec.vecExtendFrom(ref out, vec.vecAsArray(ref it));
+      out.extendFrom(it.asArray());
     }
     case Type.ValueEnum { decl: d, underlying: u, cases: cs, isOpen: o,
                           methods: mm, implementsTraits: it }: {
-      vec.vecExtendFrom(ref out, vec.vecAsArray(ref it));
+      out.extendFrom(it.asArray());
     }
     default: { }
   }
@@ -277,7 +282,7 @@ function implementedTraitsOf(ref prog: Program, id: TypeId): Vec<TypeId> propaga
 // after that would otherwise be read past its end.
 function growDecoration(ref cx: Cx): void {
   while (cx.tm.resolvedTypes.len < cx.ast.nodes.len) {
-    vec.vecPush(ref cx.tm.resolvedTypes, TYPE_ERROR_ID);
+    cx.tm.resolvedTypes.push(TYPE_ERROR_ID);
   }
 }
 

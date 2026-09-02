@@ -9,7 +9,7 @@ import { Holder, makeHolder } from "./lib.yoop";
 // shell spuriously fails the call-site bound check and, once past typecheck,
 // crashes codegen's bound-method rewrite.
 function firstToString<T implements Display>(ref v: Vec<T>): string {
-  let item: T = vec.vecGet(ref v, 0);
+  let item: T = v.get(0);
   return Display.toString(ref item);
 }
 

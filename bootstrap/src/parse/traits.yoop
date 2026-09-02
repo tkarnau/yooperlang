@@ -53,7 +53,7 @@ export function parseTraitDecl(ref ps: ParserState): Result<NodeId, ParsingError
   ps.expect(TokenTags.LCURLY)?;
   disposable ids: Vec<NodeId> = vec.vecNew(4);
   while (untilClosing(ref ps, TokenTags.RCURLY)) {
-    vec.vecPush(ref ids, parseMethodSig(ref ps, node.name, node.childA)?);
+    ids.push(parseMethodSig(ref ps, node.name, node.childA)?);
   }
   ps.expect(TokenTags.RCURLY)?;
 
@@ -127,7 +127,7 @@ function parseMethodParams(
 
   disposable ids: Vec<NodeId> = vec.vecNew(4);
   while (untilClosing(ref ps, TokenTags.RPAREN)) {
-    vec.vecPush(ref ids, parseMethodParam(ref ps, ownerName, ownerTypeParams)?);
+    ids.push(parseMethodParam(ref ps, ownerName, ownerTypeParams)?);
     if (ps.peek().tag == TokenTags.COMMA) {
       ps.advance()?;
     }
@@ -210,7 +210,7 @@ export function parseVtableDecl(ref ps: ParserState): Result<NodeId, ParsingErro
   ps.expect(TokenTags.LCURLY)?;
   disposable ids: Vec<NodeId> = vec.vecNew(4);
   while (untilClosing(ref ps, TokenTags.RCURLY)) {
-    vec.vecPush(ref ids, parseFieldDecl(ref ps)?);
+    ids.push(parseFieldDecl(ref ps)?);
     if (ps.peek().tag == TokenTags.COMMA) {
       ps.advance()?;
     }
@@ -238,7 +238,7 @@ function parseExtendsClause(ref ps: ParserState): Result<NodeId, ParsingError> {
 
   disposable ids: Vec<NodeId> = vec.vecNew(2);
   while (true) {
-    vec.vecPush(ref ids, parseTypeAnnotation(ref ps)?);
+    ids.push(parseTypeAnnotation(ref ps)?);
     if (ps.peek().tag != TokenTags.COMMA) {
       break;
     }
@@ -262,7 +262,7 @@ export function parseImplementsClause(ref ps: ParserState): Result<NodeId, Parsi
 
   disposable ids: Vec<NodeId> = vec.vecNew(2);
   while (true) {
-    vec.vecPush(ref ids, parseTypeAnnotation(ref ps)?);
+    ids.push(parseTypeAnnotation(ref ps)?);
     if (ps.peek().tag != TokenTags.COMMA) {
       break;
     }
@@ -292,7 +292,7 @@ function selfTypeArgs(ref ps: ParserState, ownerTypeParams: NodeId): Result<Node
   while (i < params.childCount) {
     let arg = ps.buildSourcedNode(ASTNodeKind.TYPE_ANNOTATION_TYPE_NAME);
     arg.name = nodeAt(ref ps.ast, childAt(ref ps.ast, params, i)).name;
-    vec.vecPush(ref ids, ps.pushNode(arg));
+    ids.push(ps.pushNode(arg));
     i += 1;
   }
   return Result.Ok { value: ps.buildListNode(ref ids, loc) };

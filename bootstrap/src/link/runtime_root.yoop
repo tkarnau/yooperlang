@@ -46,14 +46,14 @@ export function discoverRuntimeRoot(exePath: string): string {
   disposable candidates: Vec<string> = runtimeRootCandidates(exePath);
   let i: usize = 0;
   while (i < candidates.len) {
-    const candidate = vec.vecGet(ref candidates, i);
+    const candidate = candidates.get(i);
     if (fs.exists(candidate)) {
       return candidate;
     }
     i += 1;
   }
   if (candidates.len > 0) {
-    return vec.vecGet(ref candidates, 0);
+    return candidates.get(0);
   }
   return "";
 }
@@ -64,9 +64,9 @@ function runtimeRootCandidates(exePath: string): Vec<string> propagates<disposab
     return out;
   }
   const binDir = fs.dirName(exePath);
-  vec.vecPush(ref out, fs.pathJoin([binDir, "..", "lib", "runtime"]));
-  vec.vecPush(ref out, fs.pathJoin([binDir, "lib", "runtime"]));
-  vec.vecPush(ref out, fs.pathJoin([binDir, "..", "runtime"]));
+  out.push(fs.pathJoin([binDir, "..", "lib", "runtime"]));
+  out.push(fs.pathJoin([binDir, "lib", "runtime"]));
+  out.push(fs.pathJoin([binDir, "..", "runtime"]));
   return out;
 }
 
@@ -90,20 +90,20 @@ export function runtimeRootProblem(runtimeRoot: string): string {
 // platform it is on.
 export function runtimeSources(runtimeRoot: string): Vec<string> propagates<disposable> {
   let out: Vec<string> = vec.vecNew(16);
-  vec.vecPush(ref out, fs.pathJoin([runtimeRoot, "yoop_runtime.c"]));
-  vec.vecPush(ref out, fs.pathJoin([runtimeRoot, "yoop_io.c"]));
-  vec.vecPush(ref out, fs.pathJoin([runtimeRoot, "yoop_io_kqueue.c"]));
-  vec.vecPush(ref out, fs.pathJoin([runtimeRoot, "yoop_io_epoll.c"]));
-  vec.vecPush(ref out, fs.pathJoin([runtimeRoot, "yoop_io_windows.c"]));
-  vec.vecPush(ref out, fs.pathJoin([runtimeRoot, "yoop_fs.c"]));
-  vec.vecPush(ref out, fs.pathJoin([runtimeRoot, "yoop_net.c"]));
-  vec.vecPush(ref out, fs.pathJoin([runtimeRoot, "yoop_debug.c"]));
-  vec.vecPush(ref out, fs.pathJoin([runtimeRoot, "yoop_format.c"]));
-  vec.vecPush(ref out, fs.pathJoin([runtimeRoot, "yoop_args.c"]));
-  vec.vecPush(ref out, fs.pathJoin([runtimeRoot, "yoop_alloc.c"]));
-  vec.vecPush(ref out, fs.pathJoin([runtimeRoot, "yoop_atomic.c"]));
-  vec.vecPush(ref out, fs.pathJoin([runtimeRoot, "yoop_cancel.c"]));
-  vec.vecPush(ref out, fs.pathJoin([runtimeRoot, "yoop_time.c"]));
+  out.push(fs.pathJoin([runtimeRoot, "yoop_runtime.c"]));
+  out.push(fs.pathJoin([runtimeRoot, "yoop_io.c"]));
+  out.push(fs.pathJoin([runtimeRoot, "yoop_io_kqueue.c"]));
+  out.push(fs.pathJoin([runtimeRoot, "yoop_io_epoll.c"]));
+  out.push(fs.pathJoin([runtimeRoot, "yoop_io_windows.c"]));
+  out.push(fs.pathJoin([runtimeRoot, "yoop_fs.c"]));
+  out.push(fs.pathJoin([runtimeRoot, "yoop_net.c"]));
+  out.push(fs.pathJoin([runtimeRoot, "yoop_debug.c"]));
+  out.push(fs.pathJoin([runtimeRoot, "yoop_format.c"]));
+  out.push(fs.pathJoin([runtimeRoot, "yoop_args.c"]));
+  out.push(fs.pathJoin([runtimeRoot, "yoop_alloc.c"]));
+  out.push(fs.pathJoin([runtimeRoot, "yoop_atomic.c"]));
+  out.push(fs.pathJoin([runtimeRoot, "yoop_cancel.c"]));
+  out.push(fs.pathJoin([runtimeRoot, "yoop_time.c"]));
   return out;
 }
 
@@ -127,7 +127,7 @@ export function runtimeSources(runtimeRoot: string): Vec<string> propagates<disp
 export function glueSources(runtimeRoot: string, ref linkLibraries: Vec<string>): Vec<string> propagates<disposable> {
   let out: Vec<string> = vec.vecNew(2);
   if (namesTls(ref linkLibraries)) {
-    vec.vecPush(ref out, fs.pathJoin([runtimeRoot, "yoop_tls.c"]));
+    out.push(fs.pathJoin([runtimeRoot, "yoop_tls.c"]));
   }
   return out;
 }
@@ -138,7 +138,7 @@ export function glueSources(runtimeRoot: string, ref linkLibraries: Vec<string>)
 function namesTls(ref linkLibraries: Vec<string>): bool {
   let i: usize = 0;
   while (i < linkLibraries.len) {
-    const name = vec.vecGet(ref linkLibraries, i);
+    const name = linkLibraries.get(i);
     if (str.stringEq(name, "ssl") || str.stringEq(name, "crypto")) {
       return true;
     }

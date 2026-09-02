@@ -76,13 +76,13 @@ function main(): int32 {
     disposable table: Vec<Entry> = vec.vecNew(2);
     for i in 0..6 {
         if (i % 2 == 1) {
-            vec.vecPush(ref table, { name: `slot${i}`, vt: GreeterVt.from(ref b) });
+            table.push({ name: `slot${i}`, vt: GreeterVt.from(ref b) });
         } else {
-            vec.vecPush(ref table, { name: `slot${i}`, vt: GreeterVt.from(ref a) });
+            table.push({ name: `slot${i}`, vt: GreeterVt.from(ref a) });
         }
     }
     let total: int32 = 0;
-    let entries: Entry[] = vec.vecAsArray(ref table);
+    let entries: Entry[] = table.asArray();
     for (let i = 0; i < entries.len; i += 1) {
         total = total + GreeterVt.greet(ref entries[i].vt, 10);
     }

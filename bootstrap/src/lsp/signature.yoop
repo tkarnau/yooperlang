@@ -63,14 +63,14 @@ export function signatureLine(src: uint8[], pos: usize): Text propagates<disposa
       break;
     }
     if (pendingSpace && wantsSpaceBefore(ref out, c)) {
-      text.pushByte(ref out, ' ');
+      out.pushByte(' ');
     }
     pendingSpace = false;
-    text.pushByte(ref out, c);
+    out.pushByte(c);
     i += 1;
   }
   if (truncated) {
-    text.push(ref out, " ...");
+    out.push(" ...");
   }
   return out;
 }
@@ -87,7 +87,7 @@ function wantsSpaceBefore(ref out: Text, c: uint8): bool {
   if (c == ')' || c == ']' || c == ',' || c == ';') {
     return false;
   }
-  const last = text.bytes(ref out)[out.len - 1];
+  const last = out.bytes()[out.len - 1];
   return last != '(' && last != '[';
 }
 

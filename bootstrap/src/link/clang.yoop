@@ -65,7 +65,7 @@ export const PLATFORM_WINDOWS: c_int = 3;
 // escape - which is the whole point, and why this is the ONE way the compiler
 // runs another program. test_mode/run.yoop runs the test binary through it.
 export function runProgram(ref args: Vec<string>): c_int {
-  const argv = vec.vecAsArray(ref args);
+  const argv = args.asArray();
   return yoop_proc_run(argv.ptr, argv.len);
 }
 
@@ -114,7 +114,7 @@ export function withExeSuffix(out: string): string {
 // linking run leaves behind and the file `--emit-ir` produces are the same
 // bytes at the same path by construction.
 export function writeIrFile(ref ir: Text, irPath: string): string {
-  const writeErr = fs.writeFile(irPath, text.bytes(ref ir));
+  const writeErr = fs.writeFile(irPath, ir.bytes());
   if (writeErr.len > 0) {
     return `writing ${irPath}: ${writeErr}`;
   }
@@ -144,15 +144,15 @@ export function linkExecutable(
   // so is a path with a `$(` in it - there is no shell between here and clang
   // to read either.
   disposable args: Vec<string> = vec.vecNew(32);
-  vec.vecPush(ref args, "clang");
+  args.push("clang");
   // `-g` keeps the DWARF the IR carries. Without it clang drops the metadata on
   // the way to the object file, and a binary compiled from debuggable IR is not
   // debuggable - with nothing in the output saying so.
-  vec.vecPush(ref args, "-g");
-  vec.vecPush(ref args, "-Wno-override-module");
-  vec.vecPush(ref args, "-o");
-  vec.vecPush(ref args, exePath);
-  vec.vecPush(ref args, irPath);
+  args.push("-g");
+  args.push("-Wno-override-module");
+  args.push("-o");
+  args.push(exePath);
+  args.push(irPath);
 
   if (needsRuntime) {
     const runtimeRoot = discoverRuntimeRoot(exeSelfPath);
@@ -163,7 +163,7 @@ export function linkExecutable(
     disposable sources: Vec<string> = runtimeSources(runtimeRoot);
     let i: usize = 0;
     while (i < sources.len) {
-      vec.vecPush(ref args, vec.vecGet(ref sources, i));
+      args.push(sources.get(i));
       i += 1;
     }
 
@@ -175,7 +175,7 @@ export function linkExecutable(
     disposable glue: Vec<string> = glueSources(runtimeRoot, ref linkLibraries);
     let g: usize = 0;
     while (g < glue.len) {
-      vec.vecPush(ref args, vec.vecGet(ref glue, g));
+      args.push(glue.get(g));
       g += 1;
     }
   }
@@ -230,8 +230,8 @@ export function pushPlatformLinkFlags(ref args: Vec<string>, platform: c_int): v
   if (platform != PLATFORM_WINDOWS) {
     return;
   }
-  vec.vecPush(ref args, "-Wl,/STACK:8388608");
-  vec.vecPush(ref args, "-llegacy_stdio_definitions");
+  args.push("-Wl,/STACK:8388608");
+  args.push("-llegacy_stdio_definitions");
 }
 
 // The libraries EVERY program links, whatever its source names. Mirrors
@@ -256,9 +256,9 @@ export function pushRuntimeLibrariesFor(ref args: Vec<string>, platform: c_int):
   if (platform == PLATFORM_WINDOWS) {
     return;
   }
-  vec.vecPush(ref args, "-lpthread");
+  args.push("-lpthread");
   if (platform == PLATFORM_LINUX) {
-    vec.vecPush(ref args, "-lm");
+    args.push("-lm");
   }
 }
 
@@ -295,18 +295,18 @@ function pushRuntimeLibraries(ref args: Vec<string>): void {
 export function pushLinkLibrariesFor(ref args: Vec<string>, ref libs: Vec<string>, platform: c_int): void {
   let i: usize = 0;
   while (i < libs.len) {
-    const name = vec.vecGet(ref libs, i);
+    const name = libs.get(i);
     if (str.stringStartsWith(name, FRAMEWORK_PREFIX)) {
       pushFrameworkFor(ref args, name, platform);
     } else if (platform == PLATFORM_WINDOWS && isImplicitOnWindows(name)) {
       // Dropped rather than translated. See isImplicitOnWindows.
     } else if (str.stringEq(name, "ssl") || str.stringEq(name, "crypto")) {
-      vec.vecPush(ref args, "-lssl");
-      vec.vecPush(ref args, "-lcrypto");
+      args.push("-lssl");
+      args.push("-lcrypto");
     } else {
       // One short string per library named, once per compile. Not worth a
       // Text; see writing_yoop.md 3.1 on when the rule applies.
-      vec.vecPush(ref args, `-l${name}`);
+      args.push(`-l${name}`);
     }
     i += 1;
   }
@@ -341,10 +341,10 @@ function isImplicitOnWindows(name: string): bool {
 // `pushRuntimeLibrariesFor`.
 export function pushFrameworkFor(ref args: Vec<string>, name: string, platform: c_int): void {
   if (platform == PLATFORM_MACOS) {
-    vec.vecPush(ref args, "-framework");
+    args.push("-framework");
     // The name after the prefix. An owned copy, once per framework per
     // compile; a link line is the wrong place to economize on a malloc.
-    vec.vecPush(ref args, str.sliceFrom(name, FRAMEWORK_PREFIX.len));
+    args.push(str.sliceFrom(name, FRAMEWORK_PREFIX.len));
     return;
   }
   // OpenGL is the one framework name that means something off Apple, because
@@ -354,9 +354,9 @@ export function pushFrameworkFor(ref args: Vec<string>, name: string, platform: 
     return;
   }
   if (platform == PLATFORM_WINDOWS) {
-    vec.vecPush(ref args, "-lopengl32");
+    args.push("-lopengl32");
   } else if (platform == PLATFORM_LINUX) {
-    vec.vecPush(ref args, "-lGL");
+    args.push("-lGL");
   }
 }
 

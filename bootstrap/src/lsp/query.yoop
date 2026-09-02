@@ -62,7 +62,7 @@ export function queryAt(ref an: Analysis, line: usize, character: usize): Positi
   }
   let mod: Module = analysisModule(ref an);
   let sf: SourceFile = analysisFile(ref an);
-  const src = vec.vecAsArray(ref sf.src);
+  const src = sf.src.asArray();
   out.offset = byteOfPosition(src, line, character);
   out.node = locateNode(ref mod.ast, sf.root, out.offset);
   if (!out.node.found) {
@@ -84,7 +84,7 @@ function resolvedTypeOf(ref an: Analysis, nodeId: NodeId): TypeId {
   if (nodeId >= tm.resolvedTypes.len) {
     return TYPE_ERROR_ID;
   }
-  return vec.vecGet(ref tm.resolvedTypes, nodeId);
+  return tm.resolvedTypes.get(nodeId);
 }
 
 /*
@@ -113,7 +113,7 @@ function resolveNodeDecl(
     return {
       found: true,
       absPath: sf.absPath,
-      src: vec.vecAsArray(ref sf.src),
+      src: sf.src.asArray(),
       pos: node.pos,
       length: node.length,
       kind: node.kind,
@@ -129,7 +129,7 @@ function resolveNodeDecl(
     return {
       found: true,
       absPath: sf.absPath,
-      src: vec.vecAsArray(ref sf.src),
+      src: sf.src.asArray(),
       pos: localSite.pos,
       length: localSite.length,
       kind: localSite.kind,
@@ -234,13 +234,13 @@ export function buildHoverText(ref an: Analysis, ref q: PositionQuery): Text pro
     return out;
   }
 
-  text.push(ref out, "```yoop\n");
+  out.push("```yoop\n");
   pushHoverSubject(ref out, ref an, ref q);
-  text.push(ref out, "\n```");
+  out.push("\n```");
 
   if (q.site.found && !sameFileAsDocument(ref an, q.site.absPath)) {
-    text.push(ref out, "\n\ndeclared in ");
-    text.push(ref out, q.site.absPath);
+    out.push("\n\ndeclared in ");
+    out.push(q.site.absPath);
   }
   return out;
 }
@@ -248,29 +248,29 @@ export function buildHoverText(ref an: Analysis, ref q: PositionQuery): Text pro
 function pushHoverSubject(ref out: Text, ref an: Analysis, ref q: PositionQuery): void {
   if (q.site.found && !isBindingKind(q.site.kind)) {
     disposable sig: Text = signatureLine(q.site.src, q.site.pos);
-    if (!text.isEmpty(ref sig)) {
-      text.pushText(ref out, ref sig);
+    if (!sig.isEmpty()) {
+      out.pushText(ref sig);
       return;
     }
   }
 
   if (q.node.name.len > 0) {
-    text.push(ref out, q.node.name);
+    out.push(q.node.name);
   } else {
     // A node with no name still has a kind, and for a literal or an operator
     // that is the only thing there is to say about it.
-    text.push(ref out, lowerKindLabel(q.node.kind));
+    out.push(lowerKindLabel(q.node.kind));
   }
   if (q.typeId != TYPE_ERROR_ID) {
-    text.push(ref out, ": ");
-    text.push(ref out, formatType(ref an.prog, q.typeId));
+    out.push(": ");
+    out.push(formatType(ref an.prog, q.typeId));
     return;
   }
   // No type and no signature: say what kind of thing it is, which is the last
   // true thing available.
   if (q.site.found) {
-    text.push(ref out, " - ");
-    text.push(ref out, lowerKindLabel(q.site.kind));
+    out.push(" - ");
+    out.push(lowerKindLabel(q.site.kind));
   }
 }
 

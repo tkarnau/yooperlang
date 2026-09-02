@@ -54,7 +54,7 @@ export function loopStackNew(): LoopStack propagates<disposable> {
 // A LOOP frame. The scope depth is read here rather than passed in, so a caller
 // cannot open the body's scope first and record a depth the jump would skip.
 export function loopPush(ref cx: Cx, continueTarget: usize, breakTarget: usize): void {
-  vec.vecPush(ref cx.loops.frames, {
+  cx.loops.frames.push({
     continueTarget: continueTarget,
     breakTarget: breakTarget,
     scopeDepth: disposeScopeDepth(cx.disposes),
@@ -67,7 +67,7 @@ export function loopPush(ref cx: Cx, continueTarget: usize, breakTarget: usize):
 // so the slot is zeroed rather than inherited, which keeps a wrong lookup an
 // obvious zero instead of a plausible label from another construct.
 export function switchPush(ref cx: Cx, breakTarget: usize): void {
-  vec.vecPush(ref cx.loops.frames, {
+  cx.loops.frames.push({
     continueTarget: 0,
     breakTarget: breakTarget,
     scopeDepth: disposeScopeDepth(cx.disposes),
@@ -87,7 +87,7 @@ export function innermostBreakable(ref cx: Cx): LoopLabels {
   if (cx.loops.frames.len == 0) {
     return { continueTarget: 0, breakTarget: 0, scopeDepth: 0, isLoop: false, sawBreak: false };
   }
-  return vec.vecGet(ref cx.loops.frames, cx.loops.frames.len - 1);
+  return cx.loops.frames.get(cx.loops.frames.len - 1);
 }
 
 // The frame a `continue` jumps to: the innermost LOOP, looking past any
@@ -96,7 +96,7 @@ export function innermostLoop(ref cx: Cx): LoopLabels {
   let i = cx.loops.frames.len;
   while (i > 0) {
     i -= 1;
-    const frame = vec.vecGet(ref cx.loops.frames, i);
+    const frame = cx.loops.frames.get(i);
     if (frame.isLoop) {
       return frame;
     }
@@ -119,7 +119,7 @@ export function noteBreakTaken(ref cx: Cx): void {
     return;
   }
   const last = cx.loops.frames.len - 1;
-  let frame = vec.vecGet(ref cx.loops.frames, last);
+  let frame = cx.loops.frames.get(last);
   frame.sawBreak = true;
-  vec.vecSet(ref cx.loops.frames, last, frame);
+  cx.loops.frames.set(last, frame);
 }

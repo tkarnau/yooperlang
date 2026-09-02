@@ -70,7 +70,7 @@ export function noDeclSite(): DeclSite {
 */
 export function findModuleLevelDecl(ref an: Analysis, name: string): DeclSite {
   let tm: TypedModule = analysisTypedModule(ref an);
-  switch (map.mapGet(ref tm.importedFrom, name)) {
+  switch (tm.importedFrom.get(name)) {
     case Option.Some { value: origin }: {
       const owner = moduleIndexById(ref an, origin.moduleId);
       if (owner == NO_MODULE) {
@@ -94,7 +94,7 @@ export function findModuleLevelDecl(ref an: Analysis, name: string): DeclSite {
 */
 export function findNamespacedDecl(ref an: Analysis, base: string, member: string): DeclSite {
   let tm: TypedModule = analysisTypedModule(ref an);
-  switch (map.mapGet(ref tm.names, base)) {
+  switch (tm.names.get(base)) {
     case Option.Some { value: symId }: {
       switch (symbolAt(ref an.prog, symId)) {
         case Symbol.Namespace { module: m }: {
@@ -123,7 +123,7 @@ const NO_MODULE: usize = 0 - 1;
 function moduleIndexById(ref an: Analysis, moduleId: string): usize {
   let i: usize = 0;
   while (i < an.prog.modules.len) {
-    let tm: TypedModule = vec.vecGet(ref an.prog.modules, i);
+    let tm: TypedModule = an.prog.modules.get(i);
     if (str.stringEq(tm.moduleId, moduleId)) {
       return i;
     }
@@ -148,10 +148,10 @@ export function findDeclInModule(ref an: Analysis, moduleIndex: usize, name: str
   if (moduleIndex >= an.graph.modules.len || name.len == 0) {
     return noDeclSite();
   }
-  let mod: Module = vec.vecGet(ref an.graph.modules, moduleIndex);
+  let mod: Module = an.graph.modules.get(moduleIndex);
   let f: usize = 0;
   while (f < mod.files.len) {
-    let sf: SourceFile = vec.vecGet(ref mod.files, f);
+    let sf: SourceFile = mod.files.get(f);
     let site = findDeclInFile(ref mod.ast, ref sf, name);
     if (site.found) {
       site.moduleIndex = moduleIndex;
@@ -172,7 +172,7 @@ function findDeclInFile(ref ast: AST, ref sf: SourceFile, name: string): DeclSit
       return {
         found: true,
         absPath: sf.absPath,
-        src: vec.vecAsArray(ref sf.src),
+        src: sf.src.asArray(),
         pos: entry.sourceLoc.pos,
         length: entry.sourceLoc.length,
         kind: entry.kind,
@@ -242,13 +242,13 @@ export function findMemberDecl(ref an: Analysis, ownerType: TypeId, member: stri
 // hangs off a different slot on a struct, a trait and a variant - and a
 // NODE_LIST in between is the parser's indirection rather than a member.
 function findMemberInDecl(ref an: Analysis, ref typeSite: DeclSite, member: string): DeclSite {
-  let mod: Module = vec.vecGet(ref an.graph.modules, typeSite.moduleIndex);
+  let mod: Module = an.graph.modules.get(typeSite.moduleIndex);
   disposable work: Vec<NodeId> = vec.vecNew(32);
   disposable kids: Vec<NodeId> = vec.vecNew(8);
-  vec.vecPush(ref work, typeSite.nodeId);
+  work.push(typeSite.nodeId);
   let at: usize = 0;
   while (at < work.len) {
-    const id = vec.vecGet(ref work, at);
+    const id = work.get(at);
     at += 1;
     const node = nodeAt(ref mod.ast, id);
     if (isMemberDecl(node.kind) && str.stringEq(node.name, member)) {
@@ -265,7 +265,7 @@ function findMemberInDecl(ref an: Analysis, ref typeSite: DeclSite, member: stri
       childSlots(ref mod.ast, node, ref kids);
       let i: usize = 0;
       while (i < kids.len) {
-        vec.vecPush(ref work, vec.vecGet(ref kids, i));
+        work.push(kids.get(i));
         i += 1;
       }
     }

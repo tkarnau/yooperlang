@@ -51,7 +51,7 @@ export function parseAttribute(ref ps: ParserState): Result<NodeId, ParsingError
   if (ps.peek().tag == TokenTags.LPAREN) {
     ps.advance()?;
     while (untilClosing(ref ps, TokenTags.RPAREN)) {
-      vec.vecPush(ref argIds, parseExpression(ref ps, 0)?);
+      argIds.push(parseExpression(ref ps, 0)?);
       if (ps.peek().tag != TokenTags.COMMA) {
         break;
       }

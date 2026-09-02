@@ -1,4 +1,4 @@
-import { Vec, vecNew, vecPush, vecGet, vecSet, vecClear } from "../../../std/core/vec.yoop";
+import { Vec, vecNew } from "../../../std/core/vec.yoop";
 import { Disposable, disposable } from "../../../std/core/kinds.yoop";
 
 extern "C" from "stdio.h" {
@@ -7,16 +7,16 @@ extern "C" from "stdio.h" {
 
 function main(): int32 {
     disposable v: Vec<int32> = vecNew(2);
-    vecPush(ref v, 10);
-    vecPush(ref v, 20);
-    vecPush(ref v, 30);
-    vecPush(ref v, 40);
+    v.push(10);
+    v.push(20);
+    v.push(30);
+    v.push(40);
     printf(`len=${v.len} cap=${v.cap}\n`);
-    let x: int32 = vecGet(ref v, 2);
+    let x: int32 = v.get(2);
     printf(`v[2]=${x}\n`);
-    vecSet(ref v, 0, 99);
-    printf(`v[0]=${vecGet(ref v, 0)}\n`);
-    vecClear(ref v);
+    v.set(0, 99);
+    printf(`v[0]=${v.get(0)}\n`);
+    v.clear();
     printf(`after_clear len=${v.len} cap=${v.cap}\n`);
     return 0;
 }

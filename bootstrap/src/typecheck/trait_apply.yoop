@@ -71,16 +71,28 @@ export function applyTraitArgsUnchecked(
       let methods: Map<string, TypeId> = map.mapNew(0, map.stringKeyOps());
       let it: MapIter<string, TypeId> = map.mapIter(ref mm);
       for entry in it {
-        map.mapInsert(ref methods, entry.key,
+        methods.insert(entry.key,
           substitute(ref prog, entry.value, ref tp, ref args));
       }
       let applied: Vec<TypeId> = vec.vecNew(args.len);
-      vec.vecExtendFrom(ref applied, vec.vecAsArray(ref args));
+      applied.extendFrom(args.asArray());
+      // The PARENTS are applied too. `trait Growable<T> extends Sequence<T>`
+      // records `Sequence<T>` in terms of Growable's own T, so `Growable<int32>`
+      // has to carry `Sequence<int32>` - otherwise an impl is checked against
+      // a parent still talking about the template's T, and a bound on the
+      // child hands back the parent's raw T. Each parent's own chain is
+      // substituted by the same call, one level at a time.
+      let parents: Vec<TypeId> = vec.vecNew(et.len);
+      let p: usize = 0;
+      while (p < et.len) {
+        parents.push(substituteTrait(ref prog, et.get(p), ref tp, ref args));
+        p += 1;
+      }
       return internType(ref prog, Type.Trait {
         decl: d,
         methods: methods,
         typeParams: applied,
-        extendsTraits: et,
+        extendsTraits: parents,
       });
     }
     default: { return traitType; }
@@ -128,12 +140,12 @@ export function substituteTrait(
   let changed = false;
   let i: usize = 0;
   while (i < declared.len) {
-    const before = vec.vecGet(ref declared, i);
+    const before = declared.get(i);
     const after = substitute(ref prog, before, ref params, ref args);
     if (after != before) {
       changed = true;
     }
-    vec.vecPush(ref applied, after);
+    applied.push(after);
     i += 1;
   }
   if (!changed) {
@@ -148,7 +160,7 @@ function sameTypeIdList(ref a: Vec<TypeId>, ref b: Vec<TypeId>): bool {
   }
   let i: usize = 0;
   while (i < a.len) {
-    if (vec.vecGet(ref a, i) != vec.vecGet(ref b, i)) {
+    if (a.get(i) != b.get(i)) {
       return false;
     }
     i += 1;

@@ -51,7 +51,7 @@ export type DocumentStore implements Disposable propagates<disposable> {
     // `Vec<Document>` disposal frees the VECTOR, never the Documents in it.
     let i: usize = 0;
     while (i < self.docs.len) {
-      let d: Document = vec.vecGet(ref self.docs, i);
+      let d: Document = self.docs.get(i);
       d.dispose();
       i += 1;
     }
@@ -67,8 +67,8 @@ export function storeNew(): DocumentStore propagates<disposable> {
 export function storeIndexOf(ref s: DocumentStore, uri: string): usize {
   let i: usize = 0;
   while (i < s.docs.len) {
-    let d: Document = vec.vecGet(ref s.docs, i);
-    if (text.equals(text.view(ref d.uri), uri)) {
+    let d: Document = s.docs.get(i);
+    if (text.equals(d.uri.view(), uri)) {
       return i + 1;
     }
     i += 1;
@@ -86,16 +86,16 @@ export function storeUpsert(
 ): usize {
   const found = storeIndexOf(ref s, uri);
   if (found > 0) {
-    let d: Document = vec.vecGet(ref s.docs, found - 1);
-    vec.vecClear(ref d.content);
-    vec.vecExtendFrom(ref d.content, content);
+    let d: Document = s.docs.get(found - 1);
+    d.content.clear();
+    d.content.extendFrom(content);
     d.version = version;
     d.isOpen = true;
     d.needsDiagnostics = true;
     // The copy `vecGet` handed back is what was mutated, so it goes back in.
     // The Text and Vec buffers are shared with the stored struct, but `len`
     // and the flags are not.
-    vec.vecSet(ref s.docs, found - 1, d);
+    s.docs.set(found - 1, d);
     return found;
   }
 
@@ -107,8 +107,8 @@ export function storeUpsert(
     isOpen: true,
     needsDiagnostics: true,
   };
-  vec.vecExtendFrom(ref d.content, content);
-  vec.vecPush(ref s.docs, d);
+  d.content.extendFrom(content);
+  s.docs.push(d);
   return s.docs.len;
 }
 
@@ -120,16 +120,16 @@ export function storeClose(ref s: DocumentStore, uri: string): usize {
   if (found == 0) {
     return 0;
   }
-  let d: Document = vec.vecGet(ref s.docs, found - 1);
-  vec.vecClear(ref d.content);
+  let d: Document = s.docs.get(found - 1);
+  d.content.clear();
   d.isOpen = false;
   d.needsDiagnostics = false;
-  vec.vecSet(ref s.docs, found - 1, d);
+  s.docs.set(found - 1, d);
   return found;
 }
 
 export function storeGet(ref s: DocumentStore, index1: usize): Document {
-  return vec.vecGet(ref s.docs, index1 - 1);
+  return s.docs.get(index1 - 1);
 }
 
 export function storeMarkPublished(ref s: DocumentStore, index1: usize): void {
@@ -143,9 +143,9 @@ export function storeMarkPending(ref s: DocumentStore, index1: usize): void {
 }
 
 function setNeedsDiagnostics(ref s: DocumentStore, index1: usize, v: bool): void {
-  let d: Document = vec.vecGet(ref s.docs, index1 - 1);
+  let d: Document = s.docs.get(index1 - 1);
   d.needsDiagnostics = v;
-  vec.vecSet(ref s.docs, index1 - 1, d);
+  s.docs.set(index1 - 1, d);
 }
 
 // The index plus one of a document that has been edited and not diagnosed
@@ -153,7 +153,7 @@ function setNeedsDiagnostics(ref s: DocumentStore, index1: usize, v: bool): void
 export function storeNextPending(ref s: DocumentStore): usize {
   let i: usize = 0;
   while (i < s.docs.len) {
-    let d: Document = vec.vecGet(ref s.docs, i);
+    let d: Document = s.docs.get(i);
     if (d.isOpen && d.needsDiagnostics) {
       return i + 1;
     }
@@ -213,16 +213,16 @@ export function uriToPath(uri: string): Text propagates<disposable> {
       const hi = hexNibble(b[i + 1]);
       const lo = hexNibble(b[i + 2]);
       if (hi < 16 && lo < 16) {
-        text.pushByte(ref out, uint8(hi * 16 + lo));
+        out.pushByte(uint8(hi * 16 + lo));
         i += 3;
       } else {
         // A `%` that does not introduce two hex digits is a literal `%`, which
         // is a legal character in a path.
-        text.pushByte(ref out, b[i]);
+        out.pushByte(b[i]);
         i += 1;
       }
     } else {
-      text.pushByte(ref out, b[i]);
+      out.pushByte(b[i]);
       i += 1;
     }
   }
@@ -259,23 +259,23 @@ function hexNibble(b: uint8): uint32 {
 */
 export function pathToUri(path: string): Text propagates<disposable> {
   let out: Text = text.make(path.len + 16);
-  text.push(ref out, "file://");
+  out.push("file://");
   const b = intr.stringAsBytes(path);
   // The third slash. A POSIX path brings its own; a Windows path begins at a
   // drive letter and needs one, or the drive is read as the URI's HOST and
   // `c:/a` comes back naming a machine called `c`.
   if (b.len > 0 && b[0] != '/') {
-    text.pushByte(ref out, '/');
+    out.pushByte('/');
   }
   let i: usize = 0;
   while (i < b.len) {
     const c = b[i];
     if (isUnreservedUriByte(c)) {
-      text.pushByte(ref out, c);
+      out.pushByte(c);
     } else {
-      text.pushByte(ref out, '%');
-      text.pushByte(ref out, hexDigit(c / 16));
-      text.pushByte(ref out, hexDigit(c % 16));
+      out.pushByte('%');
+      out.pushByte(hexDigit(c / 16));
+      out.pushByte(hexDigit(c % 16));
     }
     i += 1;
   }

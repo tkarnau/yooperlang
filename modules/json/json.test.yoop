@@ -47,8 +47,8 @@ function refuses(src: string): bool {
 // compare to `want`.
 function checkRoundTrip(ref theory: Case, src: string, want: string): void {
   disposable got: Text = reserialize(src);
-  theory.isSuccessful = text.equals(text.view(ref got), want);
-  theory.detail = `${src} came back as ${text.view(ref got)}, wanted ${want}`;
+  theory.isSuccessful = text.equals(got.view(), want);
+  theory.detail = `${src} came back as ${got.view()}, wanted ${want}`;
 }
 
 // The serialized form of a JSON string whose content is `prefix` followed by
@@ -57,18 +57,18 @@ function checkRoundTrip(ref theory: Case, src: string, want: string): void {
 // which codepoint it means.
 function quoted(prefix: string, cp: uint32): Text propagates<disposable> {
   let out: Text = text.make(16);
-  text.pushByte(ref out, '"');
-  text.push(ref out, prefix);
-  text.pushChar(ref out, cp);
-  text.pushByte(ref out, '"');
+  out.pushByte('"');
+  out.push(prefix);
+  out.pushChar(cp);
+  out.pushByte('"');
   return out;
 }
 
 function checkDecodesTo(ref theory: Case, src: string, prefix: string, cp: uint32): void {
   disposable want: Text = quoted(prefix, cp);
   disposable got: Text = reserialize(src);
-  theory.isSuccessful = text.equals(text.view(ref got), text.view(ref want));
-  theory.detail = `${src} came back as ${text.view(ref got)}, wanted ${text.view(ref want)}`;
+  theory.isSuccessful = text.equals(got.view(), want.view());
+  theory.detail = `${src} came back as ${got.view()}, wanted ${want.view()}`;
 }
 
 suite function roundTripsEveryValueShape(): void {
@@ -157,9 +157,9 @@ suite function escapesEveryCornerOfAString(): void {
 
   let test theory: Case = t.asserts("raw UTF-8 in the input is passed through") {
     disposable src: Text = quoted("h", 233);
-    disposable got: Text = reserialize(text.view(ref src));
-    theory.isSuccessful = text.equals(text.view(ref got), text.view(ref src));
-    theory.detail = `a raw two-byte sequence came back as ${text.view(ref got)}`;
+    disposable got: Text = reserialize(src.view());
+    theory.isSuccessful = text.equals(got.view(), src.view());
+    theory.detail = `a raw two-byte sequence came back as ${got.view()}`;
   }
 
   let test theory: Case = t.asserts("an unpaired surrogate becomes U+FFFD rather than a crash") {
@@ -232,7 +232,7 @@ suite function refusesMalformedInputRatherThanCrashing(): void {
     // 200 opening brackets, past the parser's 128. The point of the assertion
     // is that this RETURNS: without the bound it is a stack overflow.
     disposable deep: Text = text.repeat("[", 200);
-    theory.isSuccessful = refuses(text.view(ref deep));
+    theory.isSuccessful = refuses(deep.view());
     theory.detail = "200 levels of nesting did not come back as an error";
   }
 }
@@ -308,8 +308,8 @@ suite function buildsADocumentFromNothing(): void {
 
     disposable out: Text = json.serializeDoc(ref doc);
     const want = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"ready\":true}}";
-    theory.isSuccessful = text.equals(text.view(ref out), want);
-    theory.detail = `built ${text.view(ref out)}, wanted ${want}`;
+    theory.isSuccessful = text.equals(out.view(), want);
+    theory.detail = `built ${out.view()}, wanted ${want}`;
   }
 
   let test theory: Case = t.asserts("a nested value may be built before it is attached") {
@@ -327,8 +327,8 @@ suite function buildsADocumentFromNothing(): void {
 
     disposable out: Text = json.serializeDoc(ref doc);
     const want = "{\"first\":1,\"items\":[7,\"eight\"],\"last\":2}";
-    theory.isSuccessful = text.equals(text.view(ref out), want);
-    theory.detail = `built ${text.view(ref out)}, wanted ${want}`;
+    theory.isSuccessful = text.equals(out.view(), want);
+    theory.detail = `built ${out.view()}, wanted ${want}`;
   }
 
   let test theory: Case = t.asserts("a built string is escaped on the way out") {
@@ -336,8 +336,8 @@ suite function buildsADocumentFromNothing(): void {
     json.setRoot(ref doc, json.addString(ref doc, "say \"hi\"\n"));
     disposable out: Text = json.serializeDoc(ref doc);
     const want = "\"say \\\"hi\\\"\\n\"";
-    theory.isSuccessful = text.equals(text.view(ref out), want);
-    theory.detail = `built ${text.view(ref out)}, wanted ${want}`;
+    theory.isSuccessful = text.equals(out.view(), want);
+    theory.detail = `built ${out.view()}, wanted ${want}`;
   }
 }
 
@@ -357,8 +357,8 @@ suite function movesAValueBetweenDocuments(): void {
         Disposable.dispose(ref src);
         disposable out: Text = json.serializeDoc(ref dst);
         const want = "{\"a\":[1,\"two\",{\"b\":true}],\"c\":null}";
-        theory.isSuccessful = text.equals(text.view(ref out), want);
-        theory.detail = `copy rendered ${text.view(ref out)}, wanted ${want}`;
+        theory.isSuccessful = text.equals(out.view(), want);
+        theory.detail = `copy rendered ${out.view()}, wanted ${want}`;
       }
     }
   }
@@ -374,8 +374,8 @@ suite function movesAValueBetweenDocuments(): void {
         disposable dst: JsonDoc = json.docNew();
         json.setRoot(ref dst, json.copyValue(ref dst, ref src, src.root));
         disposable out: Text = json.serializeDoc(ref dst);
-        theory.isSuccessful = text.equals(text.view(ref out), "9007199254740993");
-        theory.detail = `copy rendered ${text.view(ref out)}`;
+        theory.isSuccessful = text.equals(out.view(), "9007199254740993");
+        theory.detail = `copy rendered ${out.view()}`;
       }
     }
   }
@@ -397,8 +397,8 @@ suite function handsBackTheExactBytesOfAString(): void {
         disposable back: Text = json.serializeDoc(ref doc);
         theory.isSuccessful = raw.len == 3 && raw[0] == 'a' && raw[1] == 0
           && raw[2] == 'b' && asStr.len == 1
-          && text.equals(text.view(ref back), "{\"t\":\"a\\u0000b\"}");
-        theory.detail = `asBytes gave ${raw.len} bytes, the string view gave ${asStr.len}, rendered ${text.view(ref back)}`;
+          && text.equals(back.view(), "{\"t\":\"a\\u0000b\"}");
+        theory.detail = `asBytes gave ${raw.len} bytes, the string view gave ${asStr.len}, rendered ${back.view()}`;
       }
     }
   }

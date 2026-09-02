@@ -215,15 +215,15 @@ function dumpAstJsonTo(entry: string, outPath: string): int {
     return 1;
   }
 
-  switch (parse(vec.vecAsArray(ref src))) {
+  switch (parse(src.asArray())) {
     case Result.Err { error: e }: {
       log.error(`${entry}:${e.sourceLoc.line + 1}:${e.sourceLoc.column}: ${e.rawMessage}`);
       return 1;
     }
     case Result.Ok { value: parsed }: {
       disposable ast: AST = parsed;
-      disposable payload: Text = dumpAstJson(ref ast, ast.root, entry, vec.vecAsArray(ref src));
-      const writeErr = fs.writeFile(outPath, text.bytes(ref payload));
+      disposable payload: Text = dumpAstJson(ref ast, ast.root, entry, src.asArray());
+      const writeErr = fs.writeFile(outPath, payload.bytes());
       if (writeErr.len > 0) {
         log.error(writeErr);
         return 1;
@@ -303,7 +303,7 @@ function compileGraph(
           log.info("llvm IR: ok");
           disposable irText: Text = out.ir;
           disposable irPath: Text = text.fromString(outPath);
-          text.push(ref irPath, ".ll");
+          irPath.push(".ll");
           disposable libs: Vec<string> = out.linkLibraries;
 
           refreshIr(ref host, ref irText);
@@ -316,12 +316,12 @@ function compileGraph(
           // where a linking run would have written it, so the two modes leave
           // the same artifact behind and only the executable is missing.
           if (emitIr) {
-            const writeErr = writeIrFile(ref irText, text.view(ref irPath));
+            const writeErr = writeIrFile(ref irText, irPath.view());
             if (writeErr.len > 0) {
               log.error(writeErr);
               return 1;
             }
-            log.info(`llvm IR written to ${text.view(ref irPath)}`);
+            log.info(`llvm IR written to ${irPath.view()}`);
             return 0;
           }
 
@@ -331,7 +331,7 @@ function compileGraph(
           // user can run.
           const exePath = withExeSuffix(outPath);
           const linkErr = linkExecutable(
-            ref irText, text.view(ref irPath), exePath, out.needsRuntime,
+            ref irText, irPath.view(), exePath, out.needsRuntime,
             ref libs, env.argAt(0)
           );
           if (linkErr.len > 0) {
@@ -459,13 +459,13 @@ function parseCommandLine(ref extras: Vec<string>): CliArgs {
       if (args.entry.len == 0) {
         args.entry = a;
       } else {
-        vec.vecPush(ref extras, a);
+        extras.push(a);
       }
       i += 1;
     }
   }
   if (!args.test && extras.len > 0) {
-    args.error = `more than one input file: ${vec.vecGet(ref extras, 0)}`;
+    args.error = `more than one input file: ${extras.get(0)}`;
     return args;
   }
   // See the CliArgs note: a plugin rides the ordinary compile's phases, and
@@ -507,7 +507,7 @@ function reportDiagnostics(ref prog: Program, warn: WarnOptions): usize {
   let errors: usize = 0;
   let i: usize = 0;
   while (i < prog.diagnostics.len) {
-    const d = vec.vecGet(ref prog.diagnostics, i);
+    const d = prog.diagnostics.get(i);
     switch (d.severity) {
       case Severity.ERROR: {
         errors += 1;

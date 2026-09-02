@@ -34,12 +34,12 @@ export function evalTemplateLiteral(
     const partId = childAt(cx.ast, expr, i);
     const part = nodeAt(cx.ast, partId);
     if (part.kind == ASTNodeKind.STRING_PART) {
-      vec.vecPush(ref parts, vec.vecGet(ref cx.ast.strings, part.strId));
+      parts.push(cx.ast.strings.get(part.strId));
     } else {
       // An interpolation is an EXPR_PART wrapping the expression, so the value
       // is one slot in rather than the part itself.
       const value = evalExprValue(ref cx, part.childA)?;
-      vec.vecPush(ref parts, renderValue(ref cx, value, part.sourceLoc)?);
+      parts.push(renderValue(ref cx, value, part.sourceLoc)?);
     }
     i += 1;
   }
@@ -49,7 +49,7 @@ export function evalTemplateLiteral(
   }
   // One heap string for the whole literal, held for as long as the fold's value
   // is - the same cost every other string in the arena has.
-  return Result.Ok { value: strValue(cx.va, ty, str.stringConcatAll(vec.vecAsArray(ref parts))) };
+  return Result.Ok { value: strValue(cx.va, ty, str.stringConcatAll(parts.asArray())) };
 }
 
 // One interpolated value as the text the runtime would have printed.

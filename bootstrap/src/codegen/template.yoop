@@ -69,7 +69,7 @@ export function emitTemplateLiteral(
   while (i < expr.childCount) {
     let part: Operand = Operand.None;
     emitTemplatePart(ref cx, childAt(cx.ast, expr, i), ref part)?;
-    vec.vecPush(ref parts, part);
+    parts.push(part);
     i += 1;
   }
 
@@ -148,7 +148,7 @@ function emitDisplayPart(ref cx: Cx, exprId: NodeId, value: Operand, ref out: Op
   emitStore(ref cx, ty, value, TEMP_SLOT_NAME, slot.id);
 
   disposable args: Vec<CallArg> = vec.vecNew(1);
-  vec.vecPush(ref args, {
+  args.push({
     ty: "ptr",
     value: Operand.SlotAddr { name: TEMP_SLOT_NAME, id: slot.id },
   });
@@ -232,27 +232,27 @@ function emitConcatParts(ref cx: Cx, ref parts: Vec<Operand>, ref out: Operand):
   let i: usize = 0;
   while (i < parts.len) {
     const len = freshTemp(cx.e);
-    emitStrlen(ref cx, len, vec.vecGet(ref parts, i));
-    vec.vecPush(ref lengths, len);
+    emitStrlen(ref cx, len, parts.get(i));
+    lengths.push(len);
     i += 1;
   }
 
   // offsets[k] is where part k starts, so offsets[parts.len] is the total.
   // Part 0 starts at a literal 0 rather than an emitted `add`.
   disposable offsets: Vec<Operand> = vec.vecNew(parts.len + 1);
-  vec.vecPush(ref offsets, Operand.Imm { value: 0 });
+  offsets.push(Operand.Imm { value: 0 });
   i = 0;
   while (i < parts.len) {
     const sum = freshTemp(cx.e);
     emitBinOp(
       ref cx, sum, "add", "i64",
-      vec.vecGet(ref offsets, i),
-      Operand.Temp { id: vec.vecGet(ref lengths, i) }
+      offsets.get(i),
+      Operand.Temp { id: lengths.get(i) }
     );
-    vec.vecPush(ref offsets, Operand.Temp { id: sum });
+    offsets.push(Operand.Temp { id: sum });
     i += 1;
   }
-  const total = vec.vecGet(ref offsets, parts.len);
+  const total = offsets.get(parts.len);
 
   const size = freshTemp(cx.e);
   emitBinOp(ref cx, size, "add", "i64", total, Operand.Imm { value: 1 });
@@ -262,11 +262,11 @@ function emitConcatParts(ref cx: Cx, ref parts: Vec<Operand>, ref out: Operand):
   i = 0;
   while (i < parts.len) {
     const at = freshTemp(cx.e);
-    emitGepByteOffset(ref cx, at, dst, vec.vecGet(ref offsets, i));
+    emitGepByteOffset(ref cx, at, dst, offsets.get(i));
     emitMemcpy(
       ref cx, at,
-      vec.vecGet(ref parts, i),
-      Operand.Temp { id: vec.vecGet(ref lengths, i) }
+      parts.get(i),
+      Operand.Temp { id: lengths.get(i) }
     );
     i += 1;
   }
@@ -281,7 +281,7 @@ function emitConcatParts(ref cx: Cx, ref parts: Vec<Operand>, ref out: Operand):
 }
 
 function literalConstantOf(ref cx: Cx, part: ASTNode): usize {
-  return internStringConstant(cx.e, vec.vecGet(ref cx.ast.strings, part.strId));
+  return internStringConstant(cx.e, cx.ast.strings.get(part.strId));
 }
 
 // Which of the three stringifiable shapes a part's expression resolved to.

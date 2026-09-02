@@ -72,10 +72,10 @@ export function parseTemplateLiteral(ref ps: ParserState): Result<ASTNode, Parsi
     }
 
     if (i > runStart) {
-      vec.vecPush(ref ids, stringPart(ref ps, runStart, i)?);
+      ids.push(stringPart(ref ps, runStart, i)?);
     }
     const part = parseInterpolation(ref ps, i + 2)?;
-    vec.vecPush(ref ids, part.id);
+    ids.push(part.id);
     i = part.end;
     runStart = i;
   }
@@ -83,7 +83,7 @@ export function parseTemplateLiteral(ref ps: ParserState): Result<ASTNode, Parsi
   // The trailing literal run. `` `${x}` `` has none, and emits no empty part -
   // an empty STRING_PART would cost a concat operand that contributes nothing.
   if (close > runStart) {
-    vec.vecPush(ref ids, stringPart(ref ps, runStart, close)?);
+    ids.push(stringPart(ref ps, runStart, close)?);
   }
 
   // Put the cursor back at the byte after the closing backtick and prime. Until

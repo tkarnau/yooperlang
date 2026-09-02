@@ -48,11 +48,11 @@ export function parseVariantDecl(ref ps: ParserState): Result<NodeId, ParsingErr
   disposable caseIds: Vec<NodeId> = vec.vecNew(4);
   while (untilClosing(ref ps, TokenTags.RCURLY)) {
     if (atVariantMethod(ref ps)) {
-      vec.vecPush(ref caseIds, parseMethodDecl(ref ps, node.name, node.childA)?);
+      caseIds.push(parseMethodDecl(ref ps, node.name, node.childA)?);
       continue;
     }
     const caseId = parseVariantCase(ref ps)?;
-    vec.vecPush(ref caseIds, caseId);
+    caseIds.push(caseId);
     if (ps.peek().tag == TokenTags.COMMA) {
       ps.advance()?;
       continue;
@@ -128,7 +128,7 @@ function parseVariantCase(ref ps: ParserState): Result<NodeId, ParsingError> {
   ps.advance()?;
   disposable fieldIds: Vec<NodeId> = vec.vecNew(2);
   while (untilClosing(ref ps, TokenTags.RCURLY)) {
-    vec.vecPush(ref fieldIds, parseFieldDecl(ref ps)?);
+    fieldIds.push(parseFieldDecl(ref ps)?);
     if (ps.peek().tag == TokenTags.COMMA) {
       ps.advance()?;
     }
@@ -211,7 +211,7 @@ function parsePatternFields(ref ps: ParserState): Result<NodeId, ParsingError> {
     }
     field.childA = ps.pushNode(binding);
 
-    vec.vecPush(ref ids, ps.pushNode(field));
+    ids.push(ps.pushNode(field));
     if (ps.peek().tag == TokenTags.COMMA) {
       ps.advance()?;
     }

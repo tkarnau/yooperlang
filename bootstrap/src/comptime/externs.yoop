@@ -180,7 +180,7 @@ function argBits(ref cx: EvalCx, ref args: Vec<ValueId>, i: usize, loc: SourceLo
       "a comptime extern was called with too few arguments", loc
     )};
   }
-  return Result.Ok { value: valueAt(cx.va, vec.vecGet(ref args, i)).bits };
+  return Result.Ok { value: valueAt(cx.va, args.get(i)).bits };
 }
 
 function argTypeOf(ref cx: EvalCx, ref args: Vec<ValueId>, i: usize, loc: SourceLocation): Result<TypeId, ComptimeError> {
@@ -189,7 +189,7 @@ function argTypeOf(ref cx: EvalCx, ref args: Vec<ValueId>, i: usize, loc: Source
       "a comptime extern was called with too few arguments", loc
     )};
   }
-  return Result.Ok { value: valueAt(cx.va, vec.vecGet(ref args, i)).typeId };
+  return Result.Ok { value: valueAt(cx.va, args.get(i)).typeId };
 }
 
 function argText(ref cx: EvalCx, ref args: Vec<ValueId>, i: usize, loc: SourceLocation): Result<string, ComptimeError> {
@@ -198,7 +198,7 @@ function argText(ref cx: EvalCx, ref args: Vec<ValueId>, i: usize, loc: SourceLo
       "a comptime extern was called with too few arguments", loc
     )};
   }
-  const slot = valueAt(cx.va, vec.vecGet(ref args, i));
+  const slot = valueAt(cx.va, args.get(i));
   if (slot.kind != ValueKind.STR) {
     return Result.Err { error: comptimeError(
       "a comptime extern wanted a string argument and was given something else", loc

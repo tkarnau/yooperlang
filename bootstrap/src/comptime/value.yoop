@@ -70,7 +70,7 @@ export type ValueArena propagates<disposable> {
 // A fresh arena, seeded with one dead slot so real ids begin at 1.
 export function newValueArena(): ValueArena propagates<disposable> {
   let slots: Vec<ValueSlot> = vec.vecNew(32);
-  vec.vecPush(ref slots, emptySlot());
+  slots.push(emptySlot());
   let children: Vec<ValueId> = vec.vecNew(32);
   return { slots: slots, children: children };
 }
@@ -88,25 +88,25 @@ export function emptySlot(): ValueSlot {
 }
 
 export function pushValue(ref va: ValueArena, slot: ValueSlot): ValueId {
-  vec.vecPush(ref va.slots, slot);
+  va.slots.push(slot);
   return va.slots.len - 1;
 }
 
 export function valueAt(ref va: ValueArena, id: ValueId): ValueSlot {
-  return vec.vecGet(ref va.slots, id);
+  return va.slots.get(id);
 }
 
 // Overwrite a slot IN PLACE. This is the whole of assignment and of a write
 // through a borrow, which is why it is a set rather than a rebind: whoever else
 // holds this id has to see the new value.
 export function setValue(ref va: ValueArena, id: ValueId, slot: ValueSlot): void {
-  vec.vecSet(ref va.slots, id, slot);
+  va.slots.set(id, slot);
 }
 
 // The i'th part of an aggregate: a struct's field, an array's element, a
 // variant case's payload field.
 export function childValueAt(ref va: ValueArena, slot: ValueSlot, i: usize): ValueId {
-  return vec.vecGet(ref va.children, slot.childStart + i);
+  return va.children.get(slot.childStart + i);
 }
 
 export function intValue(ref va: ValueArena, typeId: TypeId, bits: uint64): ValueId {
@@ -176,7 +176,7 @@ export function aggregateValue(
   s.childCount = parts.len;
   let i: usize = 0;
   while (i < parts.len) {
-    vec.vecPush(ref va.children, vec.vecGet(ref parts, i));
+    va.children.push(parts.get(i));
     i += 1;
   }
   return pushValue(ref va, s);
@@ -198,7 +198,7 @@ export function cloneValue(ref va: ValueArena, id: ValueId): ValueId {
   disposable parts: Vec<ValueId> = vec.vecNew(s.childCount);
   let i: usize = 0;
   while (i < s.childCount) {
-    vec.vecPush(ref parts, cloneValue(ref va, childValueAt(ref va, s, i)));
+    parts.push(cloneValue(ref va, childValueAt(ref va, s, i)));
     i += 1;
   }
   return aggregateValue(ref va, s.kind, s.typeId, s.bits, ref parts);

@@ -86,7 +86,7 @@ export function followingTokenIs(ref ps: ParserState, tag: TokenTags): bool {
 // (`node.childB = ...`) rather than a node that IS one.
 export function spliceChildren(ref ps: ParserState, ref node: ASTNode, ref ids: Vec<NodeId>): void {
   node.childStart = ps.ast.childIds.len;
-  vec.vecExtendFrom(ref ps.ast.childIds, vec.vecAsArray(ref ids));
+  ps.ast.childIds.extendFrom(ids.asArray());
   node.childCount = ids.len;
 }
 
@@ -157,7 +157,7 @@ export type ParserState implements SelfLexing propagates<disposable> {
   // NodeId than its children - fine, ids need not follow tree order.
   function pushNode(ref self, node: ASTNode): NodeId {
     const id: NodeId = self.ast.nodes.len;
-    vec.vecPush(ref self.ast.nodes, node);
+    self.ast.nodes.push(node);
     return id;
   }
   // Splice a scratch run of child NodeIds into the shared childIds pool as one
@@ -166,7 +166,7 @@ export type ParserState implements SelfLexing propagates<disposable> {
   // itself append runs to childIds, so a partial splice would interleave.
   function buildListNode(ref self, ref ids: Vec<NodeId>, loc: SourceLocation): NodeId {
     const start: usize = self.ast.childIds.len;
-    vec.vecExtendFrom(ref self.ast.childIds, vec.vecAsArray(ref ids));
+    self.ast.childIds.extendFrom(ids.asArray());
     let listNode = createASTNode(ASTNodeKind.NODE_LIST, loc);
     listNode.childStart = start;
     listNode.childCount = ids.len;

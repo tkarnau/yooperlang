@@ -327,8 +327,8 @@ export function declareDiagCounters(ref e: Emitter): void {
   // LINKS the runtime even when the program itself never calls into it. Without
   // this a hello-world compiles to valid IR and fails at the link.
   e.usesRuntime = true;
-  text.push(ref e.globals, "declare void @yoop_diag_record_alloc(i64)\n");
-  text.push(ref e.globals, "declare void @yoop_diag_record_free(i64)\n");
-  text.push(ref e.globals, "declare void @yoop_diag_dump()\n");
-  text.push(ref e.globals, "declare i32 @atexit(ptr)\n");
+  e.globals.push("declare void @yoop_diag_record_alloc(i64)\n");
+  e.globals.push("declare void @yoop_diag_record_free(i64)\n");
+  e.globals.push("declare void @yoop_diag_dump()\n");
+  e.globals.push("declare i32 @atexit(ptr)\n");
 }

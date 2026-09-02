@@ -81,38 +81,11 @@ window.YOOP_DATA.std = {
     {
      "name": "Deque",
      "kind": "type",
-     "signature": "export type Deque<T> implements Disposable propagates<disposable>",
+     "signature": "export type Deque<T> implements (Disposable, DoubleEnded<T>) propagates<disposable>",
      "doc": "Container-owned, like Vec: the Deque remembers the allocator it was built\nwith and routes grows and the final free back through it, so a Deque built\ninside an arena scope draws from (and frees into) the arena.",
-     "shape": "export type Deque<T> implements Disposable propagates<disposable> {\n    data: T[],\n    head: usize,\n    len:  usize,\n    cap:  usize,\n    alloc: Allocator,\n    function dispose(ref self): void {\n        if (self.cap > 0) {\n            let prev: Allocator = pushAllocator(self.alloc);\n            intr.ctxFree(self.data);\n            popAllocator(prev);\n            self.cap = 0;\n        }\n    }\n}",
+     "shape": "export type Deque<T> implements (Disposable, DoubleEnded<T>) propagates<disposable> {\n    data: T[],\n    head: usize,\n    len:  usize,\n    cap:  usize,\n    alloc: Allocator,\n    function dispose(ref self): void {\n        if (self.cap > 0) {\n            let prev: Allocator = pushAllocator(self.alloc);\n            intr.ctxFree(self.data);\n            popAllocator(prev);\n            self.cap = 0;\n        }\n    }\n\n    // ----- DoubleEnded<T> ------------------------------------------------\n\n    // Append at the back. O(1) amortized.\n    function pushBack(ref self, value: T): void {\n        if (self.len >= self.cap) { grow(ref self); }\n        let mask: usize = self.cap - 1;\n        let idx: usize = (self.head + self.len) & mask;\n        self.data[idx] = value;\n        self.len = self.len + 1;\n    }\n\n    // Prepend at the front. O(1) amortized.\n    function pushFront(ref self, value: T): void {\n        if (self.len >= self.cap) { grow(ref self); }\n        let mask: usize = self.cap - 1;\n        // head moves backwards (modulo cap).\n        self.head = (self.head + self.cap - 1) & mask;\n        self.data[self.head] = value;\n        self.len = self.len + 1;\n    }\n\n    // Remove + return the front element. `None` when empty.\n    function popFront(ref self): Option<T> {\n        if (self.len == 0) { return Option.None; }\n        let v: T = self.data[self.head];\n        let mask: usize = self.cap - 1;\n        self.head = (self.head + 1) & mask;\n        self.len = self.len - 1;\n        return Option.Some { value: v };\n    }\n\n    // Remove + return the back element. `None` when empty.\n    function popBack(ref self): Option<T> {\n        if (self.len == 0) { return Option.None; }\n        let mask: usize = self.cap - 1;\n        let idx: usize = (self.head + self.len - 1) & mask;\n        let v: T = self.data[idx];\n        self.len = self.len - 1;\n        return Option.Some { value: v };\n    }\n\n    // Read by logical index (`0` is the front). Out-of-bounds yields `None`.\n    function get(ref self, i: usize): Option<T> {\n        if (i >= self.len) { return Option.None; }\n        let mask: usize = self.cap - 1;\n        return Option.Some { value: self.data[(self.head + i) & mask] };\n  // ...",
      "file": "std/collections/deque.yoop",
-     "line": 24
-    },
-    {
-     "name": "dequeClear",
-     "kind": "function",
-     "signature": "export function dequeClear<T>(ref d: Deque<T>): void",
-     "doc": "",
-     "shape": null,
-     "file": "std/collections/deque.yoop",
-     "line": 115
-    },
-    {
-     "name": "dequeGet",
-     "kind": "function",
-     "signature": "export function dequeGet<T>(ref d: Deque<T>, i: usize): Option<T>",
-     "doc": "Read by logical index (`0` is the front). Out-of-bounds yields `None`.",
-     "shape": null,
-     "file": "std/collections/deque.yoop",
-     "line": 105
-    },
-    {
-     "name": "dequeLen",
-     "kind": "function",
-     "signature": "export function dequeLen<T>(ref d: Deque<T>): usize",
-     "doc": "",
-     "shape": null,
-     "file": "std/collections/deque.yoop",
-     "line": 111
+     "line": 25
     },
     {
      "name": "dequeNew",
@@ -121,43 +94,7 @@ window.YOOP_DATA.std = {
      "doc": "",
      "shape": null,
      "file": "std/collections/deque.yoop",
-     "line": 40
-    },
-    {
-     "name": "dequePopBack",
-     "kind": "function",
-     "signature": "export function dequePopBack<T>(ref d: Deque<T>): Option<T>",
-     "doc": "Remove + return the back element. `None` when empty.",
-     "shape": null,
-     "file": "std/collections/deque.yoop",
-     "line": 95
-    },
-    {
-     "name": "dequePopFront",
-     "kind": "function",
-     "signature": "export function dequePopFront<T>(ref d: Deque<T>): Option<T>",
-     "doc": "Remove + return the front element. `None` when empty.",
-     "shape": null,
-     "file": "std/collections/deque.yoop",
-     "line": 85
-    },
-    {
-     "name": "dequePushBack",
-     "kind": "function",
-     "signature": "export function dequePushBack<T>(ref d: Deque<T>, value: T): void",
-     "doc": "Append at the back. O(1) amortized.",
-     "shape": null,
-     "file": "std/collections/deque.yoop",
-     "line": 66
-    },
-    {
-     "name": "dequePushFront",
-     "kind": "function",
-     "signature": "export function dequePushFront<T>(ref d: Deque<T>, value: T): void",
-     "doc": "Prepend at the front. O(1) amortized.",
-     "shape": null,
-     "file": "std/collections/deque.yoop",
-     "line": 75
+     "line": 98
     }
    ]
   },
@@ -178,7 +115,7 @@ window.YOOP_DATA.std = {
      "doc": "",
      "shape": null,
      "file": "std/collections/map.yoop",
-     "line": 380
+     "line": 381
     },
     {
      "name": "int32KeyOps",
@@ -187,7 +124,7 @@ window.YOOP_DATA.std = {
      "doc": "",
      "shape": null,
      "file": "std/collections/map.yoop",
-     "line": 336
+     "line": 337
     },
     {
      "name": "int64KeyOps",
@@ -196,7 +133,7 @@ window.YOOP_DATA.std = {
      "doc": "",
      "shape": null,
      "file": "std/collections/map.yoop",
-     "line": 348
+     "line": 349
     },
     {
      "name": "KeyOps",
@@ -210,29 +147,11 @@ window.YOOP_DATA.std = {
     {
      "name": "Map",
      "kind": "type",
-     "signature": "export type Map<K, V> implements Disposable propagates<disposable>",
+     "signature": "export type Map<K, V> implements (Disposable, Mapping<K, V>) propagates<disposable>",
      "doc": "",
-     "shape": "export type Map<K, V> implements Disposable propagates<disposable> {\n    keys:   K[],\n    values: V[],\n    states: uint8[],\n    len:    usize,\n    used:   usize,\n    cap:    usize,\n    ops:    KeyOps<K>,\n    function dispose(ref self): void {\n        if (self.cap > 0) {\n            intr.heapFree(self.keys);\n            intr.heapFree(self.values);\n            intr.heapFree(self.states);\n            self.cap = 0;\n        }\n    }\n}",
+     "shape": "export type Map<K, V> implements (Disposable, Mapping<K, V>) propagates<disposable> {\n    keys:   K[],\n    values: V[],\n    states: uint8[],\n    len:    usize,\n    used:   usize,\n    cap:    usize,\n    ops:    KeyOps<K>,\n    function dispose(ref self): void {\n        if (self.cap > 0) {\n            intr.heapFree(self.keys);\n            intr.heapFree(self.values);\n            intr.heapFree(self.states);\n            self.cap = 0;\n        }\n    }\n\n    // ----- Mapping<K, V> --------------------------------------------------\n\n    // Insert or overwrite. Returns true on overwrite (existing key),\n    // false on fresh insert.\n    function insert(ref self, key: K, value: V): bool {\n        maybeGrow(ref self);\n        let idx: usize = findInsertSlot(ref self, key);\n        let st: uint8 = self.states[idx];\n        let was_present: bool = st == STATE_OCCUPIED;\n        self.keys[idx]   = key;\n        self.values[idx] = value;\n        if (st == STATE_EMPTY) {\n            self.used = self.used + 1;\n        }\n        self.states[idx] = STATE_OCCUPIED;\n        if (!was_present) {\n            self.len = self.len + 1;\n        }\n        return was_present;\n    }\n\n    // Lookup. Returns `Option.Some { value }` when present, `Option.None`\n    // otherwise.\n    function get(ref self, key: K): Option<V> {\n        let slot: Option<usize> = findSlot(ref self, key);\n        switch (slot) {\n            case Option.Some { value: idx }: { return Option.Some { value: self.values[idx] }; }\n            case Option.None: { return Option.None; }\n        }\n        return Option.None;\n    }\n\n    // Membership check.\n    function containsKey(ref self, key: K): bool {\n        let slot: Option<usize> = findSlot(ref self, key);\n        switch (slot) {\n            case Option.Some { value: _i }: { return true; }\n            case Option.None: { return false; }\n        }\n        return false;\n    }\n\n    // Remove the entry for `key`. Returns true if an entry was removed.\n    // Tombstone keeps probes correct; the slot will be reused on the next\n  // ...",
      "file": "std/collections/map.yoop",
      "line": 53
-    },
-    {
-     "name": "mapClear",
-     "kind": "function",
-     "signature": "export function mapClear<K, V>(ref m: Map<K, V>): void",
-     "doc": "Reset to empty without shrinking the backing buffers.",
-     "shape": null,
-     "file": "std/collections/map.yoop",
-     "line": 260
-    },
-    {
-     "name": "mapContainsKey",
-     "kind": "function",
-     "signature": "export function mapContainsKey<K, V>(ref m: Map<K, V>, key: K): bool",
-     "doc": "Membership check.",
-     "shape": null,
-     "file": "std/collections/map.yoop",
-     "line": 229
     },
     {
      "name": "MapEntry",
@@ -241,25 +160,7 @@ window.YOOP_DATA.std = {
      "doc": "A single (key, value) pair yielded by `for entry in mapIter(ref m)`.",
      "shape": "export type MapEntry<K, V> { key: K, value: V }",
      "file": "std/collections/map.yoop",
-     "line": 273
-    },
-    {
-     "name": "mapGet",
-     "kind": "function",
-     "signature": "export function mapGet<K, V>(ref m: Map<K, V>, key: K): Option<V>",
-     "doc": "Lookup. Returns `Option.Some { value }` when present, `Option.None`\notherwise.",
-     "shape": null,
-     "file": "std/collections/map.yoop",
-     "line": 219
-    },
-    {
-     "name": "mapInsert",
-     "kind": "function",
-     "signature": "export function mapInsert<K, V>(ref m: Map<K, V>, key: K, value: V): bool",
-     "doc": "Insert or overwrite. Returns true on overwrite (existing key),\nfalse on fresh insert.",
-     "shape": null,
-     "file": "std/collections/map.yoop",
-     "line": 200
+     "line": 274
     },
     {
      "name": "mapIter",
@@ -268,25 +169,16 @@ window.YOOP_DATA.std = {
      "doc": "Build a `MapIter<K, V>` snapshot for `for ... in` iteration over a\nmap. The iterator yields `MapEntry<K, V>` values via the\n`Iterable<T>` trait.",
      "shape": null,
      "file": "std/collections/map.yoop",
-     "line": 305
+     "line": 306
     },
     {
      "name": "MapIter",
      "kind": "type",
      "signature": "export type MapIter<K, V> implements Iterable<MapEntry<K, V>>",
-     "doc": "`MapIter<K, V>` walks occupied slots in storage order, skipping\nEMPTY/TOMBSTONE. It holds borrowing views of the map's backing\narrays (the fat pointers are copies; the heap data is shared). The\niterator is invalidated if the map mutates (a `mapInsert` that\ntriggers a rehash relocates the backing buffers, leaving the\nview dangling) - keep the iter scoped tightly around its loop.",
+     "doc": "`MapIter<K, V>` walks occupied slots in storage order, skipping\nEMPTY/TOMBSTONE. It holds borrowing views of the map's backing\narrays (the fat pointers are copies; the heap data is shared). The\niterator is invalidated if the map mutates (an `insert` that\ntriggers a rehash relocates the backing buffers, leaving the\nview dangling) - keep the iter scoped tightly around its loop.",
      "shape": "export type MapIter<K, V> implements Iterable<MapEntry<K, V>> {\n    keys:   K[],\n    values: V[],\n    states: uint8[],\n    cap:    usize,\n    i:      usize,\n\n    function next(ref self): IterStep<MapEntry<K, V>> {\n        while (self.i < self.cap) {\n            let cur: usize = self.i;\n            self.i = self.i + 1;\n            if (self.states[cur] == STATE_OCCUPIED) {\n                return IterStep.Yield {\n                    value: { key: self.keys[cur], value: self.values[cur] },\n                };\n            }\n        }\n        return IterStep.Done;\n    }\n}",
      "file": "std/collections/map.yoop",
-     "line": 281
-    },
-    {
-     "name": "mapLen",
-     "kind": "function",
-     "signature": "export function mapLen<K, V>(ref m: Map<K, V>): usize",
-     "doc": "Number of occupied entries (tombstones excluded).",
-     "shape": null,
-     "file": "std/collections/map.yoop",
-     "line": 255
+     "line": 282
     },
     {
      "name": "mapNew",
@@ -295,16 +187,7 @@ window.YOOP_DATA.std = {
      "doc": "Construct a fresh map. `initial_cap` is a hint; the real capacity\nis the next power of two ≥ initial_cap, floor of 8.",
      "shape": null,
      "file": "std/collections/map.yoop",
-     "line": 135
-    },
-    {
-     "name": "mapRemove",
-     "kind": "function",
-     "signature": "export function mapRemove<K, V>(ref m: Map<K, V>, key: K): bool",
-     "doc": "Remove the entry for `key`. Returns true if an entry was removed.\nTombstone keeps probes correct; the slot will be reused on the next\nmatching insert.",
-     "shape": null,
-     "file": "std/collections/map.yoop",
-     "line": 241
+     "line": 208
     },
     {
      "name": "stringKeyOps",
@@ -313,7 +196,7 @@ window.YOOP_DATA.std = {
      "doc": "FNV-1a string hashing is in `std/core/strings.yoop`; reuse it +\n`stringEq` directly. The two function decls coerce into the FPT\nfields by the assignability lift.",
      "shape": null,
      "file": "std/collections/map.yoop",
-     "line": 320
+     "line": 321
     },
     {
      "name": "uint64KeyOps",
@@ -322,7 +205,7 @@ window.YOOP_DATA.std = {
      "doc": "",
      "shape": null,
      "file": "std/collections/map.yoop",
-     "line": 360
+     "line": 361
     }
    ]
   },
@@ -334,43 +217,16 @@ window.YOOP_DATA.std = {
    "files": [
     "std/collections/set.yoop"
    ],
-   "doc": "generic hash set.\n\n`Set<K>` is a thin wrapper over `Map<K, bool>`. yoop doesn't have\n`void` as a type-arg (you can't write `Map<K, void>`), and the bool\ndummy values cost one byte per slot - negligible next to the\npower-of-two-keyed arrays the map already maintains.\n\nAll methods forward straight to the underlying Map. The wrapping\ngives users an unambiguous Set-shaped API and lets us swap the\nbacking implementation later without changing callers.",
+   "doc": "generic hash set.\n\n`Set<K>` is a thin wrapper over `Map<K, bool>`. yoop doesn't have\n`void` as a type-arg (you can't write `Map<K, void>`), and the bool\ndummy values cost one byte per slot - negligible next to the\npower-of-two-keyed arrays the map already maintains.\n\nThe operations are the `Membership<K>` contract from\nstd/core/traits.yoop, called through the value (`s.insert(k)`,\n`s.contains(k)`), and every one forwards straight to the underlying\nMap. The wrapping gives users an unambiguous Set-shaped API and lets\nus swap the backing implementation later without changing callers.",
    "exports": [
     {
      "name": "Set",
      "kind": "type",
-     "signature": "export type Set<K> implements Disposable propagates<disposable>",
+     "signature": "export type Set<K> implements (Disposable, Membership<K>) propagates<disposable>",
      "doc": "",
-     "shape": "export type Set<K> implements Disposable propagates<disposable> {\n    inner: Map<K, bool>,\n    function dispose(ref self): void {\n        Disposable.dispose(ref self.inner);\n    }\n}",
+     "shape": "export type Set<K> implements (Disposable, Membership<K>) propagates<disposable> {\n    inner: Map<K, bool>,\n    function dispose(ref self): void {\n        self.inner.dispose();\n    }\n\n    // Insert `k`. Returns true if `k` was already present.\n    function insert(ref self, k: K): bool {\n        return self.inner.insert(k, true);\n    }\n\n    function contains(ref self, k: K): bool {\n        return self.inner.containsKey(k);\n    }\n\n    function remove(ref self, k: K): bool {\n        return self.inner.remove(k);\n    }\n\n    // A method rather than a field, because the count lives on the map\n    // inside and a second copy of it would have to be kept in step.\n    function len(ref self): usize {\n        return self.inner.len;\n    }\n\n    function clear(ref self): void {\n        self.inner.clear();\n    }\n\n    function isEmpty(ref self): bool {\n        return self.inner.len == 0;\n    }\n}",
      "file": "std/collections/set.yoop",
-     "line": 23
-    },
-    {
-     "name": "setContains",
-     "kind": "function",
-     "signature": "export function setContains<K>(ref s: Set<K>, k: K): bool",
-     "doc": "",
-     "shape": null,
-     "file": "std/collections/set.yoop",
-     "line": 39
-    },
-    {
-     "name": "setInsert",
-     "kind": "function",
-     "signature": "export function setInsert<K>(ref s: Set<K>, k: K): bool",
-     "doc": "Insert `k`. Returns true if `k` was already present.",
-     "shape": null,
-     "file": "std/collections/set.yoop",
-     "line": 35
-    },
-    {
-     "name": "setLen",
-     "kind": "function",
-     "signature": "export function setLen<K>(ref s: Set<K>): usize",
-     "doc": "",
-     "shape": null,
-     "file": "std/collections/set.yoop",
-     "line": 47
+     "line": 18
     },
     {
      "name": "setNew",
@@ -379,16 +235,7 @@ window.YOOP_DATA.std = {
      "doc": "",
      "shape": null,
      "file": "std/collections/set.yoop",
-     "line": 30
-    },
-    {
-     "name": "setRemove",
-     "kind": "function",
-     "signature": "export function setRemove<K>(ref s: Set<K>, k: K): bool",
-     "doc": "",
-     "shape": null,
-     "file": "std/collections/set.yoop",
-     "line": 43
+     "line": 52
     }
    ]
   },
@@ -1156,7 +1003,7 @@ window.YOOP_DATA.std = {
      "name": "disposable",
      "kind": "kind",
      "signature": "export kind disposable",
-     "doc": "A bare `disposable x = ...` binding is CONST, and that is deliberate.\n\n    disposable buf: Buf = bufNew();     // const - cannot rebind, cannot\n                                        // assign to its fields\n    let disposable buf: Buf = bufNew(); // mutable, and you own the\n                                        // consequences (below)\n\nThe auto-cleanup this kind injects fires ONCE, at scope end, on whatever the\nbinding holds at that moment. So rebinding silently drops the outgoing value\nwithout disposing it - a leak the compiler cannot see, because from its side\nthe obligation was discharged. Const by default makes that impossible to do\nby accident; writing `let` is the informed opt-in, and the rule it comes with\nis \"dispose the old value before you overwrite it\":\n\n    let disposable s: Text = textFrom(\"a\");\n    let next: Text = replace(ref s, \"a\", \"b\");\n    Disposable.dispose(ref s);          // the outgoing value, by hand\n    s = next;\n\nThat loop is the shape that motivates the mutable form at all. Reading the\nconst form as a papercut is the natural first reaction (it was reported as\none) - it is a guard rail with a gate in it.",
+     "doc": "A bare `disposable x = ...` binding is CONST, and that is deliberate.\n\n    disposable buf: Buf = bufNew();     // const - cannot rebind, cannot\n                                        // assign to its fields\n    let disposable buf: Buf = bufNew(); // mutable, and you own the\n                                        // consequences (below)\n\nThe auto-cleanup this kind injects fires ONCE, at scope end, on whatever the\nbinding holds at that moment. So rebinding silently drops the outgoing value\nwithout disposing it - a leak the compiler cannot see, because from its side\nthe obligation was discharged. Const by default makes that impossible to do\nby accident; writing `let` is the informed opt-in, and the rule it comes with\nis \"dispose the old value before you overwrite it\":\n\n    let disposable s: Text = textFrom(\"a\");\n    let next: Text = replace(ref s, \"a\", \"b\");\n    s.dispose();                        // the outgoing value, by hand\n    s = next;\n\nThat loop is the shape that motivates the mutable form at all. Reading the\nconst form as a papercut is the natural first reaction (it was reported as\none) - it is a guard rail with a gate in it.",
      "shape": "export kind disposable {\n    appliesTo binding;\n    requires Disposable;\n    mustCall dispose beforeScopeEnd;\n    ownsBlock;\n}",
      "file": "std/core/kinds.yoop",
      "line": 35
@@ -1459,7 +1306,7 @@ window.YOOP_DATA.std = {
    "files": [
     "std/core/text.yoop"
    ],
-   "doc": "the owned, growable string type.\n\nThe division of labour, which everything else here follows from:\n\n  `string` is the BORROWED view. Literals, `view(ref t)`, a slice of a\n  buffer someone else owns. It is one pointer, it never allocates, it is\n  never freed, and it is what you pass to anything that only reads.\n\n  `Text` is the OWNED buffer. It allocates through the ambient allocator,\n  captures that allocator so it frees back into the same one, and is\n  `disposable` so the compiler injects its cleanup at scope end.\n\nThat split exists because a `string` is a single pointer with nowhere to\nrecord which allocator produced it or how long it is. Ownership needs\nsomewhere to live, and `Text` is that somewhere.\n\n    disposable greeting: Text = text.fromString(\"hello\");\n    text.push(ref greeting, \", world\");\n    printf(\"%s\\n\", text.view(ref greeting));   // borrow, no copy\n                                               // dispose fires at scope end\n\nTwo invariants hold for every `Text` and are what make `view` free:\n  1. `cap >= len + 1` whenever `cap > 0`.\n  2. `data[len] == 0`.\nA `string` recovers its length with strlen rather than from a fat pointer,\nso the reserved nul byte is not optional. `len` never counts it.\n\nByte offsets versus characters: anything named `...Bytes` or taking an\noffset works in BYTES. Anything named `...Char`/`chars` works in Unicode\ncodepoints. The distinction is in the name on purpose - the older\nstd/core/strings.yoop API is all byte offsets and none of them say so.",
+   "doc": "the owned, growable string type.\n\nThe division of labour, which everything else here follows from:\n\n  `string` is the BORROWED view. Literals, `t.view()`, a slice of a\n  buffer someone else owns. It is one pointer, it never allocates, it is\n  never freed, and it is what you pass to anything that only reads.\n\n  `Text` is the OWNED buffer. It allocates through the ambient allocator,\n  captures that allocator so it frees back into the same one, and is\n  `disposable` so the compiler injects its cleanup at scope end.\n\nThat split exists because a `string` is a single pointer with nowhere to\nrecord which allocator produced it or how long it is. Ownership needs\nsomewhere to live, and `Text` is that somewhere.\n\n    disposable greeting: Text = text.fromString(\"hello\");\n    text.push(ref greeting, \", world\");\n    printf(\"%s\\n\", text.view(ref greeting));   // borrow, no copy\n                                               // dispose fires at scope end\n\nTwo invariants hold for every `Text` and are what make `view` free:\n  1. `cap >= len + 1` whenever `cap > 0`.\n  2. `data[len] == 0`.\nA `string` recovers its length with strlen rather than from a fat pointer,\nso the reserved nul byte is not optional. `len` never counts it.\n\nByte offsets versus characters: anything named `...Bytes` or taking an\noffset works in BYTES. Anything named `...Char`/`chars` works in Unicode\ncodepoints. The distinction is in the name on purpose - the older\nstd/core/strings.yoop API is all byte offsets and none of them say so.",
    "exports": [
     {
      "name": "byteOffsetOfChar",
@@ -1468,16 +1315,7 @@ window.YOOP_DATA.std = {
      "doc": "Byte offset at which codepoint `n` starts, or `s.len` if there are fewer\nthan n + 1 codepoints. This is the bridge between the two coordinate\nsystems and is what makes a byte-offset API safe to use on real text.",
      "shape": null,
      "file": "std/core/text.yoop",
-     "line": 324
-    },
-    {
-     "name": "bytes",
-     "kind": "function",
-     "signature": "export function bytes(t: ref Text): uint8[]",
-     "doc": "Borrow the contents as bytes, excluding the nul.",
-     "shape": null,
-     "file": "std/core/text.yoop",
-     "line": 273
+     "line": 342
     },
     {
      "name": "charAt",
@@ -1486,7 +1324,7 @@ window.YOOP_DATA.std = {
      "doc": "Codepoint number `n`, or 0 past the end. O(n); prefer `chars` for a walk.",
      "shape": null,
      "file": "std/core/text.yoop",
-     "line": 376
+     "line": 394
     },
     {
      "name": "charAtByte",
@@ -1495,7 +1333,7 @@ window.YOOP_DATA.std = {
      "doc": "Decode the codepoint starting at BYTE offset `at`. Returns U+FFFD for a\nmalformed or truncated sequence, so it always makes progress.",
      "shape": null,
      "file": "std/core/text.yoop",
-     "line": 365
+     "line": 383
     },
     {
      "name": "charCount",
@@ -1504,7 +1342,7 @@ window.YOOP_DATA.std = {
      "doc": "Number of codepoints in `s`. O(n) - it walks. Stops early on a malformed\nbyte rather than reporting a count it cannot justify.",
      "shape": null,
      "file": "std/core/text.yoop",
-     "line": 308
+     "line": 326
     },
     {
      "name": "chars",
@@ -1513,7 +1351,7 @@ window.YOOP_DATA.std = {
      "doc": "",
      "shape": null,
      "file": "std/core/text.yoop",
-     "line": 401
+     "line": 419
     },
     {
      "name": "Chars",
@@ -1522,16 +1360,7 @@ window.YOOP_DATA.std = {
      "doc": "An iterator over the codepoints of a borrowed string, so `for c in\ntext.chars(s)` works. Holds a borrowing view: the string must outlive it.",
      "shape": "export type Chars implements Iterable<uint32> {\n    buf: uint8[],\n    i: usize,\n\n    function next(ref self): IterStep<uint32> {\n        if (self.i >= self.buf.len) {\n            return IterStep.Done;\n        }\n        let w: usize = seqLen(self.buf[self.i]);\n        if (w == 0 || self.i + w > self.buf.len) {\n            self.i = self.buf.len;\n            return IterStep.Yield { value: 65533 };\n        }\n        let cp: uint32 = decodeAt(self.buf, self.i, w);\n        self.i = self.i + w;\n        return IterStep.Yield { value: cp };\n    }\n}",
      "file": "std/core/text.yoop",
-     "line": 382
-    },
-    {
-     "name": "clear",
-     "kind": "function",
-     "signature": "export function clear(t: ref Text): void",
-     "doc": "Drop the contents, keep the buffer. Capacity is unchanged, so a Text reused\nacross loop iterations stops allocating after the first few.",
-     "shape": null,
-     "file": "std/core/text.yoop",
-     "line": 247
+     "line": 400
     },
     {
      "name": "concat",
@@ -1540,7 +1369,7 @@ window.YOOP_DATA.std = {
      "doc": "",
      "shape": null,
      "file": "std/core/text.yoop",
-     "line": 476
+     "line": 494
     },
     {
      "name": "contains",
@@ -1549,7 +1378,7 @@ window.YOOP_DATA.std = {
      "doc": "",
      "shape": null,
      "file": "std/core/text.yoop",
-     "line": 458
+     "line": 476
     },
     {
      "name": "endsWith",
@@ -1558,7 +1387,7 @@ window.YOOP_DATA.std = {
      "doc": "",
      "shape": null,
      "file": "std/core/text.yoop",
-     "line": 419
+     "line": 437
     },
     {
      "name": "equals",
@@ -1567,7 +1396,7 @@ window.YOOP_DATA.std = {
      "doc": "",
      "shape": null,
      "file": "std/core/text.yoop",
-     "line": 462
+     "line": 480
     },
     {
      "name": "fromBytes",
@@ -1576,7 +1405,7 @@ window.YOOP_DATA.std = {
      "doc": "Copy a byte buffer into fresh owned storage. The bytes are NOT validated as\nUTF-8; use strings.stringFromBytes first if the source is untrusted.",
      "shape": null,
      "file": "std/core/text.yoop",
-     "line": 93
+     "line": 279
     },
     {
      "name": "fromString",
@@ -1585,7 +1414,7 @@ window.YOOP_DATA.std = {
      "doc": "Copy a borrowed string into fresh owned storage.",
      "shape": null,
      "file": "std/core/text.yoop",
-     "line": 84
+     "line": 270
     },
     {
      "name": "indexOf",
@@ -1594,7 +1423,7 @@ window.YOOP_DATA.std = {
      "doc": "",
      "shape": null,
      "file": "std/core/text.yoop",
-     "line": 454
+     "line": 472
     },
     {
      "name": "indexOfFrom",
@@ -1603,16 +1432,7 @@ window.YOOP_DATA.std = {
      "doc": "First BYTE offset of `needle` at or after `start`, or `s.len` if absent.\nAn empty needle matches at `start`, mirroring the usual convention.\n(`from` is a keyword in extern blocks, so the parameter cannot use it.)",
      "shape": null,
      "file": "std/core/text.yoop",
-     "line": 435
-    },
-    {
-     "name": "isEmpty",
-     "kind": "function",
-     "signature": "export function isEmpty(t: ref Text): bool",
-     "doc": "",
-     "shape": null,
-     "file": "std/core/text.yoop",
-     "line": 277
+     "line": 453
     },
     {
      "name": "join",
@@ -1621,7 +1441,7 @@ window.YOOP_DATA.std = {
      "doc": "",
      "shape": null,
      "file": "std/core/text.yoop",
-     "line": 485
+     "line": 503
     },
     {
      "name": "make",
@@ -1630,7 +1450,7 @@ window.YOOP_DATA.std = {
      "doc": "A Text with room for `capHint` bytes of content. Allocates capHint + 1 so\nthe nul always has a home. `make(0)` still allocates one byte, which keeps\nevery other function free of a \"has it been allocated yet\" branch.",
      "shape": null,
      "file": "std/core/text.yoop",
-     "line": 75
+     "line": 261
     },
     {
      "name": "padEnd",
@@ -1639,7 +1459,7 @@ window.YOOP_DATA.std = {
      "doc": "",
      "shape": null,
      "file": "std/core/text.yoop",
-     "line": 642
+     "line": 660
     },
     {
      "name": "padStart",
@@ -1648,7 +1468,7 @@ window.YOOP_DATA.std = {
      "doc": "Pad to at least `width` BYTES. A longer input is copied unchanged, and an\nempty fill is a no-op rather than a hang.",
      "shape": null,
      "file": "std/core/text.yoop",
-     "line": 633
+     "line": 651
     },
     {
      "name": "parseInt",
@@ -1657,70 +1477,7 @@ window.YOOP_DATA.std = {
      "doc": "Decimal integer with an optional leading sign. Rejects an empty string,\nstray characters, and anything that is not a digit - no partial parses.",
      "shape": null,
      "file": "std/core/text.yoop",
-     "line": 655
-    },
-    {
-     "name": "push",
-     "kind": "function",
-     "signature": "export function push(t: ref Text, s: string): void",
-     "doc": "Append a borrowed string.",
-     "shape": null,
-     "file": "std/core/text.yoop",
-     "line": 141
-    },
-    {
-     "name": "pushByte",
-     "kind": "function",
-     "signature": "export function pushByte(t: ref Text, b: uint8): void",
-     "doc": "Append one raw byte. No UTF-8 checking - this is the building block\n`pushChar` is written in terms of.",
-     "shape": null,
-     "file": "std/core/text.yoop",
-     "line": 147
-    },
-    {
-     "name": "pushBytes",
-     "kind": "function",
-     "signature": "export function pushBytes(t: ref Text, src: uint8[]): void",
-     "doc": "",
-     "shape": null,
-     "file": "std/core/text.yoop",
-     "line": 129
-    },
-    {
-     "name": "pushChar",
-     "kind": "function",
-     "signature": "export function pushChar(t: ref Text, cp: uint32): void",
-     "doc": "",
-     "shape": null,
-     "file": "std/core/text.yoop",
-     "line": 216
-    },
-    {
-     "name": "pushInt",
-     "kind": "function",
-     "signature": "export function pushInt(t: ref Text, v: int64): void",
-     "doc": "Append a base-10 signed integer.",
-     "shape": null,
-     "file": "std/core/text.yoop",
-     "line": 186
-    },
-    {
-     "name": "pushText",
-     "kind": "function",
-     "signature": "export function pushText(t: ref Text, other: ref Text): void",
-     "doc": "Append another Text's contents. `other` is untouched.",
-     "shape": null,
-     "file": "std/core/text.yoop",
-     "line": 241
-    },
-    {
-     "name": "pushUint",
-     "kind": "function",
-     "signature": "export function pushUint(t: ref Text, v: uint64): void",
-     "doc": "Append a base-10 unsigned integer.\n\nFormats straight into the buffer rather than going through\n`format.uintToString`, whose result is a malloc'd `string` that ignores the\nallocator context and that nothing frees. Anything appending numbers in a\nloop (an IR emitter, a token dump) wants this instead.",
-     "shape": null,
-     "file": "std/core/text.yoop",
-     "line": 160
+     "line": 673
     },
     {
      "name": "repeat",
@@ -1729,7 +1486,7 @@ window.YOOP_DATA.std = {
      "doc": "",
      "shape": null,
      "file": "std/core/text.yoop",
-     "line": 496
+     "line": 514
     },
     {
      "name": "replaceAll",
@@ -1738,7 +1495,7 @@ window.YOOP_DATA.std = {
      "doc": "Every occurrence of `needle` replaced by `repl`. An empty needle returns a\ncopy rather than looping forever.",
      "shape": null,
      "file": "std/core/text.yoop",
-     "line": 566
+     "line": 584
     },
     {
      "name": "replaceChar",
@@ -1747,16 +1504,7 @@ window.YOOP_DATA.std = {
      "doc": "Replace codepoint `n` with `repl`. The shape that motivated this module:\npoking one byte only works for ASCII, so the general case rebuilds.",
      "shape": null,
      "file": "std/core/text.yoop",
-     "line": 615
-    },
-    {
-     "name": "reserve",
-     "kind": "function",
-     "signature": "export function reserve(t: ref Text, wanted: usize): void",
-     "doc": "Ensure room for `wanted` bytes of CONTENT (the nul is accounted for on top).\nGrows by doubling, like Vec, so repeated appends stay amortized O(1).",
-     "shape": null,
-     "file": "std/core/text.yoop",
-     "line": 103
+     "line": 633
     },
     {
      "name": "seqLen",
@@ -1765,7 +1513,7 @@ window.YOOP_DATA.std = {
      "doc": "Byte length of the UTF-8 sequence starting with `first`, or 0 if `first` is\nnot a legal start byte. The same table stringFromBytes validates against,\nexported because every caller doing manual UTF-8 work needs it.\n\nA nonzero result does NOT mean the sequence is valid — overlong 3- and 4-byte\nforms and surrogates are only detectable once the continuation bytes are known.",
      "shape": null,
      "file": "std/core/text.yoop",
-     "line": 297
+     "line": 315
     },
     {
      "name": "startsWith",
@@ -1774,7 +1522,7 @@ window.YOOP_DATA.std = {
      "doc": "",
      "shape": null,
      "file": "std/core/text.yoop",
-     "line": 407
+     "line": 425
     },
     {
      "name": "subBytes",
@@ -1783,7 +1531,7 @@ window.YOOP_DATA.std = {
      "doc": "Sub-range in BYTE offsets, clamped to the string. Errors if either bound\nsplits a multi-byte codepoint - the byte offsets are yours to get right,\nand silently producing invalid UTF-8 is worse than saying so.",
      "shape": null,
      "file": "std/core/text.yoop",
-     "line": 589
+     "line": 607
     },
     {
      "name": "subChars",
@@ -1792,16 +1540,25 @@ window.YOOP_DATA.std = {
      "doc": "Sub-range in CODEPOINTS. Always lands on boundaries, so it cannot fail.",
      "shape": null,
      "file": "std/core/text.yoop",
-     "line": 605
+     "line": 623
     },
     {
      "name": "Text",
      "kind": "type",
-     "signature": "export type Text implements (Disposable, Display) propagates<disposable>",
-     "doc": "Like `Vec<T>`, `Text` is container-owned: it remembers the allocator that\nwas current when it was built and routes every later grow and the final\nfree back through that same one, whatever is ambient at the time. A Text\nbuilt inside an arena scope frees into the arena; a malloc-backed one stays\nmalloc-backed even if it grows while an arena is installed.",
-     "shape": "export type Text implements (Disposable, Display) propagates<disposable> {\n    data: uint8[],\n    len: usize,\n    cap: usize,\n    alloc: Allocator,\n\n    // Display, so a Text interpolates directly: `${greeting}` rather than\n    // `${text.view(ref greeting)}`. This hands back a BORROW rather than a\n    // fresh string, which is sound here because template lowering copies the\n    // bytes into the concatenated result while the Text is still alive - and\n    // it means interpolating a Text costs nothing beyond that copy.\n    function toString(ref self): string {\n        return view(ref self);\n    }\n\n    function dispose(ref self): void {\n        if (self.cap > 0) {\n            let prev: Allocator = pushAllocator(self.alloc);\n            intr.ctxFree(self.data);\n            popAllocator(prev);\n            self.cap = 0;\n            self.len = 0;\n        }\n    }\n}",
+     "signature": "export type Text implements (Disposable, Display, TextBuilder) propagates<disposable>",
+     "doc": "",
+     "shape": "export type Text implements (Disposable, Display, TextBuilder) propagates<disposable> {\n    data: uint8[],\n    len: usize,\n    cap: usize,\n    alloc: Allocator,\n\n    // Display, so a Text interpolates directly: `${greeting}` rather than\n    // `${text.view(ref greeting)}`. This hands back a BORROW rather than a\n    // fresh string, which is sound here because template lowering copies the\n    // bytes into the concatenated result while the Text is still alive - and\n    // it means interpolating a Text costs nothing beyond that copy.\n    function toString(ref self): string {\n        return self.view();\n    }\n\n    function dispose(ref self): void {\n        if (self.cap > 0) {\n            let prev: Allocator = pushAllocator(self.alloc);\n            intr.ctxFree(self.data);\n            popAllocator(prev);\n            self.cap = 0;\n            self.len = 0;\n        }\n    }\n\n    // ----- TextBuilder ---------------------------------------------------\n\n    // Ensure room for `wanted` bytes of CONTENT (the nul is accounted for on top).\n    // Grows by doubling, like Vec, so repeated appends stay amortized O(1).\n    function reserve(ref self, wanted: usize): void {\n        let need: usize = wanted + 1;\n        if (self.cap >= need) { return; }\n        let newCap: usize = self.cap * 2;\n        if (newCap < 8) { newCap = 8; }\n        while (newCap < need) { newCap = newCap * 2; }\n\n        // Grow through this Text's own allocator, not whatever is ambient now.\n        let prev: Allocator = pushAllocator(self.alloc);\n        let fresh: uint8[] = intr.ctxAlloc(newCap);\n        let i: usize = 0;\n        while (i < self.len) {\n            fresh[i] = self.data[i];\n            i = i + 1;\n        }\n        if (self.cap > 0) {\n            intr.ctxFree(self.data);\n        }\n        popAllocator(prev);\n        fresh[self.len] = 0;\n        self.data = fresh;\n        self.cap = newCap;\n    }\n\n    function pushBytes(ref self, src: uint8[]): void {\n        self.reserve(self.len + src.len);\n        let i: usize = 0;\n        while (i < src.len) {\n            self.data[self.len + i] = src[i];\n            i = i + 1;\n        }\n        self.len = self.len + src.len;\n  // ...",
      "file": "std/core/text.yoop",
-     "line": 44
+     "line": 63
+    },
+    {
+     "name": "TextBuilder",
+     "kind": "trait",
+     "signature": "export trait TextBuilder",
+     "doc": "Like `Vec<T>`, `Text` is container-owned: it remembers the allocator that\nwas current when it was built and routes every later grow and the final\nfree back through that same one, whatever is ambient at the time. A Text\nbuilt inside an arena scope frees into the arena; a malloc-backed one stays\nmalloc-backed even if it grows while an arena is installed.\nWhat a text builder can do, as a contract rather than a set of free\nfunctions: `t.push(\"x\")`, `t.pushUint(n)`, `t.view()`. See the container\ncontracts in std/core/traits.yoop for why the operations live on a trait.",
+     "shape": "export trait TextBuilder {\n    function reserve(ref self, wanted: usize): void;\n    function pushBytes(ref self, src: uint8[]): void;\n    function push(ref self, s: string): void;\n    function pushByte(ref self, b: uint8): void;\n    function pushUint(ref self, v: uint64): void;\n    function pushInt(ref self, v: int64): void;\n    function pushChar(ref self, cp: uint32): void;\n    function pushText(ref self, other: ref Text): void;\n    function clear(ref self): void;\n    function truncateBytes(ref self, newLen: usize): void;\n    function view(ref self): string;\n    function bytes(ref self): uint8[];\n    function isEmpty(ref self): bool;\n}",
+     "file": "std/core/text.yoop",
+     "line": 47
     },
     {
      "name": "toLowerAscii",
@@ -1810,7 +1567,7 @@ window.YOOP_DATA.std = {
      "doc": "ASCII-only case mapping. Bytes >= 128 are copied through untouched, which\nis why the names say ascii: real Unicode case folding is locale-dependent\nand can change a string's length.",
      "shape": null,
      "file": "std/core/text.yoop",
-     "line": 510
+     "line": 528
     },
     {
      "name": "toUpperAscii",
@@ -1819,7 +1576,7 @@ window.YOOP_DATA.std = {
      "doc": "",
      "shape": null,
      "file": "std/core/text.yoop",
-     "line": 523
+     "line": 541
     },
     {
      "name": "trim",
@@ -1828,7 +1585,7 @@ window.YOOP_DATA.std = {
      "doc": "",
      "shape": null,
      "file": "std/core/text.yoop",
-     "line": 541
+     "line": 559
     },
     {
      "name": "trimEnd",
@@ -1837,7 +1594,7 @@ window.YOOP_DATA.std = {
      "doc": "",
      "shape": null,
      "file": "std/core/text.yoop",
-     "line": 557
+     "line": 575
     },
     {
      "name": "trimStart",
@@ -1846,25 +1603,7 @@ window.YOOP_DATA.std = {
      "doc": "",
      "shape": null,
      "file": "std/core/text.yoop",
-     "line": 550
-    },
-    {
-     "name": "truncateBytes",
-     "kind": "function",
-     "signature": "export function truncateBytes(t: ref Text, newLen: usize): void",
-     "doc": "Cut back to `newLen` BYTES. Longer than the current length is a no-op.\nDoes not check that newLen lands on a codepoint boundary; use\nbyteOffsetOfChar to compute a safe cut.",
-     "shape": null,
-     "file": "std/core/text.yoop",
-     "line": 255
-    },
-    {
-     "name": "view",
-     "kind": "function",
-     "signature": "export function view(t: ref Text): string",
-     "doc": "Borrow the contents as a `string`. Free: no copy, no strlen, no allocation.\nThe result is invalidated by anything that can reallocate (`push`,\n`reserve`, `dispose`), so do not hold it across a mutation.",
-     "shape": null,
-     "file": "std/core/text.yoop",
-     "line": 266
+     "line": 568
     }
    ]
   },
@@ -1888,6 +1627,15 @@ window.YOOP_DATA.std = {
      "line": 79
     },
     {
+     "name": "DoubleEnded",
+     "kind": "trait",
+     "signature": "export trait DoubleEnded<T>",
+     "doc": "A queue open at both ends. `get` is by logical position from the front.",
+     "shape": "export trait DoubleEnded<T> {\n    function clear(ref self): void;\n    function isEmpty(ref self): bool;\n    function pushBack(ref self, value: T): void;\n    function pushFront(ref self, value: T): void;\n    function popFront(ref self): Option<T>;\n    function popBack(ref self): Option<T>;\n    function get(ref self, i: usize): Option<T>;\n}",
+     "file": "std/core/traits.yoop",
+     "line": 198
+    },
+    {
      "name": "FlushOutcome",
      "kind": "variant",
      "signature": "export variant FlushOutcome",
@@ -1895,6 +1643,15 @@ window.YOOP_DATA.std = {
      "shape": "export variant FlushOutcome {\n    Ok,\n    Err { error: string },\n}",
      "file": "std/core/traits.yoop",
      "line": 37
+    },
+    {
+     "name": "Growable",
+     "kind": "trait",
+     "signature": "export trait Growable<T>",
+     "doc": "A sequence that grows at the end.",
+     "shape": "export trait Growable<T> {\n    function push(ref self, value: T): void;\n    function extendFrom(ref self, items: T[]): void;\n}",
+     "file": "std/core/traits.yoop",
+     "line": 172
     },
     {
      "name": "Into",
@@ -1924,6 +1681,24 @@ window.YOOP_DATA.std = {
      "line": 88
     },
     {
+     "name": "Mapping",
+     "kind": "trait",
+     "signature": "export trait Mapping<K, V>",
+     "doc": "A key-to-value association. `insert` reports whether it OVERWROTE.",
+     "shape": "export trait Mapping<K, V> {\n    function clear(ref self): void;\n    function isEmpty(ref self): bool;\n    function insert(ref self, key: K, value: V): bool;\n    function get(ref self, key: K): Option<V>;\n    function containsKey(ref self, key: K): bool;\n    function remove(ref self, key: K): bool;\n}",
+     "file": "std/core/traits.yoop",
+     "line": 178
+    },
+    {
+     "name": "Membership",
+     "kind": "trait",
+     "signature": "export trait Membership<K>",
+     "doc": "A set of keys. `insert` reports whether the key was ALREADY present.",
+     "shape": "export trait Membership<K> {\n    function clear(ref self): void;\n    function isEmpty(ref self): bool;\n    function len(ref self): usize;\n    function insert(ref self, key: K): bool;\n    function contains(ref self, key: K): bool;\n    function remove(ref self, key: K): bool;\n}",
+     "file": "std/core/traits.yoop",
+     "line": 188
+    },
+    {
      "name": "Readable",
      "kind": "trait",
      "signature": "export trait Readable",
@@ -1940,6 +1715,15 @@ window.YOOP_DATA.std = {
      "shape": "export vtable Reader for Readable {\n    read: (ref buf: uint8[]) => Result<c_ssize_t, string>,\n}",
      "file": "std/core/traits.yoop",
      "line": 65
+    },
+    {
+     "name": "Sequence",
+     "kind": "trait",
+     "signature": "export trait Sequence<T>",
+     "doc": "An indexable sequence: read and write by position, and a borrowed view of\nthe populated part as a plain array.",
+     "shape": "export trait Sequence<T> {\n    function clear(ref self): void;\n    function isEmpty(ref self): bool;\n    function get(ref self, i: usize): T;\n    function set(ref self, i: usize, value: T): void;\n    function asArray(ref self): T[];\n}",
+     "file": "std/core/traits.yoop",
+     "line": 163
     },
     {
      "name": "WithContext",
@@ -2008,43 +1792,16 @@ window.YOOP_DATA.std = {
    "files": [
     "std/core/vec.yoop"
    ],
-   "doc": "growable vector type.\n\n`Vec<T>` is the blessed growable-array primitive that std modules and\nuser code build collections out of. Owns a heap-allocated backing buffer\nand grows on demand. Carries `propagates<disposable>` so the underlying\nmemory cannot be silently dropped - the user must pick auto-cleanup\n(`disposable v: Vec<T> = vecNew(8);`), manual `Disposable.dispose`, or\ntransfer-up via return.\n\nAllocation behavior per call (per the intrinsics-index naming convention):\n  * `vecNew`       -> fresh heap allocation\n  * `vecPush`      -> may reallocate (when len == cap)\n  * `vec_pop`       -> in place; no allocation\n  * `vecGet/_set`  -> in place; no allocation\n  * `vecClear`     -> in place; capacity unchanged, no allocation\n  * `vecAsArray`  -> borrowing view valid until the next mutation\n  * `dispose`       -> frees the backing buffer",
+   "doc": "growable vector type.\n\n`Vec<T>` is the blessed growable-array primitive that std modules and\nuser code build collections out of. Owns a heap-allocated backing buffer\nand grows on demand. Carries `propagates<disposable>` so the underlying\nmemory cannot be silently dropped - the user must pick auto-cleanup\n(`disposable v: Vec<T> = vec.vecNew(8);`), manual `v.dispose()`, or\ntransfer-up via return.\n\nThe operations are the `Sequence<T>` and `Growable<T>` contracts from\nstd/core/traits.yoop, called through the value: `v.push(x)`, `v.get(i)`,\n`v.asArray()`. A bounded generic takes any growable sequence the same way,\nwhich is what lets another backing strategy stand in for this one.\n\nAllocation behavior per operation (per the intrinsics-index naming\nconvention):\n  * `vecNew`        -> fresh heap allocation\n  * `push`          -> may reallocate (when len == cap)\n  * `get` / `set`   -> in place; no allocation\n  * `clear`         -> in place; capacity unchanged, no allocation\n  * `asArray`       -> borrowing view valid until the next mutation\n  * `dispose`       -> frees the backing buffer",
    "exports": [
     {
      "name": "Vec",
      "kind": "type",
-     "signature": "export type Vec<T> implements Disposable propagates<disposable>",
+     "signature": "export type Vec<T> implements (Disposable, Sequence<T>, Growable<T>) propagates<disposable>",
      "doc": "`Vec<T>` is container-owned: it remembers the allocator it was built with\n(whatever was current at `vecNew`) and routes every later grow and the\nfinal free back through that same allocator, regardless of what is current\nwhen those happen. So a Vec built inside an arena scope frees into the arena\n(a no-op; the region reclaims in bulk), and a malloc Vec stays malloc-backed\neven if it grows while an arena is installed.",
-     "shape": "export type Vec<T> implements Disposable propagates<disposable> {\n    data: T[],\n    len: usize,\n    cap: usize,\n    alloc: Allocator,\n    function dispose(ref self): void {\n        if (self.cap > 0) {\n            let prev: Allocator = pushAllocator(self.alloc);\n            intr.ctxFree(self.data);\n            popAllocator(prev);\n            self.cap = 0;\n        }\n    }\n}",
+     "shape": "export type Vec<T> implements (Disposable, Sequence<T>, Growable<T>) propagates<disposable> {\n    data: T[],\n    len: usize,\n    cap: usize,\n    alloc: Allocator,\n    function dispose(ref self): void {\n        if (self.cap > 0) {\n            let prev: Allocator = pushAllocator(self.alloc);\n            intr.ctxFree(self.data);\n            popAllocator(prev);\n            self.cap = 0;\n        }\n    }\n\n    // ----- Sequence<T> ---------------------------------------------------\n\n    // Reset length to zero. Capacity unchanged; backing buffer is retained so\n    // subsequent pushes don't reallocate immediately.\n    function clear(ref self): void {\n        self.len = 0;\n    }\n\n    function isEmpty(ref self): bool {\n        return self.len == 0;\n    }\n\n    // Read `v[i]`. Traps via the underlying array indexing if i >= len -\n    // matches the existing yoop array-indexing convention (no bounds check;\n    // caller's responsibility).\n    function get(ref self, i: usize): T {\n        return self.data[i];\n    }\n\n    // Write `v[i] = value`. Same OOB convention as `get`.\n    function set(ref self, i: usize, value: T): void {\n        self.data[i] = value;\n    }\n\n    // Borrowing view of the populated prefix as a regular yoop array. The view\n    // is valid until the next mutation (push/clear/dispose) - the underlying\n    // fat-pointer may dangle if `push` reallocates.\n    function asArray(ref self): T[] {\n        return intr.arraySlice(self.data, 0, self.len);\n    }\n\n    // ----- Growable<T> ---------------------------------------------------\n\n    // Append `value`, growing the backing buffer if necessary (doubling\n    // strategy). MAY REALLOCATE when len == cap - callers holding views from\n    // `asArray` should re-fetch after a push.\n    function push(ref self, value: T): void {\n        if (self.len >= self.cap) {\n            let new_cap: usize = self.cap * 2;\n            if (new_cap == 0) { new_cap = 4; }\n            // Grow through the Vec's own allocator, not whatever is ambient now.\n            let prev: Allocator = pushAllocator(self.alloc);\n            let new_data: T[] = intr.ctxAlloc(new_cap);\n            let i: usize = 0;\n            while (i < self.len) {\n                new_data[i] = self.data[i];\n                i = i + 1;\n  // ...",
      "file": "std/core/vec.yoop",
-     "line": 30
-    },
-    {
-     "name": "vecAsArray",
-     "kind": "function",
-     "signature": "export function vecAsArray<T>(v: ref Vec<T>): T[]",
-     "doc": "Borrowing view of the populated prefix as a regular yoop array. The view\nis valid until the next mutation (push/clear/dispose) - the underlying\nfat-pointer may dangle if vecPush reallocates.",
-     "shape": null,
-     "file": "std/core/vec.yoop",
-     "line": 100
-    },
-    {
-     "name": "vecClear",
-     "kind": "function",
-     "signature": "export function vecClear<T>(v: ref Vec<T>): void",
-     "doc": "Reset length to zero. Capacity unchanged; backing buffer is retained so\nsubsequent pushes don't reallocate immediately.",
-     "shape": null,
-     "file": "std/core/vec.yoop",
-     "line": 93
-    },
-    {
-     "name": "vecExtendFrom",
-     "kind": "function",
-     "signature": "export function vecExtendFrom<T>(v: ref Vec<T>, src: T[]): void",
-     "doc": "Append every element of `src` to `v`, growing the backing buffer at most\nonce (to exactly `v.len + src.len` when a grow is needed). This is the\nbulk-append the byte-shuffling paths want: O(n) copies but a single\nallocation, versus `vecPush` in a loop which reallocates O(log n) times.\nMAY REALLOCATE - callers holding views from `vecAsArray` should re-fetch.",
-     "shape": null,
-     "file": "std/core/vec.yoop",
-     "line": 109
+     "line": 35
     },
     {
      "name": "vecFromArray",
@@ -2053,16 +1810,7 @@ window.YOOP_DATA.std = {
      "doc": "Build a fresh Vec holding a copy of `src` (capacity == src.len, so no\nspare). Like `vecNew` it allocates once and carries the disposable\nobligation to the caller. `src` is unmodified - the bytes are copied, not\naliased - so passing a borrowing view (stringAsBytes, arraySlice) is\nsafe.",
      "shape": null,
      "file": "std/core/vec.yoop",
-     "line": 139
-    },
-    {
-     "name": "vecGet",
-     "kind": "function",
-     "signature": "export function vecGet<T>(v: ref Vec<T>, i: usize): T",
-     "doc": "Read `v[i]`. Traps via the underlying array indexing if i >= v.len -\nmatches the existing yoop array-indexing convention (no bounds check;\ncaller's responsibility).",
-     "shape": null,
-     "file": "std/core/vec.yoop",
-     "line": 82
+     "line": 152
     },
     {
      "name": "vecIter",
@@ -2071,16 +1819,16 @@ window.YOOP_DATA.std = {
      "doc": "Build a `VecIter<T>` over the populated prefix of `v`, for `for ... in`.\nThe iterator yields `T` values via the `Iterable<T>` trait.",
      "shape": null,
      "file": "std/core/vec.yoop",
-     "line": 178
+     "line": 191
     },
     {
      "name": "VecIter",
      "kind": "type",
      "signature": "export type VecIter<T> implements Iterable<T>",
-     "doc": "`VecIter<T>` walks the populated prefix (indices 0 .. len-1) in order, so\n`for x in vecIter(ref v)` replaces the index-plumbing while-loop that\nreading a Vec otherwise requires.\n\nLike `MapIter`, the iterator holds a BORROWING view of the backing buffer:\nthe `T[]` fat pointer is a copy, the heap data is shared. Any mutation that\ncan reallocate (`vecPush` at capacity, `vecExtendFrom`, `dispose`)\ninvalidates it and leaves the view dangling - keep the iterator scoped\ntightly around its loop and re-fetch after mutating.",
+     "doc": "`VecIter<T>` walks the populated prefix (indices 0 .. len-1) in order, so\n`for x in vecIter(ref v)` replaces the index-plumbing while-loop that\nreading a Vec otherwise requires.\n\nLike `MapIter`, the iterator holds a BORROWING view of the backing buffer:\nthe `T[]` fat pointer is a copy, the heap data is shared. Any mutation that\ncan reallocate (`push` at capacity, `extendFrom`, `dispose`) invalidates it\nand leaves the view dangling - keep the iterator scoped tightly around its\nloop and re-fetch after mutating.",
      "shape": "export type VecIter<T> implements Iterable<T> {\n    data: T[],\n    len: usize,\n    i: usize,\n\n    function next(ref self): IterStep<T> {\n        if (self.i >= self.len) {\n            return IterStep.Done;\n        }\n        let cur: usize = self.i;\n        self.i = self.i + 1;\n        return IterStep.Yield { value: self.data[cur] };\n    }\n}",
      "file": "std/core/vec.yoop",
-     "line": 161
+     "line": 174
     },
     {
      "name": "vecNew",
@@ -2089,25 +1837,7 @@ window.YOOP_DATA.std = {
      "doc": "Construct a fresh Vec with `initial_cap` capacity. Captures the current\nallocator. Caller must discharge the disposable obligation (auto-cleanup,\nmanual dispose, or transfer up).",
      "shape": null,
      "file": "std/core/vec.yoop",
-     "line": 48
-    },
-    {
-     "name": "vecPush",
-     "kind": "function",
-     "signature": "export function vecPush<T>(v: ref Vec<T>, value: T): void",
-     "doc": "Append `value`, growing the backing buffer if necessary (doubling\nstrategy). MAY REALLOCATE when len == cap - callers holding views from\n`vecAsArray` should re-fetch after a push.",
-     "shape": null,
-     "file": "std/core/vec.yoop",
-     "line": 56
-    },
-    {
-     "name": "vecSet",
-     "kind": "function",
-     "signature": "export function vecSet<T>(v: ref Vec<T>, i: usize, value: T): void",
-     "doc": "Write `v[i] = value`. Same OOB convention as vecGet.",
-     "shape": null,
-     "file": "std/core/vec.yoop",
-     "line": 87
+     "line": 142
     }
    ]
   },
@@ -2783,7 +2513,7 @@ window.YOOP_DATA.std = {
    "files": [
     "std/fs.yoop"
    ],
-   "doc": "filesystem operations for regular files.\n\nThis is a small wrapper over libc stdio (fopen / fread / fwrite /\nfclose / fseek / ftell / remove) and POSIX mkdir, modeled after the\nstd/net layer: an internal `import.unsafe` C interop block, and a set\nof safe exports that hand back yoop-shaped types.\n\nThe public API:\n\n  readFile(path)                  -> ReadFileResult propagates<disposable>\n  readFileInto(ref out, path)    -> string (empty on success)\n  writeFile(path, bytes)          -> string\n  deleteFile(path)                -> string\n  mkdirP(path)                    -> string\n  pathJoin(parts)                 -> string\n  exists(path)                     -> bool\n  fileSize(path)                  -> int64 (-1 if absent / not a file)\n\nAll \"string\" returns are empty on success and an error message on\nfailure - matching the std/net convention so callers stay uniform.\nFailure messages from the libc calls carry the real errno reason\n(via the errno bridge) so \"not found\" and \"permission\ndenied\" are distinguishable.\n\nWhat's deliberately absent:\n  * No streaming reads. readFile slurps.\n  * No Windows-specific path handling. Forward slashes only.",
+   "doc": "filesystem operations for regular files.\n\nThis is a small wrapper over libc stdio (fopen / fread / fwrite /\nfclose / fseek / ftell / remove) and POSIX mkdir, modeled after the\nstd/net layer: an internal `import.unsafe` C interop block, and a set\nof safe exports that hand back yoop-shaped types.\n\nThe public API:\n\n  readFile(path)                  -> ReadFileResult propagates<disposable>\n  readFileInto(ref out, path)    -> string (empty on success)\n  writeFile(path, bytes)          -> string\n  deleteFile(path)                -> string\n  mkdirP(path)                    -> string\n  pathJoin(parts)                 -> string\n  exists(path)                     -> bool\n  fileSize(path)                  -> int64 (-1 if absent / not a file)\n\nAll \"string\" returns are empty on success and an error message on\nfailure - matching the std/net convention so callers stay uniform.\nFailure messages from the libc calls carry the real errno reason\n(via the errno bridge) so \"not found\" and \"permission\ndenied\" are distinguishable.\n\nWhat's deliberately absent:\n  * No streaming reads. readFile slurps.\n  * Paths are BUILT with forward slashes and only forward slashes -\n    pathJoin emits one and never a backslash. Reading a path is the\n    asymmetric half: dirName and mkdirP accept either separator, because\n    Windows hands paths IN with backslashes (argv[0] above all) and those\n    are not ours to have written. Everything the compiler derives from a\n    path it normalized is forward-slash already - see\n    yoop_io_normalize_real_path in runtime/yoop_fs.c.",
    "exports": [
     {
      "name": "deleteFile",
@@ -2792,7 +2522,7 @@ window.YOOP_DATA.std = {
      "doc": "",
      "shape": null,
      "file": "std/fs.yoop",
-     "line": 214
+     "line": 220
     },
     {
      "name": "DirIter",
@@ -2801,7 +2531,7 @@ window.YOOP_DATA.std = {
      "doc": "A directory opened for iteration. `for name in dir` yields each entry name\n(an owned copy - readdir's own buffer is reused per call), skipping \".\"\nand \"..\". Hidden entries are NOT filtered; that is the caller's policy.\nIterating consumes the stream, so a second pass needs a second openDir.",
      "shape": "export type DirIter implements (Disposable, Iterable<string>) propagates<disposable> {\n    handle: unsafe_ptr,\n\n    function next(ref self): IterStep<string> {\n        if (self.handle == null) { return IterStep.Done; }\n        let name: string = yoop_io_readdir(self.handle);\n        if (name.len == 0) { return IterStep.Done; }\n        return IterStep.Yield { value: str.stringConcat(name, \"\") };\n    }\n\n    function dispose(ref self): void {\n        if (self.handle != null) {\n            yoop_io_closedir(self.handle);\n            self.handle = null;\n        }\n    }\n}",
      "file": "std/fs.yoop",
-     "line": 244
+     "line": 250
     },
     {
      "name": "dirName",
@@ -2810,7 +2540,7 @@ window.YOOP_DATA.std = {
      "doc": "",
      "shape": null,
      "file": "std/fs.yoop",
-     "line": 326
+     "line": 358
     },
     {
      "name": "exists",
@@ -2819,7 +2549,7 @@ window.YOOP_DATA.std = {
      "doc": "True if `path` names an existing filesystem entry (file, directory, or\notherwise). A missing parent component also reads as \"does not exist\".",
      "shape": null,
      "file": "std/fs.yoop",
-     "line": 227
+     "line": 233
     },
     {
      "name": "FileMeta",
@@ -2828,7 +2558,7 @@ window.YOOP_DATA.std = {
      "doc": "What one lstat tells you about a path. `ok` is false when the probe failed\n(missing, or a permission-denied parent); every other field is then zero.\nSymlinks are NOT followed, so `isLink` describes the link itself.",
      "shape": "export type FileMeta {\n    ok:     bool,\n    isDir:  bool,\n    isLink: bool,\n    size:   int64,\n    perm:   int32,\n    links:  int32,\n    owner:  string,\n    group:  string,\n    mtime:  int64,\n}",
      "file": "std/fs.yoop",
-     "line": 272
+     "line": 278
     },
     {
      "name": "fileSize",
@@ -2837,7 +2567,7 @@ window.YOOP_DATA.std = {
      "doc": "Size in bytes of the regular file at `path`, or -1 if it doesn't exist\nor isn't a regular file. (-1 rather than a fallible struct keeps the\ncommon \"stat the file I just wrote\" path a single read.)",
      "shape": null,
      "file": "std/fs.yoop",
-     "line": 234
+     "line": 240
     },
     {
      "name": "hasYoopFileNameSuffix",
@@ -2846,7 +2576,16 @@ window.YOOP_DATA.std = {
      "doc": "Odd helpers.",
      "shape": null,
      "file": "std/fs.yoop",
-     "line": 315
+     "line": 321
+    },
+    {
+     "name": "isAbsolutePath",
+     "kind": "function",
+     "signature": "export function isAbsolutePath(path: string): bool",
+     "doc": "Whether `path` is absolute as the OPERATING SYSTEM reads it.\n\nPOSIX has one form: a leading separator. Windows has that one too (a UNC\npath, //server/share) plus the drive form, C:/... or C:..., and the drive\nform is the whole reason this is not a one-line startsWith. The compiler\npasses absolute paths around constantly - every resolved import is one - and\non Windows every one of them begins with a letter, so a leading-separator\ntest answers false for the common case.",
+     "shape": null,
+     "file": "std/fs.yoop",
+     "line": 340
     },
     {
      "name": "mkdirP",
@@ -2855,7 +2594,7 @@ window.YOOP_DATA.std = {
      "doc": "Walk `full_path` left to right and mkdir each `/`-bounded prefix.\n\"Already exists\" failures are NOT treated as errors: the next\noperation (fopen, mkdir of the next segment) is what decides whether\nthe path is usable. If `full_path` is itself the file you want to\ncreate, this creates its parent directories but not the file.",
      "shape": null,
      "file": "std/fs.yoop",
-     "line": 111
+     "line": 117
     },
     {
      "name": "normalizePath",
@@ -2864,7 +2603,7 @@ window.YOOP_DATA.std = {
      "doc": "",
      "shape": null,
      "file": "std/fs.yoop",
-     "line": 334
+     "line": 383
     },
     {
      "name": "openDir",
@@ -2873,7 +2612,7 @@ window.YOOP_DATA.std = {
      "doc": "Open `path` for iteration. A path that isn't a readable directory yields an\niterator that is immediately Done rather than an error - check `exists`\nfirst when the difference matters.",
      "shape": null,
      "file": "std/fs.yoop",
-     "line": 265
+     "line": 271
     },
     {
      "name": "pathJoin",
@@ -2882,7 +2621,7 @@ window.YOOP_DATA.std = {
      "doc": "Join an array of components with `/`. Empty components are kept (so the\ncaller can prepend an absolute root by passing `[\"\"].concat(...)`).\nWe do NOT normalize - successive `/`s are not collapsed, `.` and `..`\npass through. Validation belongs at the API boundary, not here.",
      "shape": null,
      "file": "std/fs.yoop",
-     "line": 88
+     "line": 94
     },
     {
      "name": "readFile",
@@ -2891,7 +2630,7 @@ window.YOOP_DATA.std = {
      "doc": "",
      "shape": null,
      "file": "std/fs.yoop",
-     "line": 206
+     "line": 212
     },
     {
      "name": "readFileInto",
@@ -2900,16 +2639,16 @@ window.YOOP_DATA.std = {
      "doc": "`readFileInto` is the lower-level form: fills the caller's Vec with\nthe file contents (clearing it first). On error the Vec is left empty.\nPreferred when the caller already owns a reusable buffer (e.g. an HTTP\nhandler reusing its body buffer across requests).",
      "shape": null,
      "file": "std/fs.yoop",
-     "line": 153
+     "line": 159
     },
     {
      "name": "ReadFileResult",
      "kind": "type",
      "signature": "export type ReadFileResult implements Disposable propagates<disposable>",
      "doc": "Owned-result form: allocates a fresh Vec<uint8> and reads the whole\nfile into it. Caller wraps in `disposable` and observes `error`.",
-     "shape": "export type ReadFileResult implements Disposable propagates<disposable> {\n    data:  Vec<uint8>,\n    error: string,\n    function dispose(ref self): void {\n        Disposable.dispose(ref self.data);\n    }\n}",
+     "shape": "export type ReadFileResult implements Disposable propagates<disposable> {\n    data:  Vec<uint8>,\n    error: string,\n    function dispose(ref self): void {\n        self.data.dispose();\n    }\n}",
      "file": "std/fs.yoop",
-     "line": 198
+     "line": 204
     },
     {
      "name": "statPath",
@@ -2918,7 +2657,7 @@ window.YOOP_DATA.std = {
      "doc": "",
      "shape": null,
      "file": "std/fs.yoop",
-     "line": 284
+     "line": 290
     },
     {
      "name": "timeString",
@@ -2927,7 +2666,7 @@ window.YOOP_DATA.std = {
      "doc": "Unix seconds rendered in local time the way `ls -l` does it: \"Mon DD HH:MM\"\ninside the last six months, \"Mon DD  YYYY\" beyond it.",
      "shape": null,
      "file": "std/fs.yoop",
-     "line": 310
+     "line": 316
     },
     {
      "name": "writeFile",
@@ -2936,7 +2675,7 @@ window.YOOP_DATA.std = {
      "doc": "Create-or-truncate `path` and write all of `body`. Parent directories\nare NOT created automatically - call mkdirP first if the destination\nis nested. Returns \"\" on success, an error string on failure.",
      "shape": null,
      "file": "std/fs.yoop",
-     "line": 130
+     "line": 136
     }
    ]
   },
@@ -3006,7 +2745,7 @@ window.YOOP_DATA.std = {
      "kind": "type",
      "signature": "export type ClientRequest implements Disposable propagates<disposable>",
      "doc": "What the caller hands to `send`. `body` is a borrowed view: the client\ncopies it onto the wire during the call and never holds it afterwards.",
-     "shape": "export type ClientRequest implements Disposable propagates<disposable> {\n    method:  HttpMethod,\n    url:     string,\n    headers: Headers,\n    body:    uint8[],\n    function dispose(ref self): void {\n        Disposable.dispose(ref self.headers);\n    }\n}",
+     "shape": "export type ClientRequest implements Disposable propagates<disposable> {\n    method:  HttpMethod,\n    url:     string,\n    headers: Headers,\n    body:    uint8[],\n    function dispose(ref self): void {\n        self.headers.dispose();\n    }\n}",
      "file": "std/http/client.yoop",
      "line": 37
     },
@@ -3015,7 +2754,7 @@ window.YOOP_DATA.std = {
      "kind": "type",
      "signature": "export type ClientResponse implements Disposable propagates<disposable>",
      "doc": "",
-     "shape": "export type ClientResponse implements Disposable propagates<disposable> {\n    status:  StatusCode,\n    headers: Headers,\n    body:    Vec<uint8>,\n    function dispose(ref self): void {\n        Disposable.dispose(ref self.headers);\n        Disposable.dispose(ref self.body);\n    }\n}",
+     "shape": "export type ClientResponse implements Disposable propagates<disposable> {\n    status:  StatusCode,\n    headers: Headers,\n    body:    Vec<uint8>,\n    function dispose(ref self): void {\n        self.headers.dispose();\n        self.body.dispose();\n    }\n}",
      "file": "std/http/client.yoop",
      "line": 72
     },
@@ -3195,7 +2934,7 @@ window.YOOP_DATA.std = {
      "kind": "type",
      "signature": "export type Headers implements Disposable propagates<disposable>",
      "doc": "",
-     "shape": "export type Headers implements Disposable propagates<disposable> {\n    entries: Vec<HeaderEntry>,\n    function dispose(ref self): void {\n        Disposable.dispose(ref self.entries);\n    }\n}",
+     "shape": "export type Headers implements Disposable propagates<disposable> {\n    entries: Vec<HeaderEntry>,\n    function dispose(ref self): void {\n        self.entries.dispose();\n    }\n}",
      "file": "std/http/types.yoop",
      "line": 256
     },
@@ -3438,7 +3177,7 @@ window.YOOP_DATA.std = {
      "kind": "type",
      "signature": "export type Params implements Disposable propagates<disposable>",
      "doc": "",
-     "shape": "export type Params implements Disposable propagates<disposable> {\n    entries: Vec<Param>,\n    function dispose(ref self): void {\n        Disposable.dispose(ref self.entries);\n    }\n}",
+     "shape": "export type Params implements Disposable propagates<disposable> {\n    entries: Vec<Param>,\n    function dispose(ref self): void {\n        self.entries.dispose();\n    }\n}",
      "file": "std/http/types.yoop",
      "line": 332
     },
@@ -3519,7 +3258,7 @@ window.YOOP_DATA.std = {
      "kind": "type",
      "signature": "export type ParsedRequest implements Disposable propagates<disposable>",
      "doc": "A parsed request head plus where its body lives. `bodyStart` is an offset\ninto the buffer that was parsed; `info.contentLength` is `None` when the\nmessage declared no length, which for a request means \"no body\" and for a\nresponse means \"read until the peer closes\".",
-     "shape": "export type ParsedRequest implements Disposable propagates<disposable> {\n    request:   Request,\n    bodyStart: usize,\n    info:      HeadInfo,\n    function dispose(ref self): void {\n        Disposable.dispose(ref self.request);\n    }\n}",
+     "shape": "export type ParsedRequest implements Disposable propagates<disposable> {\n    request:   Request,\n    bodyStart: usize,\n    info:      HeadInfo,\n    function dispose(ref self): void {\n        self.request.dispose();\n    }\n}",
      "file": "std/http/parser.yoop",
      "line": 30
     },
@@ -3528,7 +3267,7 @@ window.YOOP_DATA.std = {
      "kind": "type",
      "signature": "export type ParsedResponse implements Disposable propagates<disposable>",
      "doc": "",
-     "shape": "export type ParsedResponse implements Disposable propagates<disposable> {\n    status:    StatusCode,\n    headers:   Headers,\n    bodyStart: usize,\n    info:      HeadInfo,\n    function dispose(ref self): void {\n        Disposable.dispose(ref self.headers);\n    }\n}",
+     "shape": "export type ParsedResponse implements Disposable propagates<disposable> {\n    status:    StatusCode,\n    headers:   Headers,\n    bodyStart: usize,\n    info:      HeadInfo,\n    function dispose(ref self): void {\n        self.headers.dispose();\n    }\n}",
      "file": "std/http/parser.yoop",
      "line": 50
     },
@@ -3681,7 +3420,7 @@ window.YOOP_DATA.std = {
      "kind": "type",
      "signature": "export type Request implements Disposable propagates<disposable>",
      "doc": "",
-     "shape": "export type Request implements Disposable propagates<disposable> {\n    method:  HttpMethod,\n    target:  string,\n    path:    string,\n    version: string,\n    headers: Headers,\n    query:   Params,\n    params:  Params,\n    body:    uint8[],\n\n    function dispose(ref self): void {\n        Disposable.dispose(ref self.headers);\n        Disposable.dispose(ref self.query);\n        Disposable.dispose(ref self.params);\n    }\n}",
+     "shape": "export type Request implements Disposable propagates<disposable> {\n    method:  HttpMethod,\n    target:  string,\n    path:    string,\n    version: string,\n    headers: Headers,\n    query:   Params,\n    params:  Params,\n    body:    uint8[],\n\n    function dispose(ref self): void {\n        self.headers.dispose();\n        self.query.dispose();\n        self.params.dispose();\n    }\n}",
      "file": "std/http/types.yoop",
      "line": 396
     },
@@ -3753,7 +3492,7 @@ window.YOOP_DATA.std = {
      "kind": "type",
      "signature": "export type Response implements Disposable propagates<disposable>",
      "doc": "",
-     "shape": "export type Response implements Disposable propagates<disposable> {\n    status:  StatusCode,\n    headers: Headers,\n    body:    ResponseBody,\n\n    function dispose(ref self): void {\n        Disposable.dispose(ref self.headers);\n        Disposable.dispose(ref self.body);\n    }\n}",
+     "shape": "export type Response implements Disposable propagates<disposable> {\n    status:  StatusCode,\n    headers: Headers,\n    body:    ResponseBody,\n\n    function dispose(ref self): void {\n        self.headers.dispose();\n        self.body.dispose();\n    }\n}",
      "file": "std/http/types.yoop",
      "line": 488
     },
@@ -3762,7 +3501,7 @@ window.YOOP_DATA.std = {
      "kind": "variant",
      "signature": "export variant ResponseBody implements Disposable propagates<disposable>",
      "doc": "A body is either a borrowed string (literals and interpolated strings are\nnever freed, so no copy is needed) or an owned buffer the response frees.\nMaking the body own its storage is what keeps a handler from returning a\nview into one of its own locals.",
-     "shape": "export variant ResponseBody implements Disposable propagates<disposable> {\n    Static { text: string },\n    Owned  { bytes: Bytes },\n    function dispose(ref self): void {\n        switch (self) {\n            case ResponseBody.Owned { bytes: b }: { Disposable.dispose(ref b); }\n            default: {}\n        }\n    }\n}",
+     "shape": "export variant ResponseBody implements Disposable propagates<disposable> {\n    Static { text: string },\n    Owned  { bytes: Bytes },\n    function dispose(ref self): void {\n        switch (self) {\n            case ResponseBody.Owned { bytes: b }: { b.dispose(); }\n            default: {}\n        }\n    }\n}",
      "file": "std/http/types.yoop",
      "line": 477
     },
@@ -3834,7 +3573,7 @@ window.YOOP_DATA.std = {
      "kind": "type",
      "signature": "export type Router implements (Disposable, Handler) propagates<disposable>",
      "doc": "",
-     "shape": "export type Router implements (Disposable, Handler) propagates<disposable> {\n    routes:      Vec<Route>,\n    fallback:    Dispatcher,\n    hasFallback: bool,\n\n    function dispose(ref self): void {\n        Disposable.dispose(ref self.routes);\n    }\n\n    async handle(ref self, ref req: Request, ref resp: Response): HandleOutcome {\n        let entries: Route[] = vec.vecAsArray(ref self.routes);\n\n        for (let i = 0; i < entries.len; i += 1) {\n            paramsClear(ref req.params);\n            if (!matchPath(entries[i].pattern, req.path, ref req.params)) { continue; }\n            if (methodEq(req.method, entries[i].method)) {\n                return await Dispatcher.handle(ref entries[i].dispatcher, ref req, ref resp);\n            }\n            // A HEAD with no HEAD route is answered by the GET route; the\n            // server drops the body on the way out.\n            if (methodEq(req.method, HttpMethod.Head)\n                && methodEq(entries[i].method, HttpMethod.Get)) {\n                return await Dispatcher.handle(ref entries[i].dispatcher, ref req, ref resp);\n            }\n        }\n        paramsClear(ref req.params);\n\n        // Nothing matched on method. Did anything match on path alone? If so\n        // this is a 405 and the client is owed the list of methods that would\n        // have worked; if not, it is a 404.\n        let allow: string = allowedMethods(ref self, ref req);\n        if (allow.len > 0) {\n            setHeader(ref resp, \"Allow\", allow);\n            resp.status = methodNotAllowed();\n        } else {\n            resp.status = notFound();\n        }\n\n        // The fallback, when installed, renders BOTH - with `resp.status`\n        // already set and (for a 405) the `Allow` header already written. An\n        // API that answers JSON everywhere needs that hook, because otherwise\n        // these two responses are the only plain-text ones it emits.\n        if (self.hasFallback) {\n            return await Dispatcher.handle(ref self.fallback, ref req, ref resp);\n        }\n        if (allow.len > 0) {\n            respondText(ref resp, methodNotAllowed(),\n                `405 Method Not Allowed: ${methodLabel(req.method)} ${req.path}\\n`);\n        } else {\n            respondText(ref resp, notFound(), `404 Not Found: ${req.path}\\n`);\n        }\n        return HandleOutcome.Ok;\n    }\n}",
+     "shape": "export type Router implements (Disposable, Handler) propagates<disposable> {\n    routes:      Vec<Route>,\n    fallback:    Dispatcher,\n    hasFallback: bool,\n\n    function dispose(ref self): void {\n        self.routes.dispose();\n    }\n\n    async handle(ref self, ref req: Request, ref resp: Response): HandleOutcome {\n        let entries: Route[] = self.routes.asArray();\n\n        for (let i = 0; i < entries.len; i += 1) {\n            paramsClear(ref req.params);\n            if (!matchPath(entries[i].pattern, req.path, ref req.params)) { continue; }\n            if (methodEq(req.method, entries[i].method)) {\n                return await entries[i].dispatcher.handle(ref req, ref resp);\n            }\n            // A HEAD with no HEAD route is answered by the GET route; the\n            // server drops the body on the way out.\n            if (methodEq(req.method, HttpMethod.Head)\n                && methodEq(entries[i].method, HttpMethod.Get)) {\n                return await entries[i].dispatcher.handle(ref req, ref resp);\n            }\n        }\n        paramsClear(ref req.params);\n\n        // Nothing matched on method. Did anything match on path alone? If so\n        // this is a 405 and the client is owed the list of methods that would\n        // have worked; if not, it is a 404.\n        let allow: string = allowedMethods(ref self, ref req);\n        if (allow.len > 0) {\n            setHeader(ref resp, \"Allow\", allow);\n            resp.status = methodNotAllowed();\n        } else {\n            resp.status = notFound();\n        }\n\n        // The fallback, when installed, renders BOTH - with `resp.status`\n        // already set and (for a 405) the `Allow` header already written. An\n        // API that answers JSON everywhere needs that hook, because otherwise\n        // these two responses are the only plain-text ones it emits.\n        if (self.hasFallback) {\n            return await self.fallback.handle(ref req, ref resp);\n        }\n        if (allow.len > 0) {\n            respondText(ref resp, methodNotAllowed(),\n                `405 Method Not Allowed: ${methodLabel(req.method)} ${req.path}\\n`);\n        } else {\n            respondText(ref resp, notFound(), `404 Not Found: ${req.path}\\n`);\n        }\n        return HandleOutcome.Ok;\n    }\n}",
      "file": "std/http/router.yoop",
      "line": 105
     },
@@ -4306,7 +4045,7 @@ window.YOOP_DATA.std = {
      "kind": "type",
      "signature": "export type AcceptResult implements Disposable propagates<disposable>",
      "doc": "",
-     "shape": "export type AcceptResult implements Disposable propagates<disposable> {\n    stream:    TcpStream,\n    peerHost: uint32,\n    peerPort: uint16,\n    error:     string,\n    function dispose(ref self): void {\n        Disposable.dispose(ref self.stream);\n    }\n}",
+     "shape": "export type AcceptResult implements Disposable propagates<disposable> {\n    stream:    TcpStream,\n    peerHost: uint32,\n    peerPort: uint16,\n    error:     string,\n    function dispose(ref self): void {\n        self.stream.dispose();\n    }\n}",
      "file": "std/net/tcp.yoop",
      "line": 271
     },
@@ -4324,7 +4063,7 @@ window.YOOP_DATA.std = {
      "kind": "type",
      "signature": "export type ConnectResult implements Disposable propagates<disposable>",
      "doc": "",
-     "shape": "export type ConnectResult implements Disposable propagates<disposable> {\n    stream: TcpStream,\n    error:  string,\n    function dispose(ref self): void {\n        Disposable.dispose(ref self.stream);\n    }\n}",
+     "shape": "export type ConnectResult implements Disposable propagates<disposable> {\n    stream: TcpStream,\n    error:  string,\n    function dispose(ref self): void {\n        self.stream.dispose();\n    }\n}",
      "file": "std/net/tcp.yoop",
      "line": 353
     },
@@ -4369,7 +4108,7 @@ window.YOOP_DATA.std = {
      "kind": "type",
      "signature": "export type ListenResult implements Disposable propagates<disposable>",
      "doc": "",
-     "shape": "export type ListenResult implements Disposable propagates<disposable> {\n    listener: TcpListener,\n    error:    string,\n    function dispose(ref self): void {\n        Disposable.dispose(ref self.listener);\n    }\n}",
+     "shape": "export type ListenResult implements Disposable propagates<disposable> {\n    listener: TcpListener,\n    error:    string,\n    function dispose(ref self): void {\n        self.listener.dispose();\n    }\n}",
      "file": "std/net/tcp.yoop",
      "line": 75
     },
@@ -4468,7 +4207,7 @@ window.YOOP_DATA.std = {
      "kind": "type",
      "signature": "export type TcpListener implements Disposable propagates<disposable>",
      "doc": "",
-     "shape": "export type TcpListener implements Disposable propagates<disposable> {\n    socket: Socket,\n    // The port the socket is ACTUALLY bound to, read back from the kernel\n    // rather than echoing what the caller asked for. That distinction only\n    // matters when the caller passes port 0 to mean \"any free port\" - then\n    // this is the one the kernel picked, and it is the only way to find out.\n    boundPort: int32,\n    function dispose(ref self): void {\n        Disposable.dispose(ref self.socket);\n    }\n}",
+     "shape": "export type TcpListener implements Disposable propagates<disposable> {\n    socket: Socket,\n    // The port the socket is ACTUALLY bound to, read back from the kernel\n    // rather than echoing what the caller asked for. That distinction only\n    // matters when the caller passes port 0 to mean \"any free port\" - then\n    // this is the one the kernel picked, and it is the only way to find out.\n    boundPort: int32,\n    function dispose(ref self): void {\n        self.socket.dispose();\n    }\n}",
      "file": "std/net/tcp.yoop",
      "line": 63
     },
@@ -4513,7 +4252,7 @@ window.YOOP_DATA.std = {
      "kind": "type",
      "signature": "export type TcpStream implements (Disposable, Readable, Writable) propagates<disposable>",
      "doc": "TcpStream is the workhorse: a connected TCP byte stream. Implements\nReadable + Writable + Disposable. Both read and write delegate to the\ntask-shaped ffi helpers in socket_ffi, which park on the multiplexer\nbefore issuing recv/send.\n\n`timeoutMs` and `token` are the ambient (SO_RCVTIMEO-shaped) controls:\nboth default to \"none\", and setting either makes the trait methods\nabandon a call that would otherwise park forever. They live on the\nstream rather than in the trait signatures so existing generic code\nover `Readable` / `Writable` gains timeouts without any change.",
-     "shape": "export type TcpStream implements (Disposable, Readable, Writable) propagates<disposable> {\n    socket: Socket,\n\n    // Per-call budget in milliseconds; 0 means \"no timeout\". Applied\n    // fresh to EACH read/write, not to the stream's whole lifetime -\n    // for a lifetime budget, put a deadline on `token` instead.\n    timeoutMs: uint64,\n\n    // Ambient cancellation. A null token (cancel.none()) is the default\n    // and disables the feature. Deadlines on the token combine with\n    // `timeoutMs`; whichever expires first wins.\n    token: CancelToken,\n\n    function dispose(ref self): void {\n        Disposable.dispose(ref self.socket);\n        // The stream does not own the token - it holds a shared handle,\n        // and disposing that handle only drops this stream's reference.\n        Disposable.dispose(ref self.token);\n    }\n\n    // Async: on a worker these SUSPEND the calling task rather than\n    // parking its thread, so one worker carries many connections. Off a\n    // worker (called from main) the underlying helper falls back to a\n    // blocking wait, so the same code is correct either way.\n    //\n    // The ambient deadline/token path still uses the blocking\n    // cancel-aware helpers - those already have their own abandon\n    // handshake, and combining two suspension mechanisms in one call is\n    // not worth the complexity. A stream with a timeout blocks its\n    // thread; a stream without one suspends.\n    async read(ref self, ref buf: uint8[]): Result<c_ssize_t, string> {\n        if (self.timeoutMs == 0 && cancelIsNone(ref self.token)) {\n            return ioResultToResult(await ffiRecvAsync(self.socket.fd, buf));\n        }\n        return ioResultToResult(\n            ffiRecvCt(self.socket.fd, buf, self.token.raw, streamDeadline(ref self)));\n    }\n\n    async write(ref self, ref buf: uint8[]): Result<c_ssize_t, string> {\n        if (self.timeoutMs == 0 && cancelIsNone(ref self.token)) {\n            return ioResultToResult(await ffiSendAllAsync(self.socket.fd, buf));\n        }\n        return ioResultToResult(\n            ffiSendAllCt(self.socket.fd, buf, self.token.raw, streamDeadline(ref self)));\n    }\n\n    function flush(ref self): FlushOutcome {\n        // Unbuffered stream - flush is a no-op.\n        return FlushOutcome.Ok;\n    }\n}",
+     "shape": "export type TcpStream implements (Disposable, Readable, Writable) propagates<disposable> {\n    socket: Socket,\n\n    // Per-call budget in milliseconds; 0 means \"no timeout\". Applied\n    // fresh to EACH read/write, not to the stream's whole lifetime -\n    // for a lifetime budget, put a deadline on `token` instead.\n    timeoutMs: uint64,\n\n    // Ambient cancellation. A null token (cancel.none()) is the default\n    // and disables the feature. Deadlines on the token combine with\n    // `timeoutMs`; whichever expires first wins.\n    token: CancelToken,\n\n    function dispose(ref self): void {\n        self.socket.dispose();\n        // The stream does not own the token - it holds a shared handle,\n        // and disposing that handle only drops this stream's reference.\n        self.token.dispose();\n    }\n\n    // Async: on a worker these SUSPEND the calling task rather than\n    // parking its thread, so one worker carries many connections. Off a\n    // worker (called from main) the underlying helper falls back to a\n    // blocking wait, so the same code is correct either way.\n    //\n    // The ambient deadline/token path still uses the blocking\n    // cancel-aware helpers - those already have their own abandon\n    // handshake, and combining two suspension mechanisms in one call is\n    // not worth the complexity. A stream with a timeout blocks its\n    // thread; a stream without one suspends.\n    async read(ref self, ref buf: uint8[]): Result<c_ssize_t, string> {\n        if (self.timeoutMs == 0 && cancelIsNone(ref self.token)) {\n            return ioResultToResult(await ffiRecvAsync(self.socket.fd, buf));\n        }\n        return ioResultToResult(\n            ffiRecvCt(self.socket.fd, buf, self.token.raw, streamDeadline(ref self)));\n    }\n\n    async write(ref self, ref buf: uint8[]): Result<c_ssize_t, string> {\n        if (self.timeoutMs == 0 && cancelIsNone(ref self.token)) {\n            return ioResultToResult(await ffiSendAllAsync(self.socket.fd, buf));\n        }\n        return ioResultToResult(\n            ffiSendAllCt(self.socket.fd, buf, self.token.raw, streamDeadline(ref self)));\n    }\n\n    function flush(ref self): FlushOutcome {\n        // Unbuffered stream - flush is a no-op.\n        return FlushOutcome.Ok;\n    }\n}",
      "file": "std/net/tcp.yoop",
      "line": 126
     },
@@ -4554,7 +4293,7 @@ window.YOOP_DATA.std = {
    "files": [
     "std/plugin.yoop"
    ],
-   "doc": "",
+   "doc": "the compiler plugin API, for hooks a build runs under\n--plugin. Interpret-only.\n\nA build run as `yoopiler_boot <entry> --plugin <plugin.yoop>` loads the\nplugin as its own module graph and runs its hook functions on the comptime\nevaluator at the build's phase boundaries. This module is how a hook reads\nthe build: import it namespaced -\n\n    import * as plug from \"std/plugin.yoop\";\n\n    export function onCodegen(): int32 {\n      plug.log(`ir is ${plug.ir().len} bytes`);\n      return 0;\n    }\n\nThe externs below are not C symbols. Each is answered by the compiler\nitself, from the artifact snapshots it refreshes before firing a hook - so\na program that imports this module COMPILES but does not LINK (undefined\n`yoop_plugin_*`), and outside a `--plugin` hook the evaluator refuses every\none of them by name. Both are deliberate: the module has exactly one home,\nwhich is a hook's frame.\n\nThe hooks a plugin may export, all optional:\n\n    onStart(entry: string, out: string): int32   before the graph loads\n    onParse(): int32                             graph loaded and parsed\n    onTypecheck(): int32                         typechecked, diagnostics ok\n    onCodegen(): int32                           IR emitted, not yet linked\n    onLink(): int32                              executable produced\n    onFinish(ok: int32): void                    always, success or not\n\nReturning nonzero from a hook STOPS the build with that exit code. A hook\nblocks the build for as long as it runs - which is the point: a plugin may\nhold the pipeline at a boundary for as long as it has something to show.\n\nA hook runs on the comptime evaluator and is bound by its subset: strings,\nints, structs, arrays, variants, control flow, template literals, calls\ninto modules imported as namespaces. No Vec, no Text, no closures, no\npointers, no async. Anything outside the subset is refused by name with a\nlocation in the plugin's own source.",
    "exports": [
     {
      "name": "astJson",
@@ -4563,7 +4302,7 @@ window.YOOP_DATA.std = {
      "doc": "The entry FILE's parse tree as JSON, the --dump-ast-json payload:\n{\"filename\":..., \"source\":..., \"ast\":...}. \"\" before onParse.",
      "shape": null,
      "file": "std/plugin.yoop",
-     "line": 85
+     "line": 91
     },
     {
      "name": "buildOk",
@@ -4572,16 +4311,25 @@ window.YOOP_DATA.std = {
      "doc": "1 when the build succeeded. Meaningful at onFinish; 0 before.",
      "shape": null,
      "file": "std/plugin.yoop",
-     "line": 109
+     "line": 119
+    },
+    {
+     "name": "childAlive",
+     "kind": "function",
+     "signature": "export function childAlive(): int32",
+     "doc": "1 while the child runs, 0 once it exited (or never existed).",
+     "shape": null,
+     "file": "std/plugin.yoop",
+     "line": 170
     },
     {
      "name": "diagnosticsJson",
      "kind": "function",
      "signature": "export function diagnosticsJson(): string",
-     "doc": "Every diagnostic the build reported, as a JSON array of\n{file,line,col,severity,message}. Refreshed before the build decides\nwhether to stop on them, so a failing build's onFinish still sees why.\n\"\" before onTypecheck.",
+     "doc": "Every diagnostic the build reported, as a JSON array of\n{file,line,col,severity,code,message} - `code` names the warning class\n(\"unhandled-disposable\"), \"\" for errors and plain warnings. The list is\nUNFILTERED: it carries what the typechecker recorded, including the\nwarning classes the driver's own report hides without --warn-disposable\nor --warn-std. Refreshed before the build decides\nwhether to stop on them, so a failing build's onFinish still sees why.\n\"\" before onTypecheck.",
      "shape": null,
      "file": "std/plugin.yoop",
-     "line": 99
+     "line": 109
     },
     {
      "name": "entryPath",
@@ -4590,7 +4338,7 @@ window.YOOP_DATA.std = {
      "doc": "The entry file the build was asked to compile, as it was written on the\ncommand line.",
      "shape": null,
      "file": "std/plugin.yoop",
-     "line": 67
+     "line": 73
     },
     {
      "name": "ir",
@@ -4599,7 +4347,16 @@ window.YOOP_DATA.std = {
      "doc": "The emitted LLVM IR, whole. \"\" before onCodegen.",
      "shape": null,
      "file": "std/plugin.yoop",
-     "line": 104
+     "line": 114
+    },
+    {
+     "name": "killChild",
+     "kind": "function",
+     "signature": "export function killChild(): int32",
+     "doc": "Stop the child: SIGTERM, a short grace, then SIGKILL. Releases the\nhandle, so a plugin may spawn again after.",
+     "shape": null,
+     "file": "std/plugin.yoop",
+     "line": 176
     },
     {
      "name": "log",
@@ -4608,7 +4365,7 @@ window.YOOP_DATA.std = {
      "doc": "Say something in the build's log. Comptime printf takes one\nalready-formatted string and tags the line `[comptime]`, which keeps a\nplugin's chatter apart from the compiler's own notes - and off the\nprogram's stdout, which does not exist yet.",
      "shape": null,
      "file": "std/plugin.yoop",
-     "line": 117
+     "line": 127
     },
     {
      "name": "modulesJson",
@@ -4617,7 +4374,7 @@ window.YOOP_DATA.std = {
      "doc": "The whole graph's module map: {\"nodes\":[{id,name,files,loc,entry}],\n\"edges\":[{from,to}]}, one edge per import site. \"\" before onParse.",
      "shape": null,
      "file": "std/plugin.yoop",
-     "line": 91
+     "line": 97
     },
     {
      "name": "outPath",
@@ -4626,7 +4383,7 @@ window.YOOP_DATA.std = {
      "doc": "Where the executable goes (`-o`, or the default).",
      "shape": null,
      "file": "std/plugin.yoop",
-     "line": 72
+     "line": 78
     },
     {
      "name": "phase",
@@ -4635,7 +4392,52 @@ window.YOOP_DATA.std = {
      "doc": "Which boundary the current hook was fired at: \"start\", \"parse\",\n\"typecheck\", \"codegen\", \"link\" or \"finish\".",
      "shape": null,
      "file": "std/plugin.yoop",
-     "line": 61
+     "line": 67
+    },
+    {
+     "name": "recvLine",
+     "kind": "function",
+     "signature": "export function recvLine(): string",
+     "doc": "One line from the child's stdout, without its newline, BLOCKING until it\narrives. \"\" when the child is gone or was never spawned.",
+     "shape": null,
+     "file": "std/plugin.yoop",
+     "line": 165
+    },
+    {
+     "name": "sendArtifact",
+     "kind": "function",
+     "signature": "export function sendArtifact(kind: string): int32",
+     "doc": "One whole artifact to the child, framed by the COMPILER: a `blob <kind>\n<bytes>` header line, the payload verbatim (newlines and all), a closing\nnewline. `kind` is tokens, ast, modules, diagnostics or ir. This exists\nbecause a hook has no string library to frame anything with itself.",
+     "shape": null,
+     "file": "std/plugin.yoop",
+     "line": 159
+    },
+    {
+     "name": "sendLine",
+     "kind": "function",
+     "signature": "export function sendLine(line: string): int32",
+     "doc": "One line to the child's stdin, newline appended. 0, or -1 with no child\nor a broken pipe - a dead renderer reads as failure, not as build death.",
+     "shape": null,
+     "file": "std/plugin.yoop",
+     "line": 151
+    },
+    {
+     "name": "sleepMs",
+     "kind": "function",
+     "signature": "export function sleepMs(ms: int32): int32",
+     "doc": "Hold the build here for `ms` milliseconds. The enforced-slowness knob.",
+     "shape": null,
+     "file": "std/plugin.yoop",
+     "line": 181
+    },
+    {
+     "name": "spawn",
+     "kind": "function",
+     "signature": "export function spawn(cmdline: string): int32",
+     "doc": "Start the child. 0 on success, -1 when it could not be spawned or one is\nalready held (kill it first; a plugin gets one).",
+     "shape": null,
+     "file": "std/plugin.yoop",
+     "line": 145
     },
     {
      "name": "tokens",
@@ -4644,7 +4446,7 @@ window.YOOP_DATA.std = {
      "doc": "The entry FILE's token stream, one token per line: `TAG <start> <length>`\nplus a value for the literal tags - the dump_tokens format. \"\" before\nonParse.",
      "shape": null,
      "file": "std/plugin.yoop",
-     "line": 79
+     "line": 85
     }
    ]
   },
@@ -4812,7 +4614,7 @@ window.YOOP_DATA.std = {
      "doc": "Open a case. The name is the prose - it is what a failure is reported under,\nso write it as a claim about behavior.",
      "shape": null,
      "file": "std/test.yoop",
-     "line": 105
+     "line": 112
     },
     {
      "name": "Case",
@@ -4821,7 +4623,7 @@ window.YOOP_DATA.std = {
      "doc": "`Case` deliberately does NOT model an assertion as a comparison. A check is\na bool the test sets, plus a string the test writes to explain what\nhappened. Two-value `expected/got` flattens the context that made a check\nmeaningful; a string does not, and template literals already interpolate any\nDisplay value. Build helpers for the shapes you actually repeat.",
      "shape": "export type Case implements HandlesCase {\n    name: string,\n    isSuccessful: bool,\n    // Reported only on failure, so the passing path stays quiet.\n    detail: string,\n    function recordOutcome(ref self): void {\n        CASE_INDEX = CASE_INDEX + 1;\n        if (self.isSuccessful) {\n            PASSED = PASSED + 1;\n            printf(\"ok %d - %s\\n\", CASE_INDEX, self.name);\n        } else {\n            FAILED = FAILED + 1;\n            printf(\"not ok %d - %s\\n\", CASE_INDEX, self.name);\n            if (!stringEq(self.detail, \"\")) {\n                printf(\"    %s\\n\", self.detail);\n            }\n        }\n    }\n}",
      "file": "std/test.yoop",
-     "line": 73
+     "line": 80
     },
     {
      "name": "runAll",
@@ -4830,7 +4632,7 @@ window.YOOP_DATA.std = {
      "doc": "The entry point the generated `main` calls. `suites` and `names` are\npositionally paired; the compiler builds both.",
      "shape": null,
      "file": "std/test.yoop",
-     "line": 150
+     "line": 157
     },
     {
      "name": "suite",
@@ -4839,7 +4641,7 @@ window.YOOP_DATA.std = {
      "doc": "A function-position kind. `enumerable as \"suites\"` is what authorizes the\ncompiler to collect every function carrying this kind into a table, and\nnames the table so a second enumerable kind (a `bench`, say) stays\ndistinct. `signature` pins the shape, so a suite with the wrong arity is an\nerror at the suite rather than inside generated code.",
      "shape": "export kind suite {\n    appliesTo function;\n    signature () => void;\n    enumerable as \"suites\";\n}",
      "file": "std/test.yoop",
-     "line": 116
+     "line": 123
     },
     {
      "name": "test",
@@ -4848,7 +4650,7 @@ window.YOOP_DATA.std = {
      "doc": "The per-case kind. `ownsBlock` plus `mustCall recordOutcome beforeScopeEnd`\nis the whole mechanism: the case's outcome is reported at the closing brace\nof its own block, on every path out of it.",
      "shape": "export kind test {\n    appliesTo binding;\n    requires HandlesCase;\n    mustCall recordOutcome beforeScopeEnd;\n    ownsBlock;\n}",
      "file": "std/test.yoop",
-     "line": 96
+     "line": 103
     }
    ]
   },
@@ -5213,7 +5015,7 @@ window.YOOP_DATA.std = {
      "kind": "type",
      "signature": "export type TlsStream implements (Disposable, Readable, Writable) propagates<disposable>",
      "doc": "A TLS session over a TCP connection.\n\nImplements `Readable` and `Writable`, which is the entire point: every\nconsumer that takes a `Reader`/`Writer` - all of std/http - accepts one\nwith no change.\n\nOwns three things and disposes them in order: the OpenSSL session, the two\nstaging buffers, and the socket.",
-     "shape": "export type TlsStream implements (Disposable, Readable, Writable) propagates<disposable> {\n    conn:   TcpStream,\n    // The OpenSSL side, as opaque handles. Only ffi.yoop can see inside them,\n    // which is what keeps this file free of `import.unsafe;`.\n    ssl:    TlsSession,\n    ctx:    TlsCtx,\n    // Ciphertext staging. `out` carries wbio -> socket, `in` carries\n    // socket -> rbio. Separate buffers because a handshake step can want both\n    // in the same iteration.\n    outBuf: Bytes,\n    inBuf:  Bytes,\n    closed: bool,\n\n    function dispose(ref self): void {\n        if (!self.closed) {\n            self.closed = true;\n            // Best-effort close_notify. Whatever it produced is dropped rather\n            // than sent: dispose is not async, and a peer that never sees the\n            // alert simply sees the TCP close instead - which is what a\n            // non-graceful shutdown looks like and is not an error.\n            let _rc: int32 = shutdown(ref self.ssl);\n        }\n        sessionFree(ref self.ssl);\n        ctxFree(ref self.ctx);\n        Disposable.dispose(ref self.outBuf);\n        Disposable.dispose(ref self.inBuf);\n        Disposable.dispose(ref self.conn);\n    }\n\n    // Plaintext out of the session. Same signature as TcpStream's, which is\n    // what lets the two be used interchangeably behind a `Reader`.\n    async read(ref self, ref buf: uint8[]): Result<c_ssize_t, string> {\n        while (true) {\n            let n: int64 = readPlain(ref self.ssl, ref buf);\n            if (n >= 0) { return Result.Ok { value: c_ssize_t(n) }; }\n\n            let status: int32 = int32(n);\n            if (status == TLS_CLOSED) { return Result.Ok { value: c_ssize_t(0) }; }\n            if (status == TLS_ERROR) {\n                return Result.Err { error: `tls read: ${lastError()}` };\n            }\n            // WANT_READ or WANT_WRITE: turn the crank and try again. A\n            // renegotiation or a post-handshake message can make a READ want\n            // to WRITE, which is why both land here.\n            let e: string = await pump(ref self, status);\n            if (e.len > 0) { return Result.Err { error: e }; }\n        }\n    }\n\n    // Plaintext into the session. Loops until the whole buffer is accepted:\n    // `Writable.write` may report a short write, but every caller in std/http\n    // hands over a complete message, so absorbing it here is what keeps them\n    // from each needing their own loop.\n    async write(ref self, ref buf: uint8[]): Result<c_ssize_t, string> {\n        let sent: usize = 0;\n        while (sent < buf.len) {\n            let slice: uint8[] = intr.arraySlice(buf, sent, buf.len);\n            let n: int64 = writePlain(ref self.ssl, slice);\n            if (n >= 0) {\n                sent = sent + usize(n);\n                // The ciphertext is in wbio; it has to reach the socket before\n  // ...",
+     "shape": "export type TlsStream implements (Disposable, Readable, Writable) propagates<disposable> {\n    conn:   TcpStream,\n    // The OpenSSL side, as opaque handles. Only ffi.yoop can see inside them,\n    // which is what keeps this file free of `import.unsafe;`.\n    ssl:    TlsSession,\n    ctx:    TlsCtx,\n    // Ciphertext staging. `out` carries wbio -> socket, `in` carries\n    // socket -> rbio. Separate buffers because a handshake step can want both\n    // in the same iteration.\n    outBuf: Bytes,\n    inBuf:  Bytes,\n    closed: bool,\n\n    function dispose(ref self): void {\n        if (!self.closed) {\n            self.closed = true;\n            // Best-effort close_notify. Whatever it produced is dropped rather\n            // than sent: dispose is not async, and a peer that never sees the\n            // alert simply sees the TCP close instead - which is what a\n            // non-graceful shutdown looks like and is not an error.\n            let _rc: int32 = shutdown(ref self.ssl);\n        }\n        sessionFree(ref self.ssl);\n        ctxFree(ref self.ctx);\n        self.outBuf.dispose();\n        self.inBuf.dispose();\n        self.conn.dispose();\n    }\n\n    // Plaintext out of the session. Same signature as TcpStream's, which is\n    // what lets the two be used interchangeably behind a `Reader`.\n    async read(ref self, ref buf: uint8[]): Result<c_ssize_t, string> {\n        while (true) {\n            let n: int64 = readPlain(ref self.ssl, ref buf);\n            if (n >= 0) { return Result.Ok { value: c_ssize_t(n) }; }\n\n            let status: int32 = int32(n);\n            if (status == TLS_CLOSED) { return Result.Ok { value: c_ssize_t(0) }; }\n            if (status == TLS_ERROR) {\n                return Result.Err { error: `tls read: ${lastError()}` };\n            }\n            // WANT_READ or WANT_WRITE: turn the crank and try again. A\n            // renegotiation or a post-handshake message can make a READ want\n            // to WRITE, which is why both land here.\n            let e: string = await pump(ref self, status);\n            if (e.len > 0) { return Result.Err { error: e }; }\n        }\n    }\n\n    // Plaintext into the session. Loops until the whole buffer is accepted:\n    // `Writable.write` may report a short write, but every caller in std/http\n    // hands over a complete message, so absorbing it here is what keeps them\n    // from each needing their own loop.\n    async write(ref self, ref buf: uint8[]): Result<c_ssize_t, string> {\n        let sent: usize = 0;\n        while (sent < buf.len) {\n            let slice: uint8[] = intr.arraySlice(buf, sent, buf.len);\n            let n: int64 = writePlain(ref self.ssl, slice);\n            if (n >= 0) {\n                sent = sent + usize(n);\n                // The ciphertext is in wbio; it has to reach the socket before\n  // ...",
      "file": "std/tls/stream.yoop",
      "line": 71
     },
@@ -5267,6 +5069,6 @@ window.YOOP_DATA.std = {
  ],
  "counts": {
   "modules": 33,
-  "exports": 532
+  "exports": 510
  }
 };

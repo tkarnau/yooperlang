@@ -61,7 +61,7 @@ export function parseTypeParamList(ref ps: ParserState): Result<NodeId, ParsingE
     let tp = ps.buildSourcedNode(ASTNodeKind.TYPE_PARAM);
     tp.name = parseIdentAsName(ref ps)?;
     tp.childA = parseTypeParamBounds(ref ps)?; // bounds list-node (0 = none)
-    vec.vecPush(ref ids, ps.pushNode(tp));
+    ids.push(ps.pushNode(tp));
     // `<T implements Comparable<T>>` ends in a `>>` that the BOUND's own
     // argument list already consumed, leaving one `>` owed and the cursor past
     // this whole list. Same rule, same reason, as parseTypeArgList: while a `>`
@@ -99,13 +99,13 @@ function parseTypeParamBounds(ref ps: ParserState): Result<NodeId, ParsingError>
 
   disposable ids: Vec<NodeId> = vec.vecNew(2);
   if (ps.peek().tag != TokenTags.LPAREN) {
-    vec.vecPush(ref ids, parseTypeAnnotation(ref ps)?);
+    ids.push(parseTypeAnnotation(ref ps)?);
     return Result.Ok { value: ps.buildListNode(ref ids, loc) };
   }
 
   ps.advance()?; // consume `(`
   while (true) {
-    vec.vecPush(ref ids, parseTypeAnnotation(ref ps)?);
+    ids.push(parseTypeAnnotation(ref ps)?);
     if (ps.peek().tag != TokenTags.COMMA) {
       break;
     }
@@ -146,7 +146,7 @@ function parseKindPrefixes(ref ps: ParserState): Result<NodeId, ParsingError> {
   ) {
     let node = ps.buildSourcedNode(ASTNodeKind.KIND_PREFIX);
     node.name = parseIdentAsName(ref ps)?;
-    vec.vecPush(ref ids, ps.pushNode(node));
+    ids.push(ps.pushNode(node));
   }
   return Result.Ok { value: ps.buildListNode(ref ids, loc) };
 }
@@ -174,7 +174,7 @@ function parseTypeArgList(ref ps: ParserState): Result<NodeId, ParsingError> {
 
   disposable ids: Vec<NodeId> = vec.vecNew(2);
   while (true) {
-    vec.vecPush(ref ids, parseTypeAnnotation(ref ps)?);
+    ids.push(parseTypeAnnotation(ref ps)?);
     // A pending `>` CLOSES this list, so the real token stream must not be
     // consulted while one is owed. The element just parsed ended in a `>>` that
     // an inner list already consumed, which leaves the cursor sitting on
@@ -262,9 +262,9 @@ export function parseTypeDecl(ref ps: ParserState): Result<NodeId, ParsingError>
     // lists on a node that has one, and every later pass already switches on
     // the member's kind anyway.
     if (atStructMethod(ref ps)) {
-      vec.vecPush(ref fieldIds, parseMethodDecl(ref ps, node.name, node.childA)?);
+      fieldIds.push(parseMethodDecl(ref ps, node.name, node.childA)?);
     } else {
-      vec.vecPush(ref fieldIds, parseFieldDecl(ref ps)?);
+      fieldIds.push(parseFieldDecl(ref ps)?);
     }
     // A trailing comma after the last field is allowed, so consume the
     // separator whenever there is one and let the loop condition decide.
@@ -434,7 +434,7 @@ function parseFunctionTypeAnnotation(ref ps: ParserState): Result<NodeId, Parsin
 
   disposable ids: Vec<NodeId> = vec.vecNew(2);
   while (untilClosing(ref ps, TokenTags.RPAREN)) {
-    vec.vecPush(ref ids, parseFunctionParam(ref ps)?);
+    ids.push(parseFunctionParam(ref ps)?);
     if (ps.peek().tag == TokenTags.COMMA) {
       ps.advance()?;
     }

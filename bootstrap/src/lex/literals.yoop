@@ -328,7 +328,7 @@ function lexIdentifierOrKeyword(ref tables: LexTables, src: uint8[], pos: usize)
   // Yoop has no map indexing operator, so we mirror the punctuation scan and
   // walk the small reserved-word table with `stringEq`.
   res.token.tag = TokenTags.IDENT;
-  for kw in vec.vecAsArray(ref tables.keywords) {
+  for kw in tables.keywords.asArray() {
     if (strings.stringEq(str, kw.str)) {
       res.token.tag = kw.tag;
       break;

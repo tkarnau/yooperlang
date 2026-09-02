@@ -66,7 +66,7 @@ export function implementsIterable(ref prog: Program, t: TypeId): bool {
 function namesTrait(ref prog: Program, ref traits: Vec<TypeId>, name: string): bool {
   let i: usize = 0;
   while (i < traits.len) {
-    if (str.stringEq(nominalNameOf(ref prog, vec.vecGet(ref traits, i)), name)) {
+    if (str.stringEq(nominalNameOf(ref prog, traits.get(i)), name)) {
       return true;
     }
     i += 1;

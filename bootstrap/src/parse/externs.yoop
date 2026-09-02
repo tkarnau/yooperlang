@@ -102,9 +102,9 @@ export function parseExternBlock(ref ps: ParserState): Result<NodeId, ParsingErr
   disposable ids: Vec<NodeId> = vec.vecNew(4);
   while (untilClosing(ref ps, TokenTags.RCURLY)) {
     if (ps.peek().tag == TokenTags.TYPE) {
-      vec.vecPush(ref ids, parseExternType(ref ps)?);
+      ids.push(parseExternType(ref ps)?);
     } else {
-      vec.vecPush(ref ids, parseExternFunction(ref ps)?);
+      ids.push(parseExternFunction(ref ps)?);
     }
   }
   ps.expect(TokenTags.RCURLY)?;
@@ -176,7 +176,7 @@ function parseExternFunction(ref ps: ParserState): Result<NodeId, ParsingError> 
       }
       break;
     }
-    vec.vecPush(ref ids, parseExternFunctionParam(ref ps)?);
+    ids.push(parseExternFunctionParam(ref ps)?);
     if (ps.peek().tag == TokenTags.COMMA) {
       ps.advance()?;
     }

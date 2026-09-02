@@ -19,10 +19,10 @@ const UNION_PAYLOAD_INDEX: usize = 0;
 // is the largest field's, and the alignment falls out of how the value is
 // stored - every access is spelled at the FIELD's type, not at this one.
 export function emitUnionTypeDef(ref e: Emitter, moduleId: string, name: string, size: usize): void {
-  text.push(ref e.globals, unionLlvmName(moduleId, name));
-  text.push(ref e.globals, " = type { [");
-  text.pushUint(ref e.globals, uint64(size));
-  text.push(ref e.globals, " x i8] }\n");
+  e.globals.push(unionLlvmName(moduleId, name));
+  e.globals.push(" = type { [");
+  e.globals.pushUint(uint64(size));
+  e.globals.push(" x i8] }\n");
 }
 
 //   %t2 = getelementptr inbounds %union.union_rgba_1__Color, ptr %c.1.addr, i32 0, i32 0

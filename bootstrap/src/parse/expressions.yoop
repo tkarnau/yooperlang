@@ -550,7 +550,7 @@ function parseCallArgs(ref ps: ParserState): Result<NodeId, ParsingError> {
 
   disposable ids: Vec<NodeId> = vec.vecNew(4);
   while (untilClosing(ref ps, TokenTags.RPAREN)) {
-    vec.vecPush(ref ids, parseExpression(ref ps, 0)?);
+    ids.push(parseExpression(ref ps, 0)?);
     if (ps.peek().tag == TokenTags.COMMA) {
       ps.advance()?;
     }
@@ -581,7 +581,7 @@ function parseArrayElements(ref ps: ParserState): Result<NodeId, ParsingError> {
 
   disposable ids: Vec<NodeId> = vec.vecNew(4);
   while (untilClosing(ref ps, TokenTags.RBRACKET)) {
-    vec.vecPush(ref ids, parseExpression(ref ps, 0)?);
+    ids.push(parseExpression(ref ps, 0)?);
     if (ps.peek().tag == TokenTags.COMMA) {
       ps.advance()?;
     }
@@ -608,7 +608,7 @@ function parseStructLiteralFields(ref ps: ParserState): Result<NodeId, ParsingEr
     field.name = parseIdentOrKeywordAsName(ref ps)?;
     ps.expect(TokenTags.COLON)?;
     field.childA = parseExpression(ref ps, 0)?;
-    vec.vecPush(ref ids, ps.pushNode(field));
+    ids.push(ps.pushNode(field));
     if (ps.peek().tag == TokenTags.COMMA) {
       ps.advance()?;
     }

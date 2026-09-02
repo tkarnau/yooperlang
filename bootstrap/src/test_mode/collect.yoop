@@ -44,7 +44,7 @@ export function collectSuites(ref paths: Vec<string>, rootDir: string): SuiteCol
   let out: SuiteCollection = { files: vec.vecNew(paths.len), suiteCount: 0, error: "" };
   let i: usize = 0;
   while (i < paths.len) {
-    const absPath = vec.vecGet(ref paths, i);
+    const absPath = paths.get(i);
     let suites: Vec<string> = vec.vecNew(8);
     const err = collectSuitesOf(absPath, ref suites);
     if (err.len > 0) {
@@ -52,7 +52,7 @@ export function collectSuites(ref paths: Vec<string>, rootDir: string): SuiteCol
       return out;
     }
     out.suiteCount += suites.len;
-    vec.vecPush(ref out.files, {
+    out.files.push({
       absPath: absPath,
       relPath: relativeTo(rootDir, absPath),
       suites: suites,
@@ -68,7 +68,7 @@ function collectSuitesOf(absPath: string, ref out: Vec<string>): string {
   if (src.error.len > 0) {
     return `${absPath}: ${src.error}`;
   }
-  switch (parse(vec.vecAsArray(ref src.data))) {
+  switch (parse(src.data.asArray())) {
     case Result.Err { error: pe }: {
       return `${absPath}:${pe.sourceLoc.line + 1}:${pe.sourceLoc.column}: ${pe.rawMessage}`;
     }
@@ -99,7 +99,7 @@ function appendKindPrefixedFunctionNames(ref ast: AST, ref out: Vec<string>): vo
   while (i < program.childCount) {
     const decl = nodeAt(ref ast, declOf(ref ast, childAt(ref ast, program, i)));
     if (decl.kind == ASTNodeKind.FUNCTION_DECL && decl.childE != 0) {
-      vec.vecPush(ref out, decl.name);
+      out.push(decl.name);
     }
     i += 1;
   }

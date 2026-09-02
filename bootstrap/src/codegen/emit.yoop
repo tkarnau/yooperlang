@@ -150,8 +150,8 @@ export function emitterNew(opts: CodegenOptions): Emitter propagates<disposable>
 }
 
 export function emitGlobal(ref e: Emitter, line: string): void {
-  text.push(ref e.globals, line);
-  text.pushByte(ref e.globals, 10);
+  e.globals.push(line);
+  e.globals.pushByte(10);
 }
 
 // A fresh block label number, unique within the function.
@@ -162,8 +162,8 @@ export function freshLabel(ref e: Emitter): usize {
 
 // Clear the per-function buffers. Called when a function starts.
 export function beginFunctionBuffers(ref e: Emitter): void {
-  text.clear(ref e.prologue);
-  text.clear(ref e.fn);
+  e.prologue.clear();
+  e.fn.clear();
   e.nextTemp = 0;
   e.nextLabel = 0;
 }
@@ -173,9 +173,9 @@ export function beginFunctionBuffers(ref e: Emitter): void {
 // already in `body` (emitFunctionOpen put them there), which is exactly why
 // the allocas can be collected out of order and still land at the top.
 export function flushFunction(ref e: Emitter): void {
-  text.pushText(ref e.body, ref e.prologue);
-  text.pushText(ref e.body, ref e.fn);
-  text.push(ref e.body, "}\n");
+  e.body.pushText(ref e.prologue);
+  e.body.pushText(ref e.fn);
+  e.body.push("}\n");
 }
 
 // A fresh SSA temp NUMBER. LLVM requires unnamed values to be numbered in
@@ -192,9 +192,9 @@ export function freshTemp(ref e: Emitter): usize {
 
 export function finish(ref e: Emitter): Text propagates<disposable> {
   let all: Text = text.make(e.globals.len + e.body.len + 2);
-  text.pushText(ref all, ref e.globals);
-  text.pushByte(ref all, 10);
-  text.pushText(ref all, ref e.body);
+  all.pushText(ref e.globals);
+  all.pushByte(10);
+  all.pushText(ref e.body);
   // The DWARF metadata goes LAST, after every function that references it.
   // Order is not required by LLVM - metadata is a graph, not a sequence - but
   // it keeps the readable half of the file at the top where a person looking at

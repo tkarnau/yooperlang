@@ -16,14 +16,14 @@ extern "C" from "stdlib.h" {
 }
 
 export function buildEditorCmd(path: string, line: usize, col: usize, ref out: Text): void {
-  text.clear(ref out);
-  text.push(ref out, "${YOOP_VIZWORLD_EDITOR:-code --goto} \"");
-  text.push(ref out, path);
-  text.push(ref out, ":");
-  text.pushUint(ref out, uint64(line));
-  text.push(ref out, ":");
-  text.pushUint(ref out, uint64(col));
-  text.push(ref out, "\" >/dev/null 2>&1 &");
+  out.clear();
+  out.push("${YOOP_VIZWORLD_EDITOR:-code --goto} \"");
+  out.push(path);
+  out.push(":");
+  out.pushUint(uint64(line));
+  out.push(":");
+  out.pushUint(uint64(col));
+  out.push("\" >/dev/null 2>&1 &");
 }
 
 export function openInEditor(path: string, line: usize, col: usize, ref scratch: Text): void {
@@ -31,5 +31,5 @@ export function openInEditor(path: string, line: usize, col: usize, ref scratch:
     return;
   }
   buildEditorCmd(path, line, col, ref scratch);
-  const ignored = system(text.view(ref scratch));
+  const ignored = system(scratch.view());
 }

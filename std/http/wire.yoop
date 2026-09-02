@@ -32,22 +32,22 @@ const HEAD_END: uint8[] = ['\r', '\n', '\r', '\n'];
 // ----- building -----------------------------------------------------------
 
 function pushByte(ref out: Vec<uint8>, b: uint8): void {
-    vec.vecPush(ref out, b);
+    out.push(b);
 }
 
 function pushBytes(ref out: Vec<uint8>, src: uint8[]): void {
-    vec.vecExtendFrom(ref out, src);
+    out.extendFrom(src);
 }
 
 // Strings go out as their UTF-8 bytes. Numbers ride in through a template
 // literal at the call site (`pushStr(ref out, `${n}`)`), which is why there is
 // no decimal formatter here any more.
 function pushStr(ref out: Vec<uint8>, s: string): void {
-    vec.vecExtendFrom(ref out, intr.stringAsBytes(s));
+    out.extendFrom(intr.stringAsBytes(s));
 }
 
 function pushCrlf(ref out: Vec<uint8>): void {
-    vec.vecExtendFrom(ref out, CRLF);
+    out.extendFrom(CRLF);
 }
 
 // `Name: value\r\n`. No validation: a header value containing CR or LF would
@@ -407,7 +407,7 @@ function chunkedFeed(
             return Result.Err { error: errBadRequest("chunk data is not followed by CRLF") };
         }
 
-        vec.vecExtendFrom(ref out, bytes.bytesSlice(buf, dataAt, dataAt + size));
+        out.extendFrom(bytes.bytesSlice(buf, dataAt, dataAt + size));
         r.decoded = r.decoded + size;
         r.cursor = dataAt + size + 2;
     }

@@ -25,7 +25,7 @@ import { floatBits } from "../utils";
 suite function scanTableIsSortedLongestFirst(): void {
   let test theory: Case = t.asserts("the longest scannable sorts to the front") {
     disposable tables: lex.LexTables = lex.lexTablesNew();
-    const first = vec.vecGet(ref tables.scan, 0).str;
+    const first = tables.scan.get(0).str;
     theory.isSuccessful = first.len == 3;
     theory.detail = `the first scan entry is "${first}" (len ${first.len}), wanted a 3-char entry - unsorted means "..." lexes as three DOTs`;
   }
@@ -34,7 +34,7 @@ suite function scanTableIsSortedLongestFirst(): void {
     let bad: usize = 0;
     let i: usize = 1;
     while (i < tables.scan.len) {
-      if (vec.vecGet(ref tables.scan, i).str.len > vec.vecGet(ref tables.scan, i - 1).str.len) {
+      if (tables.scan.get(i).str.len > tables.scan.get(i - 1).str.len) {
         bad = i;
       }
       i += 1;
@@ -285,11 +285,11 @@ function describe(src: string): string {
   disposable out: Text = text.make(32);
   let i: usize = 0;
   while (i < toks.len) {
-    if (i > 0) { text.push(ref out, " "); }
-    text.push(ref out, lex.tagName(toks[i].tag));
+    if (i > 0) { out.push(" "); }
+    out.push(lex.tagName(toks[i].tag));
     i += 1;
   }
-  return text.view(ref out);
+  return out.view();
 }
 
 function lexError(src: string): string {

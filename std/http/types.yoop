@@ -267,17 +267,17 @@ export function headersNew(cap: usize): Headers propagates<disposable> {
 // Append. Duplicates are preserved; use `headersSet` to replace.
 export function headersAdd(ref h: Headers, name: string, value: string): void {
     let e: HeaderEntry = { name: name, value: value };
-    vec.vecPush(ref h.entries, e);
+    h.entries.push(e);
 }
 
 // Replace the first match in place and drop nothing else, or append when the
 // name is absent. Field names are compared case insensitively, per RFC 9110.
 export function headersSet(ref h: Headers, name: string, value: string): void {
-    let view: HeaderEntry[] = vec.vecAsArray(ref h.entries);
+    let view: HeaderEntry[] = h.entries.asArray();
     for (let i = 0; i < view.len; i += 1) {
         if (str.stringEqIgnoreAsciiCase(view[i].name, name)) {
             let replaced: HeaderEntry = { name: view[i].name, value: value };
-            vec.vecSet(ref h.entries, i, replaced);
+            h.entries.set(i, replaced);
             return;
         }
     }
@@ -287,7 +287,7 @@ export function headersSet(ref h: Headers, name: string, value: string): void {
 // First value for `name`, or `None`. A present-but-empty header returns
 // `Some { value: "" }`, which is why this is an Option and not a "" sentinel.
 export function headersGet(ref h: Headers, name: string): Option<string> {
-    let view: HeaderEntry[] = vec.vecAsArray(ref h.entries);
+    let view: HeaderEntry[] = h.entries.asArray();
     for e in view {
         if (str.stringEqIgnoreAsciiCase(e.name, name)) {
             return Option.Some { value: e.value };
@@ -317,7 +317,7 @@ export function headersLen(ref h: Headers): usize {
 }
 
 export function headersView(ref h: Headers): HeaderEntry[] {
-    return vec.vecAsArray(ref h.entries);
+    return h.entries.asArray();
 }
 
 // ----- Params -------------------------------------------------------------
@@ -342,15 +342,15 @@ export function paramsNew(cap: usize): Params propagates<disposable> {
 
 export function paramsAdd(ref p: Params, name: string, value: string): void {
     let e: Param = { name: name, value: value };
-    vec.vecPush(ref p.entries, e);
+    p.entries.push(e);
 }
 
 export function paramsClear(ref p: Params): void {
-    vec.vecClear(ref p.entries);
+    p.entries.clear();
 }
 
 export function paramsGet(ref p: Params, name: string): Option<string> {
-    let view: Param[] = vec.vecAsArray(ref p.entries);
+    let view: Param[] = p.entries.asArray();
     for e in view {
         if (str.stringEq(e.name, name)) {
             return Option.Some { value: e.value };
@@ -380,7 +380,7 @@ export function paramsLen(ref p: Params): usize {
 }
 
 export function paramsView(ref p: Params): Param[] {
-    return vec.vecAsArray(ref p.entries);
+    return p.entries.asArray();
 }
 
 // ----- Request ------------------------------------------------------------

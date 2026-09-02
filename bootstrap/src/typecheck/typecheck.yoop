@@ -44,10 +44,10 @@ export function typecheckProgram(ref graph: ModuleGraph): Program propagates<dis
   // check_method.yoop), and an append into a copy's Vec header is lost when
   // the copy is - or worse, reallocates a buffer the graph still points at.
   // The view is stable because nothing adds a module while bodies are checked.
-  let mods: Module[] = vec.vecAsArray(ref graph.modules);
+  let mods: Module[] = graph.modules.asArray();
   let i: usize = 0;
   while (i < graph.modules.len) {
-    const m = vec.vecGet(ref graph.modules, i);
+    const m = graph.modules.get(i);
     // Build the TypedModule as a LOCAL and push it once it is filled. A
     // TypedModule pulled back out of the Vec would be a copy, and the map
     // bookkeeping (len, and the arrays after a rehash) would be written to the
@@ -57,7 +57,7 @@ export function typecheckProgram(ref graph: ModuleGraph): Program propagates<dis
     passBWireImports(ref program, ref tm, m);
     passCFillShells(ref program, ref tm, m, i);
     passDCheckBodies(ref program, ref tm, ref mods[i]);
-    vec.vecPush(ref program.modules, tm);
+    program.modules.push(tm);
     i += 1;
   }
 

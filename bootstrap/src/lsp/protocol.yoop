@@ -140,7 +140,7 @@ export function buildPublishDiagnostics(
   const arr = json.addArray(ref d);
   let i: usize = 0;
   while (i < diags.len) {
-    const dg = vec.vecGet(ref diags, i);
+    const dg = diags.get(i);
     const item = json.addObject(ref d);
     json.objectSet(ref d, item, "range", buildRange(ref d, dg.range));
     json.objectSetInt(ref d, item, "severity", dg.severity);
@@ -234,7 +234,7 @@ export function buildDocumentSymbolResponse(
   let openChildren: JsonId = 0;
   let i: usize = 0;
   while (i < entries.len) {
-    const e = vec.vecGet(ref entries, i);
+    const e = entries.get(i);
     const item = buildDocumentSymbol(ref d, e);
     if (e.depth == 0) {
       const children = json.addArray(ref d);
@@ -280,5 +280,5 @@ function buildPosition(ref d: JsonDoc, p: Position): JsonId {
 // pipe is gone, which is the server's cue to stop.
 export function sendMessage(ref d: JsonDoc): bool {
   disposable payload: Text = json.serializeDoc(ref d);
-  return writeFrame(STDOUT_FD, text.bytes(ref payload));
+  return writeFrame(STDOUT_FD, payload.bytes());
 }

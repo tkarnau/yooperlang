@@ -90,8 +90,8 @@ function closeOneInstance(ref prog: Program, j: usize): bool {
     disposable substituted: Vec<TypeId> = vec.vecNew(openArgs.len);
     let a: usize = 0;
     while (a < openArgs.len) {
-      vec.vecPush(ref substituted,
-        substitute(ref prog, vec.vecGet(ref openArgs, a), ref info.params, ref hostArgs));
+      substituted.push(
+        substitute(ref prog, openArgs.get(a), ref info.params, ref hostArgs));
       a += 1;
     }
     const before = prog.funcInstances.len;
@@ -116,10 +116,10 @@ function collectConcreteArgsOf(
 ): void {
   let i: usize = 1;
   while (i < prog.funcInstances.len) {
-    let inst = vec.vecGet(ref prog.funcInstances, i);
+    let inst = prog.funcInstances.get(i);
     if (inst.origin == owner && !anyOpenArg(ref prog, ref inst.args)) {
-      vec.vecPush(ref starts, out.len);
-      vec.vecExtendFrom(ref out, vec.vecAsArray(ref inst.args));
+      starts.push(out.len);
+      out.extendFrom(inst.args.asArray());
     }
     i += 1;
   }
@@ -127,10 +127,10 @@ function collectConcreteArgsOf(
   // method the call sits in, and those instances live in a different registry.
   let t: usize = 1;
   while (t < prog.instances.len) {
-    let inst = vec.vecGet(ref prog.instances, t);
+    let inst = prog.instances.get(t);
     if (inst.origin == owner && !anyOpenArg(ref prog, ref inst.args)) {
-      vec.vecPush(ref starts, out.len);
-      vec.vecExtendFrom(ref out, vec.vecAsArray(ref inst.args));
+      starts.push(out.len);
+      out.extendFrom(inst.args.asArray());
     }
     t += 1;
   }
@@ -143,10 +143,10 @@ function sliceOut(
   count: usize
 ): Vec<TypeId> propagates<disposable> {
   let out: Vec<TypeId> = vec.vecNew(count);
-  const start = vec.vecGet(ref starts, which);
+  const start = starts.get(which);
   let i: usize = 0;
   while (i < count && start + i < buf.len) {
-    vec.vecPush(ref out, vec.vecGet(ref buf, start + i));
+    out.push(buf.get(start + i));
     i += 1;
   }
   return out;
@@ -155,8 +155,8 @@ function sliceOut(
 // A COPY of an instance's arguments - the arena-sharing rule again.
 function funcInstanceArgs(ref prog: Program, index: usize): Vec<TypeId> propagates<disposable> {
   let out: Vec<TypeId> = vec.vecNew(2);
-  let inst = vec.vecGet(ref prog.funcInstances, index);
-  vec.vecExtendFrom(ref out, vec.vecAsArray(ref inst.args));
+  let inst = prog.funcInstances.get(index);
+  out.extendFrom(inst.args.asArray());
   return out;
 }
 
@@ -167,7 +167,7 @@ function funcInstanceArgs(ref prog: Program, index: usize): Vec<TypeId> propagat
 export function anyOpenArg(ref prog: Program, ref args: Vec<TypeId>): bool {
   let i: usize = 0;
   while (i < args.len) {
-    if (typeIsOpen(ref prog, vec.vecGet(ref args, i))) {
+    if (typeIsOpen(ref prog, args.get(i))) {
       return true;
     }
     i += 1;
@@ -182,7 +182,7 @@ export function anyOpenArg(ref prog: Program, ref args: Vec<TypeId>): bool {
 function owningDeclOf(ref prog: Program, ref args: Vec<TypeId>): DeclId {
   let i: usize = 0;
   while (i < args.len) {
-    const d = firstTypeParamOwner(ref prog, vec.vecGet(ref args, i));
+    const d = firstTypeParamOwner(ref prog, args.get(i));
     if (d != DECL_NONE_ID) {
       return d;
     }

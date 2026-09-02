@@ -226,7 +226,7 @@ export function drawSourceWall(ref s: Scene, ref cam: Camera, ref pick: Pick, pu
     hiStart = pick.offset;
     hiEnd = pick.offset + 1;
     if (pick.tokenIdx < s.tokens.len) {
-      const t = vec.vecGet(ref s.tokens, pick.tokenIdx);
+      const t = s.tokens.get(pick.tokenIdx);
       hiStart = t.pos;
       hiEnd = t.pos + t.len;
     }
@@ -263,7 +263,7 @@ export function drawSourceWall(ref s: Scene, ref cam: Camera, ref pick: Pick, pu
       continue;
     }
     while (tk < s.tokens.len) {
-      const tt = vec.vecGet(ref s.tokens, tk);
+      const tt = s.tokens.get(tk);
       if (tt.pos + tt.len <= i) {
         tk += 1;
       } else {
@@ -276,7 +276,7 @@ export function drawSourceWall(ref s: Scene, ref cam: Camera, ref pick: Pick, pu
       let lexed = false;
       let lexedColor: uint8 = 0;
       if (tk < shownTokens) {
-        const tt = vec.vecGet(ref s.tokens, tk);
+        const tt = s.tokens.get(tk);
         if (tt.pos <= i) {
           lexed = true;
           lexedColor = tt.colorId;
@@ -315,7 +315,7 @@ export function drawSourceWall(ref s: Scene, ref cam: Camera, ref pick: Pick, pu
   // The read head: a pulsing cursor on the NEXT unresolved token - where
   // lexNext stands right now.
   if (scene.sceneLexing(ref s) && shownTokens < s.tokens.len) {
-    const head = vec.vecGet(ref s.tokens, shownTokens);
+    const head = s.tokens.get(shownTokens);
     const hl = pickLineOf(ref s, head.pos);
     const hc = pickColOf(ref s, head.pos);
     if (hl < wallLines && hc < WALL_MAX_COLS) {
@@ -333,7 +333,7 @@ export function drawSourceWall(ref s: Scene, ref cam: Camera, ref pick: Pick, pu
   let si: usize = 0;
   let drawn: usize = 0;
   while (si < s.astItems.len && drawn < 200) {
-    const it = vec.vecGet(ref s.astItems, si);
+    const it = s.astItems.get(si);
     if (it.smell > 0 && it.spanLen > 0) {
       const ul = pickLineOf(ref s, it.spanPos);
       const uc = pickColOf(ref s, it.spanPos);
@@ -397,14 +397,14 @@ export function drawSourceWall(ref s: Scene, ref cam: Camera, ref pick: Pick, pu
 function pickLineOf(ref s: Scene, offset: usize): usize {
   let line: usize = 0;
   while (line + 1 < s.lineStarts.len &&
-      vec.vecGet(ref s.lineStarts, line + 1) <= offset) {
+      s.lineStarts.get(line + 1) <= offset) {
     line += 1;
   }
   return line;
 }
 
 function pickColOf(ref s: Scene, offset: usize): usize {
-  return offset - vec.vecGet(ref s.lineStarts, pickLineOf(ref s, offset));
+  return offset - s.lineStarts.get(pickLineOf(ref s, offset));
 }
 
 // A provenance arc: a quadratic curve lifted over the world between a wall
@@ -437,7 +437,7 @@ export function drawTokens(ref s: Scene, ref cam: Camera, ref pick: Pick, ref sc
   const lexing = scene.sceneLexing(ref s);
   let i: usize = 0;
   while (i < shown) {
-    const t = vec.vecGet(ref s.tokens, i);
+    const t = s.tokens.get(i);
     const p: Vec3 = layout.tokenPos(i);
     const dim = dimFor(ref cam, p.x, p.z);
     if (pick.active && i == pick.tokenIdx) {
@@ -462,7 +462,7 @@ export function drawTokens(ref s: Scene, ref cam: Camera, ref pick: Pick, ref sc
     const b: Vec3 = layout.tokenPos(pick.tokenIdx);
     drawArc(a, b, 5.0, 0.4, 0.9, 0.9);
     scene.sceneTokenText(ref s, pick.tokenIdx, ref scratch);
-    drawLabel(text.view(ref scratch), b.x, b.y + 1.3, b.z, 0.06, ref cam, 1.0, 0.9, 0.5);
+    drawLabel(scratch.view(), b.x, b.y + 1.3, b.z, 0.06, ref cam, 1.0, 0.9, 0.5);
   }
   if (s.tokens.len > 0) {
     drawLabel("lexer", 12.0, 6.0, Z_TOKENS + 4.0, 0.12, ref cam, 0.6, 0.9, 0.9);
@@ -476,7 +476,7 @@ export function drawAst(ref s: Scene, ref cam: Camera, ref pick: Pick, clock: fl
   const shown = scene.sceneShownAst(ref s);
   let i: usize = 0;
   while (i < shown) {
-    const n = vec.vecGet(ref s.astItems, i);
+    const n = s.astItems.get(i);
     const p: Vec3 = layout.astPos(n.depth, n.slot, n.slots);
     const dim = dimFor(ref cam, p.x, p.z);
     if (pick.active && i == pick.astIdx) {
@@ -487,7 +487,7 @@ export function drawAst(ref s: Scene, ref cam: Camera, ref pick: Pick, clock: fl
       gl.solidBox(p.x, p.y, p.z, 0.45, 0.45, 0.45);
     }
     if (n.parent < i) {
-      const pa = vec.vecGet(ref s.astItems, n.parent);
+      const pa = s.astItems.get(n.parent);
       const pp: Vec3 = layout.astPos(pa.depth, pa.slot, pa.slots);
       gl.color(0.25 * dim, 0.55 * dim, 0.35 * dim, 0.7);
       gl.lineWidth(1.0);
@@ -525,15 +525,15 @@ export function drawAst(ref s: Scene, ref cam: Camera, ref pick: Pick, clock: fl
   let labeled: usize = 0;
   let li: usize = 0;
   while (li < shown && labeled < 30) {
-    const n = vec.vecGet(ref s.astItems, li);
+    const n = s.astItems.get(li);
     if (n.named) {
       const p: Vec3 = layout.astPos(n.depth, n.slot, n.slots);
       const dx = p.x - cam.x;
       const dz = p.z - cam.z;
       if (dx * dx + dz * dz < 800.0) {
-        text.clear(ref scratch);
-        text.push(ref scratch, scene.sceneAstName(ref s, li));
-        drawLabel(text.view(ref scratch), p.x, p.y + 0.7, p.z, 0.035, ref cam,
+        scratch.clear();
+        scratch.push(scene.sceneAstName(ref s, li));
+        drawLabel(scratch.view(), p.x, p.y + 0.7, p.z, 0.035, ref cam,
           0.75, 0.9, 0.8);
         labeled += 1;
       }
@@ -544,7 +544,7 @@ export function drawAst(ref s: Scene, ref cam: Camera, ref pick: Pick, clock: fl
   // The construction beam: the node the parser JUST built, tied back to
   // the span that produced it - the parse replay's read head.
   if (scene.sceneParsing(ref s) && shown > 0) {
-    const newest = vec.vecGet(ref s.astItems, shown - 1);
+    const newest = s.astItems.get(shown - 1);
     if (newest.spanLen > 0) {
       const wl = pickLineOf(ref s, newest.spanPos);
       const wc = pickColOf(ref s, newest.spanPos);
@@ -555,14 +555,14 @@ export function drawAst(ref s: Scene, ref cam: Camera, ref pick: Pick, clock: fl
         drawArc(a, b, 6.0, 0.9, 0.95, 0.6);
         gl.color(1.0, 1.0, 0.8, 1.0);
         gl.solidBox(b.x, b.y, b.z, 0.7, 0.7, 0.7);
-        text.clear(ref scratch);
-        text.push(ref scratch, scene.sceneAstKind(ref s, shown - 1));
+        scratch.clear();
+        scratch.push(scene.sceneAstKind(ref s, shown - 1));
         const newName = scene.sceneAstName(ref s, shown - 1);
         if (newName.len > 0) {
-          text.push(ref scratch, " ");
-          text.push(ref scratch, newName);
+          scratch.push(" ");
+          scratch.push(newName);
         }
-        drawLabel(text.view(ref scratch), b.x, b.y + 1.1, b.z, 0.05, ref cam,
+        drawLabel(scratch.view(), b.x, b.y + 1.1, b.z, 0.05, ref cam,
           1.0, 1.0, 0.75);
       }
     }
@@ -571,18 +571,18 @@ export function drawAst(ref s: Scene, ref cam: Camera, ref pick: Pick, clock: fl
   // The picked node: an arc from the wall, its kind, and its name when the
   // dump carried one - CALL_EXPRESSION vecPush reads as a sentence.
   if (pick.active && pick.astIdx < shown) {
-    const n = vec.vecGet(ref s.astItems, pick.astIdx);
+    const n = s.astItems.get(pick.astIdx);
     const b: Vec3 = layout.astPos(n.depth, n.slot, n.slots);
     const a: Vec3 = layout.wallCellPos(pick.line, pick.col, wallLineCap(ref s));
     drawArc(a, b, 7.0, 0.5, 0.95, 0.55);
-    text.clear(ref scratch);
-    text.push(ref scratch, scene.sceneAstKind(ref s, pick.astIdx));
+    scratch.clear();
+    scratch.push(scene.sceneAstKind(ref s, pick.astIdx));
     const nodeName = scene.sceneAstName(ref s, pick.astIdx);
     if (nodeName.len > 0) {
-      text.push(ref scratch, " ");
-      text.push(ref scratch, nodeName);
+      scratch.push(" ");
+      scratch.push(nodeName);
     }
-    drawLabel(text.view(ref scratch), b.x, b.y + 1.2, b.z, 0.055, ref cam, 0.7, 1.0, 0.7);
+    drawLabel(scratch.view(), b.x, b.y + 1.2, b.z, 0.055, ref cam, 0.7, 1.0, 0.7);
   }
   if (s.astItems.len > 0) {
     drawLabel("ast grove", 0.0 - 14.0, 12.0, Z_AST, 0.12, ref cam, 0.55, 0.9, 0.55);
@@ -591,7 +591,7 @@ export function drawAst(ref s: Scene, ref cam: Camera, ref pick: Pick, clock: fl
 
 // Where a diagnostic's sigil floats: in front of its wall line, bobbing.
 export function diagSigilPos(ref s: Scene, idx: usize, clock: float32): Vec3 {
-  const it = vec.vecGet(ref s.diagItems, idx);
+  const it = s.diagItems.get(idx);
   let line = it.line;
   if (line > 0) {
     line -= 1;
@@ -633,7 +633,7 @@ function pulseWave(clock: float32): float32 {
 export function drawDiagSigils(ref s: Scene, ref cam: Camera, ref pick: Pick, clock: float32): void {
   let i: usize = 0;
   while (i < s.diagItems.len) {
-    const it = vec.vecGet(ref s.diagItems, i);
+    const it = s.diagItems.get(i);
     const p: Vec3 = diagSigilPos(ref s, i, clock);
     const picked = pick.active && pick.kind == PickKind.DIAG && pick.diagIdx == i;
     gl.pushMatrix();
@@ -663,14 +663,14 @@ function pushTail(ref out: Text, s2: string, keep: usize): void {
   if (bytes.len > keep) {
     start = bytes.len - keep;
   }
-  text.pushBytes(ref out, intr.arraySlice(bytes, start, bytes.len));
+  out.pushBytes(intr.arraySlice(bytes, start, bytes.len));
 }
 
 function diagLeaks(ref s: Scene): usize {
   let n: usize = 0;
   let i: usize = 0;
   while (i < s.diagItems.len) {
-    if (vec.vecGet(ref s.diagItems, i).leak) {
+    if (s.diagItems.get(i).leak) {
       n += 1;
     }
     i += 1;
@@ -701,7 +701,7 @@ export function drawModules(ref s: Scene, ref cam: Camera, ref pick: Pick): void
   const shown = scene.sceneShownIslands(ref s);
   let i: usize = 0;
   while (i < shown) {
-    const isle = vec.vecGet(ref s.islands, i);
+    const isle = s.islands.get(i);
     const p: Vec3 = layout.islandPos(i, s.islands.len, isle.entry);
     const radius = layout.islandRadius(isle.loc);
     const dim = dimFor(ref cam, p.x, p.z);
@@ -722,10 +722,10 @@ export function drawModules(ref s: Scene, ref cam: Camera, ref pick: Pick): void
   gl.lineWidth(1.5);
   let e: usize = 0;
   while (e < s.edges.len) {
-    const edge = vec.vecGet(ref s.edges, e);
+    const edge = s.edges.get(e);
     if (edge.src < shown && edge.dst < shown) {
-      const a = vec.vecGet(ref s.islands, edge.src);
-      const b = vec.vecGet(ref s.islands, edge.dst);
+      const a = s.islands.get(edge.src);
+      const b = s.islands.get(edge.dst);
       const pa: Vec3 = layout.islandPos(edge.src, s.islands.len, a.entry);
       const pb: Vec3 = layout.islandPos(edge.dst, s.islands.len, b.entry);
       const dim = dimFor(ref cam, pa.x, pa.z);
@@ -774,14 +774,14 @@ export function drawIr(ref s: Scene, ref cam: Camera, ref pick: Pick, ref scratc
   let f: usize = 0;
   let drawnBlocks: usize = 0;
   while (f < s.irFuncs.len && drawnBlocks < shown) {
-    const fun = vec.vecGet(ref s.irFuncs, f);
+    const fun = s.irFuncs.get(f);
     const fp: Vec3 = layout.irFunctionPos(f);
     const dim = dimFor(ref cam, fp.x, fp.z);
     gl.color(0.10 * dim, 0.14 * dim, 0.24 * dim, 1.0);
     gl.solidBox(fp.x, 0.15, fp.z - 1.2, 5.0, 0.3, 4.0);
     let b: usize = 0;
     while (b < fun.blockCount && drawnBlocks < shown) {
-      const blk = vec.vecGet(ref s.irBlocks, fun.blockStart + b);
+      const blk = s.irBlocks.get(fun.blockStart + b);
       const bp: Vec3 = layout.irBlockPos(fp, b);
       const h = layout.irTowerHeight(blk.instructions);
       if (pick.active && pick.kind == PickKind.IRBLOCK && pick.irBlock == fun.blockStart + b) {
@@ -801,15 +801,15 @@ export function drawIr(ref s: Scene, ref cam: Camera, ref pick: Pick, ref scratc
   // HUD: function and block over the tower's head.
   if (pick.active && pick.kind == PickKind.IRBLOCK && pick.irFunc < s.irFuncs.len) {
     const fp2: Vec3 = layout.irFunctionPos(pick.irFunc);
-    const fun2 = vec.vecGet(ref s.irFuncs, pick.irFunc);
+    const fun2 = s.irFuncs.get(pick.irFunc);
     const bp2: Vec3 = layout.irBlockPos(fp2, pick.irBlock - fun2.blockStart);
-    const blk2 = vec.vecGet(ref s.irBlocks, pick.irBlock);
+    const blk2 = s.irBlocks.get(pick.irBlock);
     scene.sceneIrName(ref s, pick.irFunc, ref scratch);
-    text.push(ref scratch, " / ");
+    scratch.push(" / ");
     disposable lbl: Text = text.make(8);
     scene.sceneIrBlockLabel(ref s, pick.irBlock, ref lbl);
-    text.push(ref scratch, text.view(ref lbl));
-    drawLabel(text.view(ref scratch), bp2.x,
+    scratch.push(lbl.view());
+    drawLabel(scratch.view(), bp2.x,
       layout.irTowerHeight(blk2.instructions) + 1.4, bp2.z, 0.06, ref cam, 1.0, 0.9, 0.5);
   }
   // Function names over their platforms, nearest first, capped - at forty
@@ -821,7 +821,7 @@ export function drawIr(ref s: Scene, ref cam: Camera, ref pick: Pick, ref scratc
     scene.sceneIrName(ref s, nf, ref scratch);
     if (scratch.len > 0) {
       const dim2 = dimFor(ref cam, fp2.x, fp2.z);
-      drawLabel(text.view(ref scratch), fp2.x, 3.6, fp2.z - 1.2, 0.045, ref cam,
+      drawLabel(scratch.view(), fp2.x, 3.6, fp2.z - 1.2, 0.045, ref cam,
         0.85 * dim2, 0.75 * dim2, 0.55 * dim2);
       named += 1;
     }
@@ -924,12 +924,12 @@ export function drawHud(ref s: Scene, ref pick: Pick, pinned: bool, w: float32, 
   fillRect2d(cx - 1.0, cy + 4.0, 2.0, 5.0, 0.9, 0.95, 1.0, 0.8);
 
   // Status, top-left.
-  text.clear(ref scratch);
+  scratch.clear();
   if (s.pendingPhase != Phase.NONE) {
-    text.push(ref scratch, "build waiting at ");
-    text.push(ref scratch, phaseLabel(s.pendingPhase));
-    text.push(ref scratch, " - press g");
-    drawText2d(text.view(ref scratch), 16.0, 16.0, 2.4, 0.95, 0.85, 0.4, 1.0);
+    scratch.push("build waiting at ");
+    scratch.push(phaseLabel(s.pendingPhase));
+    scratch.push(" - press g");
+    drawText2d(scratch.view(), 16.0, 16.0, 2.4, 0.95, 0.85, 0.4, 1.0);
   } else if (s.buildDone) {
     if (s.buildOk == 1) {
       drawText2d("build complete - q to leave", 16.0, 16.0, 2.4, 0.5, 0.9, 0.6, 1.0);
@@ -940,142 +940,142 @@ export function drawHud(ref s: Scene, ref pick: Pick, pinned: bool, w: float32, 
     drawText2d("compiling...", 16.0, 16.0, 2.4, 0.6, 0.7, 0.9, 1.0);
   }
   // What the replay is doing right now - the algorithm's own progress bar.
-  text.clear(ref scratch);
+  scratch.clear();
   if (scene.sceneLexing(ref s)) {
-    text.push(ref scratch, "lexing ");
-    text.pushUint(ref scratch, uint64(scene.sceneShownTokens(ref s)));
-    text.push(ref scratch, "/");
-    text.pushUint(ref scratch, uint64(s.tokens.len));
-    text.push(ref scratch, " tokens");
+    scratch.push("lexing ");
+    scratch.pushUint(uint64(scene.sceneShownTokens(ref s)));
+    scratch.push("/");
+    scratch.pushUint(uint64(s.tokens.len));
+    scratch.push(" tokens");
   } else if (scene.sceneParsing(ref s)) {
-    text.push(ref scratch, "parsing ");
-    text.pushUint(ref scratch, uint64(scene.sceneShownAst(ref s)));
-    text.push(ref scratch, "/");
-    text.pushUint(ref scratch, uint64(s.astItems.len));
-    text.push(ref scratch, " nodes");
+    scratch.push("parsing ");
+    scratch.pushUint(uint64(scene.sceneShownAst(ref s)));
+    scratch.push("/");
+    scratch.pushUint(uint64(s.astItems.len));
+    scratch.push(" nodes");
   } else if (scene.sceneMapping(ref s)) {
-    text.push(ref scratch, "mapping ");
-    text.pushUint(ref scratch, uint64(scene.sceneShownIslands(ref s)));
-    text.push(ref scratch, "/");
-    text.pushUint(ref scratch, uint64(s.islands.len));
-    text.push(ref scratch, " modules");
+    scratch.push("mapping ");
+    scratch.pushUint(uint64(scene.sceneShownIslands(ref s)));
+    scratch.push("/");
+    scratch.pushUint(uint64(s.islands.len));
+    scratch.push(" modules");
   } else if (scene.sceneEmitting(ref s)) {
-    text.push(ref scratch, "emitting ");
-    text.pushUint(ref scratch, uint64(scene.sceneShownBlocks(ref s)));
-    text.push(ref scratch, "/");
-    text.pushUint(ref scratch, uint64(s.irBlocks.len));
-    text.push(ref scratch, " blocks");
+    scratch.push("emitting ");
+    scratch.pushUint(uint64(scene.sceneShownBlocks(ref s)));
+    scratch.push("/");
+    scratch.pushUint(uint64(s.irBlocks.len));
+    scratch.push(" blocks");
   }
   if (scratch.len > 0) {
-    drawText2d(text.view(ref scratch), 16.0, 62.0, 2.0, 0.5, 0.9, 0.9, 1.0);
+    drawText2d(scratch.view(), 16.0, 62.0, 2.0, 0.5, 0.9, 0.9, 1.0);
   }
 
   if (s.entryFile.len > 0) {
-    text.clear(ref scratch);
-    text.push(ref scratch, "viewing ");
+    scratch.clear();
+    scratch.push("viewing ");
     pushTail(ref scratch, s.entryFile, 52);
-    drawText2d(text.view(ref scratch), 16.0, 106.0, 1.6, 0.55, 0.7, 0.75, 1.0);
+    drawText2d(scratch.view(), 16.0, 106.0, 1.6, 0.55, 0.7, 0.75, 1.0);
   }
 
   if (s.smellOnce + s.smellLoop > 0 || diagLeaks(ref s) > 0) {
-    text.clear(ref scratch);
-    text.push(ref scratch, "memory: ");
-    text.pushUint(ref scratch, uint64(s.smellOnce + s.smellLoop));
-    text.push(ref scratch, " heap smells (");
-    text.pushUint(ref scratch, uint64(s.smellLoop));
-    text.push(ref scratch, " in loops)  ");
-    text.pushUint(ref scratch, uint64(diagLeaks(ref s)));
-    text.push(ref scratch, " unhandled disposables");
-    drawText2d(text.view(ref scratch), 16.0, 84.0, 1.7, 0.9, 0.6, 0.4, 1.0);
+    scratch.clear();
+    scratch.push("memory: ");
+    scratch.pushUint(uint64(s.smellOnce + s.smellLoop));
+    scratch.push(" heap smells (");
+    scratch.pushUint(uint64(s.smellLoop));
+    scratch.push(" in loops)  ");
+    scratch.pushUint(uint64(diagLeaks(ref s)));
+    scratch.push(" unhandled disposables");
+    drawText2d(scratch.view(), 16.0, 84.0, 1.7, 0.9, 0.6, 0.4, 1.0);
   }
 
-  text.clear(ref scratch);
-  text.push(ref scratch, "speed x");
-  text.pushUint(ref scratch, uint64(s.speed));
-  text.push(ref scratch, ".");
-  text.pushUint(ref scratch, uint64(s.speed * 10.0) % 10);
+  scratch.clear();
+  scratch.push("speed x");
+  scratch.pushUint(uint64(s.speed));
+  scratch.push(".");
+  scratch.pushUint(uint64(s.speed * 10.0) % 10);
   if (s.paused) {
-    text.push(ref scratch, "  paused");
+    scratch.push("  paused");
   }
-  drawText2d(text.view(ref scratch), 16.0, 40.0, 1.8, 0.6, 0.65, 0.85, 1.0);
+  drawText2d(scratch.view(), 16.0, 40.0, 1.8, 0.6, 0.65, 0.85, 1.0);
 
   // The tooltip, beside the crosshair. What it says follows what KIND of
   // thing the ray landed on.
   if (pick.active && pick.kind == PickKind.ISLAND && pick.irFunc < s.islands.len) {
-    const isle = vec.vecGet(ref s.islands, pick.irFunc);
+    const isle = s.islands.get(pick.irFunc);
     const stored = scene.sceneModuleFileCount(ref s, pick.irFunc);
     const panelX = cx + 22.0;
     const panelY = cy - 14.0;
     fillRect2d(panelX - 8.0, panelY - 8.0, 420.0, 80.0, 0.03, 0.05, 0.12, 0.82);
     drawText2d(isle.name, panelX, panelY, 2.2, 0.7, 0.9, 1.0, 1.0);
-    text.clear(ref scratch);
-    text.pushUint(ref scratch, uint64(isle.loc));
-    text.push(ref scratch, " lines in ");
-    text.pushUint(ref scratch, uint64(stored));
-    text.push(ref scratch, " file(s)");
-    drawText2d(text.view(ref scratch), panelX, panelY + 22.0, 1.7, 0.65, 0.75, 0.85, 1.0);
+    scratch.clear();
+    scratch.pushUint(uint64(isle.loc));
+    scratch.push(" lines in ");
+    scratch.pushUint(uint64(stored));
+    scratch.push(" file(s)");
+    drawText2d(scratch.view(), panelX, panelY + 22.0, 1.7, 0.65, 0.75, 0.85, 1.0);
     if (stored > 0) {
       drawText2d("press e to walk its source", panelX, panelY + 44.0, 1.7, 0.95, 0.85, 0.5, 1.0);
     } else {
       drawText2d("its files were not streamed", panelX, panelY + 44.0, 1.6, 0.6, 0.6, 0.7, 1.0);
     }
   } else if (pick.active && pick.kind == PickKind.DIAG && pick.diagIdx < s.diagItems.len) {
-    const it = vec.vecGet(ref s.diagItems, pick.diagIdx);
+    const it = s.diagItems.get(pick.diagIdx);
     const panelX = cx + 22.0;
     const panelY = cy - 14.0;
     fillRect2d(panelX - 8.0, panelY - 8.0, 560.0, 80.0, 0.03, 0.05, 0.12, 0.82);
-    text.clear(ref scratch);
+    scratch.clear();
     if (it.error) {
-      text.push(ref scratch, "error");
+      scratch.push("error");
     } else if (it.leak) {
-      text.push(ref scratch, "unhandled disposable");
+      scratch.push("unhandled disposable");
     } else {
-      text.push(ref scratch, "warning");
+      scratch.push("warning");
     }
-    text.push(ref scratch, "  line ");
-    text.pushUint(ref scratch, uint64(it.line));
+    scratch.push("  line ");
+    scratch.pushUint(uint64(it.line));
     if (it.error) {
-      drawText2d(text.view(ref scratch), panelX, panelY, 2.0, 0.95, 0.4, 0.4, 1.0);
+      drawText2d(scratch.view(), panelX, panelY, 2.0, 0.95, 0.4, 0.4, 1.0);
     } else if (it.leak) {
-      drawText2d(text.view(ref scratch), panelX, panelY, 2.0, 0.85, 0.55, 0.95, 1.0);
+      drawText2d(scratch.view(), panelX, panelY, 2.0, 0.85, 0.55, 0.95, 1.0);
     } else {
-      drawText2d(text.view(ref scratch), panelX, panelY, 2.0, 0.95, 0.8, 0.45, 1.0);
+      drawText2d(scratch.view(), panelX, panelY, 2.0, 0.95, 0.8, 0.45, 1.0);
     }
     scene.sceneDiagMsg(ref s, pick.diagIdx, ref scratch);
-    drawText2d(text.view(ref scratch), panelX, panelY + 22.0, 1.5, 0.75, 0.8, 0.9, 1.0);
+    drawText2d(scratch.view(), panelX, panelY + 22.0, 1.5, 0.75, 0.8, 0.9, 1.0);
     if (it.leak) {
       drawText2d("its dispose never runs - mark it disposable, or hand it on",
         panelX, panelY + 44.0, 1.5, 0.7, 0.6, 0.8, 1.0);
     }
   } else if (pick.active && pick.kind == PickKind.IRBLOCK && pick.irBlock < s.irBlocks.len) {
-    const blk = vec.vecGet(ref s.irBlocks, pick.irBlock);
+    const blk = s.irBlocks.get(pick.irBlock);
     const panelX = cx + 22.0;
     const panelY = cy - 14.0;
     fillRect2d(panelX - 8.0, panelY - 8.0, 420.0, 80.0, 0.03, 0.05, 0.12, 0.82);
     scene.sceneIrName(ref s, pick.irFunc, ref scratch);
-    text.push(ref scratch, " / ");
+    scratch.push(" / ");
     disposable lbl: Text = text.make(8);
     scene.sceneIrBlockLabel(ref s, pick.irBlock, ref lbl);
-    text.push(ref scratch, text.view(ref lbl));
-    drawText2d(text.view(ref scratch), panelX, panelY, 2.2, 1.0, 0.9, 0.5, 1.0);
-    text.clear(ref scratch);
-    text.pushUint(ref scratch, uint64(blk.instructions));
-    text.push(ref scratch, " instructions");
-    drawText2d(text.view(ref scratch), panelX, panelY + 22.0, 1.7, 0.7, 0.8, 0.9, 1.0);
-    text.clear(ref scratch);
-    text.pushUint(ref scratch, uint64(blk.calls));
-    text.push(ref scratch, " calls  ");
-    text.pushUint(ref scratch, uint64(blk.branches));
-    text.push(ref scratch, " branches  ");
-    text.pushUint(ref scratch, uint64(blk.memOps));
-    text.push(ref scratch, " memory");
-    drawText2d(text.view(ref scratch), panelX, panelY + 44.0, 1.7, 0.85, 0.7, 0.55, 1.0);
+    scratch.push(lbl.view());
+    drawText2d(scratch.view(), panelX, panelY, 2.2, 1.0, 0.9, 0.5, 1.0);
+    scratch.clear();
+    scratch.pushUint(uint64(blk.instructions));
+    scratch.push(" instructions");
+    drawText2d(scratch.view(), panelX, panelY + 22.0, 1.7, 0.7, 0.8, 0.9, 1.0);
+    scratch.clear();
+    scratch.pushUint(uint64(blk.calls));
+    scratch.push(" calls  ");
+    scratch.pushUint(uint64(blk.branches));
+    scratch.push(" branches  ");
+    scratch.pushUint(uint64(blk.memOps));
+    scratch.push(" memory");
+    drawText2d(scratch.view(), panelX, panelY + 44.0, 1.7, 0.85, 0.7, 0.55, 1.0);
   } else if (pick.active) {
     let lineCount: usize = 2;
     let smell: uint8 = 0;
     if (pick.astIdx < s.astItems.len) {
       lineCount += 2;
-      smell = vec.vecGet(ref s.astItems, pick.astIdx).smell;
+      smell = s.astItems.get(pick.astIdx).smell;
       if (smell > 0) {
         lineCount += 1;
       }
@@ -1089,49 +1089,49 @@ export function drawHud(ref s: Scene, ref pick: Pick, pinned: bool, w: float32, 
       0.03, 0.05, 0.12, 0.82);
     let ty = panelY;
     if (pick.tokenIdx < s.tokens.len) {
-      const t = vec.vecGet(ref s.tokens, pick.tokenIdx);
+      const t = s.tokens.get(pick.tokenIdx);
       scene.sceneTokenText(ref s, pick.tokenIdx, ref scratch);
-      drawText2d(text.view(ref scratch), panelX, ty, 2.2, 1.0, 0.9, 0.5, 1.0);
+      drawText2d(scratch.view(), panelX, ty, 2.2, 1.0, 0.9, 0.5, 1.0);
       ty += 22.0;
-      text.clear(ref scratch);
-      text.push(ref scratch, "token ");
-      text.pushUint(ref scratch, uint64(t.len));
-      text.push(ref scratch, " bytes at ");
-      text.pushUint(ref scratch, uint64(t.pos));
-      drawText2d(text.view(ref scratch), panelX, ty, 1.7, 0.6, 0.8, 0.85, 1.0);
+      scratch.clear();
+      scratch.push("token ");
+      scratch.pushUint(uint64(t.len));
+      scratch.push(" bytes at ");
+      scratch.pushUint(uint64(t.pos));
+      drawText2d(scratch.view(), panelX, ty, 1.7, 0.6, 0.8, 0.85, 1.0);
       ty += 22.0;
     } else {
-      text.clear(ref scratch);
-      text.push(ref scratch, "line ");
-      text.pushUint(ref scratch, uint64(pick.line + 1));
-      text.push(ref scratch, " col ");
-      text.pushUint(ref scratch, uint64(pick.col + 1));
-      drawText2d(text.view(ref scratch), panelX, ty, 1.9, 0.7, 0.8, 0.9, 1.0);
+      scratch.clear();
+      scratch.push("line ");
+      scratch.pushUint(uint64(pick.line + 1));
+      scratch.push(" col ");
+      scratch.pushUint(uint64(pick.col + 1));
+      drawText2d(scratch.view(), panelX, ty, 1.9, 0.7, 0.8, 0.9, 1.0);
       ty += 22.0;
       drawText2d("no token here", panelX, ty, 1.7, 0.5, 0.6, 0.7, 1.0);
       ty += 22.0;
     }
     if (pick.astIdx < s.astItems.len) {
-      text.clear(ref scratch);
-      text.push(ref scratch, scene.sceneAstKind(ref s, pick.astIdx));
+      scratch.clear();
+      scratch.push(scene.sceneAstKind(ref s, pick.astIdx));
       const nodeName = scene.sceneAstName(ref s, pick.astIdx);
       if (nodeName.len > 0) {
-        text.push(ref scratch, " ");
-        text.push(ref scratch, nodeName);
+        scratch.push(" ");
+        scratch.push(nodeName);
       }
-      text.push(ref scratch, "  depth ");
-      text.pushUint(ref scratch, uint64(vec.vecGet(ref s.astItems, pick.astIdx).depth));
-      drawText2d(text.view(ref scratch), panelX, ty, 1.7, 0.6, 0.95, 0.65, 1.0);
+      scratch.push("  depth ");
+      scratch.pushUint(uint64(s.astItems.get(pick.astIdx).depth));
+      drawText2d(scratch.view(), panelX, ty, 1.7, 0.6, 0.95, 0.65, 1.0);
       ty += 22.0;
-      text.clear(ref scratch);
-      text.push(ref scratch, "line ");
-      text.pushUint(ref scratch, uint64(pick.line + 1));
-      text.push(ref scratch, " col ");
-      text.pushUint(ref scratch, uint64(pick.col + 1));
+      scratch.clear();
+      scratch.push("line ");
+      scratch.pushUint(uint64(pick.line + 1));
+      scratch.push(" col ");
+      scratch.pushUint(uint64(pick.col + 1));
       if (pick.kind == PickKind.NODE) {
-        text.push(ref scratch, "  (picked in the grove)");
+        scratch.push("  (picked in the grove)");
       }
-      drawText2d(text.view(ref scratch), panelX, ty, 1.6, 0.55, 0.65, 0.8, 1.0);
+      drawText2d(scratch.view(), panelX, ty, 1.6, 0.55, 0.65, 0.8, 1.0);
       ty += 22.0;
       if (smell == 2) {
         drawText2d("heap smell in a loop: a malloc PER ITERATION - use Text",

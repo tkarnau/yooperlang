@@ -207,6 +207,6 @@ function headerTempAssign(ref cx: Cx, dest: usize): void {
 
 //   `%t1`
 export function headerTemp(ref cx: Cx, id: usize): void {
-  text.push(ref cx.e.body, "%t");
-  text.pushUint(ref cx.e.body, uint64(id));
+  cx.e.body.push("%t");
+  cx.e.body.pushUint(uint64(id));
 }

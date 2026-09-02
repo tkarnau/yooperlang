@@ -196,7 +196,7 @@ function parseObject(ref p: Parser, ref d: JsonDoc): JsonId {
     if (p.error.len > 0) {
       return 0;
     }
-    objectSet(ref d, obj, text.view(ref key), v);
+    objectSet(ref d, obj, key.view(), v);
     skipWs(ref p);
     const sep = peekByte(ref p);
     if (sep == ',') {
@@ -254,7 +254,7 @@ function parseStringValue(ref p: Parser, ref d: JsonDoc): JsonId {
   }
   // The BYTES rather than a view: a decoded string may hold a nul, which a
   // `string` would silently cut it off at.
-  return addStringBytes(ref d, text.bytes(ref s));
+  return addStringBytes(ref d, s.bytes());
 }
 
 // ----- strings -------------------------------------------------------------
@@ -288,7 +288,7 @@ function parseStringInto(ref p: Parser, ref out: Text): void {
       // Anything at or above 0x20 is passed through as its own byte, which is
       // correct for UTF-8: JSON is defined over text, and re-encoding a
       // multi-byte sequence would only make the value bigger.
-      text.pushByte(ref out, c);
+      out.pushByte(c);
       p.pos += 1;
     }
   }
@@ -301,14 +301,14 @@ function parseEscape(ref p: Parser, ref out: Text): void {
   }
   const e = p.src[p.pos];
   p.pos += 1;
-  if (e == '"') { text.pushByte(ref out, '"'); return; }
-  if (e == '\\') { text.pushByte(ref out, '\\'); return; }
-  if (e == '/') { text.pushByte(ref out, '/'); return; }
-  if (e == 'b') { text.pushByte(ref out, 8); return; }
-  if (e == 'f') { text.pushByte(ref out, 12); return; }
-  if (e == 'n') { text.pushByte(ref out, '\n'); return; }
-  if (e == 'r') { text.pushByte(ref out, '\r'); return; }
-  if (e == 't') { text.pushByte(ref out, '\t'); return; }
+  if (e == '"') { out.pushByte('"'); return; }
+  if (e == '\\') { out.pushByte('\\'); return; }
+  if (e == '/') { out.pushByte('/'); return; }
+  if (e == 'b') { out.pushByte(8); return; }
+  if (e == 'f') { out.pushByte(12); return; }
+  if (e == 'n') { out.pushByte('\n'); return; }
+  if (e == 'r') { out.pushByte('\r'); return; }
+  if (e == 't') { out.pushByte('\t'); return; }
   if (e == 'u') {
     parseUnicodeEscape(ref p, ref out);
     return;
@@ -332,23 +332,23 @@ function parseUnicodeEscape(ref p: Parser, ref out: Text): void {
       }
       if (lo >= 56320 && lo <= 57343) {     // 0xDC00..0xDFFF, a low surrogate
         const cp = 65536 + ((hi - 55296) << 10) + (lo - 56320);
-        text.pushChar(ref out, cp);
+        out.pushChar(cp);
         return;
       }
       // A high surrogate followed by something that is not a low one: both
       // halves are unpaired, so both are replaced.
-      text.pushChar(ref out, REPLACEMENT);
-      text.pushChar(ref out, REPLACEMENT);
+      out.pushChar(REPLACEMENT);
+      out.pushChar(REPLACEMENT);
       return;
     }
-    text.pushChar(ref out, REPLACEMENT);
+    out.pushChar(REPLACEMENT);
     return;
   }
   if (hi >= 56320 && hi <= 57343) {         // a low surrogate with no high one
-    text.pushChar(ref out, REPLACEMENT);
+    out.pushChar(REPLACEMENT);
     return;
   }
-  text.pushChar(ref out, hi);
+  out.pushChar(hi);
 }
 
 function readHex4(ref p: Parser): uint32 {
@@ -452,8 +452,8 @@ function parseNumber(ref p: Parser, ref d: JsonDoc): JsonId {
   disposable tok: Text = text.make(p.pos - start);
   let j: usize = start;
   while (j < p.pos) {
-    text.pushByte(ref tok, p.src[j]);
+    tok.pushByte(p.src[j]);
     j += 1;
   }
-  return addFloat(ref d, atof(text.view(ref tok)));
+  return addFloat(ref d, atof(tok.view()));
 }

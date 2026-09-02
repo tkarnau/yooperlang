@@ -72,13 +72,13 @@ suite function theJsonDumpEscapesWhatItMust(): void {
 // Parse `src` and render the payload.
 function dumpOf(src: string): string {
   let buf: Vec<uint8> = vec.vecNew(src.len + 1);
-  vec.vecExtendFrom(ref buf, intr.stringAsBytes(src));
-  switch (parse(vec.vecAsArray(ref buf))) {
+  buf.extendFrom(intr.stringAsBytes(src));
+  switch (parse(buf.asArray())) {
     case Result.Err { error: e }: { return ""; }
     case Result.Ok { value: parsed }: {
       let ast: AST = parsed;
-      let payload: Text = dumpAstJson(ref ast, ast.root, "test.yoop", vec.vecAsArray(ref buf));
-      return text.view(ref payload);
+      let payload: Text = dumpAstJson(ref ast, ast.root, "test.yoop", buf.asArray());
+      return payload.view();
     }
   }
 }

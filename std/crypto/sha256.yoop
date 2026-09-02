@@ -166,10 +166,10 @@ export function digest(ref s: Sha256, ref out: Vec<uint8>): void {
 }
 
 function pushBE32(ref out: Vec<uint8>, v: uint32): void {
-    vec.vecPush(ref out, uint8((v >> 24) & 255));
-    vec.vecPush(ref out, uint8((v >> 16) & 255));
-    vec.vecPush(ref out, uint8((v >> 8) & 255));
-    vec.vecPush(ref out, uint8(v & 255));
+    out.push(uint8((v >> 24) & 255));
+    out.push(uint8((v >> 16) & 255));
+    out.push(uint8((v >> 8) & 255));
+    out.push(uint8(v & 255));
 }
 
 // One 64-byte block, read from `data` at `off`. FIPS 180-4 section 6.2.2.
@@ -179,7 +179,7 @@ function compress(ref s: Sha256, data: uint8[], off: usize): void {
     // The first 16 words are the block, big-endian.
     for (let i: usize = 0; i < 16; i += 1) {
         let b: usize = off + i * 4;
-        vec.vecPush(ref w,
+        w.push(
             (uint32(data[b]) << 24)
             | (uint32(data[b + 1]) << 16)
             | (uint32(data[b + 2]) << 8)
@@ -187,12 +187,12 @@ function compress(ref s: Sha256, data: uint8[], off: usize): void {
     }
     // The remaining 48 are the message schedule.
     for (let i: usize = 16; i < 64; i += 1) {
-        let wm15: uint32 = vec.vecGet(ref w, i - 15);
-        let wm2: uint32 = vec.vecGet(ref w, i - 2);
+        let wm15: uint32 = w.get(i - 15);
+        let wm2: uint32 = w.get(i - 2);
         let s0: uint32 = rotr(wm15, 7) ^ rotr(wm15, 18) ^ (wm15 >> 3);
         let s1: uint32 = rotr(wm2, 17) ^ rotr(wm2, 19) ^ (wm2 >> 10);
-        vec.vecPush(ref w,
-            vec.vecGet(ref w, i - 16) + s0 + vec.vecGet(ref w, i - 7) + s1);
+        w.push(
+            w.get(i - 16) + s0 + w.get(i - 7) + s1);
     }
 
     let a: uint32 = s.h0;
@@ -207,7 +207,7 @@ function compress(ref s: Sha256, data: uint8[], off: usize): void {
     for (let i: usize = 0; i < 64; i += 1) {
         let sig1: uint32 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25);
         let ch: uint32 = (e & f) ^ ((~e) & g);
-        let t1: uint32 = hh + sig1 + ch + K[i] + vec.vecGet(ref w, i);
+        let t1: uint32 = hh + sig1 + ch + K[i] + w.get(i);
         let sig0: uint32 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22);
         let maj: uint32 = (a & b) ^ (a & c) ^ (b & c);
         let t2: uint32 = sig0 + maj;
@@ -257,10 +257,10 @@ export function hmacSha256(ref out: Vec<uint8>, key: uint8[], message: uint8[]):
     if (key.len > SHA256_BLOCK_BYTES) {
         sha256(ref block, key);
     } else {
-        vec.vecExtendFrom(ref block, key);
+        block.extendFrom(key);
     }
     while (block.len < SHA256_BLOCK_BYTES) {
-        vec.vecPush(ref block, 0);
+        block.push(0);
     }
 
     // inner = H((K ^ 0x36) ++ message)
@@ -268,9 +268,9 @@ export function hmacSha256(ref out: Vec<uint8>, key: uint8[], message: uint8[]):
     let si: Sha256 = sha256New();
     disposable ipad: Vec<uint8> = vec.vecNew(SHA256_BLOCK_BYTES);
     for (let i: usize = 0; i < SHA256_BLOCK_BYTES; i += 1) {
-        vec.vecPush(ref ipad, vec.vecGet(ref block, i) ^ 0x36);
+        ipad.push(block.get(i) ^ 0x36);
     }
-    update(ref si, vec.vecAsArray(ref ipad));
+    update(ref si, ipad.asArray());
     update(ref si, message);
     digest(ref si, ref inner);
     sha256Free(ref si);
@@ -279,10 +279,10 @@ export function hmacSha256(ref out: Vec<uint8>, key: uint8[], message: uint8[]):
     let so: Sha256 = sha256New();
     disposable opad: Vec<uint8> = vec.vecNew(SHA256_BLOCK_BYTES);
     for (let i: usize = 0; i < SHA256_BLOCK_BYTES; i += 1) {
-        vec.vecPush(ref opad, vec.vecGet(ref block, i) ^ 0x5c);
+        opad.push(block.get(i) ^ 0x5c);
     }
-    update(ref so, vec.vecAsArray(ref opad));
-    update(ref so, vec.vecAsArray(ref inner));
+    update(ref so, opad.asArray());
+    update(ref so, inner.asArray());
     digest(ref so, ref out);
     sha256Free(ref so);
 }
@@ -293,8 +293,8 @@ export function hmacSha256(ref out: Vec<uint8>, key: uint8[], message: uint8[]):
 export function toHex(ref out: Vec<uint8>, data: uint8[]): void {
     let digits: uint8[] = intr.stringAsBytes("0123456789abcdef");
     for (let i: usize = 0; i < data.len; i += 1) {
-        vec.vecPush(ref out, digits[usize(data[i] >> 4)]);
-        vec.vecPush(ref out, digits[usize(data[i] & 15)]);
+        out.push(digits[usize(data[i] >> 4)]);
+        out.push(digits[usize(data[i] & 15)]);
     }
 }
 

@@ -48,7 +48,7 @@ export function debugTypeOf(ref cx: Cx, typeId: TypeId): DebugType {
   if (typeId == TYPE_ERROR_ID || typeId == TYPE_VOID_ID) {
     return noDebugType();
   }
-  switch (map.mapGet(ref cx.e.debug.types, uint64(typeId))) {
+  switch (cx.e.debug.types.get(uint64(typeId))) {
     case Option.Some { value: id }: { return { id: id, found: true }; }
     case Option.None: {}
   }
@@ -96,7 +96,7 @@ export function debugTypeOf(ref cx: Cx, typeId: TypeId): DebugType {
 
 function cacheDebugType(ref cx: Cx, typeId: TypeId, made: DebugType): DebugType {
   if (made.found) {
-    map.mapInsert(ref cx.e.debug.types, uint64(typeId), made.id);
+    cx.e.debug.types.insert(uint64(typeId), made.id);
   }
   return made;
 }
@@ -153,19 +153,19 @@ function primDebugEncoding(p: PrimKind): string {
 // `int32[]` - the fat pointer, which is what an array VALUE is.
 function arrayDebugType(ref cx: Cx, typeId: TypeId, elem: TypeId): DebugType {
   const id = reserveDebugNode(ref cx.e.debug);
-  map.mapInsert(ref cx.e.debug.types, uint64(typeId), id);
+  cx.e.debug.types.insert(uint64(typeId), id);
 
   const elemTy = debugTypeOf(ref cx, elem);
   disposable members: Vec<DebugNodeId> = vec.vecNew(2);
-  vec.vecPush(ref members, debugMember(ref cx, id, "data", debugPointerTo(ref cx, elemTy, ""), 8, 8, 0));
-  vec.vecPush(ref members, debugMember(ref cx, id, "len",
+  members.push(debugMember(ref cx, id, "data", debugPointerTo(ref cx, elemTy, ""), 8, 8, 0));
+  members.push(debugMember(ref cx, id, "len",
     basicDebugType(ref cx, "usize", 64, "DW_ATE_unsigned"), 8, 8, 8));
 
   disposable name: Vec<string> = vec.vecNew(2);
-  vec.vecPush(ref name, nominalOrPrimName(ref cx, elem));
-  vec.vecPush(ref name, "[]");
+  name.push(nominalOrPrimName(ref cx, elem));
+  name.push("[]");
   finishComposite(ref cx, id, "DW_TAG_structure_type",
-    str.stringConcatAll(vec.vecAsArray(ref name)), 16, 8, ref members);
+    str.stringConcatAll(name.asArray()), 16, 8, ref members);
   return { id: id, found: true };
 }
 
@@ -173,7 +173,7 @@ function arrayDebugType(ref cx: Cx, typeId: TypeId, elem: TypeId): DebugType {
 // to its own alignment and the whole rounded up to the widest.
 function structDebugType(ref cx: Cx, typeId: TypeId): DebugType {
   const id = reserveDebugNode(ref cx.e.debug);
-  map.mapInsert(ref cx.e.debug.types, uint64(typeId), id);
+  cx.e.debug.types.insert(uint64(typeId), id);
 
   disposable members: Vec<DebugNodeId> = vec.vecNew(4);
   let offset: usize = 0;
@@ -191,7 +191,7 @@ function structDebugType(ref cx: Cx, typeId: TypeId): DebugType {
       maxAlign = fieldAlign;
     }
     offset = roundUpTo(offset, fieldAlign);
-    vec.vecPush(ref members, debugMember(ref cx, id, field.name,
+    members.push(debugMember(ref cx, id, field.name,
       debugTypeOf(ref cx, field.typeId), fieldSize, fieldAlign, offset));
     offset += fieldSize;
     i += 1;
@@ -207,18 +207,18 @@ function structDebugType(ref cx: Cx, typeId: TypeId): DebugType {
 // than `tag = 0`.
 function variantDebugType(ref cx: Cx, typeId: TypeId): DebugType {
   const id = reserveDebugNode(ref cx.e.debug);
-  map.mapInsert(ref cx.e.debug.types, uint64(typeId), id);
+  cx.e.debug.types.insert(uint64(typeId), id);
 
   const name = nominalNameOf(cx.prog, typeId);
   disposable members: Vec<DebugNodeId> = vec.vecNew(2);
-  vec.vecPush(ref members, debugMember(ref cx, id, "tag",
+  members.push(debugMember(ref cx, id, "tag",
     variantTagEnumType(ref cx, typeId, name), 4, 4, 0));
 
   let payloadSize = variantPayloadSize(cx.prog, typeId);
   if (payloadSize == 0) {
     payloadSize = 1;
   }
-  vec.vecPush(ref members, debugMember(ref cx, id, "payload",
+  members.push(debugMember(ref cx, id, "payload",
     debugOpaqueBlob(ref cx, name, payloadSize), payloadSize, 4, 4));
 
   finishComposite(ref cx, id, "DW_TAG_structure_type", name,
@@ -239,33 +239,33 @@ function variantTagEnumType(ref cx: Cx, typeId: TypeId, name: string): DebugType
     }
     const eid = reserveDebugNode(ref cx.e.debug);
     disposable parts: Vec<string> = vec.vecNew(4);
-    vec.vecPush(ref parts, "!DIEnumerator(name: \"");
-    vec.vecPush(ref parts, caseName);
-    vec.vecPush(ref parts, "\", value: ");
-    vec.vecPush(ref parts, fmt.uintToString(uint64(i)));
-    vec.vecPush(ref parts, ")");
-    setDebugNode(ref cx.e.debug, eid, str.stringConcatAll(vec.vecAsArray(ref parts)));
-    vec.vecPush(ref enumerators, eid);
+    parts.push("!DIEnumerator(name: \"");
+    parts.push(caseName);
+    parts.push("\", value: ");
+    parts.push(fmt.uintToString(uint64(i)));
+    parts.push(")");
+    setDebugNode(ref cx.e.debug, eid, str.stringConcatAll(parts.asArray()));
+    enumerators.push(eid);
     i += 1;
   }
 
   const id = reserveDebugNode(ref cx.e.debug);
   disposable parts: Vec<string> = vec.vecNew(8);
-  vec.vecPush(ref parts, "!DICompositeType(tag: DW_TAG_enumeration_type, name: \"");
-  vec.vecPush(ref parts, name);
-  vec.vecPush(ref parts, ".tag\", baseType: ");
-  vec.vecPush(ref parts, debugRef(basicDebugType(ref cx, "int32", 32, "DW_ATE_signed").id));
-  vec.vecPush(ref parts, ", size: 32, elements: !{");
-  vec.vecPush(ref parts, debugRefList(ref enumerators));
-  vec.vecPush(ref parts, "})");
-  setDebugNode(ref cx.e.debug, id, str.stringConcatAll(vec.vecAsArray(ref parts)));
+  parts.push("!DICompositeType(tag: DW_TAG_enumeration_type, name: \"");
+  parts.push(name);
+  parts.push(".tag\", baseType: ");
+  parts.push(debugRef(basicDebugType(ref cx, "int32", 32, "DW_ATE_signed").id));
+  parts.push(", size: 32, elements: !{");
+  parts.push(debugRefList(ref enumerators));
+  parts.push("})");
+  setDebugNode(ref cx.e.debug, id, str.stringConcatAll(parts.asArray()));
   return { id: id, found: true };
 }
 
 // A `union` - every field at offset zero, the whole as wide as the widest.
 function unionDebugType(ref cx: Cx, typeId: TypeId): DebugType {
   const id = reserveDebugNode(ref cx.e.debug);
-  map.mapInsert(ref cx.e.debug.types, uint64(typeId), id);
+  cx.e.debug.types.insert(uint64(typeId), id);
 
   disposable members: Vec<DebugNodeId> = vec.vecNew(4);
   let widest: usize = 1;
@@ -281,7 +281,7 @@ function unionDebugType(ref cx: Cx, typeId: TypeId): DebugType {
     const fieldAlign = alignOfType(cx.prog, field.typeId);
     if (fieldSize > widest) { widest = fieldSize; }
     if (fieldAlign > maxAlign) { maxAlign = fieldAlign; }
-    vec.vecPush(ref members, debugMember(ref cx, id, field.name,
+    members.push(debugMember(ref cx, id, field.name,
       debugTypeOf(ref cx, field.typeId), fieldSize, fieldAlign, 0));
     i += 1;
   }
@@ -307,10 +307,10 @@ function valueEnumDebugType(ref cx: Cx, typeId: TypeId, underlying: TypeId): Deb
 // the declaration order codegen stores them in.
 function vtableDebugType(ref cx: Cx, typeId: TypeId): DebugType {
   const id = reserveDebugNode(ref cx.e.debug);
-  map.mapInsert(ref cx.e.debug.types, uint64(typeId), id);
+  cx.e.debug.types.insert(uint64(typeId), id);
 
   disposable members: Vec<DebugNodeId> = vec.vecNew(4);
-  vec.vecPush(ref members, debugMember(ref cx, id, "ctx", debugOpaquePointer(ref cx), 8, 8, 0));
+  members.push(debugMember(ref cx, id, "ctx", debugOpaquePointer(ref cx), 8, 8, 0));
   let i: usize = 0;
   while (true) {
     const slot = vtableSlotNameAt(cx.prog, typeId, i);
@@ -318,7 +318,7 @@ function vtableDebugType(ref cx: Cx, typeId: TypeId): DebugType {
       i = i;
       break;
     }
-    vec.vecPush(ref members, debugMember(ref cx, id, slot,
+    members.push(debugMember(ref cx, id, slot,
       debugOpaquePointer(ref cx), 8, 8, (i + 1) * 8));
     i += 1;
   }
@@ -367,16 +367,16 @@ function nominalOrPrimName(ref cx: Cx, typeId: TypeId): string {
 // the arguments it can describe.
 export function debugSubroutineText(ref cx: Cx, retTy: TypeId, ref params: Vec<ParamInfo>): string {
   disposable parts: Vec<string> = vec.vecNew(params.len * 2 + 3);
-  vec.vecPush(ref parts, "!DISubroutineType(types: !{");
-  vec.vecPush(ref parts, debugBaseRef(debugTypeOf(ref cx, retTy)));
+  parts.push("!DISubroutineType(types: !{");
+  parts.push(debugBaseRef(debugTypeOf(ref cx, retTy)));
   let i: usize = 0;
   while (i < params.len) {
-    vec.vecPush(ref parts, ", ");
-    vec.vecPush(ref parts, debugBaseRef(debugTypeOf(ref cx, vec.vecGet(ref params, i).typeId)));
+    parts.push(", ");
+    parts.push(debugBaseRef(debugTypeOf(ref cx, params.get(i).typeId)));
     i += 1;
   }
-  vec.vecPush(ref parts, "})");
-  return str.stringConcatAll(vec.vecAsArray(ref parts));
+  parts.push("})");
+  return str.stringConcatAll(parts.asArray());
 }
 
 export function roundUpTo(value: usize, align: usize): usize {
@@ -425,23 +425,23 @@ export function noteLocalDebug(
 
   const id = reserveDebugNode(ref cx.e.debug);
   disposable parts: Vec<string> = vec.vecNew(12);
-  vec.vecPush(ref parts, "!DILocalVariable(name: \"");
-  vec.vecPush(ref parts, name);
-  vec.vecPush(ref parts, "\"");
+  parts.push("!DILocalVariable(name: \"");
+  parts.push(name);
+  parts.push("\"");
   if (argIndex > 0) {
-    vec.vecPush(ref parts, ", arg: ");
-    vec.vecPush(ref parts, fmt.uintToString(uint64(argIndex)));
+    parts.push(", arg: ");
+    parts.push(fmt.uintToString(uint64(argIndex)));
   }
-  vec.vecPush(ref parts, ", scope: ");
-  vec.vecPush(ref parts, debugRef(cx.e.dbgScope));
-  vec.vecPush(ref parts, ", file: ");
-  vec.vecPush(ref parts, debugRef(cx.e.dbgFile));
-  vec.vecPush(ref parts, ", line: ");
-  vec.vecPush(ref parts, fmt.uintToString(uint64(dwarfLine(line))));
-  vec.vecPush(ref parts, ", type: ");
-  vec.vecPush(ref parts, debugRef(varType.id));
-  vec.vecPush(ref parts, ")");
-  setDebugNode(ref cx.e.debug, id, str.stringConcatAll(vec.vecAsArray(ref parts)));
+  parts.push(", scope: ");
+  parts.push(debugRef(cx.e.dbgScope));
+  parts.push(", file: ");
+  parts.push(debugRef(cx.e.dbgFile));
+  parts.push(", line: ");
+  parts.push(fmt.uintToString(uint64(dwarfLine(line))));
+  parts.push(", type: ");
+  parts.push(debugRef(varType.id));
+  parts.push(")");
+  setDebugNode(ref cx.e.debug, id, str.stringConcatAll(parts.asArray()));
 
   emitDbgDeclare(ref cx, name, slotId, id);
 }

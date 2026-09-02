@@ -56,15 +56,15 @@ export function guardRuntimeFormat(
   if (!text.equals(name, PRINTF_NAME) || fixedCount != 1 || args.len != 1) {
     return;
   }
-  if (isConstantString(vec.vecGet(ref args, 0).value)) {
+  if (isConstantString(args.get(0).value)) {
     return;
   }
 
   // Push the old format to the end and overwrite slot 0, rather than inserting:
   // `Vec` has no insert, and with exactly one element "append then overwrite"
   // IS the insert.
-  vec.vecPush(ref args, vec.vecGet(ref args, 0));
-  vec.vecSet(ref args, 0, {
+  args.push(args.get(0));
+  args.set(0, {
     ty: "ptr",
     value: Operand.StrRef { id: internStringConstant(cx.e, "%s") },
   });

@@ -79,7 +79,7 @@ function evalCast(ref cx: EvalCx, expr: ASTNode, exprId: NodeId): Result<ValueId
   if (argIds.len != 1) {
     return unhandled("a cast with other than one argument", expr.sourceLoc);
   }
-  const argId = vec.vecGet(ref argIds, 0);
+  const argId = argIds.get(0);
   const source = typeOfNode(ref cx, argId);
   const target = typeOfNode(ref cx, exprId);
   const value = valueAt(cx.va, evalExprValue(ref cx, argId)?);
@@ -132,7 +132,7 @@ function findFunctionDecl(ref cx: EvalCx, name: string): NodeId {
 export function findFunctionDeclIn(ref m: Module, name: string): NodeId {
   let f: usize = 0;
   while (f < m.files.len) {
-    const root = vec.vecGet(ref m.files, f).root;
+    const root = m.files.get(f).root;
     const programNode = nodeAt(ref m.ast, root);
     let i: usize = 0;
     while (i < programNode.childCount) {
@@ -165,12 +165,12 @@ function callFunction(
   disposable argIds: Vec<NodeId> = callArgIds(ref cx, call);
   let i: usize = 0;
   while (i < argIds.len) {
-    const argValue = evalExpr(ref cx, vec.vecGet(ref argIds, i))?;
+    const argValue = evalExpr(ref cx, argIds.get(i))?;
     const opened = openBorrow(ref cx, argValue);
     if (valueAt(cx.va, argValue).kind == ValueKind.REF) {
-      vec.vecPush(ref bound, opened);
+      bound.push(opened);
     } else {
-      vec.vecPush(ref bound, cloneValue(cx.va, opened));
+      bound.push(cloneValue(cx.va, opened));
     }
     i += 1;
   }
@@ -224,8 +224,8 @@ export function runFrame(
   }
   let p: usize = 0;
   while (p < paramIds.len) {
-    bindLocal(ref calleeScope, nodeAt(ref m.ast, vec.vecGet(ref paramIds, p)).name,
-      vec.vecGet(ref bound, p));
+    bindLocal(ref calleeScope, nodeAt(ref m.ast, paramIds.get(p)).name,
+      bound.get(p));
     p += 1;
   }
 
@@ -270,7 +270,7 @@ export function returnTypeOfFuncType(ref prog: Program, funcTy: TypeId): TypeId 
 
 // True when `name` was declared in an `extern` block in this module.
 function isExternHere(ref cx: EvalCx, name: string): bool {
-  switch (map.mapGet(ref cx.tm.externNames, name)) {
+  switch (cx.tm.externNames.get(name)) {
     case Option.Some { value: v }: { return true; }
     case Option.None: { return false; }
   }
@@ -282,7 +282,7 @@ function callExtern(ref cx: EvalCx, expr: ASTNode, exprId: NodeId): Result<Value
   disposable args: Vec<ValueId> = vec.vecNew(argIds.len);
   let i: usize = 0;
   while (i < argIds.len) {
-    vec.vecPush(ref args, evalExprValue(ref cx, vec.vecGet(ref argIds, i))?);
+    args.push(evalExprValue(ref cx, argIds.get(i))?);
     i += 1;
   }
   return callWhitelistedExtern(ref cx, expr.name, ref args,
@@ -304,7 +304,7 @@ function callArgIds(ref cx: EvalCx, call: ASTNode): Vec<NodeId> propagates<dispo
   const list = nodeAt(cx.ast, call.childA);
   let i: usize = 0;
   while (i < list.childCount) {
-    vec.vecPush(ref ids, childAt(cx.ast, list, i));
+    ids.push(childAt(cx.ast, list, i));
     i += 1;
   }
   return ids;
@@ -320,7 +320,7 @@ export function paramNodeIdsIn(ref ast: AST, decl: ASTNode): Vec<NodeId> propaga
   const list = nodeAt(ref ast, decl.childB);
   let i: usize = 0;
   while (i < list.childCount) {
-    vec.vecPush(ref ids, childAt(ref ast, list, i));
+    ids.push(childAt(ref ast, list, i));
     i += 1;
   }
   return ids;

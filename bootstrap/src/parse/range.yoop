@@ -53,8 +53,8 @@ export function buildRangeCall(
   nsNode.name = RANGE_NAMESPACE;
 
   disposable args: Vec<NodeId> = vec.vecNew(2);
-  vec.vecPush(ref args, startId);
-  vec.vecPush(ref args, endId);
+  args.push(startId);
+  args.push(endId);
   const loc = posToSourceLocation(ps.src, ps.pos, 1);
 
   let call = ps.buildSourcedNode(ASTNodeKind.CALL_EXPRESSION);

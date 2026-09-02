@@ -44,19 +44,19 @@ function walkForTests(dir: string, ref out: Vec<string>): void {
   disposable names: Vec<string> = vec.vecNew(16);
   disposable entries: fs.DirIter = fs.openDir(dir);
   for name in entries {
-    vec.vecPush(ref names, name);
+    names.push(name);
   }
 
   let i: usize = 0;
   while (i < names.len) {
-    const name = vec.vecGet(ref names, i);
+    const name = names.get(i);
     const full = fs.pathJoin([dir, name]);
     if (fs.statPath(full).isDir) {
       if (!isSkippedDirName(name)) {
         walkForTests(full, ref out);
       }
     } else if (isTestFileName(name)) {
-      vec.vecPush(ref out, full);
+      out.push(full);
     }
     i += 1;
   }
@@ -91,13 +91,13 @@ export function isTestFileName(name: string): bool {
 function sortPaths(ref paths: Vec<string>): void {
   let i: usize = 1;
   while (i < paths.len) {
-    const item = vec.vecGet(ref paths, i);
+    const item = paths.get(i);
     let j = i;
-    while (j > 0 && pathLess(item, vec.vecGet(ref paths, j - 1))) {
-      vec.vecSet(ref paths, j, vec.vecGet(ref paths, j - 1));
+    while (j > 0 && pathLess(item, paths.get(j - 1))) {
+      paths.set(j, paths.get(j - 1));
       j -= 1;
     }
-    vec.vecSet(ref paths, j, item);
+    paths.set(j, item);
     i += 1;
   }
 }

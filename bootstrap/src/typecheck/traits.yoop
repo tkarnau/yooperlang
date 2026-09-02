@@ -65,7 +65,7 @@ export function lookupMethod(ref prog: Program, ownerType: TypeId, name: string)
       }
       let i: usize = 0;
       while (i < et.len) {
-        switch (typeAt(ref prog, vec.vecGet(ref et, i))) {
+        switch (typeAt(ref prog, et.get(i))) {
           case Type.Trait { decl: pd, methods: pm, typeParams: ptp, extendsTraits: pet }: {
             const inherited = methodInTable(ref pm, name);
             if (inherited != TYPE_ERROR_ID) {
@@ -92,7 +92,7 @@ export function lookupMethod(ref prog: Program, ownerType: TypeId, name: string)
 }
 
 function methodInTable(ref methods: Map<string, TypeId>, name: string): TypeId {
-  switch (map.mapGet(ref methods, name)) {
+  switch (methods.get(name)) {
     case Option.Some { value: t }: { return t; }
     case Option.None: { return TYPE_ERROR_ID; }
   }
@@ -201,7 +201,7 @@ export function fillTraitMethods(
   while (i < declNode.childCount) {
     const sigNode = nodeAt(ref ast, childAt(ref ast, declNode, i));
     checkReceiverIsRefSelf(ref prog, ref ast, sigNode, declNode.name);
-    map.mapInsert(ref methods, sigNode.name,
+    methods.insert(sigNode.name,
       funcTypeOfSignature(ref prog, ref tm, ref ast, sigNode));
     i += 1;
   }
@@ -237,7 +237,7 @@ function checkParentsAreFilled(
 ): void {
   let p: usize = 0;
   while (p < parents.len) {
-    switch (typeAt(ref prog, vec.vecGet(ref parents, p))) {
+    switch (typeAt(ref prog, parents.get(p))) {
       case Type.Trait { decl: d, methods: pm, typeParams: tp, extendsTraits: et }: {
         if (!d.populated) {
           reportError(
@@ -262,7 +262,7 @@ function traitTypeParams(ref prog: Program, ref ast: AST, declNode: ASTNode): Ve
   const list = nodeAt(ref ast, declNode.childA);
   let i: usize = 0;
   while (i < list.childCount) {
-    vec.vecPush(ref params, internType(ref prog, Type.TypeParam {
+    params.push(internType(ref prog, Type.TypeParam {
       name: nodeAt(ref ast, childAt(ref ast, list, i)).name,
       originDecl: 0,
       bounds: vec.vecNew(0),
@@ -280,7 +280,7 @@ function traitTypeParamNames(ref ast: AST, declNode: ASTNode): Vec<string> propa
   const list = nodeAt(ref ast, declNode.childA);
   let i: usize = 0;
   while (i < list.childCount) {
-    vec.vecPush(ref names, nodeAt(ref ast, childAt(ref ast, list, i)).name);
+    names.push(nodeAt(ref ast, childAt(ref ast, list, i)).name);
     i += 1;
   }
   return names;
@@ -305,7 +305,7 @@ export function collectMethods(
       // The map keeps the last one and nothing downstream could tell, so the
       // two bodies would differ and the call would silently reach one of them;
       // the mangled symbol is `Type__name` and there is only one of those.
-      if (map.mapInsert(ref methods, member.name,
+      if (methods.insert(member.name,
             funcTypeOfSignature(ref prog, ref tm, ref ast, member))) {
         reportError(
           ref prog,
@@ -354,10 +354,10 @@ export function checkMethodKinds(
     switch (lookupKind(ref prog, prefix.name)) {
       case Option.Some { value: info }: {
         if (info.pausable) {
-          map.mapInsert(ref tm.pausableMethods, uint64(memberId), true);
+          tm.pausableMethods.insert(uint64(memberId), true);
         }
         if (info.providesTask) {
-          map.mapInsert(ref tm.taskMethods, uint64(memberId), true);
+          tm.taskMethods.insert(uint64(memberId), true);
         }
       }
       case Option.None: {
@@ -408,13 +408,13 @@ export function collectImplementedTraits(
         const argList = nodeAt(ref ast, annot.childA);
         let a: usize = 0;
         while (a < argList.childCount) {
-          vec.vecPush(ref args,
+          args.push(
             resolveTypeAnnotation(ref prog, ref tm, ref ast, childAt(ref ast, argList, a)));
           a += 1;
         }
       }
       const applied = applyTraitArgs(ref prog, t, ref args, annot.name, annot.sourceLoc);
-      vec.vecPush(ref traits, applied);
+      traits.push(applied);
       // `type Cat implements Mammal` where `trait Mammal extends Animal` claims
       // BOTH, so a `T implements Animal` bound is satisfied and Animal's
       // methods are required. The parent list is already flat - a trait's own
@@ -432,9 +432,9 @@ function extendParentTraits(ref prog: Program, ref out: Vec<TypeId>, traitId: Ty
     case Type.Trait { decl: d, methods: mm, typeParams: tp, extendsTraits: et }: {
       let i: usize = 0;
       while (i < et.len) {
-        const parent = vec.vecGet(ref et, i);
+        const parent = et.get(i);
         if (!containsTypeId(ref out, parent)) {
-          vec.vecPush(ref out, parent);
+          out.push(parent);
         }
         i += 1;
       }
@@ -446,7 +446,7 @@ function extendParentTraits(ref prog: Program, ref out: Vec<TypeId>, traitId: Ty
 function containsTypeId(ref xs: Vec<TypeId>, want: TypeId): bool {
   let i: usize = 0;
   while (i < xs.len) {
-    if (vec.vecGet(ref xs, i) == want) {
+    if (xs.get(i) == want) {
       return true;
     }
     i += 1;
@@ -468,7 +468,7 @@ export function checkTraitsSatisfied(
 ): void {
   let t: usize = 0;
   while (t < traits.len) {
-    const traitType = vec.vecGet(ref traits, t);
+    const traitType = traits.get(t);
     switch (typeAt(ref prog, traitType)) {
       case Type.Trait { decl: d, methods: mm, typeParams: tp, extendsTraits: et }: {
         let it: MapIter<string, TypeId> = map.mapIter(ref mm);
@@ -537,7 +537,7 @@ export function checkMethodsRequired(
 function anyTraitRequires(ref prog: Program, ref traits: Vec<TypeId>, name: string): bool {
   let t: usize = 0;
   while (t < traits.len) {
-    if (lookupMethod(ref prog, vec.vecGet(ref traits, t), name) != TYPE_ERROR_ID) {
+    if (lookupMethod(ref prog, traits.get(t), name) != TYPE_ERROR_ID) {
       return true;
     }
     t += 1;
@@ -583,8 +583,8 @@ function checkSignatureMatches(
           }
           let i: usize = 1;
           while (i < want.len) {
-            const w = vec.vecGet(ref want, i);
-            const g = vec.vecGet(ref got, i);
+            const w = want.get(i);
+            const g = got.get(i);
             if (w != g && w != TYPE_ERROR_ID && g != TYPE_ERROR_ID) {
               reportError(
                 ref prog,
@@ -690,9 +690,9 @@ function funcTypeOfSignature(
       // Same rule as an ordinary parameter: `ref` is part of the SIGNATURE, so
       // `ref self` is `ref Point` and a by-value receiver would not satisfy it.
       if (paramNode.flagA) {
-        vec.vecPush(ref params, internRef(ref prog, annotated));
+        params.push(internRef(ref prog, annotated));
       } else {
-        vec.vecPush(ref params, annotated);
+        params.push(annotated);
       }
       p += 1;
     }

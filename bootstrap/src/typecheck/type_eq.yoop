@@ -173,7 +173,7 @@ function sameTypeListStructurally(ref prog: Program, ref a: Vec<TypeId>, ref b: 
   }
   let i: usize = 0;
   while (i < a.len) {
-    if (!sameTypeStructurally(ref prog, vec.vecGet(ref a, i), vec.vecGet(ref b, i))) {
+    if (!sameTypeStructurally(ref prog, a.get(i), b.get(i))) {
       return false;
     }
     i += 1;

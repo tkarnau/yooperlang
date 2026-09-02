@@ -244,7 +244,7 @@ suite function anAssignmentRearmsTheObligation(): void {
 
 function probe(src: string, fnName: string, bindingName: string): Probe {
   let srcBuf: Vec<uint8> = vec.vecNew(src.len + 1);
-  vec.vecExtendFrom(ref srcBuf, intr.stringAsBytes(src));
+  srcBuf.extendFrom(intr.stringAsBytes(src));
 
   switch (moduleFromSource("test", "test.yoop", srcBuf)) {
     case LoadModuleResult.Err { error: e }: {
@@ -255,8 +255,8 @@ function probe(src: string, fnName: string, bindingName: string): Probe {
     case LoadModuleResult.Ok { value: m }: {
       let graph = singleModuleGraph(m);
       let prog = typecheckProgram(ref graph);
-      let mod = vec.vecGet(ref graph.modules, 0);
-      let tm = vec.vecGet(ref prog.modules, 0);
+      let mod = graph.modules.get(0);
+      let tm = prog.modules.get(0);
       const bodyId = bodyOfFunction(ref mod.ast, fnName);
       const declId = declNamedUnder(ref mod.ast, bodyId, bindingName);
       const returnId = findUnder(ref mod.ast, bodyId, ASTNodeKind.RETURN_STATEMENT, "");
@@ -275,7 +275,7 @@ function firstDiagnostic(ref prog: Program): string {
   if (prog.diagnostics.len == 0) {
     return "";
   }
-  return vec.vecGet(ref prog.diagnostics, 0).message;
+  return prog.diagnostics.get(0).message;
 }
 
 // The arena is FLAT, so finding a node is a linear scan rather than a walk.

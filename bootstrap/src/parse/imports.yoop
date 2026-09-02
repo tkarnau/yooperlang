@@ -83,7 +83,7 @@ function parseNamespaceClause(ref ps: ParserState): Result<string, ParsingError>
 function parseNamedClause(ref ps: ParserState, ref out: Vec<NodeId>): Result<usize, ParsingError> {
   ps.expect(TokenTags.LCURLY)?;
   while (ps.peek().tag == TokenTags.IDENT) {
-    vec.vecPush(ref out, parseImportSpecifier(ref ps)?);
+    out.push(parseImportSpecifier(ref ps)?);
     if (ps.peek().tag == TokenTags.COMMA) {
       ps.advance()?;
     }

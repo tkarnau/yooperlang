@@ -16,11 +16,11 @@ type Bag propagates<disposable> {
 
 function main(): int {
   let nums: Vec<int32> = vec.vecNew(2);
-  vec.vecPush(ref nums, 7);
-  vec.vecPush(ref nums, 8);
+  nums.push(7);
+  nums.push(8);
   let mapNums: Map<string, int32> = map.mapNew(2, map.stringKeyOps());
-  map.mapInsert(ref mapNums, "t", 9);
-  map.mapInsert(ref mapNums, "u", 10);
+  mapNums.insert("t", 9);
+  mapNums.insert("u", 10);
   const full: Bag = { xs: [1, 2, 3], v: nums, cb: double, m: mapNums };
   printf(`${full}\n`);
 

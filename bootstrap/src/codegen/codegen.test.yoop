@@ -40,19 +40,19 @@ suite function aUserExternAndALoweringShareOneDeclare(): void {
   }
   let test theory: Case = t.asserts("`malloc` is declared exactly once") {
     disposable e: Emitted = emitSource(src);
-    const n = occurrences(text.view(ref e.ir), "declare ptr @malloc(i64)");
+    const n = occurrences(e.ir.view(), "declare ptr @malloc(i64)");
     theory.isSuccessful = n == 1;
     theory.detail = `the module holds ${n} malloc declares, wanted 1 - clang rejects the second as an invalid redefinition`;
   }
   let test theory: Case = t.asserts("`free` is declared exactly once") {
     disposable e: Emitted = emitSource(src);
-    const n = occurrences(text.view(ref e.ir), "declare void @free(ptr)");
+    const n = occurrences(e.ir.view(), "declare void @free(ptr)");
     theory.isSuccessful = n == 1;
     theory.detail = `the module holds ${n} free declares, wanted 1`;
   }
   let test theory: Case = t.asserts("the lowering's own libc calls are still declared") {
     disposable e: Emitted = emitSource(src);
-    theory.isSuccessful = occurrences(text.view(ref e.ir), "declare ptr @memcpy(ptr, ptr, i64)") == 1;
+    theory.isSuccessful = occurrences(e.ir.view(), "declare ptr @memcpy(ptr, ptr, i64)") == 1;
     theory.detail = "memcpy is not declared, so the string builder would call a symbol nothing declares";
   }
 }
@@ -98,7 +98,7 @@ suite function compatibleMeansTheSameLlvmDeclaration(): void {
   let test theory: Case = t.asserts("two spellings of one LLVM signature are compatible") {
     disposable e: Emitted = emitSource(same);
     theory.isSuccessful = e.error.len == 0
-      && occurrences(text.view(ref e.ir), "declare ptr @malloc(i64)") == 1;
+      && occurrences(e.ir.view(), "declare ptr @malloc(i64)") == 1;
     theory.detail = `usize and uint64 both lower to i64, so this is one declaration; got "${e.error}"`;
   }
 }
@@ -111,8 +111,8 @@ suite function twoModulesDeclaringOneSymbolShareItsDeclare(): void {
   let test theory: Case = t.asserts("two agreeing declarations collapse to one line") {
     disposable e: Emitted = emitFixture("extern_agree.yoop");
     theory.isSuccessful = e.error.len == 0
-      && occurrences(text.view(ref e.ir), "declare i32 @puts(ptr)") == 1;
-    theory.detail = `error "${e.error}", ${occurrences(text.view(ref e.ir), "declare i32 @puts(ptr)")} puts declares; wanted no error and exactly 1`;
+      && occurrences(e.ir.view(), "declare i32 @puts(ptr)") == 1;
+    theory.detail = `error "${e.error}", ${occurrences(e.ir.view(), "declare i32 @puts(ptr)")} puts declares; wanted no error and exactly 1`;
   }
   let test theory: Case = t.asserts("two disagreeing declarations are refused by name") {
     disposable e: Emitted = emitFixture("extern_clash.yoop");
@@ -134,7 +134,7 @@ suite function anExternFromTheRuntimeLinksIt(): void {
     // codegen's own lowerings, and emitting it here would declare symbols this
     // program never calls.
     disposable e: Emitted = emitSource(src);
-    theory.isSuccessful = occurrences(text.view(ref e.ir), "declare ptr @yoop_ctx_alloc(i64, i64)") == 0;
+    theory.isSuccessful = occurrences(e.ir.view(), "declare ptr @yoop_ctx_alloc(i64, i64)") == 0;
     theory.detail = "a user extern from the runtime dragged in the allocator-context declares";
   }
   let test theory: Case = t.asserts("an ordinary header name asks for nothing") {
@@ -182,7 +182,7 @@ suite function anUnsignedComparePicksTheUnsignedPredicate(): void {
 
   let test theory: Case = t.asserts("an unsigned-backed value enum compares with `ugt`") {
     disposable e: Emitted = emitSource(ENUM);
-    theory.isSuccessful = occurrences(text.view(ref e.ir), "icmp ugt") == 1;
+    theory.isSuccessful = occurrences(e.ir.view(), "icmp ugt") == 1;
     theory.detail = `wanted one "icmp ugt" for an enum<uint8>; a signed predicate reads 200 as -56: ${e.error}`;
   }
 
@@ -190,7 +190,7 @@ suite function anUnsignedComparePicksTheUnsignedPredicate(): void {
 
   let test theory: Case = t.asserts("a signed operand still compares with `slt`") {
     disposable e: Emitted = emitSource(SIGNED);
-    theory.isSuccessful = occurrences(text.view(ref e.ir), "icmp slt") == 1;
+    theory.isSuccessful = occurrences(e.ir.view(), "icmp slt") == 1;
     theory.detail = `wanted one "icmp slt" for an int32: ${e.error}`;
   }
 
@@ -198,7 +198,7 @@ suite function anUnsignedComparePicksTheUnsignedPredicate(): void {
 
   let test theory: Case = t.asserts("a uint8 against a literal above 127 compares with `ult`") {
     disposable e: Emitted = emitSource(UNSIGNED);
-    theory.isSuccessful = occurrences(text.view(ref e.ir), "icmp ult") == 1;
+    theory.isSuccessful = occurrences(e.ir.view(), "icmp ult") == 1;
     theory.detail = `wanted one "icmp ult" for a uint8: ${e.error}`;
   }
 }
@@ -214,18 +214,18 @@ suite function anIterableForInDrivesOffTheTag(): void {
     disposable e: Emitted = emitSource(ITER);
     // The DEFINE spells its receiver `%self.arg`, so only the call site
     // matches an anonymous slot - which is where the iterator was spilled.
-    theory.isSuccessful = occurrences(text.view(ref e.ir), "__Counter__next(ptr %sc.") == 1;
+    theory.isSuccessful = occurrences(e.ir.view(), "__Counter__next(ptr %sc.") == 1;
     theory.detail = `wanted one static dispatch to Counter's next, codegen said: ${e.error}`;
   }
   let test theory: Case = t.asserts("the loop condition is a TAG test against Yield") {
     disposable e: Emitted = emitSource(ITER);
-    theory.isSuccessful = occurrences(text.view(ref e.ir), "icmp eq i32 %t") >= 1;
+    theory.isSuccessful = occurrences(e.ir.view(), "icmp eq i32 %t") >= 1;
     theory.detail = "no tag comparison in the emitted loop";
   }
   let test theory: Case = t.asserts("the element is read out of the Yield payload") {
     disposable e: Emitted = emitSource(ITER);
     theory.isSuccessful =
-      occurrences(text.view(ref e.ir), "__IterStep_int32__Yield") >= 1;
+      occurrences(e.ir.view(), "__IterStep_int32__Yield") >= 1;
     theory.detail = "the loop body never addresses the Yield case struct";
   }
 }
@@ -237,18 +237,18 @@ suite function aPropagatedDisposalGepsIntoEachField(): void {
 
   let test theory: Case = t.asserts("one close per CARRYING field, and no more") {
     disposable e: Emitted = emitSource(PROP);
-    const n = occurrences(text.view(ref e.ir), "__Res__close(ptr %t");
+    const n = occurrences(e.ir.view(), "__Res__close(ptr %t");
     theory.isSuccessful = n == 2;
     theory.detail = `wanted 2 propagated close calls, got ${n} - the plain field must not owe one`;
   }
   let test theory: Case = t.asserts("the receiver is a gep into the binding, not the binding") {
     disposable e: Emitted = emitSource(PROP);
-    theory.isSuccessful = occurrences(text.view(ref e.ir), "__Pair, ptr %p.") >= 2;
+    theory.isSuccessful = occurrences(e.ir.view(), "__Pair, ptr %p.") >= 2;
     theory.detail = "the disposal did not address the binding's fields";
   }
   let test theory: Case = t.asserts("the binding itself is never the receiver") {
     disposable e: Emitted = emitSource(PROP);
-    theory.isSuccessful = occurrences(text.view(ref e.ir), "close(ptr %p.") == 0;
+    theory.isSuccessful = occurrences(e.ir.view(), "close(ptr %p.") == 0;
     theory.detail = "a propagating type has no method of its own, so calling it on the binding would name a symbol nothing defines";
   }
 }
@@ -264,14 +264,14 @@ suite function aVariantTypedFieldIsReadNotConstructed(): void {
   let test theory: Case = t.asserts("the field read extracts, it does not build a tag") {
     disposable e: Emitted = emitSource(FIELD);
     theory.isSuccessful =
-      occurrences(text.view(ref e.ir), "= extractvalue %struct.") >= 1;
+      occurrences(e.ir.view(), "= extractvalue %struct.") >= 1;
     theory.detail = "the variant-typed field was not read out of the struct at all";
   }
   let test theory: Case = t.asserts("main builds exactly ONE Step value") {
     disposable e: Emitted = emitSource(FIELD);
     // Two tag stores would mean the read fabricated a second one. The literal
     // `Step.Num { n: 42 }` is the only Step this program constructs.
-    const n = occurrences(text.view(ref e.ir), "store i32 1, ptr %t");
+    const n = occurrences(e.ir.view(), "store i32 1, ptr %t");
     theory.isSuccessful = n == 1;
     theory.detail = `wanted 1 tag store for the one constructor, got ${n}`;
   }
@@ -285,7 +285,7 @@ suite function aTopOfRangeUsizeConstKeepsItsValue(): void {
     disposable e: Emitted = emitSource(
       "const BIG: usize = 18446744073709551615;\nfunction main(): usize { return BIG; }\n"
     );
-    theory.isSuccessful = occurrences(text.view(ref e.ir), "18446744073709551615") >= 1;
+    theory.isSuccessful = occurrences(e.ir.view(), "18446744073709551615") >= 1;
     theory.detail = "the constant was not emitted at its declared value";
   }
 }
@@ -310,7 +310,7 @@ suite function anAsyncFunctionIsACoroutine(): void {
 
   let test theory: Case = t.asserts("it carries the coroutine ABI and attribute") {
     disposable e: Emitted = emitSource(src);
-    theory.isSuccessful = occurrences(text.view(ref e.ir),
+    theory.isSuccessful = occurrences(e.ir.view(),
       "define ptr @test__double(i32 %x.arg, ptr %__ret) presplitcoroutine {") == 1;
     theory.detail = `codegen said "${e.error}"; the define line is not the async one`;
   }
@@ -318,7 +318,7 @@ suite function anAsyncFunctionIsACoroutine(): void {
   // leftover intrinsics, so this is not a cosmetic assertion.
   let test theory: Case = t.asserts("the frame is opened before anything else") {
     disposable e: Emitted = emitSource(src);
-    const ir = text.view(ref e.ir);
+    const ir = e.ir.view();
     theory.isSuccessful = occurrences(ir, "call token @llvm.coro.id(") == 1 &&
       occurrences(ir, "call ptr @llvm.coro.begin(") == 1 &&
       occurrences(ir, "call i64 @llvm.coro.size.i64()") == 1;
@@ -330,7 +330,7 @@ suite function anAsyncFunctionIsACoroutine(): void {
   // needed a buffer of its own.
   let test theory: Case = t.asserts("the parameter alloca sits AFTER coro.begin") {
     disposable e: Emitted = emitSource(src);
-    const ir = text.view(ref e.ir);
+    const ir = e.ir.view();
     const begin = text.indexOfFrom(ir, "llvm.coro.begin", 0);
     const alloca = text.indexOfFrom(ir, "%x.1.addr = alloca", 0);
     theory.isSuccessful = begin < alloca && alloca < ir.len;
@@ -338,14 +338,14 @@ suite function anAsyncFunctionIsACoroutine(): void {
   }
   let test theory: Case = t.asserts("a `return` stores to the caller's slot rather than returning") {
     disposable e: Emitted = emitSource(src);
-    const ir = text.view(ref e.ir);
+    const ir = e.ir.view();
     theory.isSuccessful = occurrences(ir, "store i32 %t6, ptr %__ret") == 1 &&
       occurrences(ir, "ret ptr %t4") == 1;
     theory.detail = "the return does not go through the result slot";
   }
   let test theory: Case = t.asserts("the trailer frees the frame and ends the coroutine") {
     disposable e: Emitted = emitSource(src);
-    const ir = text.view(ref e.ir);
+    const ir = e.ir.view();
     theory.isSuccessful = occurrences(ir, "call i8 @llvm.coro.suspend(token none, i1 true)") == 1 &&
       occurrences(ir, "call ptr @llvm.coro.free(") == 1 &&
       occurrences(ir, "call i1 @llvm.coro.end(") == 1;
@@ -357,7 +357,7 @@ suite function anAsyncFunctionIsACoroutine(): void {
     disposable e: Emitted = emitSource(
       `${ASYNC_KIND}async a(): int32 { return 1; } async b(): int32 { return 2; }`
     );
-    const ir = text.view(ref e.ir);
+    const ir = e.ir.view();
     theory.isSuccessful = occurrences(ir, "declare i1 @llvm.coro.done(ptr)") == 1 &&
       occurrences(ir, "declare ptr @malloc(i64)") == 1;
     theory.detail = "an intrinsic is declared more than once - clang rejects the second";
@@ -368,7 +368,7 @@ suite function anAsyncFunctionIsACoroutine(): void {
     disposable e: Emitted = emitSource(
       `${ASYNC_KIND}async a(): int32 { return 1; } function plain(): int32 { return 2; }`
     );
-    const ir = text.view(ref e.ir);
+    const ir = e.ir.view();
     theory.isSuccessful = occurrences(ir, "define i32 @test__plain()") == 1 &&
       occurrences(ir, "presplitcoroutine") == 1;
     theory.detail = "the plain function did not keep the ordinary ABI";
@@ -380,7 +380,7 @@ suite function awaitDrivesTheCalleeAndPropagatesItsSuspend(): void {
 
   let test theory: Case = t.asserts("the call passes a result slot and takes a handle back") {
     disposable e: Emitted = emitSource(src);
-    theory.isSuccessful = occurrences(text.view(ref e.ir),
+    theory.isSuccessful = occurrences(e.ir.view(),
       "call ptr @test__inner(ptr %sc.1.addr)") == 1;
     theory.detail = `codegen said "${e.error}"; the async call site is not the ABI shape`;
   }
@@ -388,7 +388,7 @@ suite function awaitDrivesTheCalleeAndPropagatesItsSuspend(): void {
   // past a callee that has not finished.
   let test theory: Case = t.asserts("it tests `done`, and resumes on the way round") {
     disposable e: Emitted = emitSource(src);
-    const ir = text.view(ref e.ir);
+    const ir = e.ir.view();
     theory.isSuccessful = occurrences(ir, "call i1 @llvm.coro.done(ptr %t") == 1 &&
       occurrences(ir, "call void @llvm.coro.resume(ptr %t") == 1;
     theory.detail = "the await has no drive loop";
@@ -398,13 +398,13 @@ suite function awaitDrivesTheCalleeAndPropagatesItsSuspend(): void {
   // so `coro.done` on the caller stays false.
   let test theory: Case = t.asserts("the caller suspends itself when the callee has not finished") {
     disposable e: Emitted = emitSource(src);
-    const ir = text.view(ref e.ir);
+    const ir = e.ir.view();
     theory.isSuccessful = occurrences(ir, "call i8 @llvm.coro.suspend(token none, i1 false)") == 1;
     theory.detail = "there is no non-final suspend, so a callee's suspend would not propagate";
   }
   let test theory: Case = t.asserts("the result is read BEFORE the frame is destroyed") {
     disposable e: Emitted = emitSource(src);
-    const ir = text.view(ref e.ir);
+    const ir = e.ir.view();
     const load = text.indexOfFrom(ir, "load i32, ptr %sc.1.addr", 0);
     const destroy = text.indexOfFrom(ir, "call void @llvm.coro.destroy(", 0);
     theory.isSuccessful = load < destroy && destroy < ir.len;
@@ -421,14 +421,14 @@ suite function theSuspendPrimitiveIsABareSuspend(): void {
 
   let test theory: Case = t.asserts("it emits a suspend and no call at all") {
     disposable e: Emitted = emitSource(src);
-    const ir = text.view(ref e.ir);
+    const ir = e.ir.view();
     theory.isSuccessful = occurrences(ir, "call i8 @llvm.coro.suspend(token none, i1 false)") == 1 &&
       occurrences(ir, "@test__suspendNow") == 0;
     theory.detail = `codegen said "${e.error}"; an intrinsic must not become a call`;
   }
   let test theory: Case = t.asserts("it does not test `done` - there is nothing being driven") {
     disposable e: Emitted = emitSource(src);
-    theory.isSuccessful = occurrences(text.view(ref e.ir), "call i1 @llvm.coro.done(ptr %t") == 0;
+    theory.isSuccessful = occurrences(e.ir.view(), "call i1 @llvm.coro.done(ptr %t") == 0;
     theory.detail = "a bare suspend grew a drive loop";
   }
 }
@@ -447,7 +447,7 @@ suite function theTaskHandleStructMatchesTheRuntimeLayout(): void {
 
   let test theory: Case = t.asserts("the handle is the prefix, then the result, then the args") {
     disposable e: Emitted = emitSource(src);
-    theory.isSuccessful = occurrences(text.view(ref e.ir),
+    theory.isSuccessful = occurrences(e.ir.view(),
       "%Task_test__worker = type { ptr, i8, [3 x i8], i32, ptr, ptr, ptr, ptr, i32, i32 }") == 1;
     theory.detail = `codegen said "${e.error}"; the handle layout is not the runtime's`;
   }
@@ -455,7 +455,7 @@ suite function theTaskHandleStructMatchesTheRuntimeLayout(): void {
   // not quietly turn it back into a function.
   let test theory: Case = t.asserts("the body is still emitted as a coroutine") {
     disposable e: Emitted = emitSource(src);
-    theory.isSuccessful = occurrences(text.view(ref e.ir),
+    theory.isSuccessful = occurrences(e.ir.view(),
       "define ptr @test__worker(i32 %n.arg, ptr %__ret) presplitcoroutine {") == 1;
     theory.detail = "a task body is not a coroutine";
   }
@@ -469,7 +469,7 @@ suite function eachTaskGetsAThunk(): void {
 
   let test theory: Case = t.asserts("it loads the args out of the handle") {
     disposable e: Emitted = emitSource(src);
-    const ir = text.view(ref e.ir);
+    const ir = e.ir.view();
     theory.isSuccessful = occurrences(ir, "define void @test__worker__thunk(ptr %ts) {") == 1 &&
       occurrences(ir, "%t1 = getelementptr inbounds %Task_test__worker, ptr %ts, i32 0, i32 9") == 1;
     theory.detail = `codegen said "${e.error}"; the thunk does not unpack its arguments`;
@@ -479,7 +479,7 @@ suite function eachTaskGetsAThunk(): void {
   // keep alive across a suspend.
   let test theory: Case = t.asserts("the body is handed the handle's own result slot") {
     disposable e: Emitted = emitSource(src);
-    const ir = text.view(ref e.ir);
+    const ir = e.ir.view();
     theory.isSuccessful = occurrences(ir, "%t3 = getelementptr inbounds %Task_test__worker, ptr %ts, i32 0, i32 8") == 1 &&
       occurrences(ir, "%t4 = call ptr @test__worker(i32 %t2, ptr %t3)") == 1;
     theory.detail = "the thunk does not pass the result slot as the body's __ret";
@@ -489,7 +489,7 @@ suite function eachTaskGetsAThunk(): void {
   // task blocked on I/O gives its worker thread back.
   let test theory: Case = t.asserts("it stashes the handle and settles rather than driving") {
     disposable e: Emitted = emitSource(src);
-    const ir = text.view(ref e.ir);
+    const ir = e.ir.view();
     theory.isSuccessful = occurrences(ir, "%t5 = getelementptr inbounds %Task_test__worker, ptr %ts, i32 0, i32 6") == 1 &&
       occurrences(ir, "call void @yoop_task_settle(ptr %ts)") == 1 &&
       occurrences(ir, "call void @llvm.coro.resume(ptr %t4)") == 0;
@@ -504,7 +504,7 @@ suite function theThreeBindingFormsDifferInStorage(): void {
     disposable e: Emitted = emitSource(
       `${TASK_KINDS}task w(): int32 { return 1; } function main(): int32 { pooled h = w(); return 0; }`
     );
-    const ir = text.view(ref e.ir);
+    const ir = e.ir.view();
     theory.isSuccessful = occurrences(ir, "call ptr @yoop_task_alloc(i64 %t") == 1 &&
       occurrences(ir, "call void @yoop_task_release(ptr %t") == 1;
     theory.detail = `codegen said "${e.error}"; a pooled handle is not refcounted on the heap`;
@@ -513,7 +513,7 @@ suite function theThreeBindingFormsDifferInStorage(): void {
     disposable e: Emitted = emitSource(
       `${TASK_KINDS}task w(): int32 { return 1; } function main(): int32 { joined d = w(); return 0; }`
     );
-    const ir = text.view(ref e.ir);
+    const ir = e.ir.view();
     theory.isSuccessful = occurrences(ir, "alloca %Task_test__w") == 1 &&
       occurrences(ir, "call ptr @yoop_task_alloc") == 0 &&
       occurrences(ir, "call void @yoop_task_wait(ptr %t") == 1 &&
@@ -527,7 +527,7 @@ suite function theThreeBindingFormsDifferInStorage(): void {
     disposable e: Emitted = emitSource(
       `${TASK_KINDS}task w(): int32 { return 1; } function main(): int32 { const v: int32 = w(); return v; }`
     );
-    const ir = text.view(ref e.ir);
+    const ir = e.ir.view();
     theory.isSuccessful = occurrences(ir, "call void @yoop_task_submit(ptr %sc.1.addr") == 1 &&
       occurrences(ir, "call void @yoop_task_wait(ptr %sc.1.addr)") == 1 &&
       occurrences(ir, "%v.2.addr = alloca i32") == 1;
@@ -543,7 +543,7 @@ suite function waitJoinsAndReadsTheResultSlot(): void {
 
   let test theory: Case = t.asserts("it blocks, then loads from byte 48") {
     disposable e: Emitted = emitSource(src);
-    const ir = text.view(ref e.ir);
+    const ir = e.ir.view();
     theory.isSuccessful = occurrences(ir, "call void @yoop_task_wait(ptr %t") == 1 &&
       occurrences(ir, "= getelementptr inbounds i8, ptr %t") == 1 &&
       occurrences(ir, ", i64 48") == 1;
@@ -560,7 +560,7 @@ suite function mainInstallsAndTearsDownTheScheduler(): void {
     disposable e: Emitted = emitSource(
       `${TASK_KINDS}task w(): int32 { return 1; } function main(): int32 { pooled h = w(); return 0; }`
     );
-    const ir = text.view(ref e.ir);
+    const ir = e.ir.view();
     theory.isSuccessful = occurrences(ir, "call void @yoop_runtime_init()") == 1 &&
       occurrences(ir,
         "call void @yoop_runtime_set_coro_ops(ptr @yoop_coro_resume, ptr @yoop_coro_destroy, ptr @yoop_coro_done)") == 1 &&
@@ -573,7 +573,7 @@ suite function mainInstallsAndTearsDownTheScheduler(): void {
   // compiling fourteen C files.
   let test theory: Case = t.asserts("a program with NO task installs nothing") {
     disposable e: Emitted = emitSource("function main(): int32 { return 0; }");
-    const ir = text.view(ref e.ir);
+    const ir = e.ir.view();
     theory.isSuccessful = occurrences(ir, "yoop_runtime_init") == 0 &&
       occurrences(ir, "yoop_coro_resume") == 0 && !e.needsRuntime;
     theory.detail = "a task-free program grew the scheduler";
@@ -608,7 +608,7 @@ suite function anOrdinaryFunctionMayShareAnIntrinsicsName(): void {
     disposable e: Emitted = emitSource(
       `${INTRINSICS}function main(): int32 { let xs: int32[] = [1, 2]; ctxFree(xs); return 0; }`
     );
-    const ir = text.view(ref e.ir);
+    const ir = e.ir.view();
     theory.isSuccessful = occurrences(ir, "call void @yoop_ctx_free(ptr ") == 1 &&
       occurrences(ir, "@test__ctxFree") == 0;
     theory.detail = `codegen said "${e.error}"`;
@@ -620,7 +620,7 @@ suite function anOrdinaryFunctionMayShareAnIntrinsicsName(): void {
   // namespace is still the intrinsic.
   let test theory: Case = t.asserts("an unqualified call reaches the module's own function") {
     disposable e: Emitted = emitFixture("intrinsic_shadow.yoop");
-    const ir = text.view(ref e.ir);
+    const ir = e.ir.view();
     // Two hits: the `define` line and the call. Matched without the module
     // id, which carries the module's POSITION in the graph and so moves with
     // whatever else the graph happens to hold.
@@ -630,7 +630,7 @@ suite function anOrdinaryFunctionMayShareAnIntrinsicsName(): void {
 
   let test theory: Case = t.asserts("and the qualified one in the same file still reaches the intrinsic") {
     disposable e: Emitted = emitFixture("intrinsic_shadow.yoop");
-    const ir = text.view(ref e.ir);
+    const ir = e.ir.view();
     theory.isSuccessful = occurrences(ir, "call void @yoop_ctx_free(ptr ") == 1 &&
       occurrences(ir, "call ptr @yoop_ctx_alloc(") == 1;
     theory.detail = `codegen said "${e.error}"`;
@@ -659,7 +659,7 @@ suite function theTaskIntrinsicsLowerToRuntimeCalls(): void {
 
   let test theory: Case = t.asserts("each of the three lowers to its own runtime call") {
     disposable e: Emitted = emitSource(src);
-    const ir = text.view(ref e.ir);
+    const ir = e.ir.view();
     theory.isSuccessful = occurrences(ir, "call i32 @yoop_task_is_done(ptr ") == 1 &&
       occurrences(ir, "call i32 @yoop_task_arm_complete(ptr ") == 1 &&
       occurrences(ir, "call void @yoop_task_cancel(ptr ") == 1;
@@ -670,7 +670,7 @@ suite function theTaskIntrinsicsLowerToRuntimeCalls(): void {
   // module that only ever holds a handle somebody else spawned still polls it.
   let test theory: Case = t.asserts("the declares are emitted with the right signatures") {
     disposable e: Emitted = emitSource(src);
-    const ir = text.view(ref e.ir);
+    const ir = e.ir.view();
     theory.isSuccessful = occurrences(ir, "declare i32 @yoop_task_is_done(ptr)") == 1 &&
       occurrences(ir, "declare i32 @yoop_task_arm_complete(ptr)") == 1 &&
       occurrences(ir, "declare void @yoop_task_cancel(ptr)") == 1 &&
@@ -685,7 +685,7 @@ suite function theTaskIntrinsicsLowerToRuntimeCalls(): void {
     disposable e: Emitted = emitSource(
       `${TASK_KINDS}task w(): int32 { return 1; } function main(): int32 { pooled h = w(); return 0; }`
     );
-    const ir = text.view(ref e.ir);
+    const ir = e.ir.view();
     theory.isSuccessful = occurrences(ir, "@yoop_task_is_done") == 0 &&
       occurrences(ir, "@yoop_task_wait_until_ns") == 0;
     theory.detail = `codegen said "${e.error}"`;
@@ -700,7 +700,7 @@ suite function waitUntilBuildsTheWaitResultVariant(): void {
 
   let test theory: Case = t.asserts("it calls the bounded wait with a 64-bit deadline") {
     disposable e: Emitted = emitSource(src);
-    theory.isSuccessful = occurrences(text.view(ref e.ir), "call i32 @yoop_task_wait_until_ns(ptr ") == 1;
+    theory.isSuccessful = occurrences(e.ir.view(), "call i32 @yoop_task_wait_until_ns(ptr ") == 1;
     theory.detail = `codegen said "${e.error}"`;
   }
 
@@ -709,7 +709,7 @@ suite function waitUntilBuildsTheWaitResultVariant(): void {
   // value" - which is the safe reading of any extension.
   let test theory: Case = t.asserts("the outcome dispatches through a two-case switch with a default") {
     disposable e: Emitted = emitSource(src);
-    const ir = text.view(ref e.ir);
+    const ir = e.ir.view();
     theory.isSuccessful = occurrences(ir, "switch i32 %t") == 1 &&
       occurrences(ir, "i32 0, label %L") == 1 &&
       occurrences(ir, "i32 1, label %L") == 1;
@@ -720,7 +720,7 @@ suite function waitUntilBuildsTheWaitResultVariant(): void {
   // universal, so this site never names the task function the handle came from.
   let test theory: Case = t.asserts("the Done arm reads the result at byte 48 of the handle") {
     disposable e: Emitted = emitSource(src);
-    const ir = text.view(ref e.ir);
+    const ir = e.ir.view();
     theory.isSuccessful = occurrences(ir, "getelementptr inbounds i8, ptr %t") > 0 &&
       occurrences(ir, ", i64 48") == 1;
     theory.detail = `codegen said "${e.error}"`;
@@ -747,7 +747,7 @@ suite function aVtableValueCarriesACtxSlot(): void {
 
   let test theory: Case = t.asserts("the type definition is one ptr per slot, plus the ctx") {
     disposable e: Emitted = emitSource(`${VT}function main(): int32 { return 0; }`);
-    const ir = text.view(ref e.ir);
+    const ir = e.ir.view();
     theory.isSuccessful = occurrences(ir, "%vtable.test__D = type { ptr, ptr }") == 1;
     theory.detail = `codegen said "${e.error}"; wanted a two-pointer vtable definition`;
   }
@@ -756,7 +756,7 @@ suite function aVtableValueCarriesACtxSlot(): void {
     disposable e: Emitted = emitSource(
       `${VT}function main(): int32 { let c: C = { v: 7 }; let d: D = D.from(ref c); return 0; }`
     );
-    const ir = text.view(ref e.ir);
+    const ir = e.ir.view();
     theory.isSuccessful =
       occurrences(ir, "%vtable.test__D, ptr %sc.3.addr, i32 0, i32 0") == 1 &&
       occurrences(ir, "store ptr %c.2.addr, ptr %t3") == 1 &&
@@ -771,7 +771,7 @@ suite function aVtableValueCarriesACtxSlot(): void {
     disposable e: Emitted = emitSource(
       `${VT}function main(): int32 { let c: C = { v: 7 }; let d: D = D.from(ref c); return 0; }`
     );
-    const ir = text.view(ref e.ir);
+    const ir = e.ir.view();
     theory.isSuccessful = occurrences(ir, "yoop_fromfn_shim") == 0;
     theory.detail = `codegen said "${e.error}"; an erasure from a struct grew a shim`;
   }
@@ -780,7 +780,7 @@ suite function aVtableValueCarriesACtxSlot(): void {
     disposable e: Emitted = emitSource(
       `${VT}function main(): int32 { let c: C = { v: 7 }; let d: D = D.from(ref c); return D.handle(ref d, 1); }`
     );
-    const ir = text.view(ref e.ir);
+    const ir = e.ir.view();
     theory.isSuccessful =
       occurrences(ir, "%vtable.test__D, ptr %d.4.addr, i32 0, i32 0") == 1 &&
       occurrences(ir, "%vtable.test__D, ptr %d.4.addr, i32 0, i32 1") == 1 &&
@@ -799,7 +799,7 @@ suite function fromFnNullsCtxAndEmitsOneShimPerTarget(): void {
     disposable e: Emitted = emitSource(
       `${VT}function main(): int32 { let v: PV = PV.fromFn(isPos); return 0; }`
     );
-    const ir = text.view(ref e.ir);
+    const ir = e.ir.view();
     theory.isSuccessful =
       occurrences(ir, "store ptr null, ptr %t") == 1 &&
       occurrences(ir, "define i1 @yoop_fromfn_shim__test__isPos(ptr %ctx, i32 %a0) {") == 1 &&
@@ -812,7 +812,7 @@ suite function fromFnNullsCtxAndEmitsOneShimPerTarget(): void {
     disposable e: Emitted = emitSource(
       `${VT}function main(): int32 { let a: PV = PV.fromFn(isPos); let b: PV = PV.fromFn(isPos); return 0; }`
     );
-    const ir = text.view(ref e.ir);
+    const ir = e.ir.view();
     theory.isSuccessful =
       occurrences(ir, "define i1 @yoop_fromfn_shim__test__isPos") == 1 &&
       occurrences(ir, "store ptr @yoop_fromfn_shim__test__isPos, ptr %t") == 2;
@@ -828,7 +828,7 @@ suite function fromFnNullsCtxAndEmitsOneShimPerTarget(): void {
 suite function aVoidMainCarriesCsEntryPointSignature(): void {
   let test theory: Case = t.asserts("a void main is `define i32 @main()` returning 0") {
     disposable e: Emitted = emitSource("function main(): void { }");
-    const ir = text.view(ref e.ir);
+    const ir = e.ir.view();
     theory.isSuccessful = occurrences(ir, "define i32 @main()") == 1 &&
       occurrences(ir, "ret i32 0") == 1 &&
       occurrences(ir, "define void @main") == 0;
@@ -840,7 +840,7 @@ suite function aVoidMainCarriesCsEntryPointSignature(): void {
   // does not verify.
   let test theory: Case = t.asserts("an explicit `return;` in a void main returns 0 too") {
     disposable e: Emitted = emitSource("function main(): void { return; }");
-    const ir = text.view(ref e.ir);
+    const ir = e.ir.view();
     theory.isSuccessful = occurrences(ir, "define i32 @main()") == 1 &&
       occurrences(ir, "ret i32 0") == 1 &&
       occurrences(ir, "ret void") == 0;
@@ -851,7 +851,7 @@ suite function aVoidMainCarriesCsEntryPointSignature(): void {
     disposable e: Emitted = emitSource(
       "function f(): void { return; } function main(): int32 { f(); return 0; }"
     );
-    const ir = text.view(ref e.ir);
+    const ir = e.ir.view();
     theory.isSuccessful = occurrences(ir, "define void @test__f()") == 1 &&
       occurrences(ir, "ret void") == 1;
     theory.detail = `codegen said "${e.error}"; the entry point's signature leaked into an ordinary function`;
@@ -859,7 +859,7 @@ suite function aVoidMainCarriesCsEntryPointSignature(): void {
 
   let test theory: Case = t.asserts("a main DECLARED int32 is unchanged") {
     disposable e: Emitted = emitSource("function main(): int32 { return 7; }");
-    const ir = text.view(ref e.ir);
+    const ir = e.ir.view();
     theory.isSuccessful = occurrences(ir, "define i32 @main()") == 1 &&
       occurrences(ir, "ret i32 7") == 1;
     theory.detail = `codegen said "${e.error}"`;
@@ -884,7 +884,7 @@ suite function trackHeapIsOffUnlessAskedFor(): void {
 
   disposable off: Emitted = emitSourceWith(SRC, { trackHeap: false });
   let test theory: Case = t.asserts("an ordinary build emits none of it") {
-    const ir = text.view(ref off.ir);
+    const ir = off.ir.view();
     theory.isSuccessful = occurrences(ir, "yoop_diag") == 0 && occurrences(ir, "atexit") == 0;
     theory.detail = `codegen said "${off.error}"; a build that did not ask still pays for it`;
   }
@@ -893,7 +893,7 @@ suite function trackHeapIsOffUnlessAskedFor(): void {
   // Through atexit rather than before each `ret`, so an `exit()` or an abort
   // prints the totals too.
   let test theory: Case = t.asserts("main installs the dump as an atexit handler") {
-    const ir = text.view(ref on.ir);
+    const ir = on.ir.view();
     theory.isSuccessful = occurrences(ir, "call i32 @atexit(ptr @yoop_diag_dump)") == 1 &&
       occurrences(ir, "declare void @yoop_diag_dump()") == 1;
     theory.detail = `codegen said "${on.error}"; the dump is never installed`;
@@ -916,7 +916,7 @@ suite function trackHeapIsOffUnlessAskedFor(): void {
 suite function emittedIrCarriesDwarfMetadata(): void {
   disposable e: Emitted = emitSource(
     "function pow(a: int32, b: int32): int32 { return a * b; }\nfunction main(): int32 { return pow(2, 3); }");
-  const ir = text.view(ref e.ir);
+  const ir = e.ir.view();
 
   let test theory: Case = t.asserts("the two named nodes are emitted") {
     theory.isSuccessful = occurrences(ir, "!llvm.dbg.cu = !{") == 1 &&
@@ -964,7 +964,7 @@ suite function emittedIrCarriesDwarfMetadata(): void {
 suite function dwarfDescribesTheLayoutCodegenEmits(): void {
   disposable e: Emitted = emitSource(
     "type Point { x: int32, y: int32 }\nvariant Shape { Dot, Rect { w: int32 } }\nfunction main(): int32 {\n  let pt: Point = { x: 1, y: 2 };\n  let who: string = \"t\";\n  let nums: int32[] = [1, 2];\n  let shape: Shape = Shape.Rect { w: 3 };\n  return pt.x;\n}");
-  const ir = text.view(ref e.ir);
+  const ir = e.ir.view();
 
   // A struct: one member per field, at the byte offset the layout gives it -
   // in BITS, which is DWARF's unit.
@@ -1019,7 +1019,7 @@ suite function dwarfDescribesTheLayoutCodegenEmits(): void {
 suite function dwarfDescribesParametersAndSignatures(): void {
   disposable e: Emitted = emitSource(
     "function twice(n: int32): int32 { return n * 2; }\nfunction main(): int32 { return twice(4); }");
-  const ir = text.view(ref e.ir);
+  const ir = e.ir.view();
 
   let test theory: Case = t.asserts("a parameter is a DILocalVariable with a 1-based arg index") {
     theory.isSuccessful = occurrences(ir, "!DILocalVariable(name: \"n\", arg: 1") == 1;
@@ -1040,7 +1040,7 @@ suite function dwarfDescribesParametersAndSignatures(): void {
 suite function dwarfTagsOnlyWhereAnInstructionEnds(): void {
   disposable e: Emitted = emitSource(
     "function classify(n: int32): int32 { let r: int32 = 0; switch (n) { case 0: { r = 1; } case 1, 2: { r = 2; } default: { r = 3; } } return r; }\nfunction main(): int32 { return classify(1); }");
-  const ir = text.view(ref e.ir);
+  const ir = e.ir.view();
 
   let test theory: Case = t.asserts("a label is not tagged") {
     theory.isSuccessful = occurrences(ir, ":, !dbg") == 0;
@@ -1080,7 +1080,7 @@ suite function dwarfLaysOutCompositesTheWayLlvmDoes(): void {
   let test theory: Case = t.asserts("a struct member is padded to its own alignment") {
     disposable e: Emitted = emitSource(
       "type S { flag: int8, big: int64 }\nfunction main(): int32 {\n  let s: S = { flag: 1, big: 2 };\n  return int32(s.big);\n}");
-    const ir = text.view(ref e.ir);
+    const ir = e.ir.view();
     theory.isSuccessful =
       occurrences(ir, "name: \"S\", size: 128, align: 64") == 1 &&
       occurrences(ir, "name: \"flag\", scope: !") == 1 &&
@@ -1095,7 +1095,7 @@ suite function dwarfLaysOutCompositesTheWayLlvmDoes(): void {
   let test theory: Case = t.asserts("a named union puts every member at offset 0") {
     disposable e: Emitted = emitSource(
       "union Color { rgba: uint32, chans: uint16 }\nfunction main(): int32 {\n  let c: Color = { rgba: 7 };\n  return int32(c.rgba);\n}");
-    const ir = text.view(ref e.ir);
+    const ir = e.ir.view();
     theory.isSuccessful =
       occurrences(ir, "!DICompositeType(tag: DW_TAG_union_type, name: \"Color\", size: 32, align: 32") == 1 &&
       occurrences(ir, "name: \"rgba\", scope: !") == 1 &&
@@ -1110,7 +1110,7 @@ suite function dwarfLaysOutCompositesTheWayLlvmDoes(): void {
   let test theory: Case = t.asserts("a named vtable is ctx followed by one word per slot") {
     disposable e: Emitted = emitSource(
       "trait Handler {\n  function handle(ref self, n: int32): int32;\n  function reset(ref self): int32;\n}\ntype Impl implements Handler {\n  k: int32,\n  function handle(ref self, n: int32): int32 { return n; }\n  function reset(ref self): int32 { return 0; }\n}\nvtable Dispatcher for Handler {\n  handle: (n: int32) => int32,\n  reset: () => int32,\n}\nfunction main(): int32 {\n  let im: Impl = { k: 1 };\n  let d: Dispatcher = Dispatcher.from(ref im);\n  return Dispatcher.handle(ref d, 0);\n}");
-    const ir = text.view(ref e.ir);
+    const ir = e.ir.view();
     theory.isSuccessful =
       occurrences(ir, "name: \"Dispatcher\", size: 192, align: 64") == 1 &&
       occurrences(ir, "name: \"ctx\", scope: !") == 1 &&
@@ -1126,7 +1126,7 @@ suite function dwarfLaysOutCompositesTheWayLlvmDoes(): void {
   let test theory: Case = t.asserts("a value enum is a named typedef over its underlying") {
     disposable e: Emitted = emitSource(
       "enum Level { Info, Warn }\nfunction main(): int32 {\n  let lv: Level = Level.Warn;\n  return int32(lv);\n}");
-    const ir = text.view(ref e.ir);
+    const ir = e.ir.view();
     theory.isSuccessful =
       occurrences(ir, "!DIDerivedType(tag: DW_TAG_typedef, name: \"Level\"") == 1 &&
       occurrences(ir, "!DIBasicType(name: \"int32\", size: 32, encoding: DW_ATE_signed)") == 1;
@@ -1147,7 +1147,7 @@ suite function dwarfLaysOutCompositesTheWayLlvmDoes(): void {
 suite function dwarfTerminatesOnASelfReferentialType(): void {
   disposable e: Emitted = emitSource(
     "type Node { value: int32, next: ref Node }\nfunction hold(ref a: Node): int32 {\n  let b: Node = { value: 2, next: ref a };\n  return b.value;\n}\nfunction main(): int32 { return 0; }");
-  const ir = text.view(ref e.ir);
+  const ir = e.ir.view();
 
   let test theory: Case = t.asserts("the cycle closes onto one composite rather than rebuilding it") {
     theory.isSuccessful =
@@ -1173,7 +1173,7 @@ suite function aConstThatCannotInlineBecomesAGlobal(): void {
     disposable e: Emitted = emitSource(
       "const N: int32 = 7;\nfunction main(): int32 { return N; }"
     );
-    const ir = text.view(ref e.ir);
+    const ir = e.ir.view();
     theory.isSuccessful = occurrences(ir, "@test__N") == 0 && occurrences(ir, "module_init") == 0;
     theory.detail = `codegen said "${e.error}"; the fast path grew storage`;
   }
@@ -1182,7 +1182,7 @@ suite function aConstThatCannotInlineBecomesAGlobal(): void {
     disposable e: Emitted = emitSource(
       "function five(): int32 { return 5; }\nconst N: int32 = five();\nfunction main(): int32 { return N; }"
     );
-    const ir = text.view(ref e.ir);
+    const ir = e.ir.view();
     theory.isSuccessful =
       occurrences(ir, "@test__N = internal global i32 zeroinitializer, align 8") == 1 &&
       occurrences(ir, "store i32 %t1, ptr @test__N") == 1 &&
@@ -1196,7 +1196,7 @@ suite function aConstThatCannotInlineBecomesAGlobal(): void {
     disposable e: Emitted = emitSource(
       "function five(): int32 { return 5; }\nconst N: int32 = five();\nfunction main(): int32 { return N; }"
     );
-    const ir = text.view(ref e.ir);
+    const ir = e.ir.view();
     theory.isSuccessful = occurrences(ir, "load i32, ptr @test__N") == 1;
     theory.detail = `codegen said "${e.error}"; the read did not load the global`;
   }
@@ -1212,7 +1212,7 @@ suite function aBorrowOfAModuleGlobalIsItsSymbol(): void {
     disposable e: Emitted = emitSource(
       "let counter: int32 = 0;\nfunction bump(ref n: int32): int32 { n = n + 1; return n; }\nfunction main(): int32 { return bump(ref counter); }"
     );
-    const ir = text.view(ref e.ir);
+    const ir = e.ir.view();
     theory.isSuccessful =
       occurrences(ir, "@test__counter = internal global i32 0, align 8") == 1 &&
       occurrences(ir, "call i32 @test__bump(ptr @test__counter)") == 1;
@@ -1225,7 +1225,7 @@ suite function aBorrowOfAModuleGlobalIsItsSymbol(): void {
     disposable e: Emitted = emitSource(
       "let counter: int32 = 0;\nfunction bump(ref n: int32): int32 { n = n + 1; return n; }\nfunction main(): int32 { counter = 1; const a = bump(ref counter); return counter; }"
     );
-    const ir = text.view(ref e.ir);
+    const ir = e.ir.view();
     theory.isSuccessful =
       occurrences(ir, "store i32 1, ptr @test__counter") == 1 &&
       occurrences(ir, "call i32 @test__bump(ptr @test__counter)") == 1 &&
@@ -1239,7 +1239,7 @@ suite function aBorrowOfAModuleGlobalIsItsSymbol(): void {
     disposable e: Emitted = emitSource(
       "type Pair { lo: int32, hi: int32 }\nlet pair: Pair = { lo: 1, hi: 2 };\nfunction bump(ref n: int32): int32 { n = n + 1; return n; }\nfunction main(): int32 { return bump(ref pair.hi); }"
     );
-    const ir = text.view(ref e.ir);
+    const ir = e.ir.view();
     theory.isSuccessful = occurrences(
       ir,
       "getelementptr inbounds %struct.test__Pair, ptr @test__pair, i32 0, i32 1"
@@ -1257,7 +1257,7 @@ suite function aModuleGlobalWithARunTimeInitializer(): void {
     disposable e: Emitted = emitSource(
       "let n: int32 = 5;\nfunction main(): int32 { return n; }"
     );
-    const ir = text.view(ref e.ir);
+    const ir = e.ir.view();
     theory.isSuccessful = occurrences(ir, "@test__n = internal global i32 5, align 8") == 1 &&
       occurrences(ir, "module_init") == 0;
     theory.detail = `codegen said "${e.error}"; the cheap case grew a function`;
@@ -1267,7 +1267,7 @@ suite function aModuleGlobalWithARunTimeInitializer(): void {
     disposable e: Emitted = emitSource(
       "function five(): int32 { return 5; }\nlet n: int32 = five();\nfunction main(): int32 { return n; }"
     );
-    const ir = text.view(ref e.ir);
+    const ir = e.ir.view();
     theory.isSuccessful =
       occurrences(ir, "@test__n = internal global i32 zeroinitializer, align 8") == 1 &&
       occurrences(ir, "define internal void @test__module_init0() {") == 1 &&
@@ -1286,7 +1286,7 @@ suite function aModuleGlobalWithARunTimeInitializer(): void {
     disposable e: Emitted = emitSource(
       "let xs: int32[] = [1, 2];\nlet ys: int32[] = [1, 2];\nfunction main(): int32 { return xs[0] + ys[1]; }"
     );
-    const ir = text.view(ref e.ir);
+    const ir = e.ir.view();
     theory.isSuccessful =
       occurrences(ir, "@.arr.0 = internal global [2 x i32] [i32 1, i32 2], align 8") == 1 &&
       occurrences(ir, "@.arr.1 = internal global [2 x i32] [i32 1, i32 2], align 8") == 1 &&
@@ -1313,7 +1313,7 @@ suite function aModuleGlobalWithARunTimeInitializer(): void {
 suite function moduleInitsRunInTopologicalOrder(): void {
   let test theory: Case = t.asserts("the imported module's init is called first") {
     disposable e: Emitted = emitFixture("init_order.yoop");
-    const ir = text.view(ref e.ir);
+    const ir = e.ir.view();
     const leaf = text.indexOfFrom(ir, "call void @seedmod_", 0);
     const entry = text.indexOfFrom(ir, "call void @init_order_", 0);
     theory.isSuccessful = leaf < ir.len && entry < ir.len && leaf < entry;
@@ -1337,14 +1337,14 @@ suite function aUnionIsAByteBufferAddressedAtTheFieldsType(): void {
     // The module PREFIX on the name is the mangler's business and is asserted
     // elsewhere, so the needle stops at the decl name.
     theory.isSuccessful =
-      occurrences(text.view(ref e.ir), "__Word = type { [8 x i8] }") == 1 &&
-      occurrences(text.view(ref e.ir), "%union.") >= 1;
+      occurrences(e.ir.view(), "__Word = type { [8 x i8] }") == 1 &&
+      occurrences(e.ir.view(), "%union.") >= 1;
     theory.detail = `codegen said "${e.error}"; the union type definition is not an 8-byte buffer`;
   }
 
   let test theory: Case = t.asserts("the literal stores at the FIELD's width, not the union's") {
     disposable e: Emitted = emitSource(UNION_SRC);
-    const ir = text.view(ref e.ir);
+    const ir = e.ir.view();
     // `{ word: 7 }` is a uint32. A store spelled `i64` would write eight bytes
     // for a four-byte field, and a store spelled at the union's own type would
     // not typecheck against an i32 operand at all.
@@ -1354,7 +1354,7 @@ suite function aUnionIsAByteBufferAddressedAtTheFieldsType(): void {
 
   let test theory: Case = t.asserts("a field READ is a load at the union's address, never an extractvalue on it") {
     disposable e: Emitted = emitSource(UNION_SRC);
-    const ir = text.view(ref e.ir);
+    const ir = e.ir.view();
     // The read of `w.bytes` loads the Channels-shaped struct out of the union's
     // own address; only the LAST step, picking `.b1` out of that struct, is an
     // extractvalue, and it is on the struct rather than on the union.
@@ -1367,7 +1367,7 @@ suite function aUnionIsAByteBufferAddressedAtTheFieldsType(): void {
 
   let test theory: Case = t.asserts("a field WRITE geps the union's address with no index added") {
     disposable e: Emitted = emitSource(UNION_SRC);
-    const ir = text.view(ref e.ir);
+    const ir = e.ir.view();
     // Two of them: one for the write, one for the read. Both address member 0,
     // which is the only member a union has, and both start from `w`'s own slot.
     theory.isSuccessful =
@@ -1417,7 +1417,7 @@ suite function aDeepCodegenRefusalReachesTheDriver(): void {
   // carries no payload, so an Ok mistaken for an Err would abort every compile.
   let test theory: Case = t.asserts("the Ok case is not mistaken for a failure") {
     disposable e: Emitted = emitSource("function main(): int32 { return 1; }\n");
-    theory.isSuccessful = e.error.len == 0 && text.view(ref e.ir).len > 0;
+    theory.isSuccessful = e.error.len == 0 && e.ir.view().len > 0;
     theory.detail = `a well-formed program was refused: "${e.error}"`;
   }
 }
@@ -1466,7 +1466,7 @@ function emitGraph(ref graph: ModuleGraph): Emitted propagates<disposable> {
 
 function graphOfSource(src: string): ModuleGraph {
   let srcBuf: Vec<uint8> = vec.vecNew(src.len + 1);
-  vec.vecExtendFrom(ref srcBuf, intr.stringAsBytes(src));
+  srcBuf.extendFrom(intr.stringAsBytes(src));
   switch (moduleFromSource("test", "test.yoop", srcBuf)) {
     case LoadModuleResult.Ok { value: m }: { return singleModuleGraph(m); }
     case LoadModuleResult.Err { error: e }: {
@@ -1516,7 +1516,7 @@ suite function aDottedCallLowersAsTheQualifiedOne(): void {
     disposable dotted: Emitted = emitSource(`${M}function main(): int32 { let r: Rect = { w: 2, h: 3 }; return r.area(); }`);
     disposable qualified: Emitted = emitSource(`${M}function main(): int32 { let r: Rect = { w: 2, h: 3 }; return Shape.area(ref r); }`);
     theory.isSuccessful = dotted.error.len == 0 && qualified.error.len == 0 &&
-      text.equals(text.view(ref dotted.ir), text.view(ref qualified.ir));
+      text.equals(dotted.ir.view(), qualified.ir.view());
     theory.detail = `dotted said "${dotted.error}", qualified said "${qualified.error}"; the two spellings lowered differently`;
   }
 }

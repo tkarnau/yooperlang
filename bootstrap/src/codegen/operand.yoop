@@ -55,12 +55,12 @@ export variant Operand {
 // `@mathx_1__add` - a module-qualified symbol as an operand. A bare `home` means
 // an unqualified one, which is what an extern's exact spelling needs.
 function pushSymbolRef(ref out: Text, home: string, name: string): void {
-  text.pushByte(ref out, '@');
+  out.pushByte('@');
   if (home.len > 0) {
-    text.push(ref out, home);
-    text.push(ref out, SYMBOL_MODULE_SEPARATOR);
+    out.push(home);
+    out.push(SYMBOL_MODULE_SEPARATOR);
   }
-  text.push(ref out, name);
+  out.push(name);
 }
 
 // Writes into the per-function instruction buffer (`fn`), not the module buffer.
@@ -75,56 +75,56 @@ export function emitOperand(ref e: Emitter, op: Operand): void {
 // function's instruction stream.
 export function pushOperand(ref out: Text, op: Operand): void {
   switch (op) {
-    case Operand.Imm { value: v }: { text.pushUint(ref out, v); }
+    case Operand.Imm { value: v }: { out.pushUint(v); }
     case Operand.NegImm { value: v }: {
-      text.pushByte(ref out, '-');
-      text.pushUint(ref out, v);
+      out.pushByte('-');
+      out.pushUint(v);
     }
     case Operand.FloatImm { bits: b }: { pushFloatBitsHex(ref out, b); }
     case Operand.Bool { value: b }: {
       if (b) {
-        text.push(ref out, "true");
+        out.push("true");
       } else {
-        text.push(ref out, "false");
+        out.push("false");
       }
     }
     case Operand.Temp { id: n }: {
-      text.push(ref out, "%t");
-      text.pushUint(ref out, uint64(n));
+      out.push("%t");
+      out.pushUint(uint64(n));
     }
     case Operand.FuncRef { home: h, name: n }: { pushSymbolRef(ref out, h, n); }
     case Operand.GlobalAddr { home: h, name: n }: { pushSymbolRef(ref out, h, n); }
-    case Operand.Null: { text.push(ref out, "null"); }
+    case Operand.Null: { out.push("null"); }
     case Operand.StrRef { id: n }: {
-      text.push(ref out, "@.str.");
-      text.pushUint(ref out, uint64(n));
+      out.push("@.str.");
+      out.pushUint(uint64(n));
     }
     //   { ptr @.arr.0, i64 4 }
     // The descriptor spelled out. It must match ARRAY_DESCRIPTOR exactly, or
     // the aggregate does not typecheck as the array it is standing in for.
     case Operand.ArrayConst { dataId: d, len: n }: {
-      text.push(ref out, "{ ptr @.arr.");
-      text.pushUint(ref out, uint64(d));
-      text.push(ref out, ", i64 ");
-      text.pushUint(ref out, uint64(n));
-      text.push(ref out, " }");
+      out.push("{ ptr @.arr.");
+      out.pushUint(uint64(d));
+      out.push(", i64 ");
+      out.pushUint(uint64(n));
+      out.push(" }");
     }
     case Operand.SlotAddr { name: n, id: i }: {
-      text.pushByte(ref out, '%');
-      text.push(ref out, n);
+      out.pushByte('%');
+      out.push(n);
       // Mirrors `slot()` in context.yoop, including its reserved id.
       if (i == ARG_PTR_SLOT) {
-        text.push(ref out, ".arg");
+        out.push(".arg");
       } else {
-        text.pushByte(ref out, '.');
-        text.pushUint(ref out, uint64(i));
-        text.push(ref out, ".addr");
+        out.pushByte('.');
+        out.pushUint(uint64(i));
+        out.push(".addr");
       }
     }
     case Operand.Named { name: n }: {
-      text.pushByte(ref out, '%');
-      text.push(ref out, n);
+      out.pushByte('%');
+      out.push(n);
     }
-    case Operand.None: { text.push(ref out, "void"); }
+    case Operand.None: { out.push("void"); }
   }
 }

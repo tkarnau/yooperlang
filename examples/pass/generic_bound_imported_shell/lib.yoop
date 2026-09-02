@@ -16,7 +16,7 @@ export type Holder propagates<disposable> {
 
 export function makeHolder(): Holder propagates<disposable> {
   let ps: Vec<Point> = vec.vecNew(2);
-  vec.vecPush(ref ps, { x: 1, y: 2 });
-  vec.vecPush(ref ps, { x: 3, y: 4 });
+  ps.push({ x: 1, y: 2 });
+  ps.push({ x: 3, y: 4 });
   return { points: ps };
 }

@@ -178,7 +178,7 @@ function checkPayloadValues(
         }
         // The field node carries its POSITION in the payload, which is what
         // codegen stores at - a literal may list the fields in any order.
-        vec.vecSet(ref cx.tm.resolvedTypes, fieldId, declared.typeId);
+        cx.tm.resolvedTypes.set(fieldId, declared.typeId);
       }
       i += 1;
     }
@@ -230,7 +230,7 @@ export function checkVariantPattern(ref cx: Cx, patternId: NodeId, scrutType: Ty
     return -1;
   }
 
-  vec.vecSet(ref cx.tm.resolvedTypes, patternId, scrutType);
+  cx.tm.resolvedTypes.set(patternId, scrutType);
   bindPatternPayload(
     ref cx,
     pattern,
@@ -277,7 +277,7 @@ function bindPatternPayload(
       // case that grows a field breaks its patterns loudly - the difference
       // between ignoring a payload and forgetting it.
       if (str.stringEq(binding.name, DISCARD_BINDING)) {
-        vec.vecSet(ref cx.tm.resolvedTypes, fieldId, declared.typeId);
+        cx.tm.resolvedTypes.set(fieldId, declared.typeId);
         i += 1;
         continue;
       }
@@ -294,8 +294,8 @@ function bindPatternPayload(
       // Both the field node and the binding carry the field's type: codegen
       // reads the field node to know what to load, and the binding to know what
       // slot to declare.
-      vec.vecSet(ref cx.tm.resolvedTypes, fieldId, declared.typeId);
-      vec.vecSet(ref cx.tm.resolvedTypes, bindingId, declared.typeId);
+      cx.tm.resolvedTypes.set(fieldId, declared.typeId);
+      cx.tm.resolvedTypes.set(bindingId, declared.typeId);
       i += 1;
     }
   }

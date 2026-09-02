@@ -67,10 +67,10 @@ function exeSuffix(): string {
 // truncates 256 failures to 0.
 export function runTestBinary(exePath: string, ref filters: Vec<string>): int32 {
   disposable args: Vec<string> = vec.vecNew(filters.len + 1);
-  vec.vecPush(ref args, exePath);
+  args.push(exePath);
   let i: usize = 0;
   while (i < filters.len) {
-    vec.vecPush(ref args, vec.vecGet(ref filters, i));
+    args.push(filters.get(i));
     i += 1;
   }
   const code = runProgram(ref args);

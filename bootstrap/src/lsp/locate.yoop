@@ -51,10 +51,10 @@ export function locateNode(ref ast: AST, root: NodeId, offset: usize): Located {
   // breadth-first walk, which is what the tie-break above relies on.
   disposable work: Vec<NodeId> = vec.vecNew(256);
   disposable kids: Vec<NodeId> = vec.vecNew(8);
-  vec.vecPush(ref work, root);
+  work.push(root);
   let at: usize = 0;
   while (at < work.len) {
-    const id = vec.vecGet(ref work, at);
+    const id = work.get(at);
     at += 1;
     const node = nodeAt(ref ast, id);
     if (coversOffset(node, offset) && atLeastAsNarrow(ref best, node)) {
@@ -70,7 +70,7 @@ export function locateNode(ref ast: AST, root: NodeId, offset: usize): Located {
     childSlots(ref ast, node, ref kids);
     let i: usize = 0;
     while (i < kids.len) {
-      vec.vecPush(ref work, vec.vecGet(ref kids, i));
+      work.push(kids.get(i));
       i += 1;
     }
   }
@@ -166,10 +166,10 @@ export function locateLocalBinding(
   }
   disposable work: Vec<NodeId> = vec.vecNew(128);
   disposable kids: Vec<NodeId> = vec.vecNew(8);
-  vec.vecPush(ref work, declRoot);
+  work.push(declRoot);
   let at: usize = 0;
   while (at < work.len) {
-    const id = vec.vecGet(ref work, at);
+    const id = work.get(at);
     at += 1;
     const node = nodeAt(ref ast, id);
     if (bindsName(node, name) && node.sourceLoc.pos <= offset) {
@@ -187,7 +187,7 @@ export function locateLocalBinding(
     childSlots(ref ast, node, ref kids);
     let i: usize = 0;
     while (i < kids.len) {
-      vec.vecPush(ref work, vec.vecGet(ref kids, i));
+      work.push(kids.get(i));
       i += 1;
     }
   }

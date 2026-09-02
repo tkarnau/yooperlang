@@ -25,23 +25,23 @@ import * as intr from "std/core/intrinsics.yoop";
 // and only the ELF and Mach-O mergeable-string sections made that look right -
 // COFF kept them apart and `warm == Label.Warm` came out false on Windows.
 export function internStringConstant(ref e: Emitter, s: string): usize {
-  switch (map.mapGet(ref e.strConstants, s)) {
+  switch (e.strConstants.get(s)) {
     case Option.Some { value: existing }: { return existing; }
     case Option.None: {}
   }
 
   const id = e.nextStr;
   e.nextStr += 1;
-  map.mapInsert(ref e.strConstants, s, id);
+  e.strConstants.insert(s, id);
 
   const raw = intr.stringAsBytes(s);
-  text.push(ref e.globals, "@.str.");
-  text.pushUint(ref e.globals, uint64(id));
-  text.push(ref e.globals, " = private unnamed_addr constant [");
-  text.pushUint(ref e.globals, uint64(raw.len + 1));
-  text.push(ref e.globals, " x i8] c\"");
+  e.globals.push("@.str.");
+  e.globals.pushUint(uint64(id));
+  e.globals.push(" = private unnamed_addr constant [");
+  e.globals.pushUint(uint64(raw.len + 1));
+  e.globals.push(" x i8] c\"");
   pushLlvmEscaped(ref e.globals, raw);
-  text.push(ref e.globals, "\\00\", align 1\n");
+  e.globals.push("\\00\", align 1\n");
   return id;
 }
 
@@ -59,31 +59,31 @@ export function emitArrayPayload(ref e: Emitter, elemTy: string, ref elems: Vec<
   const id = e.nextArr;
   e.nextArr += 1;
 
-  text.push(ref e.globals, "@.arr.");
-  text.pushUint(ref e.globals, uint64(id));
-  text.push(ref e.globals, " = internal global [");
-  text.pushUint(ref e.globals, uint64(elems.len));
-  text.push(ref e.globals, " x ");
-  text.push(ref e.globals, elemTy);
-  text.push(ref e.globals, "] ");
+  e.globals.push("@.arr.");
+  e.globals.pushUint(uint64(id));
+  e.globals.push(" = internal global [");
+  e.globals.pushUint(uint64(elems.len));
+  e.globals.push(" x ");
+  e.globals.push(elemTy);
+  e.globals.push("] ");
   // A zero-length array has no element list to write, and `[0 x i8] []` is not
   // how LLVM spells one - `zeroinitializer` is.
   if (elems.len == 0) {
-    text.push(ref e.globals, "zeroinitializer, align 8\n");
+    e.globals.push("zeroinitializer, align 8\n");
     return id;
   }
-  text.pushByte(ref e.globals, '[');
+  e.globals.pushByte('[');
   let i: usize = 0;
   while (i < elems.len) {
     if (i > 0) {
-      text.push(ref e.globals, ", ");
+      e.globals.push(", ");
     }
-    text.push(ref e.globals, elemTy);
-    text.pushByte(ref e.globals, ' ');
-    pushOperand(ref e.globals, vec.vecGet(ref elems, i));
+    e.globals.push(elemTy);
+    e.globals.pushByte(' ');
+    pushOperand(ref e.globals, elems.get(i));
     i += 1;
   }
-  text.push(ref e.globals, "], align 8\n");
+  e.globals.push("], align 8\n");
   return id;
 }
 
@@ -94,11 +94,11 @@ function pushLlvmEscaped(t: ref Text, raw: uint8[]): void {
   while (i < raw.len) {
     const b = raw[i];
     if (b >= 32 && b < 127 && b != '"' && b != '\\') {
-      text.pushByte(ref t, b);
+      t.pushByte(b);
     } else {
-      text.pushByte(ref t, '\\');
-      text.pushByte(ref t, hexDigit(b / 16));
-      text.pushByte(ref t, hexDigit(b % 16));
+      t.pushByte('\\');
+      t.pushByte(hexDigit(b / 16));
+      t.pushByte(hexDigit(b % 16));
     }
     i += 1;
   }

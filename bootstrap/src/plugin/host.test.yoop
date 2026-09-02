@@ -22,7 +22,7 @@ import { PluginHost, pluginHostInactive, pluginFromLoad,
 function hostOf(src: string): PluginHost propagates<disposable> {
   const stdRoot = discoverStdRoot(env.argAt(0));
   let srcBuf: Vec<uint8> = vec.vecNew(src.len + 1);
-  vec.vecExtendFrom(ref srcBuf, intr.stringAsBytes(src));
+  srcBuf.extendFrom(intr.stringAsBytes(src));
   return pluginFromLoad(
     loadModuleGraphFromSource(srcBuf, "plug_test.yoop", stdRoot), "plug_test.yoop");
 }

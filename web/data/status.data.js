@@ -2,15 +2,15 @@
 // Regenerate with: npm run gen:web
 window.YOOP_DATA = window.YOOP_DATA || {};
 window.YOOP_DATA.status = {
- "version": "0.2.0",
- "commit": "11c3daf",
- "commitDate": "2026-08-27",
- "generatedAt": "2026-08-28",
+ "version": "0.3.1",
+ "commit": "01461d0",
+ "commitDate": "2026-09-01",
+ "generatedAt": "2026-09-02",
  "stdModules": 33,
- "bootstrapFiles": 209,
- "bootstrapLines": 49083,
- "exampleProgramsPass": 244,
- "exampleProgramsFail": 143,
- "specLines": 1900,
- "stdExports": 532
+ "bootstrapFiles": 211,
+ "bootstrapLines": 50121,
+ "exampleProgramsPass": 245,
+ "exampleProgramsFail": 145,
+ "specLines": 1954,
+ "stdExports": 510
 };

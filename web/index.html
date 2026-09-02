@@ -99,10 +99,10 @@ function describe(t: ref Town): Result&lt;int32, string&gt; {
   // the type. It makes the compiler place the cleanup call on every
   // path out of this scope, including the one `?` above takes.
   disposable line: Text = text.make(64);
-  text.push(ref line, t.name);
-  text.push(ref line, ": ");
-  text.pushInt(ref line, int64(n));
-  printf(`${text.view(ref line)}\n`);
+  line.push(t.name);
+  line.push(": ");
+  line.pushInt(int64(n));
+  printf(`${line.view()}\n`);
 
   return Result.Ok { value: n };
 }

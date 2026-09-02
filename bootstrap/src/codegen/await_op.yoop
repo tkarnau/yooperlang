@@ -125,11 +125,11 @@ function emitAsyncCall(
   // two are not one gap: a vtable slot's signature comes from the trait, so its
   // asyncness is known and stamped, while a function VALUE carries whatever the
   // annotation said and a `=>` type is never written `async`.
-  if (map.mapContainsKey(ref cx.tm.indirectCalls, uint64(callId))) {
+  if (cx.tm.indirectCalls.containsKey(uint64(callId))) {
     return unsupportedHere("an INDIRECT call to an async function", call.name);
   }
 
-  const throughVtable = map.mapContainsKey(ref cx.tm.vtableSlots, uint64(callId));
+  const throughVtable = cx.tm.vtableSlots.containsKey(uint64(callId));
 
   disposable args: Vec<CallArg> = vec.vecNew(4);
   // The receiver of a vtable dispatch is the vtable itself and does not travel
@@ -139,12 +139,12 @@ function emitAsyncCall(
   let fnPtr: usize = 0;
   if (throughVtable) {
     let slotIndex: usize = 0;
-    switch (map.mapGet(ref cx.tm.vtableSlots, uint64(callId))) {
+    switch (cx.tm.vtableSlots.get(uint64(callId))) {
       case Option.Some { value: idx }: { slotIndex = idx; }
       case Option.None: { }
     }
     emitVtableSlotLoad(ref cx, call, slotIndex, ref ctx, ref fnPtr)?;
-    vec.vecPush(ref args, { ty: "ptr", value: Operand.Temp { id: ctx } });
+    args.push({ ty: "ptr", value: Operand.Temp { id: ctx } });
     emitDispatchArgs(ref cx, call, ref args)?;
   } else if (call.childA != 0) {
     const list = nodeAt(cx.ast, call.childA);
@@ -153,7 +153,7 @@ function emitAsyncCall(
       const argId = childAt(cx.ast, list, i);
       let value: Operand = Operand.None;
       emitExpr(ref cx, argId, ref value)?;
-      vec.vecPush(ref args, { ty: typeOf(ref cx, argId), value: value });
+      args.push({ ty: typeOf(ref cx, argId), value: value });
       i += 1;
     }
   }
@@ -164,7 +164,7 @@ function emitAsyncCall(
   }
   const slot = declareAnonSlot(ref cx, slotTy);
   slotId = slot.id;
-  vec.vecPush(ref args, {
+  args.push({
     ty: "ptr",
     value: Operand.SlotAddr { name: TEMP_SLOT_NAME, id: slot.id },
   });

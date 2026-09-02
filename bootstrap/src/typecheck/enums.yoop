@@ -99,7 +99,7 @@ export function fillEnumCases(
       i += 1;
       continue;
     }
-    vec.vecPush(ref cases, foldEnumCase(
+    cases.push(foldEnumCase(
       ref prog, ref ast, declNode.name, caseNode, underlying, ref cases, ref state
     ));
     i += 1;
@@ -165,7 +165,7 @@ function bindEnumName(
   exported: bool
 ): void {
   const symbolId = internSymbol(ref prog, sym);
-  if (map.mapInsert(ref tm.names, declNode.name, symbolId)) {
+  if (tm.names.insert(declNode.name, symbolId)) {
     reportError(
       ref prog,
       `"${declNode.name}" is declared more than once in this module`,
@@ -173,6 +173,6 @@ function bindEnumName(
     );
   }
   if (exported) {
-    map.mapInsert(ref tm.exports, declNode.name, symbolId);
+    tm.exports.insert(declNode.name, symbolId);
   }
 }

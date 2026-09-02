@@ -25,6 +25,12 @@ import { Vec }, * as vec from "std/core/vec.yoop";
 import { Text }, * as text from "std/core/text.yoop";
 import { Disposable, disposable } from "std/core/kinds.yoop";
 import * as intr from "std/core/intrinsics.yoop";
+// `Sequence` is named here only so the SEED can build this file: a dotted call
+// handed straight to a generic (`quickSort(scan.asArray(), ...)`) is checked
+// twice by the v0.3.1 checker, and its second look resolves the trait by name.
+// This tree's checker records the trait instead. Remove once the seed is
+// raised past that fix.
+import { Sequence } from "std/core/traits.yoop";
 
 extern "C" from "unistd.h" {
   function read(fd: c_int, buf: unsafe_ptr<uint8>, count: c_size_t): c_ssize_t;
@@ -97,7 +103,7 @@ export function frameReaderFromBytes(src: uint8[]): FrameReader propagates<dispo
     scratch: vec.vecNew(0),
     pos: 0, atEof: true, error: "",
   };
-  vec.vecExtendFrom(ref r.buf, src);
+  r.buf.extendFrom(src);
   return r;
 }
 
@@ -107,7 +113,7 @@ export function frameReaderFromBytes(src: uint8[]): FrameReader propagates<dispo
 // the editor has already sent the next one, and if so it defers the compile
 // and drains first. See server.yoop.
 export function hasBufferedMessage(ref r: FrameReader): bool {
-  const scan = scanHeader(vec.vecAsArray(ref r.buf), r.pos);
+  const scan = scanHeader(r.buf.asArray(), r.pos);
   if (!scan.valid || !scan.complete) {
     return false;
   }
@@ -121,7 +127,7 @@ export function hasBufferedMessage(ref r: FrameReader): bool {
 // allocated ten thousand message buffers.
 export function readFrame(ref r: FrameReader, ref out: Vec<uint8>): FrameStatus {
   while (true) {
-    const scan = scanHeader(vec.vecAsArray(ref r.buf), r.pos);
+    const scan = scanHeader(r.buf.asArray(), r.pos);
     if (!scan.valid) {
       r.error = scan.error;
       return FrameStatus.MALFORMED;
@@ -129,9 +135,9 @@ export function readFrame(ref r: FrameReader, ref out: Vec<uint8>): FrameStatus 
     if (scan.complete) {
       const need = scan.headerEnd + scan.contentLength;
       if (r.buf.len >= need) {
-        vec.vecClear(ref out);
-        vec.vecExtendFrom(ref out,
-          intr.arraySlice(vec.vecAsArray(ref r.buf), scan.headerEnd, need));
+        out.clear();
+        out.extendFrom(
+          intr.arraySlice(r.buf.asArray(), scan.headerEnd, need));
         r.pos = need;
         compact(ref r);
         return FrameStatus.MESSAGE;
@@ -159,7 +165,7 @@ function fill(ref r: FrameReader): bool {
     r.atEof = true;
     return false;
   }
-  vec.vecExtendFrom(ref r.buf, intr.arraySlice(r.scratch.data, 0, usize(n)));
+  r.buf.extendFrom(intr.arraySlice(r.scratch.data, 0, usize(n)));
   return true;
 }
 
@@ -171,15 +177,15 @@ function compact(ref r: FrameReader): void {
     return;
   }
   if (r.pos >= r.buf.len) {
-    vec.vecClear(ref r.buf);
+    r.buf.clear();
     r.pos = 0;
     return;
   }
   disposable tail: Vec<uint8> = vec.vecNew(r.buf.len - r.pos);
-  vec.vecExtendFrom(ref tail,
-    intr.arraySlice(vec.vecAsArray(ref r.buf), r.pos, r.buf.len));
-  vec.vecClear(ref r.buf);
-  vec.vecExtendFrom(ref r.buf, vec.vecAsArray(ref tail));
+  tail.extendFrom(
+    intr.arraySlice(r.buf.asArray(), r.pos, r.buf.len));
+  r.buf.clear();
+  r.buf.extendFrom(tail.asArray());
   r.pos = 0;
 }
 
@@ -337,16 +343,16 @@ function lowerAscii(b: uint8): uint8 {
 // anything, and so the framing is testable without a descriptor.
 export function frameMessage(body: uint8[]): Text propagates<disposable> {
   let out: Text = text.make(body.len + 32);
-  text.push(ref out, "Content-Length: ");
-  text.pushUint(ref out, uint64(body.len));
-  text.push(ref out, "\r\n\r\n");
-  text.pushBytes(ref out, body);
+  out.push("Content-Length: ");
+  out.pushUint(uint64(body.len));
+  out.push("\r\n\r\n");
+  out.pushBytes(body);
   return out;
 }
 
 export function writeFrame(fd: int32, body: uint8[]): bool {
   disposable msg: Text = frameMessage(body);
-  return writeAll(fd, text.bytes(ref msg));
+  return writeAll(fd, msg.bytes());
 }
 
 // A short write is ordinary on a pipe, so the loop is the point.

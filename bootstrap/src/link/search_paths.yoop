@@ -95,10 +95,10 @@ export function collectSearchPaths(ref libs: Vec<string>, ref includes: Vec<stri
 // and the one MSVC users expect; it never exists in a Homebrew tree, so
 // offering both costs nothing there.
 function pushPrefix(ref libs: Vec<string>, ref includes: Vec<string>, prefix: string): void {
-  vec.vecPush(ref libs, fs.pathJoin([prefix, "lib", "arm64"]));
-  vec.vecPush(ref libs, fs.pathJoin([prefix, "lib", "x64"]));
-  vec.vecPush(ref libs, fs.pathJoin([prefix, "lib"]));
-  vec.vecPush(ref includes, fs.pathJoin([prefix, "include"]));
+  libs.push(fs.pathJoin([prefix, "lib", "arm64"]));
+  libs.push(fs.pathJoin([prefix, "lib", "x64"]));
+  libs.push(fs.pathJoin([prefix, "lib"]));
+  includes.push(fs.pathJoin([prefix, "include"]));
 }
 
 // A `PATH`-shaped environment variable, split into its entries.
@@ -121,7 +121,7 @@ function pushPathListVar(ref out: Vec<string>, name: string): void {
   }
   let i: usize = 0;
   while (i < parts.len) {
-    vec.vecPush(ref out, vec.vecGet(ref parts, i));
+    out.push(parts.get(i));
     i += 1;
   }
 }
@@ -149,10 +149,10 @@ function pushEachExisting(ref args: Vec<string>, ref dirs: Vec<string>, flag: st
   disposable seen: Vec<string> = vec.vecNew(8);
   let i: usize = 0;
   while (i < dirs.len) {
-    const dir = vec.vecGet(ref dirs, i);
+    const dir = dirs.get(i);
     if (fs.exists(dir) && !containsString(ref seen, dir)) {
-      vec.vecPush(ref seen, dir);
-      vec.vecPush(ref args, `${flag}${dir}`);
+      seen.push(dir);
+      args.push(`${flag}${dir}`);
     }
     i += 1;
   }
@@ -161,7 +161,7 @@ function pushEachExisting(ref args: Vec<string>, ref dirs: Vec<string>, flag: st
 function containsString(ref v: Vec<string>, needle: string): bool {
   let i: usize = 0;
   while (i < v.len) {
-    if (str.stringEq(vec.vecGet(ref v, i), needle)) {
+    if (str.stringEq(v.get(i), needle)) {
       return true;
     }
     i += 1;

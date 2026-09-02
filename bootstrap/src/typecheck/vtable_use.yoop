@@ -86,7 +86,7 @@ function checkVtableFrom(
     }
     i += 1;
   }
-  map.mapInsert(ref cx.tm.vtableBuilds, uint64(exprId), implType);
+  cx.tm.vtableBuilds.insert(uint64(exprId), implType);
   return vtableType;
 }
 
@@ -141,7 +141,7 @@ function checkVtableFromFn(
     }
     i += 1;
   }
-  map.mapInsert(ref cx.tm.vtableFromFns, uint64(exprId), true);
+  cx.tm.vtableFromFns.insert(uint64(exprId), true);
   return vtableType;
 }
 
@@ -210,7 +210,7 @@ export function checkVtableDispatch(
       if (a == 0) {
         want = internRef(cx.prog, vtableType);
       } else if (a - 1 < params.len) {
-        want = vec.vecGet(ref params, a - 1);
+        want = params.get(a - 1);
       }
       const got = checkExpr(ref cx, argId, want);
       if (want != TYPE_ERROR_ID && got != TYPE_ERROR_ID && !typeAccepts(cx.prog, want, got)) {
@@ -232,7 +232,7 @@ export function checkVtableDispatch(
     return ret;
   }
 
-  map.mapInsert(ref cx.tm.vtableSlots, uint64(exprId), slot.index);
+  cx.tm.vtableSlots.insert(uint64(exprId), slot.index);
   return ret;
 }
 

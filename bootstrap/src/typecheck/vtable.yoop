@@ -74,8 +74,8 @@ export function vtableSlotNamed(ref prog: Program, vtableType: TypeId, name: str
     case Type.VTable { decl: d, forTrait: ft, fields: f, methodOrder: mo }: {
       let i: usize = 0;
       while (i < mo.len) {
-        if (str.stringEq(vec.vecGet(ref mo, i), name)) {
-          return { found: true, index: i, slotType: vec.vecGet(ref f, i).typeId };
+        if (str.stringEq(mo.get(i), name)) {
+          return { found: true, index: i, slotType: f.get(i).typeId };
         }
         i += 1;
       }
@@ -98,7 +98,7 @@ export function vtableSlotNameAt(ref prog: Program, vtableType: TypeId, i: usize
   switch (typeAt(ref prog, vtableType)) {
     case Type.VTable { decl: d, forTrait: ft, fields: f, methodOrder: mo }: {
       if (i < mo.len) {
-        return vec.vecGet(ref mo, i);
+        return mo.get(i);
       }
     }
     default: { }

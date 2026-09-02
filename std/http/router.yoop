@@ -112,7 +112,7 @@ export type Router implements (Disposable, Handler) propagates<disposable> {
     }
 
     async handle(ref self, ref req: Request, ref resp: Response): HandleOutcome {
-        let entries: Route[] = vec.vecAsArray(ref self.routes);
+        let entries: Route[] = self.routes.asArray();
 
         for (let i = 0; i < entries.len; i += 1) {
             paramsClear(ref req.params);
@@ -161,7 +161,7 @@ export type Router implements (Disposable, Handler) propagates<disposable> {
 // path matches nothing at all. This is the difference between a 405 and a
 // 404, and it is also the body of the `Allow` header the 405 owes the client.
 function allowedMethods(ref r: Router, ref req: Request): string {
-    let entries: Route[] = vec.vecAsArray(ref r.routes);
+    let entries: Route[] = r.routes.asArray();
     let allow: string = "";
     disposable scratch: Params = paramsNew(4);
     for (let i = 0; i < entries.len; i += 1) {
@@ -201,7 +201,7 @@ type NoRoute implements Handler {
 
 export function routerAdd(ref r: Router, method: HttpMethod, pattern: string, d: Dispatcher): void {
     let entry: Route = { method: method, pattern: pattern, dispatcher: d };
-    vec.vecPush(ref r.routes, entry);
+    r.routes.push(entry);
 }
 
 export function routerGet(ref r: Router, pattern: string, d: Dispatcher): void {

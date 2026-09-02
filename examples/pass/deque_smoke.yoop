@@ -23,27 +23,27 @@ function main(): int32 {
     disposable d: Deque<int32> = deque.dequeNew(2);
 
     // Build [1, 5, 10, 20] using both ends.
-    deque.dequePushBack(ref d, 10);
-    deque.dequePushBack(ref d, 20);
-    deque.dequePushFront(ref d, 5);
-    deque.dequePushFront(ref d, 1);
-    printf(`len=${deque.dequeLen(ref d)} at0=${unwrap_or(deque.dequeGet(ref d, 0), -1)} at3=${unwrap_or(deque.dequeGet(ref d, 3), -1)}\n`);
+    d.pushBack(10);
+    d.pushBack(20);
+    d.pushFront(5);
+    d.pushFront(1);
+    printf(`len=${d.len} at0=${unwrap_or(d.get(0), -1)} at3=${unwrap_or(d.get(3), -1)}\n`);
 
-    let pf: int32 = unwrap_or(deque.dequePopFront(ref d), -1);
-    let pb: int32 = unwrap_or(deque.dequePopBack(ref d), -1);
-    printf(`pop_front=${pf} pop_back=${pb} len=${deque.dequeLen(ref d)}\n`);
+    let pf: int32 = unwrap_or(d.popFront(), -1);
+    let pb: int32 = unwrap_or(d.popBack(), -1);
+    printf(`pop_front=${pf} pop_back=${pb} len=${d.len}\n`);
 
     // Force grow: keep pushing past the cap.
     let i: int32 = 0;
     while (i < 20) {
-        deque.dequePushBack(ref d, 100 + i);
+        d.pushBack(100 + i);
         i = i + 1;
     }
-    printf(`grown len=${deque.dequeLen(ref d)} at0=${unwrap_or(deque.dequeGet(ref d, 0), -1)} at10=${unwrap_or(deque.dequeGet(ref d, 10), -1)}\n`);
+    printf(`grown len=${d.len} at0=${unwrap_or(d.get(0), -1)} at10=${unwrap_or(d.get(10), -1)}\n`);
 
     // Pop from an empty deque returns None.
     disposable small_d: Deque<int32> = deque.dequeNew(2);
-    let none_pop: Option<int32> = deque.dequePopBack(ref small_d);
+    let none_pop: Option<int32> = small_d.popBack();
     let np: int32 = -42;
     switch (none_pop) {
         case Option.Some { value: v }: { np = v; }

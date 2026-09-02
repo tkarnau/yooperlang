@@ -125,14 +125,14 @@ export function propagatedFieldsOf(
     case Type.Struct { decl: d, fields: f, methods: mm, implementsTraits: it, generic: g }: {
       let i: usize = 0;
       while (i < f.len) {
-        const field = vec.vecGet(ref f, i);
+        const field = f.get(i);
         // TWO spellings, and the second is why `carriedKind` exists. `Text`
         // PROPAGATES disposable, so its own type answers. `FileHandle`
         // implements `Disposable` outright and propagates nothing, so the field
         // says it: `handle: disposable FileHandle`. The reference counts both.
         if (propagatesMustCall(ref prog, field.typeId, method)
             || kindMustCallIs(ref prog, field.carriedKind, method)) {
-          vec.vecPush(ref out, { name: field.name, index: i, fieldType: field.typeId });
+          out.push({ name: field.name, index: i, fieldType: field.typeId });
         }
         i += 1;
       }
@@ -155,7 +155,7 @@ export function propagatedDisposeProblem(
   }
   let i: usize = 0;
   while (i < fields.len) {
-    const field = vec.vecGet(ref fields, i);
+    const field = fields.get(i);
     if (lookupMethod(ref prog, field.fieldType, method) == TYPE_ERROR_ID) {
       // Two ways to be here and they are different mistakes, so they get
       // different messages. A field that qualified by PROPAGATING wants a

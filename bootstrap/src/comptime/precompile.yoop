@@ -48,8 +48,8 @@ export function runPrecompilePass(ref prog: Program, ref graph: ModuleGraph): vo
   disposable va: ValueArena = newValueArena();
   disposable folded: FoldedConsts = newFoldedConsts();
 
-  let mods: Module[] = vec.vecAsArray(ref graph.modules);
-  let tms: TypedModule[] = vec.vecAsArray(ref prog.modules);
+  let mods: Module[] = graph.modules.asArray();
+  let tms: TypedModule[] = prog.modules.asArray();
   let i: usize = 0;
   while (i < graph.modules.len) {
     foldModulePrecompiles(ref prog, ref tms[i], ref mods[i], ref graph, ref va, ref folded);
@@ -67,7 +67,7 @@ function foldModulePrecompiles(
 ): void {
   let f: usize = 0;
   while (f < m.files.len) {
-    const root = vec.vecGet(ref m.files, f).root;
+    const root = m.files.get(f).root;
     const programNode = nodeAt(ref m.ast, root);
     let i: usize = 0;
     while (i < programNode.childCount) {
@@ -140,9 +140,9 @@ function foldPrecompileBlock(
         case Result.Ok { value: v }: {
           const slot = cloneValue(ref va, v);
           bindLocal(ref scope, declNode.name, slot);
-          vec.vecPush(ref names, declNode.name);
-          vec.vecPush(ref declIds, declId);
-          vec.vecPush(ref slots, slot);
+          names.push(declNode.name);
+          declIds.push(declId);
+          slots.push(slot);
         }
         case Result.Err { error: e }: {}
       }
@@ -166,16 +166,16 @@ function foldPrecompileBlock(
   // AFTER: each binding's final value becomes its decl's initializer.
   let g: usize = 0;
   while (g < names.len) {
-    const declId = vec.vecGet(ref declIds, g);
+    const declId = declIds.get(g);
     let declNode = nodeAt(ref m.ast, declId);
     const declared = moduleLevelValueType(ref prog, ref tm, declNode.name);
-    switch (literalForValue(ref prog, ref tm, ref m.ast, ref va, vec.vecGet(ref slots, g),
+    switch (literalForValue(ref prog, ref tm, ref m.ast, ref va, slots.get(g),
                             declared, false, declNode.sourceLoc)) {
       case Result.Ok { value: literalId }: {
         declNode.childB = literalId;
         replaceNode(ref m.ast, declId, declNode);
         bakeGlobalInt(ref prog, ref tm, ref va, declNode.name,
-          vec.vecGet(ref slots, g), declared);
+          slots.get(g), declared);
       }
       case Result.Err { error: e }: {
         reportError(
@@ -303,9 +303,9 @@ function precompiledConstType(ref prog: Program, symId: SymbolId): TypeId {
 // slot, which clang rejects. Every literal below says what it is.
 function noteType(ref tm: TypedModule, nodeId: NodeId, ty: TypeId): void {
   while (tm.resolvedTypes.len <= nodeId) {
-    vec.vecPush(ref tm.resolvedTypes, TYPE_ERROR_ID);
+    tm.resolvedTypes.push(TYPE_ERROR_ID);
   }
-  vec.vecSet(ref tm.resolvedTypes, nodeId, ty);
+  tm.resolvedTypes.set(nodeId, ty);
 }
 
 // A folded value as the literal node that spells it.
@@ -439,7 +439,7 @@ function structLiteralForValue(
     // The FIELD's type, not the struct's: codegen stores a field at
     // `typeOf(fieldNode)`.
     noteType(ref tm, fieldId, field.typeId);
-    vec.vecPush(ref ids, fieldId);
+    ids.push(fieldId);
     i += 1;
   }
 
@@ -482,7 +482,7 @@ function arrayLiteralForValue(
   while (i < slot.childCount) {
     const elemId = literalForValue(ref prog, ref tm, ref ast, ref va,
       childValueAt(ref va, slot, i), elem, inlined, loc)?;
-    vec.vecPush(ref ids, elemId);
+    ids.push(elemId);
     i += 1;
   }
 

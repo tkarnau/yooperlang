@@ -91,7 +91,7 @@ export function variantPayloadSize(ref prog: Program, variantType: TypeId): usiz
       let biggest: usize = 1;
       let i: usize = 0;
       while (i < cs.len) {
-        let c = vec.vecGet(ref cs, i);
+        let c = cs.get(i);
         const size = sizeOfFields(ref prog, ref c.fields);
         if (size > biggest) {
           biggest = size;
@@ -114,7 +114,7 @@ export function unionPayloadSize(ref prog: Program, unionType: TypeId): usize {
       let biggest: usize = 1;
       let i: usize = 0;
       while (i < f.len) {
-        const size = sizeOfType(ref prog, vec.vecGet(ref f, i).typeId);
+        const size = sizeOfType(ref prog, f.get(i).typeId);
         if (size > biggest) {
           biggest = size;
         }
@@ -134,7 +134,7 @@ function sizeOfFields(ref prog: Program, ref fields: Vec<Field>): usize {
   let widest: usize = 1;
   let i: usize = 0;
   while (i < fields.len) {
-    const t = vec.vecGet(ref fields, i).typeId;
+    const t = fields.get(i).typeId;
     const align = alignOfType(ref prog, t);
     if (align > widest) {
       widest = align;
@@ -149,7 +149,7 @@ function alignOfFields(ref prog: Program, ref fields: Vec<Field>): usize {
   let widest: usize = 1;
   let i: usize = 0;
   while (i < fields.len) {
-    const align = alignOfType(ref prog, vec.vecGet(ref fields, i).typeId);
+    const align = alignOfType(ref prog, fields.get(i).typeId);
     if (align > widest) {
       widest = align;
     }

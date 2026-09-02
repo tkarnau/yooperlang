@@ -100,7 +100,7 @@ function checkLiteralFieldValues(ref cx: Cx, expr: ASTNode, structType: TypeId):
         present += 1;
         // The field's POSITION is what codegen stores to, so record it on the
         // node rather than making codegen look it up again.
-        vec.vecSet(ref cx.tm.resolvedTypes, fieldId, found.typeId);
+        cx.tm.resolvedTypes.set(fieldId, found.typeId);
       } else {
         reportError(
           cx.prog,
@@ -137,7 +137,7 @@ function checkTemplateParts(ref cx: Cx, expr: ASTNode): void {
     const part = nodeAt(cx.ast, partId);
     // A literal run is already a string and has no expression to check.
     if (part.kind != ASTNodeKind.EXPR_PART) {
-      vec.vecSet(ref cx.tm.resolvedTypes, partId, primTypeId(PrimKind.STRING));
+      cx.tm.resolvedTypes.set(partId, primTypeId(PrimKind.STRING));
       i += 1;
       continue;
     }
@@ -146,7 +146,7 @@ function checkTemplateParts(ref cx: Cx, expr: ASTNode): void {
     // free-standing expression in this file passes it: an interpolation takes
     // whatever the expression is.
     const inner = checkExpr(ref cx, part.childA, TYPE_ERROR_ID);
-    vec.vecSet(ref cx.tm.resolvedTypes, partId, primTypeId(PrimKind.STRING));
+    cx.tm.resolvedTypes.set(partId, primTypeId(PrimKind.STRING));
     // An expression that already failed produced its own diagnostic; a second
     // one naming the error type would only be noise.
     if (inner != TYPE_ERROR_ID &&

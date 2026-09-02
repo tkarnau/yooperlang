@@ -54,10 +54,17 @@ let FAILED: int32 = 0;
 // goes with it - so the last thing visible is a PASSING case from an earlier
 // suite.
 //
-// If a test genuinely needs more than a megabyte, the honest answer is
-// usually that it should not be reading that much (yooperdoom hit this trying
-// to load a 28 MB IWAD in a fixture). Raise this only after asking that.
-const SUITE_ARENA_BYTES: usize = 1048576;
+// If a test genuinely needs more than this, the honest answer is usually
+// that it should not be reading that much (yooperdoom hit this trying to load
+// a 28 MB IWAD in a fixture). Raise this only after asking that.
+//
+// Four megabytes rather than one because a suite that COMPILES a graph
+// importing std (the plugin host's do) keeps that compile in this arena, and a
+// compile of std is bigger than a megabyte now: every dotted method call in it
+// is rewritten into the qualified shape, which appends nodes to the arena
+// (typecheck/check_method.yoop). That is the compiler's working set, not a
+// fixture reading too much.
+const SUITE_ARENA_BYTES: usize = 4194304;
 
 // ----- a single case ----------------------------------------------------
 

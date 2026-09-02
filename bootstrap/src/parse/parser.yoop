@@ -61,17 +61,17 @@ function parseAST(ref ps: ParserState): Result<NodeId, ParsingError> {
             program.intVal = program.intVal | PROGRAM_FLAG_TEST;
           }
         } else {
-          vec.vecPush(ref body, parseImportDecl(ref ps)?);
+          body.push(parseImportDecl(ref ps)?);
         }
       }
       case TokenTags.EXTERN: {
-        vec.vecPush(ref body, parseExternBlock(ref ps)?);
+        body.push(parseExternBlock(ref ps)?);
       }
       case TokenTags.EXPORT: {
-        vec.vecPush(ref body, parseExportDecl(ref ps)?);
+        body.push(parseExportDecl(ref ps)?);
       }
       case TokenTags.TYPE: {
-        vec.vecPush(ref body, parseTypeDecl(ref ps)?);
+        body.push(parseTypeDecl(ref ps)?);
       }
       case TokenTags.CONST, TokenTags.LET: {
         // Module-level `const NAME: T = <literal>;`. The same parser as the
@@ -82,29 +82,29 @@ function parseAST(ref ps: ParserState): Result<NodeId, ParsingError> {
         // between a constant and a mutable global is semantic, so the message
         // that names it belongs where the semantics are - "unexpected token at
         // top level: LET" says nothing about what to do instead.
-        vec.vecPush(ref body, parseVarDecl(ref ps)?);
+        body.push(parseVarDecl(ref ps)?);
       }
       case TokenTags.VARIANT: {
-        vec.vecPush(ref body, parseVariantDecl(ref ps)?);
+        body.push(parseVariantDecl(ref ps)?);
       }
       case TokenTags.ENUM: {
-        vec.vecPush(ref body, parseEnumDecl(ref ps)?);
+        body.push(parseEnumDecl(ref ps)?);
       }
       case TokenTags.TRAIT: {
-        vec.vecPush(ref body, parseTraitDecl(ref ps)?);
+        body.push(parseTraitDecl(ref ps)?);
       }
       case TokenTags.VTABLE: {
-        vec.vecPush(ref body, parseVtableDecl(ref ps)?);
+        body.push(parseVtableDecl(ref ps)?);
       }
       case TokenTags.FUNCTION /*, TokenTags.TASK */: {
-        vec.vecPush(ref body, parseFunctionDecl(ref ps)?);
+        body.push(parseFunctionDecl(ref ps)?);
       }
       case TokenTags.AT: {
-        vec.vecPush(ref body, parseAttribute(ref ps)?);
+        body.push(parseAttribute(ref ps)?);
       }
       // C's union - every field at offset 0, sized by the largest.
       case TokenTags.UNION: {
-        vec.vecPush(ref body, parseUnionDecl(ref ps)?);
+        body.push(parseUnionDecl(ref ps)?);
       }
       // TODO: rest of tags...
       default: {
@@ -122,7 +122,7 @@ function parseAST(ref ps: ParserState): Result<NodeId, ParsingError> {
         // `kind async { ... }` - a kind DECLARATION. Contextual, so it arrives
         // as an IDENT like everything else here.
         if (atKindDecl(ref ps)) {
-          vec.vecPush(ref body, parseKindDecl(ref ps)?);
+          body.push(parseKindDecl(ref ps)?);
           peekTag = ps.peek().tag;
           continue;
         }
@@ -130,7 +130,7 @@ function parseAST(ref ps: ParserState): Result<NodeId, ParsingError> {
         // stands where the `function` keyword would, so there is no keyword to
         // dispatch on and the two-identifier shape is what says so.
         if (atKindPrefixedDecl(ref ps)) {
-          vec.vecPush(ref body, parseKindPrefixedDecl(ref ps)?);
+          body.push(parseKindPrefixedDecl(ref ps)?);
           peekTag = ps.peek().tag;
           continue;
         }
@@ -157,11 +157,11 @@ function parseAST(ref ps: ParserState): Result<NodeId, ParsingError> {
 
   const start: usize = ps.ast.childIds.len;
   if (extra == 1) {
-    vec.vecPush(ref ps.ast.childIds, rangeImportId);
+    ps.ast.childIds.push(rangeImportId);
   }
   // copy the dynamic body into the childIds so we can destroy
   // the scratch buffer (body: Vec<NodeId>)
-  vec.vecExtendFrom(ref ps.ast.childIds, vec.vecAsArray(ref body));
+  ps.ast.childIds.extendFrom(body.asArray());
   program.childStart = start;
   program.childCount = body.len + extra;
   ps.ast.root = ps.pushNode(program);

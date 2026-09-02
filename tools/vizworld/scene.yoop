@@ -167,7 +167,7 @@ export type Scene implements Disposable propagates<disposable> {
     self.diagMsgs.dispose();
     let fe: usize = 0;
     while (fe < self.fileEntries.len) {
-      let entry: FileEntry = vec.vecGet(ref self.fileEntries, fe);
+      let entry: FileEntry = self.fileEntries.get(fe);
       entry.tokens.dispose();
       entry.ast.dispose();
       fe += 1;
@@ -336,8 +336,8 @@ export function applyBlob(ref s: Scene, kind: Artifact, ref payload: Vec<uint8>)
 // the palette: no taxonomy of tags to maintain, every tag stable and
 // distinct enough to read as variety on the belt.
 function parseTokens(ref s: Scene, ref payload: Vec<uint8>): void {
-  vec.vecClear(ref s.tokens);
-  const bytes: uint8[] = vec.vecAsArray(ref payload);
+  s.tokens.clear();
+  const bytes: uint8[] = payload.asArray();
   let i: usize = 0;
   while (i < bytes.len) {
     // Hash the tag - the bytes up to the first space.
@@ -373,7 +373,7 @@ function parseTokens(ref s: Scene, ref payload: Vec<uint8>): void {
       i += 1;
     }
     if (sawTag) {
-      vec.vecPush(ref s.tokens, { colorId: uint8(h % 12), pos: pos, len: len });
+      s.tokens.push({ colorId: uint8(h % 12), pos: pos, len: len });
     }
   }
   // The dump's trailing EOF token is real output; the belt does not need to
@@ -384,8 +384,8 @@ function parseTokens(ref s: Scene, ref payload: Vec<uint8>): void {
 // first walk counts the nodes of each depth, a second assigns each its slot
 // on its ring. Color hashes the node's kind.
 function parseAst(ref s: Scene, ref payload: Vec<uint8>): void {
-  vec.vecClear(ref s.astItems);
-  switch (json.parseBytes(vec.vecAsArray(ref payload))) {
+  s.astItems.clear();
+  switch (json.parseBytes(payload.asArray())) {
     case ParseResult.Err { error: e }: { return; }
     case ParseResult.Ok { value: d }: {
       if (s.astHeld) {
@@ -408,7 +408,7 @@ function parseAst(ref s: Scene, ref payload: Vec<uint8>): void {
       disposable filled: Vec<usize> = vec.vecNew(perDepth.len);
       let i: usize = 0;
       while (i < perDepth.len) {
-        vec.vecPush(ref filled, 0);
+        filled.push(0);
         i += 1;
       }
       collectAst(ref s, astNode, 0, 0, 0, ref perDepth, ref filled);
@@ -418,9 +418,9 @@ function parseAst(ref s: Scene, ref payload: Vec<uint8>): void {
 
 function countDepths(ref d: JsonDoc, node: JsonId, depth: usize, ref perDepth: Vec<usize>): void {
   while (perDepth.len <= depth) {
-    vec.vecPush(ref perDepth, 0);
+    perDepth.push(0);
   }
-  vec.vecSet(ref perDepth, depth, vec.vecGet(ref perDepth, depth) + 1);
+  perDepth.set(depth, perDepth.get(depth) + 1);
   const kids = json.member(ref d, node, "children");
   if (kids == 0) {
     return;
@@ -433,8 +433,8 @@ function countDepths(ref d: JsonDoc, node: JsonId, depth: usize, ref perDepth: V
 }
 
 function collectAst(ref s: Scene, node: JsonId, depth: usize, parent: usize, loopDepth: usize, ref perDepth: Vec<usize>, ref filled: Vec<usize>): void {
-  const slot = vec.vecGet(ref filled, depth);
-  vec.vecSet(ref filled, depth, slot + 1);
+  const slot = filled.get(depth);
+  filled.set(depth, slot + 1);
   const kind = json.memberString(ref s.astDoc, node, "kind");
   const selfIndex = s.astItems.len;
   const smell = smellOf(ref s, node, kind, loopDepth);
@@ -460,10 +460,10 @@ function collectAst(ref s: Scene, node: JsonId, depth: usize, parent: usize, loo
   if (fields != 0 && json.memberString(ref s.astDoc, fields, "name").len > 0) {
     named = true;
   }
-  vec.vecPush(ref s.astItems, {
+  s.astItems.push({
     depth: depth,
     slot: slot,
-    slots: vec.vecGet(ref perDepth, depth),
+    slots: perDepth.get(depth),
     parent: parent,
     colorId: uint8(hashBytes(intr.stringAsBytes(kind)) % 12),
     spanPos: spanPos,
@@ -515,9 +515,9 @@ function smellOf(ref s: Scene, node: JsonId, kind: string, loopDepth: usize): ui
 // {"nodes":[{id,name,files,loc,entry}],"edges":[{from,to}]} - the host's
 // module map. Edges resolve their endpoint ids against the nodes list.
 function parseModules(ref s: Scene, ref payload: Vec<uint8>): void {
-  vec.vecClear(ref s.islands);
-  vec.vecClear(ref s.edges);
-  switch (json.parseBytes(vec.vecAsArray(ref payload))) {
+  s.islands.clear();
+  s.edges.clear();
+  switch (json.parseBytes(payload.asArray())) {
     case ParseResult.Err { error: e }: { return; }
     case ParseResult.Ok { value: d }: {
       if (s.modulesHeld) {
@@ -529,7 +529,7 @@ function parseModules(ref s: Scene, ref payload: Vec<uint8>): void {
       const nodes = json.member(ref s.modulesDoc, rootObj, "nodes");
       let n = json.firstChild(ref s.modulesDoc, nodes);
       while (n != 0) {
-        vec.vecPush(ref s.islands, {
+        s.islands.push({
           name: json.memberString(ref s.modulesDoc, n, "id"),
           loc: usize(json.memberInt(ref s.modulesDoc, n, "loc", 0)),
           entry: json.asBool(ref s.modulesDoc, json.member(ref s.modulesDoc, n, "entry"), false),
@@ -542,7 +542,7 @@ function parseModules(ref s: Scene, ref payload: Vec<uint8>): void {
         const srcIdx = islandIndexOf(ref s, json.memberString(ref s.modulesDoc, e, "from"));
         const dstIdx = islandIndexOf(ref s, json.memberString(ref s.modulesDoc, e, "to"));
         if (srcIdx < s.islands.len && dstIdx < s.islands.len) {
-          vec.vecPush(ref s.edges, { src: srcIdx, dst: dstIdx });
+          s.edges.push({ src: srcIdx, dst: dstIdx });
         }
         e = json.nextSibling(ref s.modulesDoc, e);
       }
@@ -553,7 +553,7 @@ function parseModules(ref s: Scene, ref payload: Vec<uint8>): void {
 function islandIndexOf(ref s: Scene, id: string): usize {
   let i: usize = 0;
   while (i < s.islands.len) {
-    if (str.stringEq(vec.vecGet(ref s.islands, i).name, id)) {
+    if (str.stringEq(s.islands.get(i).name, id)) {
       return i;
     }
     i += 1;
@@ -564,8 +564,8 @@ function islandIndexOf(ref s: Scene, id: string): usize {
 // A JSON array of {file,line,col,severity,message}: the gate only needs the
 // two counts - the door opens on zero errors.
 function parseDiagnostics(ref s: Scene, ref payload: Vec<uint8>): void {
-  vec.vecClear(ref s.diagRaw);
-  vec.vecExtendFrom(ref s.diagRaw, vec.vecAsArray(ref payload));
+  s.diagRaw.clear();
+  s.diagRaw.extendFrom(payload.asArray());
   placeDiagnostics(ref s);
 }
 
@@ -574,9 +574,9 @@ function parseDiagnostics(ref s: Scene, ref payload: Vec<uint8>): void {
 function placeDiagnostics(ref s: Scene): void {
   s.diagErrors = 0;
   s.diagWarnings = 0;
-  vec.vecClear(ref s.diagItems);
-  text.clear(ref s.diagMsgs);
-  switch (json.parseBytes(vec.vecAsArray(ref s.diagRaw))) {
+  s.diagItems.clear();
+  s.diagMsgs.clear();
+  switch (json.parseBytes(s.diagRaw.asArray())) {
     case ParseResult.Err { error: e }: { return; }
     case ParseResult.Ok { value: d }: {
       disposable doc: JsonDoc = d;
@@ -593,8 +593,8 @@ function placeDiagnostics(ref s: Scene): void {
         if (endsWith(json.memberString(ref doc, n, "file"), s.entryFile)) {
           const msg = json.memberString(ref doc, n, "message");
           const msgStart = s.diagMsgs.len;
-          text.push(ref s.diagMsgs, msg);
-          vec.vecPush(ref s.diagItems, {
+          s.diagMsgs.push(msg);
+          s.diagItems.push({
             line: usize(json.memberInt(ref doc, n, "line", 1)),
             col: usize(json.memberInt(ref doc, n, "col", 0)),
             error: isError,
@@ -630,11 +630,11 @@ function endsWith(haystack: string, needle: string): bool {
 // between is an instruction. The same reading tools/visualizer's JS parser
 // does, minus the pieces a skyline does not need.
 function parseIr(ref s: Scene, ref payload: Vec<uint8>): void {
-  vec.vecClear(ref s.irFuncs);
-  vec.vecClear(ref s.irBlocks);
-  text.clear(ref s.irNames);
+  s.irFuncs.clear();
+  s.irBlocks.clear();
+  s.irNames.clear();
   s.irLines = 0;
-  const bytes: uint8[] = vec.vecAsArray(ref payload);
+  const bytes: uint8[] = payload.asArray();
   let inFunc = false;
   let blockStart: usize = 0;
   let hasBlock = false;
@@ -676,16 +676,16 @@ function parseIr(ref s: Scene, ref payload: Vec<uint8>): void {
           nameLen += 1;
         }
         if (nameLen > 0) {
-          text.pushBytes(ref s.irNames, intr.arraySlice(bytes, at - nameLen, at));
+          s.irNames.pushBytes(intr.arraySlice(bytes, at - nameLen, at));
         }
       }
       continue;
     }
     if (bytes[lineStart] == 125) {
       if (hasBlock || blk.instructions > 0) {
-        vec.vecPush(ref s.irBlocks, blk);
+        s.irBlocks.push(blk);
       }
-      vec.vecPush(ref s.irFuncs, {
+      s.irFuncs.push({
         blockStart: blockStart,
         blockCount: s.irBlocks.len - blockStart,
         nameStart: nameStart,
@@ -697,7 +697,7 @@ function parseIr(ref s: Scene, ref payload: Vec<uint8>): void {
     if (bytes[lineEnd - 1] == 58 && bytes[lineStart] != 32) {
       // A label line ends the block before it and names the next.
       if (hasBlock || blk.instructions > 0) {
-        vec.vecPush(ref s.irBlocks, blk);
+        s.irBlocks.push(blk);
       }
       blk = emptyIrBlock(labelInto(ref s, bytes, lineStart, lineEnd - 1), lineEnd - 1 - lineStart);
       hasBlock = true;
@@ -722,7 +722,7 @@ function emptyIrBlock(labelStart: usize, labelLen: usize): IrBlock {
 function labelInto(ref s: Scene, bytes: uint8[], first: usize, last: usize): usize {
   const at = s.irNames.len;
   if (last > first) {
-    text.pushBytes(ref s.irNames, intr.arraySlice(bytes, first, last));
+    s.irNames.pushBytes(intr.arraySlice(bytes, first, last));
   }
   return at;
 }
@@ -783,13 +783,13 @@ function wordAt(bytes: uint8[], at: usize, lineEnd: usize, word: string): bool {
 // Byte offsets each source line starts at, so a wall cell inverts to an
 // offset in O(1).
 function indexLines(ref s: Scene): void {
-  vec.vecClear(ref s.lineStarts);
-  vec.vecPush(ref s.lineStarts, 0);
+  s.lineStarts.clear();
+  s.lineStarts.push(0);
   const bytes: uint8[] = intr.stringAsBytes(s.source);
   let i: usize = 0;
   while (i < bytes.len) {
     if (bytes[i] == 10 && i + 1 < bytes.len) {
-      vec.vecPush(ref s.lineStarts, i + 1);
+      s.lineStarts.push(i + 1);
     }
     i += 1;
   }
@@ -806,7 +806,7 @@ export function sceneOffsetAt(ref s: Scene, line: usize, col: usize): usize {
   if (line >= s.lineStarts.len) {
     return s.source.len;
   }
-  const start = vec.vecGet(ref s.lineStarts, line);
+  const start = s.lineStarts.get(line);
   const offset = start + col;
   if (offset >= s.source.len) {
     return s.source.len;
@@ -827,7 +827,7 @@ export function sceneOffsetAt(ref s: Scene, line: usize, col: usize): usize {
 export function sceneTokenAt(ref s: Scene, offset: usize): usize {
   let i: usize = 0;
   while (i < s.tokens.len) {
-    const t = vec.vecGet(ref s.tokens, i);
+    const t = s.tokens.get(i);
     if (offset >= t.pos && offset < t.pos + t.len) {
       return i;
     }
@@ -845,7 +845,7 @@ export function sceneAstNodeAt(ref s: Scene, offset: usize): usize {
   let bestDepth: usize = 0;
   let i: usize = 0;
   while (i < s.astItems.len) {
-    const n = vec.vecGet(ref s.astItems, i);
+    const n = s.astItems.get(i);
     if (offset >= n.spanPos && offset < n.spanPos + n.spanLen) {
       if (best == s.astItems.len || n.depth >= bestDepth) {
         best = i;
@@ -860,15 +860,15 @@ export function sceneAstNodeAt(ref s: Scene, offset: usize): usize {
 // A token's own source text, written into `out` - the label the belt shows
 // when the pick ray lands on the wall above it.
 export function sceneTokenText(ref s: Scene, idx: usize, ref out: Text): void {
-  text.clear(ref out);
+  out.clear();
   if (idx >= s.tokens.len) {
     return;
   }
-  const t = vec.vecGet(ref s.tokens, idx);
+  const t = s.tokens.get(idx);
   if (t.pos + t.len > s.source.len) {
     return;
   }
-  text.pushBytes(ref out, intr.arraySlice(intr.stringAsBytes(s.source), t.pos, t.pos + t.len));
+  out.pushBytes(intr.arraySlice(intr.stringAsBytes(s.source), t.pos, t.pos + t.len));
 }
 
 // An AST node's kind, read back from the kept doc.
@@ -876,7 +876,7 @@ export function sceneAstKind(ref s: Scene, idx: usize): string {
   if (idx >= s.astItems.len) {
     return "";
   }
-  return json.memberString(ref s.astDoc, vec.vecGet(ref s.astItems, idx).nodeId, "kind");
+  return json.memberString(ref s.astDoc, s.astItems.get(idx).nodeId, "kind");
 }
 
 // An AST node's human name when the dump carried one (`fields.name`), "".
@@ -884,7 +884,7 @@ export function sceneAstName(ref s: Scene, idx: usize): string {
   if (idx >= s.astItems.len) {
     return "";
   }
-  const fields = json.member(ref s.astDoc, vec.vecGet(ref s.astItems, idx).nodeId, "fields");
+  const fields = json.member(ref s.astDoc, s.astItems.get(idx).nodeId, "fields");
   if (fields == 0) {
     return "";
   }
@@ -896,14 +896,14 @@ export function sceneAstName(ref s: Scene, idx: usize): string {
 export function sceneLineOfOffset(ref s: Scene, offset: usize): usize {
   let line: usize = 0;
   while (line + 1 < s.lineStarts.len &&
-      vec.vecGet(ref s.lineStarts, line + 1) <= offset) {
+      s.lineStarts.get(line + 1) <= offset) {
     line += 1;
   }
   return line;
 }
 
 export function sceneColOfOffset(ref s: Scene, offset: usize): usize {
-  return offset - vec.vecGet(ref s.lineStarts, sceneLineOfOffset(ref s, offset));
+  return offset - s.lineStarts.get(sceneLineOfOffset(ref s, offset));
 }
 
 // ----- the browsable closure ------------------------------------------------
@@ -914,10 +914,10 @@ export function sceneStoreFilePath(ref s: Scene, modIdx: usize, fileIdx: usize, 
   const start = s.filePaths.len;
   let plen: usize = 0;
   if (pathAt < bytes.len) {
-    text.pushBytes(ref s.filePaths, intr.arraySlice(bytes, pathAt, bytes.len));
+    s.filePaths.pushBytes(intr.arraySlice(bytes, pathAt, bytes.len));
     plen = bytes.len - pathAt;
   }
-  vec.vecPush(ref s.fileEntries, {
+  s.fileEntries.push({
     modIdx: modIdx, fileIdx: fileIdx, pathStart: start, pathLen: plen,
     tokens: vec.vecNew(2), ast: vec.vecNew(2),
   });
@@ -929,15 +929,15 @@ export function sceneStoreFileBlob(ref s: Scene, kind: Artifact, ref payload: Ve
   if (s.fileEntries.len == 0) {
     return;
   }
-  let entry: FileEntry = vec.vecGet(ref s.fileEntries, s.fileEntries.len - 1);
+  let entry: FileEntry = s.fileEntries.get(s.fileEntries.len - 1);
   if (kind == Artifact.TOKENS) {
-    vec.vecClear(ref entry.tokens);
-    vec.vecExtendFrom(ref entry.tokens, vec.vecAsArray(ref payload));
+    entry.tokens.clear();
+    entry.tokens.extendFrom(payload.asArray());
   } else if (kind == Artifact.AST) {
-    vec.vecClear(ref entry.ast);
-    vec.vecExtendFrom(ref entry.ast, vec.vecAsArray(ref payload));
+    entry.ast.clear();
+    entry.ast.extendFrom(payload.asArray());
   }
-  vec.vecSet(ref s.fileEntries, s.fileEntries.len - 1, entry);
+  s.fileEntries.set(s.fileEntries.len - 1, entry);
 }
 
 // How many files a module streamed - what the archipelago's tooltip says
@@ -946,7 +946,7 @@ export function sceneModuleFileCount(ref s: Scene, modIdx: usize): usize {
   let n: usize = 0;
   let i: usize = 0;
   while (i < s.fileEntries.len) {
-    if (vec.vecGet(ref s.fileEntries, i).modIdx == modIdx) {
+    if (s.fileEntries.get(i).modIdx == modIdx) {
       n += 1;
     }
     i += 1;
@@ -959,7 +959,7 @@ export function sceneFileEntryFor(ref s: Scene, modIdx: usize, nth: usize): usiz
   let seen: usize = 0;
   let i: usize = 0;
   while (i < s.fileEntries.len) {
-    if (vec.vecGet(ref s.fileEntries, i).modIdx == modIdx) {
+    if (s.fileEntries.get(i).modIdx == modIdx) {
       if (seen == nth) {
         return i;
       }
@@ -981,7 +981,7 @@ export function sceneOpenFile(ref s: Scene, entryIdx: usize): bool {
   if (entryIdx >= s.fileEntries.len) {
     return false;
   }
-  let entry: FileEntry = vec.vecGet(ref s.fileEntries, entryIdx);
+  let entry: FileEntry = s.fileEntries.get(entryIdx);
   parseAst(ref s, ref entry.ast);
   parseTokens(ref s, ref entry.tokens);
   placeDiagnostics(ref s);
@@ -993,59 +993,59 @@ export function sceneOpenFile(ref s: Scene, entryIdx: usize): bool {
 // A stored file's path into `out` - what the editor jump and any label
 // needs off an island.
 export function sceneFilePath(ref s: Scene, entryIdx: usize, ref out: Text): void {
-  text.clear(ref out);
+  out.clear();
   if (entryIdx >= s.fileEntries.len) {
     return;
   }
-  const entry = vec.vecGet(ref s.fileEntries, entryIdx);
+  const entry = s.fileEntries.get(entryIdx);
   if (entry.pathStart + entry.pathLen > s.filePaths.len) {
     return;
   }
-  text.pushBytes(ref out,
-    intr.arraySlice(text.bytes(ref s.filePaths), entry.pathStart, entry.pathStart + entry.pathLen));
+  out.pushBytes(
+    intr.arraySlice(s.filePaths.bytes(), entry.pathStart, entry.pathStart + entry.pathLen));
 }
 
 // A placed diagnostic's message into `out` - the sigil's tooltip text.
 export function sceneDiagMsg(ref s: Scene, idx: usize, ref out: Text): void {
-  text.clear(ref out);
+  out.clear();
   if (idx >= s.diagItems.len) {
     return;
   }
-  const it = vec.vecGet(ref s.diagItems, idx);
+  const it = s.diagItems.get(idx);
   if (it.msgStart + it.msgLen > s.diagMsgs.len) {
     return;
   }
-  text.pushBytes(ref out,
-    intr.arraySlice(text.bytes(ref s.diagMsgs), it.msgStart, it.msgStart + it.msgLen));
+  out.pushBytes(
+    intr.arraySlice(s.diagMsgs.bytes(), it.msgStart, it.msgStart + it.msgLen));
 }
 
 // A block's label ("entry", "L3") into `out`, from the shared name buffer.
 export function sceneIrBlockLabel(ref s: Scene, blockIdx: usize, ref out: Text): void {
-  text.clear(ref out);
+  out.clear();
   if (blockIdx >= s.irBlocks.len) {
     return;
   }
-  const b = vec.vecGet(ref s.irBlocks, blockIdx);
+  const b = s.irBlocks.get(blockIdx);
   if (b.labelLen == 0 || b.labelStart + b.labelLen > s.irNames.len) {
-    text.push(ref out, "entry");
+    out.push("entry");
     return;
   }
-  text.pushBytes(ref out,
-    intr.arraySlice(text.bytes(ref s.irNames), b.labelStart, b.labelStart + b.labelLen));
+  out.pushBytes(
+    intr.arraySlice(s.irNames.bytes(), b.labelStart, b.labelStart + b.labelLen));
 }
 
 // An IR function's name as a view into the scene's own buffer.
 export function sceneIrName(ref s: Scene, idx: usize, ref out: Text): void {
-  text.clear(ref out);
+  out.clear();
   if (idx >= s.irFuncs.len) {
     return;
   }
-  const f = vec.vecGet(ref s.irFuncs, idx);
+  const f = s.irFuncs.get(idx);
   if (f.nameLen == 0 || f.nameStart + f.nameLen > s.irNames.len) {
     return;
   }
-  text.pushBytes(ref out,
-    intr.arraySlice(text.bytes(ref s.irNames), f.nameStart, f.nameStart + f.nameLen));
+  out.pushBytes(
+    intr.arraySlice(s.irNames.bytes(), f.nameStart, f.nameStart + f.nameLen));
 }
 
 function matchesAt(bytes: uint8[], at: usize, word: string): bool {

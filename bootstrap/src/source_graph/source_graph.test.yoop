@@ -137,7 +137,7 @@ suite function aDirectoryModuleIsOneModuleOfSeveralFiles(): void {
         theory.detail = `the graph holds ${graph.modules.len} modules, wanted 2 (geo and the entry)`;
       }
 
-      let geo = vec.vecGet(ref graph.modules, 0);
+      let geo = graph.modules.get(0);
       // geo.test.yoop sits in that directory and must not be absorbed - if it
       // were, its `import.test;` would have failed the parse above.
       let test theory: Case = t.asserts("*.test.yoop is excluded from the module's files") {
@@ -153,8 +153,8 @@ suite function aDirectoryModuleIsOneModuleOfSeveralFiles(): void {
       // One arena for the whole module is what keeps typecheck's decoration a
       // single dense vector: two files must not share a root.
       let test theory: Case = t.asserts("each file has its own root in the shared arena") {
-        const a = vec.vecGet(ref geo.files, 0).root;
-        const b = vec.vecGet(ref geo.files, 1).root;
+        const a = geo.files.get(0).root;
+        const b = geo.files.get(1).root;
         theory.isSuccessful = a != 0 && b != 0 && a != b;
         theory.detail = `the two files have roots ${a} and ${b}; they must be distinct and non-zero`;
       }
@@ -162,7 +162,7 @@ suite function aDirectoryModuleIsOneModuleOfSeveralFiles(): void {
       // Files are loaded in name order so a module's contents do not depend on
       // what order the filesystem happened to hand them back.
       let test theory: Case = t.asserts("files are loaded in sorted order") {
-        const first = vec.vecGet(ref geo.files, 0).absPath;
+        const first = geo.files.get(0).absPath;
         theory.isSuccessful = str.stringIndexOf(first, "area.yoop") < first.len;
         theory.detail = `the first file is ${first}, wanted area.yoop to sort ahead of point.yoop`;
       }
@@ -193,7 +193,7 @@ suite function theModulesRootIsTheNearestOneAtOrAboveTheImporter(): void {
 
       // The walk STARTS at the importing file's own directory, which is what
       // makes a program with `modules/` beside its entry file work at all.
-      let lib = vec.vecGet(ref graph.modules, 0);
+      let lib = graph.modules.get(0);
       let test theory: Case = t.asserts("the root beside the entry is the one that answered") {
         const wanted = "tests/graph/modules/lib";
         theory.isSuccessful = str.stringIndexOf(lib.dir, wanted) < lib.dir.len;
@@ -213,7 +213,7 @@ suite function theModulesRootIsTheNearestOneAtOrAboveTheImporter(): void {
       }
     }
     case LoadGraphResult.Ok { value: graph }: {
-      let lib = vec.vecGet(ref graph.modules, 0);
+      let lib = graph.modules.get(0);
       let test theory: Case = t.asserts("the NEAREST root wins over one further up") {
         const wanted = "tests/graph/nearer/modules/lib";
         theory.isSuccessful = str.stringIndexOf(lib.dir, wanted) < lib.dir.len;
@@ -348,8 +348,8 @@ suite function stdImportsResolveAgainstTheGivenRoot(): void {
         theory.detail = `the std fixture produced ${graph.modules.len} modules, wanted 2`;
       }
       let test theory: Case = t.asserts("the resolved path is under the std root, not the importer") {
-        const stdModule = vec.vecGet(ref graph.modules, 0);
-        const path = vec.vecGet(ref stdModule.files, 0).absPath;
+        const stdModule = graph.modules.get(0);
+        const path = stdModule.files.get(0).absPath;
         theory.isSuccessful = str.stringIndexOf(path, "std_imports.std") < path.len;
         theory.detail = `std/core/tiny.yoop resolved to ${path}, wanted it under the stub root`;
       }
@@ -396,10 +396,10 @@ suite function stdModulesAreAutoloadedIntoEveryGraph(): void {
       // entry so they precede every user module topologically, and traits.yoop
       // walks after kinds.yoop because it USES a kind kinds.yoop declares.
       let test theory: Case = t.asserts("kinds is first, traits second, the entry last") {
-        const first = vec.vecGet(ref graph.modules, 0);
-        const second = vec.vecGet(ref graph.modules, 1);
-        theory.isSuccessful = str.stringIndexOf(vec.vecGet(ref first.files, 0).absPath, "kinds.yoop") < vec.vecGet(ref first.files, 0).absPath.len
-          && str.stringIndexOf(vec.vecGet(ref second.files, 0).absPath, "traits.yoop") < vec.vecGet(ref second.files, 0).absPath.len
+        const first = graph.modules.get(0);
+        const second = graph.modules.get(1);
+        theory.isSuccessful = str.stringIndexOf(first.files.get(0).absPath, "kinds.yoop") < first.files.get(0).absPath.len
+          && str.stringIndexOf(second.files.get(0).absPath, "traits.yoop") < second.files.get(0).absPath.len
           && graph.entryIndex == 2;
         theory.detail = `entryIndex is ${graph.entryIndex}`;
       }
@@ -407,8 +407,8 @@ suite function stdModulesAreAutoloadedIntoEveryGraph(): void {
       // Recorded by BASE NAME, which is what a later reader asks for - the
       // path is the graph layer's business and nobody else's.
       let test theory: Case = t.asserts("each autoload records its module id under its base name") {
-        theory.isSuccessful = map.mapContainsKey(ref graph.autoLoadModuleIds, "kinds")
-          && map.mapContainsKey(ref graph.autoLoadModuleIds, "traits");
+        theory.isSuccessful = graph.autoLoadModuleIds.containsKey("kinds")
+          && graph.autoLoadModuleIds.containsKey("traits");
         theory.detail = `recorded ${graph.autoLoadModuleIds.len} autoload id(s), wanted kinds and traits`;
       }
     }
@@ -490,13 +490,13 @@ function loadFails(name: string, needle: string): bool {
 function importsAllPointBackwards(ref graph: ModuleGraph): bool {
   let i: usize = 0;
   while (i < graph.modules.len) {
-    let m = vec.vecGet(ref graph.modules, i);
+    let m = graph.modules.get(i);
     let f: usize = 0;
     while (f < m.files.len) {
-      let file = vec.vecGet(ref m.files, f);
+      let file = m.files.get(f);
       let e: usize = 0;
       while (e < file.imports.len) {
-        if (vec.vecGet(ref file.imports, e).resolvedModuleIndex >= i) {
+        if (file.imports.get(e).resolvedModuleIndex >= i) {
           return false;
         }
         e += 1;
@@ -513,7 +513,7 @@ function idsAreDistinct(ref graph: ModuleGraph): bool {
   while (i < graph.modules.len) {
     let j = i + 1;
     while (j < graph.modules.len) {
-      if (str.stringEq(vec.vecGet(ref graph.modules, i).id, vec.vecGet(ref graph.modules, j).id)) {
+      if (str.stringEq(graph.modules.get(i).id, graph.modules.get(j).id)) {
         return false;
       }
       j += 1;

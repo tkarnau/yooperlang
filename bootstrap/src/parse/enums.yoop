@@ -57,10 +57,10 @@ export function parseEnumDecl(ref ps: ParserState): Result<NodeId, ParsingError>
     // same rule a variant body uses, and methods may sit anywhere in the run.
     if (ps.peek().tag == TokenTags.FUNCTION ||
         atKindPrefixedMethod(ref ps, true)) {
-      vec.vecPush(ref memberIds, parseMethodDecl(ref ps, node.name, 0)?);
+      memberIds.push(parseMethodDecl(ref ps, node.name, 0)?);
       continue;
     }
-    vec.vecPush(ref memberIds, parseEnumCase(ref ps)?);
+    memberIds.push(parseEnumCase(ref ps)?);
     if (ps.peek().tag == TokenTags.COMMA) {
       ps.advance()?;
     }

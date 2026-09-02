@@ -133,7 +133,7 @@ function checkAssignment(ref cx: Cx, expr: ASTNode): TypeId {
         // refused: a module's mutable state is its own, and a write from
         // outside it is invisible to every invariant the declaring module
         // keeps about it. The import is what makes it visible, not writable.
-        switch (map.mapGet(ref cx.tm.importedFrom, target.name)) {
+        switch (cx.tm.importedFrom.get(target.name)) {
           case Option.Some { value: origin }: {
             reportError(
               cx.prog,
@@ -161,7 +161,7 @@ function checkAssignment(ref cx: Cx, expr: ASTNode): TypeId {
         }
       }
     }
-    vec.vecSet(ref cx.tm.resolvedTypes, expr.childA, targetType);
+    cx.tm.resolvedTypes.set(expr.childA, targetType);
   } else if (target.kind == ASTNodeKind.FIELD_ACCESS) {
     // `p.x = v`, and `a.b.c = v`. checkFieldAccess records the field's type,
     // which the store needs; the base has to have an ADDRESS, which means a
@@ -179,17 +179,17 @@ function checkAssignment(ref cx: Cx, expr: ASTNode): TypeId {
       return TYPE_ERROR_ID;
     }
     targetType = checkFieldAccess(ref cx, target, TYPE_ERROR_ID);
-    vec.vecSet(ref cx.tm.resolvedTypes, expr.childA, targetType);
+    cx.tm.resolvedTypes.set(expr.childA, targetType);
   } else if (target.kind == ASTNodeKind.DEREF_EXPRESSION) {
     // `*p = v` - a store THROUGH a pointer. The target's type is the pointee,
     // which is the same thing a read of it produces.
     targetType = checkDeref(ref cx, target);
-    vec.vecSet(ref cx.tm.resolvedTypes, expr.childA, targetType);
+    cx.tm.resolvedTypes.set(expr.childA, targetType);
   } else if (target.kind == ASTNodeKind.INDEX_EXPRESSION) {
     // `xs[i] = v` - checkIndex records the element type on the node, which is
     // what the store needs.
     targetType = checkIndex(ref cx, target);
-    vec.vecSet(ref cx.tm.resolvedTypes, expr.childA, targetType);
+    cx.tm.resolvedTypes.set(expr.childA, targetType);
   } else {
     reportError(cx.prog, `cannot assign to ${kindName(target.kind)}`, target.sourceLoc);
     return TYPE_ERROR_ID;

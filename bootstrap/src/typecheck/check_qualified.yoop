@@ -41,6 +41,17 @@ function checkQualifiedCall(
     return checkErrnoCall(ref cx, expr);
   }
 
+  // A dotted method call this pass ALREADY rewrote - a call node is checked
+  // more than once when it is an argument (once for inference, once against
+  // the parameter), and the trait it was rewritten through may not be a name
+  // this module can resolve. The rewrite recorded it; read that back.
+  switch (cx.tm.methodTraits.get(uint64(exprId))) {
+    case Option.Some { value: traitType }: {
+      return checkTraitCall(ref cx, expr, exprId, base, traitType);
+    }
+    case Option.None: { }
+  }
+
   // `m.ops.hash(key)` - an INDIRECT call through a function-typed field. The
   // base is a value rather than a name, and the thing being called is the
   // field's contents, so this is checked before anything looks for a module.
@@ -90,9 +101,9 @@ function checkQualifiedCall(
       return TYPE_ERROR_ID;   // namespaceModuleOf reported why
     }
   }
-  let source = vec.vecGet(ref cx.prog.modules, sourceIndex);
+  let source = cx.prog.modules.get(sourceIndex);
 
-  switch (map.mapGet(ref source.exports, expr.name)) {
+  switch (source.exports.get(expr.name)) {
     case Option.Some { value: symId }: {
       // The signature is the SOURCE module's, but the arguments are checked in
       // THIS module's scope - the types on both sides are program-wide TypeIds,
@@ -238,7 +249,7 @@ export function declIsModuleGlobal(
 
 // The Func type of a module-level function NAME, or TYPE_ERROR_ID.
 function moduleFuncType(ref prog: Program, ref tm: TypedModule, name: string): TypeId {
-  switch (map.mapGet(ref tm.names, name)) {
+  switch (tm.names.get(name)) {
     case Option.None: { return TYPE_ERROR_ID; }
     case Option.Some { value: symId }: {
       // No import to follow: an import binds the SOURCE module's SymbolId, the
@@ -304,7 +315,7 @@ function checkTraitCall(
       );
       return TYPE_ERROR_ID;
     }
-    map.mapInsert(ref cx.tm.calleeReceiver, uint64(exprId), receiverType);
+    cx.tm.calleeReceiver.insert(uint64(exprId), receiverType);
     return checkArgsAgainstFunc(ref cx, expr, exprId, bound, expr.name);
   }
 
@@ -336,7 +347,7 @@ function checkTraitCall(
 
   // Which impl this call landed on, for codegen. The receiver's TYPE is the
   // answer, and the symbol name follows from it plus the method name.
-  map.mapInsert(ref cx.tm.calleeReceiver, uint64(exprId), receiverType);
+  cx.tm.calleeReceiver.insert(uint64(exprId), receiverType);
 
   return checkArgsAgainstFunc(ref cx, expr, exprId, method, expr.name);
 }

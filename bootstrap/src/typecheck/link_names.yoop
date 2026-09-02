@@ -67,7 +67,7 @@ export function checkExternLinkName(ref prog: Program, declNode: ASTNode, ref as
   if (declNode.operator != TokenTags.LIBRARY) {
     return;
   }
-  const problem = linkNameProblem(vec.vecGet(ref ast.strings, declNode.strId));
+  const problem = linkNameProblem(ast.strings.get(declNode.strId));
   if (problem.len > 0) {
     reportError(ref prog, problem, declNode.sourceLoc);
   }

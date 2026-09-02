@@ -134,23 +134,23 @@ export function analysisIsFor(ref a: Analysis, uri: string, version: int64): boo
   if (a.version != version) {
     return false;
   }
-  return text.equals(text.view(ref a.uri), uri);
+  return text.equals(a.uri.view(), uri);
 }
 
 // Forget whatever is held, so the next request recompiles. What `didSave` does.
 export function analysisInvalidate(ref a: Analysis): void {
   releaseCompile(ref a);
-  text.clear(ref a.uri);
-  text.clear(ref a.path);
+  a.uri.clear();
+  a.path.clear();
   a.version = 0 - 1;
 }
 
 // Record which document a freshly built compile belongs to.
 export function analysisIdentify(ref a: Analysis, uri: string, path: string, version: int64): void {
-  text.clear(ref a.uri);
-  text.push(ref a.uri, uri);
-  text.clear(ref a.path);
-  text.push(ref a.path, path);
+  a.uri.clear();
+  a.uri.push(uri);
+  a.path.clear();
+  a.path.push(path);
   a.version = version;
 }
 
@@ -170,10 +170,10 @@ export function analysisIdentify(ref a: Analysis, uri: string, path: string, ver
 export function analysisLocateDocument(ref a: Analysis, path: string): bool {
   let m: usize = 0;
   while (m < a.graph.modules.len) {
-    let mod: Module = vec.vecGet(ref a.graph.modules, m);
+    let mod: Module = a.graph.modules.get(m);
     let f: usize = 0;
     while (f < mod.files.len) {
-      let sf: SourceFile = vec.vecGet(ref mod.files, f);
+      let sf: SourceFile = mod.files.get(f);
       if (text.equals(sf.absPath, path)) {
         a.moduleIndex = m;
         a.fileIndex = f;
@@ -190,14 +190,14 @@ export function analysisLocateDocument(ref a: Analysis, path: string): bool {
 // module. Three one-liners, so a query reads as what it is asking rather than
 // as two levels of `vecGet`.
 export function analysisModule(ref a: Analysis): Module {
-  return vec.vecGet(ref a.graph.modules, a.moduleIndex);
+  return a.graph.modules.get(a.moduleIndex);
 }
 
 export function analysisFile(ref a: Analysis): SourceFile {
   let mod: Module = analysisModule(ref a);
-  return vec.vecGet(ref mod.files, a.fileIndex);
+  return mod.files.get(a.fileIndex);
 }
 
 export function analysisTypedModule(ref a: Analysis): TypedModule {
-  return vec.vecGet(ref a.prog.modules, a.moduleIndex);
+  return a.prog.modules.get(a.moduleIndex);
 }

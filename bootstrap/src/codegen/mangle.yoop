@@ -68,7 +68,7 @@ export function calleeSymbol(ref cx: Cx, expr: ASTNode, exprId: NodeId): SymbolN
   // in terms of the parameters" rule every node type follows, so it goes
   // through the same substitution - which is what makes one checked body emit
   // `Token__compare` in one instance and `Num__compare` in the next.
-  switch (map.mapGet(ref cx.tm.calleeReceiver, uint64(exprId))) {
+  switch (cx.tm.calleeReceiver.get(uint64(exprId))) {
     case Option.Some { value: recorded }: {
       const receiver = resolvedType(ref cx, recorded);
       return {
@@ -83,7 +83,7 @@ export function calleeSymbol(ref cx: Cx, expr: ASTNode, exprId: NodeId): SymbolN
   // the decl - `identity` becomes `identity_int32`. The home is the module that
   // DECLARED it, so an instance created from an importing module still lands on
   // one symbol.
-  switch (map.mapGet(ref cx.tm.calleeInstance, uint64(exprId))) {
+  switch (cx.tm.calleeInstance.get(uint64(exprId))) {
     case Option.Some { value: index }: {
       // A generic calling a generic recorded `partitionYoop_T`, because `T` was
       // all the body knew. Which one it really means depends on the instance
@@ -101,7 +101,7 @@ export function calleeSymbol(ref cx: Cx, expr: ASTNode, exprId: NodeId): SymbolN
   if (keepsCName(expr.name) || isExtern(ref cx, expr.name)) {
     return { home: "", name: expr.name };
   }
-  switch (map.mapGet(ref cx.tm.importedFrom, expr.name)) {
+  switch (cx.tm.importedFrom.get(expr.name)) {
     case Option.Some { value: origin }: {
       return { home: origin.moduleId, name: origin.exportName };
     }
@@ -121,10 +121,10 @@ export function debugSymbolText(symbol: SymbolName): string {
     return symbol.name;
   }
   disposable parts: Vec<string> = vec.vecNew(3);
-  vec.vecPush(ref parts, symbol.home);
-  vec.vecPush(ref parts, SYMBOL_MODULE_SEPARATOR);
-  vec.vecPush(ref parts, symbol.name);
-  return str.stringConcatAll(vec.vecAsArray(ref parts));
+  parts.push(symbol.home);
+  parts.push(SYMBOL_MODULE_SEPARATOR);
+  parts.push(symbol.name);
+  return str.stringConcatAll(parts.asArray());
 }
 
 // The symbol a module-level `let` is READ and WRITTEN through.
@@ -135,7 +135,7 @@ export function debugSymbolText(symbol: SymbolName): string {
 // Same rule and same table as an imported CALL, which is why this is the two
 // lines it is rather than anything the emit sites have to know about.
 export function globalSymbol(ref cx: Cx, name: string): SymbolName {
-  switch (map.mapGet(ref cx.tm.importedFrom, name)) {
+  switch (cx.tm.importedFrom.get(name)) {
     case Option.Some { value: origin }: {
       return { home: origin.moduleId, name: origin.exportName };
     }
@@ -151,7 +151,7 @@ export function globalSymbol(ref cx: Cx, name: string): SymbolName {
 // with the bare name rather than silently calling the wrong function.
 function qualifyingModuleOf(ref cx: Cx, baseId: NodeId): string {
   const base = nodeAt(cx.ast, baseId);
-  switch (map.mapGet(ref cx.tm.names, base.name)) {
+  switch (cx.tm.names.get(base.name)) {
     case Option.Some { value: symId }: {
       switch (symbolAt(cx.prog, symId)) {
         case Symbol.Namespace { module: mi }: { return moduleIdOf(cx.prog, mi); }
@@ -192,5 +192,5 @@ function keepsCName(name: string): bool {
 // there. Pass A recorded which names those are; the Symbol alone cannot say,
 // since an extern is an ordinary `Symbol.Func`.
 function isExtern(ref cx: Cx, name: string): bool {
-  return map.mapContainsKey(ref cx.tm.externNames, name);
+  return cx.tm.externNames.containsKey(name);
 }

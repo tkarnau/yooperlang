@@ -108,17 +108,17 @@ export function percentDecode(s: string, plusIsSpace: bool): Result<string, Http
             if (hi < 0 || lo < 0) {
                 return Result.Err { error: errBadRequest(`invalid percent escape at offset ${i}`) };
             }
-            vec.vecPush(ref out, uint8(hi * 16 + lo));
+            out.push(uint8(hi * 16 + lo));
             i = i + 3;
         } else if (plusIsSpace && c == '+') {
-            vec.vecPush(ref out, ' ');
+            out.push(' ');
             i = i + 1;
         } else {
-            vec.vecPush(ref out, c);
+            out.push(c);
             i = i + 1;
         }
     }
-    return Result.Ok { value: intr.stringFromBytesUnchecked(vec.vecAsArray(ref out)) };
+    return Result.Ok { value: intr.stringFromBytesUnchecked(out.asArray()) };
 }
 
 // Percent-encode everything outside the unreserved set. Used by the client to
@@ -135,14 +135,14 @@ export function percentEncode(s: string): string {
     disposable out: Vec<uint8> = vec.vecNew(raw.len * 3);
     for c in raw {
         if (isUnreserved(c)) {
-            vec.vecPush(ref out, c);
+            out.push(c);
         } else {
-            vec.vecPush(ref out, '%');
-            vec.vecPush(ref out, HEX_DIGITS[usize(c) / 16]);
-            vec.vecPush(ref out, HEX_DIGITS[usize(c) % 16]);
+            out.push('%');
+            out.push(HEX_DIGITS[usize(c) / 16]);
+            out.push(HEX_DIGITS[usize(c) % 16]);
         }
     }
-    return intr.stringFromBytesUnchecked(vec.vecAsArray(ref out));
+    return intr.stringFromBytesUnchecked(out.asArray());
 }
 
 // Decode the path portion of a request-target.
@@ -245,7 +245,7 @@ export function pathSegments(path: string, ref out: Vec<string>): Result<usize, 
         if (end > start) {
             let segRaw: string = sliceStr(raw, start, end);
             let seg: string = percentDecode(segRaw, false)? `decoding path segment "${segRaw}"`;
-            vec.vecPush(ref out, seg);
+            out.push(seg);
             count = count + 1;
         }
         if (rel == rest.len) { break; }

@@ -52,7 +52,7 @@ export function createASTNode(astNodeKind: ASTNodeKind, sourceLoc: SourceLocatio
 export function emptyArena(): AST propagates<disposable> {
   let nodes: Vec<ASTNode> = vec.vecNew(64);
   const sentinelLoc: SourceLocation = { pos: 0, line: 0, column: 0, length: 0 };
-  vec.vecPush(ref nodes, createASTNode(ASTNodeKind.PROGRAM, sentinelLoc));
+  nodes.push(createASTNode(ASTNodeKind.PROGRAM, sentinelLoc));
   let childIds: Vec<NodeId> = vec.vecNew(64);
   let strings: Vec<string> = vec.vecNew(16);
   return {
@@ -66,13 +66,13 @@ export function emptyArena(): AST propagates<disposable> {
 // The i'th child in a node's own childIds run. Callers are responsible for
 // staying inside `node.childCount`.
 export function childAt(ref ast: AST, node: ASTNode, i: usize): NodeId {
-  return vec.vecGet(ref ast.childIds, node.childStart + i);
+  return ast.childIds.get(node.childStart + i);
 }
 
 // The node a NodeId names. Reads better than the vecGet at every call site, and
 // gives us one place to put a bounds assertion later.
 export function nodeAt(ref ast: AST, id: NodeId): ASTNode {
-  return vec.vecGet(ref ast.nodes, id);
+  return ast.nodes.get(id);
 }
 
 /*
@@ -88,7 +88,7 @@ export function nodeAt(ref ast: AST, id: NodeId): ASTNode {
   `out` is cleared first and is the caller's buffer, so a walk reuses one.
 */
 export function childSlots(ref ast: AST, node: ASTNode, ref out: Vec<NodeId>): void {
-  vec.vecClear(ref out);
+  out.clear();
   noteChild(ref out, node.childA);
   noteChild(ref out, node.childB);
   noteChild(ref out, node.childC);
@@ -105,7 +105,7 @@ export function childSlots(ref ast: AST, node: ASTNode, ref out: Vec<NodeId>): v
 // 0 is the reserved "none" sentinel, so an empty slot contributes nothing.
 function noteChild(ref out: Vec<NodeId>, id: NodeId): void {
   if (id != 0) {
-    vec.vecPush(ref out, id);
+    out.push(id);
   }
 }
 
@@ -166,14 +166,14 @@ export function attributeNameOf(ref ast: AST, id: NodeId): string {
 // layers, and a literal is what the fold produced anyway.
 
 export function appendNode(ref ast: AST, node: ASTNode): NodeId {
-  vec.vecPush(ref ast.nodes, node);
+  ast.nodes.push(node);
   return ast.nodes.len - 1;
 }
 
 // Overwrite a node in place. Used to REPOINT a decl at its folded initializer;
 // nothing else in the compiler rewrites a node once it is built.
 export function replaceNode(ref ast: AST, id: NodeId, node: ASTNode): void {
-  vec.vecSet(ref ast.nodes, id, node);
+  ast.nodes.set(id, node);
 }
 
 // Point `node` at a run of children appended to the shared pool. The same
@@ -184,14 +184,14 @@ export function appendChildRun(ref ast: AST, ref node: ASTNode, ref ids: Vec<Nod
   node.childCount = ids.len;
   let i: usize = 0;
   while (i < ids.len) {
-    vec.vecPush(ref ast.childIds, vec.vecGet(ref ids, i));
+    ast.childIds.push(ids.get(i));
     i += 1;
   }
 }
 
 // A string into the arena's pool, returning the `strId` a literal node carries.
 export function appendString(ref ast: AST, s: string): usize {
-  vec.vecPush(ref ast.strings, s);
+  ast.strings.push(s);
   return ast.strings.len - 1;
 }
 

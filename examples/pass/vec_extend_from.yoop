@@ -15,17 +15,17 @@ function main(): int32 {
 
     // vecFromArray copies the source (cap == len, no spare).
     disposable a: Vec<int32> = vec.vecFromArray(src);
-    let sum: int32 = vec.vecGet(ref a, 0) + vec.vecGet(ref a, 1) + vec.vecGet(ref a, 2);
+    let sum: int32 = a.get(0) + a.get(1) + a.get(2);
     printf(`from_array len=${a.len} cap=${a.cap} sum=${sum}\n`);
 
     // vecExtendFrom grows once (3 -> 5) and appends.
     let more: int32[] = [40, 50];
-    vec.vecExtendFrom(ref a, more);
-    printf(`extend len=${a.len} cap=${a.cap} last=${vec.vecGet(ref a, 4)}\n`);
+    a.extendFrom(more);
+    printf(`extend len=${a.len} cap=${a.cap} last=${a.get(4)}\n`);
 
     // Extending an empty Vec allocates exactly src.len in a single grow.
     disposable e: Vec<int32> = vec.vecNew(0);
-    vec.vecExtendFrom(ref e, src);
-    printf(`empty len=${e.len} cap=${e.cap} first=${vec.vecGet(ref e, 0)}\n`);
+    e.extendFrom(src);
+    printf(`empty len=${e.len} cap=${e.cap} first=${e.get(0)}\n`);
     return 0;
 }

@@ -55,19 +55,19 @@ export function emitTaskThunk(ref cx: Cx, declNode: ASTNode): EmitResult {
   disposable args: Vec<CallArg> = vec.vecNew(meta.argTys.len + 1);
   let i: usize = 0;
   while (i < meta.argTys.len) {
-    const argTy = vec.vecGet(ref meta.argTys, i);
+    const argTy = meta.argTys.get(i);
     const addr = freshTemp(cx.e);
     emitGepTaskField(ref cx, addr, meta.structName, THUNK_HANDLE_PARAM, TASK_FIELD_ARG0 + i);
     const value = freshTemp(cx.e);
     emitLoadFromPtr(ref cx, value, argTy, addr);
-    vec.vecPush(ref args, { ty: argTy, value: Operand.Temp { id: value } });
+    args.push({ ty: argTy, value: Operand.Temp { id: value } });
     i += 1;
   }
 
   // The result slot, passed as the body's `__ret`.
   const resultAddr = freshTemp(cx.e);
   emitGepTaskField(ref cx, resultAddr, meta.structName, THUNK_HANDLE_PARAM, TASK_FIELD_RESULT);
-  vec.vecPush(ref args, { ty: "ptr", value: Operand.Temp { id: resultAddr } });
+  args.push({ ty: "ptr", value: Operand.Temp { id: resultAddr } });
 
   const handle = freshTemp(cx.e);
   emitCall(ref cx, handle, "ptr", cx.tm.moduleId, declNode.name, ref args);

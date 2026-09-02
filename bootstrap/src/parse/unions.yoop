@@ -67,7 +67,7 @@ export function parseUnionDecl(ref ps: ParserState): Result<NodeId, ParsingError
         peekLengthUsize(ref ps),
       )};
     }
-    vec.vecPush(ref fieldIds, parseFieldDecl(ref ps)?);
+    fieldIds.push(parseFieldDecl(ref ps)?);
     // A trailing comma after the last field is allowed, so consume the
     // separator whenever there is one and let the loop condition decide.
     if (ps.peek().tag == TokenTags.COMMA) {

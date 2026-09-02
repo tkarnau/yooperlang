@@ -38,11 +38,11 @@ import { TokenTags } from "../lex";
 export function materializeModuleConsts(ref e: Emitter, ref prog: Program, ref graph: ModuleGraph): void {
   let i: usize = 0;
   while (i < graph.modules.len) {
-    const m = vec.vecGet(ref graph.modules, i);
-    let tm = vec.vecGet(ref prog.modules, i);
+    const m = graph.modules.get(i);
+    let tm = prog.modules.get(i);
     let f: usize = 0;
     while (f < m.files.len) {
-      const programNode = nodeAt(ref m.ast, vec.vecGet(ref m.files, f).root);
+      const programNode = nodeAt(ref m.ast, m.files.get(f).root);
       let d: usize = 0;
       while (d < programNode.childCount) {
         const declNode = nodeAt(ref m.ast, declOf(ref m.ast, childAt(ref m.ast, programNode, d)));
@@ -65,7 +65,7 @@ function materializeOne(
   declNode: ASTNode
 ): void {
   let symId: SymbolId = 0;
-  switch (map.mapGet(ref tm.names, declNode.name)) {
+  switch (tm.names.get(declNode.name)) {
     case Option.None: { return; }
     case Option.Some { value: s }: { symId = s; }
   }
@@ -76,14 +76,13 @@ function materializeOne(
   }
   // Already done: a file may be reached twice through the walk, and an imported
   // const is materialized by its DECLARING module either way.
-  if (map.mapContainsKey(ref e.constOps, uint64(symId))) {
+  if (e.constOps.containsKey(uint64(symId))) {
     return;
   }
 
   const elem = arrayElementOf(ref prog, declared);
   if (elem != TYPE_ERROR_ID) {
-    map.mapInsert(
-      ref e.constOps, uint64(symId),
+    e.constOps.insert(uint64(symId),
       arrayConstOperand(ref e, ref prog, ref ast, declNode.childB, elem)
     );
     return;
@@ -92,7 +91,7 @@ function materializeOne(
   // immediate is spelled here so `emitLocalRead` has a single question to ask.
   let op: Operand = Operand.None;
   if (scalarConstOperand(ref e, ref prog, ref ast, declNode.childB, declared, ref op)) {
-    map.mapInsert(ref e.constOps, uint64(symId), op);
+    e.constOps.insert(uint64(symId), op);
   }
 }
 
@@ -118,7 +117,7 @@ function arrayConstOperand(
         // Pass C already checked every element, so a miss here cannot happen on
         // well-formed input - `Operand.Imm 0` keeps it total rather than silent.
         scalarConstOperand(ref e, ref prog, ref ast, childAt(ref ast, list, i), elem, ref op);
-        vec.vecPush(ref elems, op);
+        elems.push(op);
         i += 1;
       }
     }
@@ -166,7 +165,7 @@ function scalarConstOperand(
   }
   if (expr.kind == ASTNodeKind.STRING_LITERAL) {
     out = Operand.StrRef {
-      id: internStringConstant(ref e, vec.vecGet(ref ast.strings, expr.strId))
+      id: internStringConstant(ref e, ast.strings.get(expr.strId))
     };
     return true;
   }

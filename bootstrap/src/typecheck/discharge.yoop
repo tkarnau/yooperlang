@@ -103,7 +103,7 @@ export const DISCHARGE_LIMIT: usize = 64;
 // Called at the end of pass D, once the bodies it describes have been checked -
 // a body that did not check is not going to reach codegen anyway.
 export function computeDischarges(ref prog: Program, ref tm: TypedModule, m: Module): void {
-  vec.vecClear(ref tm.discharges);
+  tm.discharges.clear();
   let w: DischargeWalk = {
     ast: ref m.ast,
     prog: prog,
@@ -114,7 +114,7 @@ export function computeDischarges(ref prog: Program, ref tm: TypedModule, m: Mod
   };
   let f: usize = 0;
   while (f < m.files.len) {
-    const file = vec.vecGet(ref m.files, f);
+    const file = m.files.get(f);
     walkFileBodies(ref w, file.root);
     f += 1;
   }
@@ -134,7 +134,7 @@ export function isDischargedAt(ref tm: TypedModule, exitId: NodeId, bindingId: N
   }
   let i: usize = 0;
   while (i < tm.discharges.len) {
-    const d = vec.vecGet(ref tm.discharges, i);
+    const d = tm.discharges.get(i);
     if (d.exit == exitId && d.binding == bindingId) {
       return true;
     }
@@ -170,7 +170,7 @@ function noteManualCall(ref w: DischargeWalk, call: ASTNode): void {
   let i: usize = w.live.len;
   while (i > 0) {
     i -= 1;
-    const o = vec.vecGet(ref w.live, i);
+    const o = w.live.get(i);
     if (str.stringEq(o.name, target) && str.stringEq(o.method, call.name)) {
       markSat(ref w, i);
       return;
@@ -191,7 +191,7 @@ function rearmAssigned(ref w: DischargeWalk, targetId: NodeId): void {
   let i: usize = w.live.len;
   while (i > 0) {
     i -= 1;
-    const o = vec.vecGet(ref w.live, i);
+    const o = w.live.get(i);
     if (str.stringEq(o.name, target.name)) {
       clearSat(ref w, i);
       return;
@@ -246,14 +246,14 @@ function mustCallMethodOf(ref w: DischargeWalk, declNode: ASTNode): string {
 // ----- the frame stack and the satisfied set ------------------------------
 
 function pushFrame(ref w: DischargeWalk): void {
-  vec.vecPush(ref w.frames, w.live.len);
+  w.frames.push(w.live.len);
 }
 
 function popFrame(ref w: DischargeWalk): void {
   if (w.frames.len == 0) {
     return;
   }
-  w.live.len = vec.vecGet(ref w.frames, w.frames.len - 1);
+  w.live.len = w.frames.get(w.frames.len - 1);
   w.frames.len -= 1;
 }
 
@@ -261,7 +261,7 @@ function popFrame(ref w: DischargeWalk): void {
 // still be set from a binding that lived at the same index earlier.
 function addObligation(ref w: DischargeWalk, declId: NodeId, name: string, method: string): void {
   const at: usize = w.live.len;
-  vec.vecPush(ref w.live, { binding: declId, name: name, method: method });
+  w.live.push({ binding: declId, name: name, method: method });
   clearSat(ref w, at);
 }
 
@@ -294,8 +294,8 @@ function recordExit(ref w: DischargeWalk, exitId: NodeId): void {
   let i: usize = 0;
   while (i < w.live.len) {
     if (isSat(ref w, i)) {
-      const o = vec.vecGet(ref w.live, i);
-      vec.vecPush(ref w.tm.discharges, { exit: exitId, binding: o.binding });
+      const o = w.live.get(i);
+      w.tm.discharges.push({ exit: exitId, binding: o.binding });
     }
     i += 1;
   }

@@ -18,10 +18,10 @@ function main(): int32 {
   // it, so the number costs no allocation. `disposable` frees it at the
   // closing brace (that keyword is the next file).
   disposable line: Text = text.make(32);
-  text.push(ref line, town);
-  text.push(ref line, ", founded ");
-  text.pushInt(ref line, 1849);
-  printf(`${text.view(ref line)}\n`);
+  line.push(town);
+  line.push(", founded ");
+  line.pushInt(1849);
+  printf(`${line.view()}\n`);
 
   // Logging goes to stderr with a level prefix.
   log.info("greeted a town");

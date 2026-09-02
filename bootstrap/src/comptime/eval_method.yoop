@@ -40,8 +40,8 @@ export function evalQualifiedCall(
   // name in the base - a name this module never imported, when the trait was
   // declared elsewhere. Pass D's own decoration says it is a trait call, so
   // that is believed before the name is.
-  if (symId == SYMBOL_NONE_ID && (map.mapContainsKey(ref cx.tm.calleeReceiver, uint64(exprId))
-      || map.mapContainsKey(ref cx.tm.vtableSlots, uint64(exprId)))) {
+  if (symId == SYMBOL_NONE_ID && (cx.tm.calleeReceiver.containsKey(uint64(exprId))
+      || cx.tm.vtableSlots.containsKey(uint64(exprId)))) {
     return dispatchTraitCall(ref cx, expr, exprId);
   }
   if (symId == SYMBOL_NONE_ID) {
@@ -90,7 +90,7 @@ function buildVtable(
   if (argIds.len != 1) {
     return unhandled("a vtable built from other than one value", expr.sourceLoc);
   }
-  const receiver = openBorrow(ref cx, evalExpr(ref cx, vec.vecGet(ref argIds, 0))?);
+  const receiver = openBorrow(ref cx, evalExpr(ref cx, argIds.get(0))?);
   const concrete = valueAt(cx.va, receiver).typeId;
   if (nominalNameOf(cx.prog, derefType(cx.prog, concrete)).len == 0) {
     return unhandled(
@@ -123,12 +123,12 @@ function dispatchTraitCall(
   disposable bound: Vec<ValueId> = vec.vecNew(argIds.len);
   let i: usize = 0;
   while (i < argIds.len) {
-    const v = evalExpr(ref cx, vec.vecGet(ref argIds, i))?;
+    const v = evalExpr(ref cx, argIds.get(i))?;
     const opened = openBorrow(ref cx, v);
     if (valueAt(cx.va, v).kind == ValueKind.REF) {
-      vec.vecPush(ref bound, opened);
+      bound.push(opened);
     } else {
-      vec.vecPush(ref bound, cloneValue(cx.va, opened));
+      bound.push(cloneValue(cx.va, opened));
     }
     i += 1;
   }
@@ -136,13 +136,13 @@ function dispatchTraitCall(
   // A vtable receiver dispatches to whatever it was built over, and hands the
   // METHOD the value rather than the vtable - which is what the context pointer
   // does at run time.
-  let receiver = vec.vecGet(ref bound, 0);
+  let receiver = bound.get(0);
   let concrete = derefType(cx.prog, valueAt(cx.va, receiver).typeId);
   const receiverSlot = valueAt(cx.va, receiver);
   if (receiverSlot.kind == ValueKind.VTABLE) {
     concrete = usize(receiverSlot.bits);
     receiver = receiverSlot.target;
-    vec.vecSet(ref bound, 0, receiver);
+    bound.set(0, receiver);
   }
 
   return callMethodOn(ref cx, concrete, expr.name, ref bound, expr, exprId);
@@ -167,8 +167,8 @@ export function callMethodOn(
   }
   const home = moduleIdOf(cx.prog, nominalModuleOf(cx.prog, concrete));
 
-  let mods: Module[] = vec.vecAsArray(ref cx.graph.modules);
-  let tms: TypedModule[] = vec.vecAsArray(ref cx.prog.modules);
+  let mods: Module[] = cx.graph.modules.asArray();
+  let tms: TypedModule[] = cx.prog.modules.asArray();
   const at = moduleIndexOfId(cx.graph, home);
   if (at >= cx.graph.modules.len) {
     return unhandled(`the module declaring "${owner}"`, expr.sourceLoc);
@@ -194,8 +194,8 @@ function callNamespacedFunction(
   expr: ASTNode,
   exprId: NodeId
 ): Result<ValueId, ComptimeError> {
-  let mods: Module[] = vec.vecAsArray(ref cx.graph.modules);
-  let tms: TypedModule[] = vec.vecAsArray(ref cx.prog.modules);
+  let mods: Module[] = cx.graph.modules.asArray();
+  let tms: TypedModule[] = cx.prog.modules.asArray();
   const at = moduleIndexOfId(cx.graph, moduleIdOf(cx.prog, home));
   if (at >= cx.graph.modules.len) {
     return unhandled(`the module "${baseNode.name}" names`, expr.sourceLoc);
@@ -213,12 +213,12 @@ function callNamespacedFunction(
   disposable argIds: Vec<NodeId> = callArgIds(ref cx, expr);
   let i: usize = 0;
   while (i < argIds.len) {
-    const v = evalExpr(ref cx, vec.vecGet(ref argIds, i))?;
+    const v = evalExpr(ref cx, argIds.get(i))?;
     const opened = openBorrow(ref cx, v);
     if (valueAt(cx.va, v).kind == ValueKind.REF) {
-      vec.vecPush(ref bound, opened);
+      bound.push(opened);
     } else {
-      vec.vecPush(ref bound, cloneValue(cx.va, opened));
+      bound.push(cloneValue(cx.va, opened));
     }
     i += 1;
   }
@@ -232,7 +232,7 @@ function callNamespacedFunction(
 export function moduleIndexOfId(ref graph: ModuleGraph, id: string): usize {
   let i: usize = 0;
   while (i < graph.modules.len) {
-    if (str.stringEq(vec.vecGet(ref graph.modules, i).id, id)) {
+    if (str.stringEq(graph.modules.get(i).id, id)) {
       return i;
     }
     i += 1;

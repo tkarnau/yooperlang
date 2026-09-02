@@ -18,9 +18,9 @@ extern "C" from "stdio.h" {
 // the returned Bytes.
 function build(): Bytes propagates<disposable> {
     disposable v: Vec<uint8> = vec.vecNew(4);
-    vec.vecPush(ref v, 1);
-    vec.vecPush(ref v, 2);
-    vec.vecPush(ref v, 3);
+    v.push(1);
+    v.push(2);
+    v.push(3);
     return bytes.bytesFromVec(ref v);
 }
 

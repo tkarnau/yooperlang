@@ -36,9 +36,9 @@ suite function discoveryIsSortedAndRecursive(): void {
 
   let test theory: Case = t.asserts("the order is lexicographic, so a subdirectory sorts by its whole path") {
     theory.isSuccessful = found.len == 3
-      && endsWith(vec.vecGet(ref found, 0), "alpha.test.yoop")
-      && endsWith(vec.vecGet(ref found, 1), "nested/beta.test.yoop")
-      && endsWith(vec.vecGet(ref found, 2), "zeta.test.yoop");
+      && endsWith(found.get(0), "alpha.test.yoop")
+      && endsWith(found.get(1), "nested/beta.test.yoop")
+      && endsWith(found.get(2), "zeta.test.yoop");
     theory.detail = `got ${joined(ref found)}`;
   }
 
@@ -159,7 +159,7 @@ suite function theGeneratedEntryIsATableAndItsLabels(): void {
   disposable files: Vec<string> = discoverTestFiles(fixtureDir("testmode"));
   disposable got: SuiteCollection = collectSuites(ref files, fixtureDir("testmode"));
   disposable src: Text = generateEntrySource(ref got.files);
-  const out = text.view(ref src);
+  const out = src.view();
 
   // By NAME under a positional alias, never through a namespace: two test files
   // may each declare a `setup`, and the alias is what keeps them apart.
@@ -227,7 +227,7 @@ function endsWith(s: string, suffix: string): bool {
 function anyContains(ref paths: Vec<string>, needle: string): bool {
   let i: usize = 0;
   while (i < paths.len) {
-    if (contains(vec.vecGet(ref paths, i), needle)) {
+    if (contains(paths.get(i), needle)) {
       return true;
     }
     i += 1;
@@ -240,17 +240,17 @@ function joined(ref paths: Vec<string>): string {
   let i: usize = 0;
   while (i < paths.len) {
     if (i > 0) {
-      text.push(ref out, ", ");
+      out.push(", ");
     }
-    text.push(ref out, vec.vecGet(ref paths, i));
+    out.push(paths.get(i));
     i += 1;
   }
-  return `${text.view(ref out)}`;
+  return `${out.view()}`;
 }
 
 function oneFile(dir: string, name: string): Vec<string> propagates<disposable> {
   let paths: Vec<string> = vec.vecNew(1);
-  vec.vecPush(ref paths, fixture(dir, name));
+  paths.push(fixture(dir, name));
   return paths;
 }
 
@@ -258,20 +258,20 @@ function suiteNameIs(ref got: SuiteCollection, fileIndex: usize, suiteIndex: usi
   if (fileIndex >= got.files.len) {
     return false;
   }
-  let file = vec.vecGet(ref got.files, fileIndex);
+  let file = got.files.get(fileIndex);
   if (suiteIndex >= file.suites.len) {
     return false;
   }
-  return str.stringEq(vec.vecGet(ref file.suites, suiteIndex), want);
+  return str.stringEq(file.suites.get(suiteIndex), want);
 }
 
 function suiteNamesInclude(ref got: SuiteCollection, want: string): bool {
   let f: usize = 0;
   while (f < got.files.len) {
-    let file = vec.vecGet(ref got.files, f);
+    let file = got.files.get(f);
     let s: usize = 0;
     while (s < file.suites.len) {
-      if (str.stringEq(vec.vecGet(ref file.suites, s), want)) {
+      if (str.stringEq(file.suites.get(s), want)) {
         return true;
       }
       s += 1;
@@ -285,16 +285,16 @@ function suiteNames(ref got: SuiteCollection): string {
   disposable out: Text = text.make(128);
   let f: usize = 0;
   while (f < got.files.len) {
-    let file = vec.vecGet(ref got.files, f);
+    let file = got.files.get(f);
     let s: usize = 0;
     while (s < file.suites.len) {
-      text.push(ref out, vec.vecGet(ref file.suites, s));
-      text.push(ref out, " ");
+      out.push(file.suites.get(s));
+      out.push(" ");
       s += 1;
     }
     f += 1;
   }
-  return `${text.view(ref out)}`;
+  return `${out.view()}`;
 }
 
 // Fixtures are reached by path, which is the one thing here that depends on

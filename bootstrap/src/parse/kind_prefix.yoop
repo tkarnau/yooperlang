@@ -135,7 +135,7 @@ export function parseKindPrefixRun(ref ps: ParserState): Result<NodeId, ParsingE
   while (ps.peek().tag == TokenTags.IDENT && atKindPrefixIdent(ref ps)) {
     let prefix = ps.buildSourcedNode(ASTNodeKind.KIND_PREFIX);
     prefix.name = parseIdentAsName(ref ps)?;
-    vec.vecPush(ref ids, ps.pushNode(prefix));
+    ids.push(ps.pushNode(prefix));
   }
   if (ids.len == 0 || ps.peek().tag == TokenTags.FUNCTION) {
     ps.expect(TokenTags.FUNCTION)?;
@@ -184,7 +184,7 @@ export function parsePropagatesClause(ref ps: ParserState): Result<NodeId, Parsi
   while (true) {
     let node = ps.buildSourcedNode(ASTNodeKind.KIND_PREFIX);
     node.name = parseIdentAsName(ref ps)?;
-    vec.vecPush(ref ids, ps.pushNode(node));
+    ids.push(ps.pushNode(node));
     if (ps.peek().tag != TokenTags.COMMA) {
       break;
     }

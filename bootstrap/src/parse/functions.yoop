@@ -55,7 +55,7 @@ export function parseFunctionRest(
       peekTag = ps.peek().tag;
     }
     if (peekTag != TokenTags.RPAREN && peekTag != TokenTags.EOF) {
-      vec.vecPush(ref ids, parseFunctionParam(ref ps)?);
+      ids.push(parseFunctionParam(ref ps)?);
       peekTag = ps.peek().tag;
     }
   }
@@ -132,7 +132,7 @@ export function parseParamKindPrefix(ref ps: ParserState): Result<NodeId, Parsin
   disposable ids: Vec<NodeId> = vec.vecNew(1);
   let prefix = ps.buildSourcedNode(ASTNodeKind.KIND_PREFIX);
   prefix.name = parseIdentAsName(ref ps)?;
-  vec.vecPush(ref ids, ps.pushNode(prefix));
+  ids.push(ps.pushNode(prefix));
 
   if (atParamKindPrefix(ref ps)) {
     return Result.Err { error: SelfLexing.createParsingError(

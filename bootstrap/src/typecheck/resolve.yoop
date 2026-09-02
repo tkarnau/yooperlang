@@ -131,7 +131,7 @@ function resolveTypeName(ref prog: Program, ref tm: TypedModule, ref ast: AST, a
       // Not a primitive, so it has to be a name the module declared. Pass A
       // registered a shell for every one of those, which is why a forward
       // reference resolves here.
-      switch (map.mapGet(ref tm.names, annot.name)) {
+      switch (tm.names.get(annot.name)) {
         case Option.Some { value: symId }: {
           return typeIdOfSymbol(ref prog, ref tm, ref ast, symId, annot);
         }
@@ -157,7 +157,7 @@ function resolveQualifiedTypeName(
   ref ast: AST,
   annot: ASTNode
 ): TypeId {
-  const nsName: string = vec.vecGet(ref ast.strings, annot.strId);
+  const nsName: string = ast.strings.get(annot.strId);
 
   const nsSym = lookupOwnName(ref tm, nsName);
   if (nsSym == SYMBOL_NONE_ID) {
@@ -178,8 +178,8 @@ function resolveQualifiedTypeName(
     }
   }
 
-  let source = vec.vecGet(ref prog.modules, sourceIndex);
-  switch (map.mapGet(ref source.exports, annot.name)) {
+  let source = prog.modules.get(sourceIndex);
+  switch (source.exports.get(annot.name)) {
     case Option.Some { value: symId }: {
       return typeIdOfSymbol(ref prog, ref tm, ref ast, symId, annot);
     }
@@ -330,7 +330,7 @@ function resolveGenericApplication(
   disposable args: Vec<TypeId> = vec.vecNew(list.childCount);
   let i: usize = 0;
   while (i < list.childCount) {
-    vec.vecPush(ref args, resolveTypeAnnotation(ref prog, ref tm, ref ast, childAt(ref ast, list, i)));
+    args.push(resolveTypeAnnotation(ref prog, ref tm, ref ast, childAt(ref ast, list, i)));
     i += 1;
   }
 
@@ -548,9 +548,9 @@ function formatTypeList(ref prog: Program, ref types: Vec<TypeId>): string {
   let i: usize = 0;
   while (i < types.len) {
     if (i > 0) {
-      out = `${out}, ${formatType(ref prog, vec.vecGet(ref types, i))}`;
+      out = `${out}, ${formatType(ref prog, types.get(i))}`;
     } else {
-      out = formatType(ref prog, vec.vecGet(ref types, i));
+      out = formatType(ref prog, types.get(i));
     }
     i += 1;
   }
@@ -646,7 +646,7 @@ export function lookupField(ref prog: Program, structType: TypeId, name: string)
     case Type.Struct { decl: d, fields: f, methods: mm, implementsTraits: it, generic: g }: {
       let i: usize = 0;
       while (i < f.len) {
-        const field = vec.vecGet(ref f, i);
+        const field = f.get(i);
         if (str.stringEq(field.name, name)) {
           return { index: i, typeId: field.typeId, found: true };
         }
@@ -674,7 +674,7 @@ export function structFieldAt(ref prog: Program, structType: TypeId, i: usize): 
       if (i >= f.len) {
         return { name: "", typeId: TYPE_ERROR_ID, found: false };
       }
-      const field = vec.vecGet(ref f, i);
+      const field = f.get(i);
       return { name: field.name, typeId: field.typeId, found: true };
     }
     default: { return { name: "", typeId: TYPE_ERROR_ID, found: false }; }
@@ -690,7 +690,7 @@ export function unionFieldAt(ref prog: Program, unionType: TypeId, i: usize): Po
       if (i >= f.len) {
         return { name: "", typeId: TYPE_ERROR_ID, found: false };
       }
-      const field = vec.vecGet(ref f, i);
+      const field = f.get(i);
       return { name: field.name, typeId: field.typeId, found: true };
     }
     default: { return { name: "", typeId: TYPE_ERROR_ID, found: false }; }
@@ -728,7 +728,7 @@ export function lookupVariantCase(ref prog: Program, variantType: TypeId, name: 
     case Type.Variant { decl: d, cases: cs, methods: mm, implementsTraits: it, generic: g }: {
       let i: usize = 0;
       while (i < cs.len) {
-        const c = vec.vecGet(ref cs, i);
+        const c = cs.get(i);
         if (str.stringEq(c.name, name)) {
           return { ordinal: c.ordinal, fieldCount: c.fields.len, found: true };
         }
@@ -751,11 +751,11 @@ export function variantCaseFieldAt(ref prog: Program, variantType: TypeId, ordin
       if (ordinal >= cs.len) {
         return { index: 0, typeId: TYPE_ERROR_ID, found: false };
       }
-      let c = vec.vecGet(ref cs, ordinal);
+      let c = cs.get(ordinal);
       if (i >= c.fields.len) {
         return { index: 0, typeId: TYPE_ERROR_ID, found: false };
       }
-      return { index: i, typeId: vec.vecGet(ref c.fields, i).typeId, found: true };
+      return { index: i, typeId: c.fields.get(i).typeId, found: true };
     }
     default: {
       return { index: 0, typeId: TYPE_ERROR_ID, found: false };
@@ -770,10 +770,10 @@ export function variantCaseFieldNamed(ref prog: Program, variantType: TypeId, or
       if (ordinal >= cs.len) {
         return { index: 0, typeId: TYPE_ERROR_ID, found: false };
       }
-      let c = vec.vecGet(ref cs, ordinal);
+      let c = cs.get(ordinal);
       let i: usize = 0;
       while (i < c.fields.len) {
-        const f = vec.vecGet(ref c.fields, i);
+        const f = c.fields.get(i);
         if (str.stringEq(f.name, name)) {
           return { index: i, typeId: f.typeId, found: true };
         }
@@ -804,7 +804,7 @@ export function variantCaseNameAt(ref prog: Program, variantType: TypeId, ordina
       if (ordinal >= cs.len) {
         return "";
       }
-      return vec.vecGet(ref cs, ordinal).name;
+      return cs.get(ordinal).name;
     }
     default: { return ""; }
   }
@@ -883,9 +883,9 @@ function resolveFuncTypeAnnotation(
       const declared = resolveTypeAnnotation(ref prog, ref tm, ref ast, paramNode.childA);
       // `ref` is part of the signature here exactly as on a declaration.
       if (paramNode.flagA) {
-        vec.vecPush(ref params, internRef(ref prog, declared));
+        params.push(internRef(ref prog, declared));
       } else {
-        vec.vecPush(ref params, declared);
+        params.push(declared);
       }
       i += 1;
     }

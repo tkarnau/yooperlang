@@ -15,10 +15,10 @@ extern "C" from "stdio.h" {
 
 function main(): int32 {
     disposable m: Map<int32, int32> = map.mapNew(8, map.int32KeyOps());
-    let _f1: bool = map.mapInsert(ref m, 1, 100);
-    let _f2: bool = map.mapInsert(ref m, 2, 200);
-    let _f3: bool = map.mapInsert(ref m, 3, 300);
-    let _f4: bool = map.mapInsert(ref m, 4, 400);
+    let _f1: bool = m.insert(1, 100);
+    let _f2: bool = m.insert(2, 200);
+    let _f3: bool = m.insert(3, 300);
+    let _f4: bool = m.insert(4, 400);
 
     let sum_keys: int32 = 0;
     let sum_vals: int32 = 0;

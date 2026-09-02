@@ -2616,8 +2616,8 @@ suite function boundsParseOnEveryGenericDeclaration(): void {
 // than the test crashing.
 function parseOk(src: string): AST propagates<disposable> {
   let srcBuf: Vec<uint8> = vec.vecNew(src.len + 1);
-  vec.vecExtendFrom(ref srcBuf, intr.stringAsBytes(src));
-  switch (parse(vec.vecAsArray(ref srcBuf))) {
+  srcBuf.extendFrom(intr.stringAsBytes(src));
+  switch (parse(srcBuf.asArray())) {
     case Result.Ok { value: ast }: { return ast; }
     case Result.Err { error: e }: { return emptyArena(); }
   }
@@ -2629,8 +2629,8 @@ function parseOk(src: string): AST propagates<disposable> {
 // this file is about what the PARSER alone produces.
 function expandOk(src: string): AST propagates<disposable> {
   let srcBuf: Vec<uint8> = vec.vecNew(src.len + 1);
-  vec.vecExtendFrom(ref srcBuf, intr.stringAsBytes(src));
-  switch (parseInto(emptyArena(), vec.vecAsArray(ref srcBuf))) {
+  srcBuf.extendFrom(intr.stringAsBytes(src));
+  switch (parseInto(emptyArena(), srcBuf.asArray())) {
     case Result.Err { error: e }: { return emptyArena(); }
     case Result.Ok { value: file }: {
       switch (expandDerives(file.ast, file.root)) {
@@ -2644,8 +2644,8 @@ function expandOk(src: string): AST propagates<disposable> {
 // The expansion's refusal message, or "" when it expanded clean.
 function expandError(src: string): string propagates<disposable> {
   let srcBuf: Vec<uint8> = vec.vecNew(src.len + 1);
-  vec.vecExtendFrom(ref srcBuf, intr.stringAsBytes(src));
-  switch (parseInto(emptyArena(), vec.vecAsArray(ref srcBuf))) {
+  srcBuf.extendFrom(intr.stringAsBytes(src));
+  switch (parseInto(emptyArena(), srcBuf.asArray())) {
     case Result.Err { error: e }: { return e.rawMessage; }
     case Result.Ok { value: file }: {
       switch (expandDerives(file.ast, file.root)) {
@@ -2659,8 +2659,8 @@ function expandError(src: string): string propagates<disposable> {
 // The parse error's message, or "" when the source parsed clean.
 function parseError(src: string): string {
   let srcBuf: Vec<uint8> = vec.vecNew(src.len + 1);
-  vec.vecExtendFrom(ref srcBuf, intr.stringAsBytes(src));
-  switch (parse(vec.vecAsArray(ref srcBuf))) {
+  srcBuf.extendFrom(intr.stringAsBytes(src));
+  switch (parse(srcBuf.asArray())) {
     case Result.Ok { value: ast }: { return ""; }
     case Result.Err { error: e }: { return e.rawMessage; }
   }
@@ -2872,7 +2872,7 @@ function poolString(ref ast: AST, id: usize): string {
   if (id >= ast.strings.len) {
     return "";
   }
-  return vec.vecGet(ref ast.strings, id);
+  return ast.strings.get(id);
 }
 
 // `a..b` - the RANGE operator, lowered in the parser into the call it means.

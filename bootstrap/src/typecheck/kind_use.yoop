@@ -148,8 +148,8 @@ function siteWordsOf(sites: uint32): Text propagates<disposable> {
   pushSiteWord(ref out, sites, SITE_FIELD, "field");
   pushSiteWord(ref out, sites, SITE_RETURN, "return");
   pushSiteWord(ref out, sites, SITE_REGION, "region");
-  if (text.isEmpty(ref out)) {
-    text.push(ref out, "nothing");
+  if (out.isEmpty()) {
+    out.push("nothing");
   }
   return out;
 }
@@ -158,10 +158,10 @@ function pushSiteWord(ref out: Text, sites: uint32, bit: uint32, word: string): 
   if ((sites & bit) == 0) {
     return;
   }
-  if (!text.isEmpty(ref out)) {
-    text.push(ref out, " ");
+  if (!out.isEmpty()) {
+    out.push(" ");
   }
-  text.push(ref out, word);
+  out.push(word);
 }
 
 // ----- a kind on a FIELD -----------------------------------------------------

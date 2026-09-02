@@ -47,7 +47,7 @@ function firstBody(wire: string): Text propagates<disposable> {
   disposable body: Vec<uint8> = vec.vecNew(64);
   switch (readFrame(ref r, ref body)) {
     case FrameStatus.MESSAGE: {
-      return text.fromBytes(vec.vecAsArray(ref body));
+      return text.fromBytes(body.asArray());
     }
     case FrameStatus.ENDED: {
       return text.fromString("<ended>");
@@ -75,8 +75,8 @@ function statusAfter(wire: string, skip: usize): Text propagates<disposable> {
 }
 
 function checkText(ref theory: Case, ref got: Text, want: string): void {
-  theory.isSuccessful = text.equals(text.view(ref got), want);
-  theory.detail = `got "${text.view(ref got)}", wanted "${want}"`;
+  theory.isSuccessful = text.equals(got.view(), want);
+  theory.detail = `got "${got.view()}", wanted "${want}"`;
 }
 
 // The JSON a built message serializes to.
@@ -158,16 +158,16 @@ suite function readsTheContentLengthFraming(): void {
     // 12-byte body is 11 characters. Counting characters would read one byte
     // short and desynchronize every message after it.
     disposable want: Text = text.make(16);
-    text.push(ref want, "{\"k\":\"");
-    text.pushChar(ref want, 233);          // U+00E9, two bytes in UTF-8
-    text.push(ref want, "\"}");
+    want.push("{\"k\":\"");
+    want.pushChar(233);          // U+00E9, two bytes in UTF-8
+    want.push("\"}");
     disposable wire: Text = text.make(64);
-    text.push(ref wire, "Content-Length: ");
-    text.pushUint(ref wire, uint64(text.bytes(ref want).len));
-    text.push(ref wire, "\r\n\r\n");
-    text.pushText(ref wire, ref want);
-    disposable got: Text = firstBody(text.view(ref wire));
-    checkText(ref theory, ref got, text.view(ref want));
+    wire.push("Content-Length: ");
+    wire.pushUint(uint64(want.bytes().len));
+    wire.push("\r\n\r\n");
+    wire.pushText(ref want);
+    disposable got: Text = firstBody(wire.view());
+    checkText(ref theory, ref got, want.view());
   }
 
   let test theory: Case = t.asserts("two messages back to back are read as two") {
@@ -175,15 +175,15 @@ suite function readsTheContentLengthFraming(): void {
     disposable r: FrameReader = frameReaderFromBytes(intr.stringAsBytes(wire));
     disposable body: Vec<uint8> = vec.vecNew(64);
     const s1 = readFrame(ref r, ref body);
-    disposable one: Text = text.fromBytes(vec.vecAsArray(ref body));
+    disposable one: Text = text.fromBytes(body.asArray());
     const s2 = readFrame(ref r, ref body);
-    disposable two: Text = text.fromBytes(vec.vecAsArray(ref body));
+    disposable two: Text = text.fromBytes(body.asArray());
     const s3 = readFrame(ref r, ref body);
     theory.isSuccessful = s1 == FrameStatus.MESSAGE && s2 == FrameStatus.MESSAGE
       && s3 == FrameStatus.ENDED
-      && text.equals(text.view(ref one), "first")
-      && text.equals(text.view(ref two), "second");
-    theory.detail = `got "${text.view(ref one)}" then "${text.view(ref two)}"`;
+      && text.equals(one.view(), "first")
+      && text.equals(two.view(), "second");
+    theory.detail = `got "${one.view()}" then "${two.view()}"`;
   }
 
   let test theory: Case = t.asserts("empty input ends cleanly") {
@@ -216,7 +216,7 @@ suite function writesTheContentLengthFraming(): void {
   let test theory: Case = t.asserts("what is written reads back as what went in") {
     const body = "{\"jsonrpc\":\"2.0\",\"method\":\"exit\"}";
     disposable wire: Text = frameMessage(intr.stringAsBytes(body));
-    disposable back: Text = firstBody(text.view(ref wire));
+    disposable back: Text = firstBody(wire.view());
     checkText(ref theory, ref back, body);
   }
 }
@@ -260,9 +260,9 @@ suite function convertsCompilerLocationsToEditorPositions(): void {
   let test theory: Case = t.asserts("a two-byte codepoint is ONE UTF-16 unit") {
     // "<U+00E9>x" - the x is at byte 2 and at character 1.
     disposable src: Text = text.make(8);
-    text.pushChar(ref src, 233);
-    text.push(ref src, "x");
-    const p = positionOfByte(text.bytes(ref src), 2);
+    src.pushChar(233);
+    src.push("x");
+    const p = positionOfByte(src.bytes(), 2);
     theory.isSuccessful = p.line == 0 && p.character == 1;
     theory.detail = `got ${p.line}:${p.character}, wanted 0:1`;
   }
@@ -271,9 +271,9 @@ suite function convertsCompilerLocationsToEditorPositions(): void {
     // "<U+1F600>x" - the x is at byte 4 and at character 2, because an editor
     // counts the emoji as a surrogate pair.
     disposable src: Text = text.make(8);
-    text.pushChar(ref src, 128512);
-    text.push(ref src, "x");
-    const p = positionOfByte(text.bytes(ref src), 4);
+    src.pushChar(128512);
+    src.push("x");
+    const p = positionOfByte(src.bytes(), 4);
     theory.isSuccessful = p.line == 0 && p.character == 2;
     theory.detail = `got ${p.line}:${p.character}, wanted 0:2`;
   }
@@ -339,10 +339,10 @@ suite function tracksWhatTheEditorIsHolding(): void {
     theory.isSuccessful = slot == 1
       && storeIndexOf(ref s, "file:///tmp/a.yoop") == 1
       && storeIndexOf(ref s, "file:///tmp/b.yoop") == 0
-      && text.equals(text.view(ref d.path), "/tmp/a.yoop")
+      && text.equals(d.path.view(), "/tmp/a.yoop")
       && d.version == 3
       && d.content.len == 2;
-    theory.detail = `slot=${slot} path="${text.view(ref d.path)}" len=${d.content.len}`;
+    theory.detail = `slot=${slot} path="${d.path.view()}" len=${d.content.len}`;
   }
 
   let test theory: Case = t.asserts("a second edit replaces the text rather than appending") {
@@ -350,10 +350,10 @@ suite function tracksWhatTheEditorIsHolding(): void {
     const _a = storeUpsert(ref s, "file:///tmp/a.yoop", intr.stringAsBytes("first"), 1);
     const slot = storeUpsert(ref s, "file:///tmp/a.yoop", intr.stringAsBytes("second one"), 2);
     let d: Document = storeGet(ref s, slot);
-    disposable got: Text = text.fromBytes(vec.vecAsArray(ref d.content));
+    disposable got: Text = text.fromBytes(d.content.asArray());
     theory.isSuccessful = slot == 1 && d.version == 2
-      && text.equals(text.view(ref got), "second one");
-    theory.detail = `content is "${text.view(ref got)}" at version ${d.version}`;
+      && text.equals(got.view(), "second one");
+    theory.detail = `content is "${got.view()}" at version ${d.version}`;
   }
 
   let test theory: Case = t.asserts("an edited document is pending until it is published") {
@@ -435,8 +435,8 @@ suite function buildsTheMessagesTheProtocolExpects(): void {
     disposable entries: Vec<OutlineEntry> = vec.vecNew(2);
     let one: Range = { start: { line: 0, character: 5 }, end: { line: 0, character: 10 } };
     let two: Range = { start: { line: 1, character: 2 }, end: { line: 1, character: 3 } };
-    vec.vecPush(ref entries, { name: "Point", kind: 23, range: one, depth: 0 });
-    vec.vecPush(ref entries, { name: "x", kind: 8, range: two, depth: 1 });
+    entries.push({ name: "Point", kind: 23, range: one, depth: 0 });
+    entries.push({ name: "x", kind: 8, range: two, depth: 1 });
     const _r = buildDocumentSymbolResponse(ref out, ref req,
                                            json.member(ref req, req.root, "id"), ref entries);
     disposable got: Text = rendered(ref out);
@@ -472,7 +472,7 @@ suite function buildsTheMessagesTheProtocolExpects(): void {
       severity: 1,
       range: { start: { line: 1, character: 19 }, end: { line: 1, character: 23 } },
     };
-    vec.vecPush(ref diags, d);
+    diags.push(d);
     disposable out: JsonDoc = json.docNew();
     const _p = buildPublishDiagnostics(ref out, "file:///tmp/a.yoop", 4, ref diags);
     disposable got: Text = rendered(ref out);
@@ -488,7 +488,7 @@ suite function buildsTheMessagesTheProtocolExpects(): void {
       severity: 2,
       range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } },
     };
-    vec.vecPush(ref diags, d);
+    diags.push(d);
     disposable out: JsonDoc = json.docNew();
     const _p = buildPublishDiagnostics(ref out, "file:///x", 0, ref diags);
     disposable got: Text = rendered(ref out);
@@ -519,7 +519,7 @@ suite function reportsWhatTheCompilerSaysAboutTheBuffer(): void {
     let doc: Document = storeGet(ref s, slot);
     disposable an: Analysis = analysisNew();
     ensureAnalysis(ref an, ref doc, "");
-    const first = vec.vecGet(ref an.diags, 0);
+    const first = an.diags.get(0);
     theory.isSuccessful = an.diags.len == 1 && first.severity == 1
       && first.range.start.line == 2;
     theory.detail = `got ${an.diags.len} diagnostic(s), first at line ${first.range.start.line}: ${first.message}`;
@@ -538,7 +538,7 @@ suite function reportsWhatTheCompilerSaysAboutTheBuffer(): void {
     let sawSyntaxDiagnostic: bool = false;
     let i: usize = 0;
     while (i < an.diags.len) {
-      const d = vec.vecGet(ref an.diags, i);
+      const d = an.diags.get(i);
       if (d.range.start.line > 0) {
         sawSyntaxDiagnostic = true;
       }
@@ -579,11 +579,11 @@ suite function convertsBetweenOffsetsAndEditorPositions(): void {
     // letter is 2, and ` = ` is 3 - and at column 8, which counts the letter
     // once.
     disposable buf: Vec<uint8> = vec.vecNew(32);
-    vec.vecExtendFrom(ref buf, intr.stringAsBytes("let a = 1;\nlet "));
-    vec.vecPush(ref buf, 195);
-    vec.vecPush(ref buf, 169);
-    vec.vecExtendFrom(ref buf, intr.stringAsBytes(" = naive;\n"));
-    const src = vec.vecAsArray(ref buf);
+    buf.extendFrom(intr.stringAsBytes("let a = 1;\nlet "));
+    buf.push(195);
+    buf.push(169);
+    buf.extendFrom(intr.stringAsBytes(" = naive;\n"));
+    const src = buf.asArray();
     const p = positionOfByte(src, 20);
     const back = byteOfPosition(src, p.line, p.character);
     theory.isSuccessful = p.line == 1 && p.character == 8 && back == 20;
@@ -611,18 +611,18 @@ suite function convertsBetweenOffsetsAndEditorPositions(): void {
 suite function convertsBetweenPathsAndUris(): void {
   let test theory: Case = t.asserts("a path with a space round-trips through a URI") {
     disposable uri: Text = pathToUri("/home/a/b c.yoop");
-    disposable back: Text = uriToPath(text.view(ref uri));
-    theory.isSuccessful = text.equals(text.view(ref uri), "file:///home/a/b%20c.yoop")
-      && text.equals(text.view(ref back), "/home/a/b c.yoop");
-    theory.detail = `"${text.view(ref uri)}" -> "${text.view(ref back)}"`;
+    disposable back: Text = uriToPath(uri.view());
+    theory.isSuccessful = text.equals(uri.view(), "file:///home/a/b%20c.yoop")
+      && text.equals(back.view(), "/home/a/b c.yoop");
+    theory.detail = `"${uri.view()}" -> "${back.view()}"`;
   }
 
   let test theory: Case = t.asserts("separators survive and a hash is escaped") {
     // A `#` in a path is a FRAGMENT marker in a URI, so leaving it alone names
     // a different file; a `/` is the one reserved character that has to stay.
     disposable uri: Text = pathToUri("/a/b#c/d.yoop");
-    theory.isSuccessful = text.equals(text.view(ref uri), "file:///a/b%23c/d.yoop");
-    theory.detail = `got "${text.view(ref uri)}"`;
+    theory.isSuccessful = text.equals(uri.view(), "file:///a/b%23c/d.yoop");
+    theory.detail = `got "${uri.view()}"`;
   }
 }
 
@@ -709,9 +709,9 @@ suite function listsWhatIsInTheFile(): void {
         // Point (a struct, depth 0), its field x (depth 1), then twice (a
         // function, depth 0). SymbolKind 23 is Struct, 8 is Field, 12 is
         // Function - the protocol's numbers, not this compiler's.
-        const a = vec.vecGet(ref entries, 0);
-        const b = vec.vecGet(ref entries, 1);
-        const c = vec.vecGet(ref entries, 2);
+        const a = entries.get(0);
+        const b = entries.get(1);
+        const c = entries.get(2);
         theory.isSuccessful = entries.len == 3
           && text.equals(a.name, "Point") && a.kind == 23 && a.depth == 0
           && text.equals(b.name, "x") && b.kind == 8 && b.depth == 1
@@ -728,8 +728,8 @@ suite function rendersADeclarationAsOneLine(): void {
   let test theory: Case = t.asserts("a signature stops at the body and keeps the whole line") {
     const src = "export function twice(n: int32): int32 {\n  return n + n;\n}\n";
     disposable got: Text = signatureLine(intr.stringAsBytes(src), text.indexOf(src, "twice"));
-    theory.isSuccessful = text.equals(text.view(ref got), "export function twice(n: int32): int32");
-    theory.detail = `got "${text.view(ref got)}"`;
+    theory.isSuccessful = text.equals(got.view(), "export function twice(n: int32): int32");
+    theory.detail = `got "${got.view()}"`;
   }
 
   let test theory: Case = t.asserts("a signature written over several lines collapses to one") {
@@ -737,23 +737,23 @@ suite function rendersADeclarationAsOneLine(): void {
     // back with the indentation left in would be a tooltip four lines tall.
     const src = "function wide(\n  a: int32,\n  b: int32\n): int32 {\n  return a;\n}\n";
     disposable got: Text = signatureLine(intr.stringAsBytes(src), text.indexOf(src, "wide"));
-    theory.isSuccessful = text.equals(text.view(ref got), "function wide(a: int32, b: int32): int32");
-    theory.detail = `got "${text.view(ref got)}"`;
+    theory.isSuccessful = text.equals(got.view(), "function wide(a: int32, b: int32): int32");
+    theory.detail = `got "${got.view()}"`;
   }
 
   let test theory: Case = t.asserts("a declaration with no body stops at its semicolon") {
     const src = "type NodeId = usize;\n";
     disposable got: Text = signatureLine(intr.stringAsBytes(src), text.indexOf(src, "NodeId"));
-    theory.isSuccessful = text.equals(text.view(ref got), "type NodeId = usize");
-    theory.detail = `got "${text.view(ref got)}"`;
+    theory.isSuccessful = text.equals(got.view(), "type NodeId = usize");
+    theory.detail = `got "${got.view()}"`;
   }
 
   let test theory: Case = t.asserts("a brace inside a generic argument does not end the signature") {
     // `<` and `>` are counted, so the `{` that ends this one is the body's.
     const src = "function pick(v: Vec<int32>): int32 {\n  return 0;\n}\n";
     disposable got: Text = signatureLine(intr.stringAsBytes(src), text.indexOf(src, "pick"));
-    theory.isSuccessful = text.equals(text.view(ref got), "function pick(v: Vec<int32>): int32");
-    theory.detail = `got "${text.view(ref got)}"`;
+    theory.isSuccessful = text.equals(got.view(), "function pick(v: Vec<int32>): int32");
+    theory.detail = `got "${got.view()}"`;
   }
 }
 

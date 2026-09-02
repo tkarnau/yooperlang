@@ -36,9 +36,9 @@ import { TypeId, moduleIdOf, methodSymbolName, nominalModuleOf, vtableSlotCount,
 // Whether a CALL node is one of the three vtable shapes. Asked before anything
 // looks for a symbol, because none of the three has one.
 export function isVtableCall(ref cx: Cx, exprId: NodeId): bool {
-  return map.mapContainsKey(ref cx.tm.vtableBuilds, uint64(exprId))
-    || map.mapContainsKey(ref cx.tm.vtableFromFns, uint64(exprId))
-    || map.mapContainsKey(ref cx.tm.vtableSlots, uint64(exprId));
+  return cx.tm.vtableBuilds.containsKey(uint64(exprId))
+    || cx.tm.vtableFromFns.containsKey(uint64(exprId))
+    || cx.tm.vtableSlots.containsKey(uint64(exprId));
 }
 
 export function emitVtableCall(
@@ -47,16 +47,16 @@ export function emitVtableCall(
   exprId: NodeId,
   ref out: Operand
 ): EmitResult {
-  switch (map.mapGet(ref cx.tm.vtableBuilds, uint64(exprId))) {
+  switch (cx.tm.vtableBuilds.get(uint64(exprId))) {
     case Option.Some { value: implType }: {
       return emitVtableFrom(ref cx, expr, exprId, implType, ref out);
     }
     case Option.None: { }
   }
-  if (map.mapContainsKey(ref cx.tm.vtableFromFns, uint64(exprId))) {
+  if (cx.tm.vtableFromFns.containsKey(uint64(exprId))) {
     return emitVtableFromFn(ref cx, expr, exprId, ref out);
   }
-  switch (map.mapGet(ref cx.tm.vtableSlots, uint64(exprId))) {
+  switch (cx.tm.vtableSlots.get(uint64(exprId))) {
     case Option.Some { value: slotIndex }: {
       return emitVtableDispatch(ref cx, expr, exprId, slotIndex, ref out);
     }

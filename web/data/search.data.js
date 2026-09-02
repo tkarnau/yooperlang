@@ -114,7 +114,7 @@ window.YOOP_DATA.search = {
    "href": "reference.html#traits"
   },
   {
-   "title": "Calls are trait-qualified",
+   "title": "Calling a method",
    "where": "Language reference",
    "href": "reference.html#traits-calls"
   },
@@ -318,55 +318,13 @@ window.YOOP_DATA.search = {
    "title": "Deque",
    "where": "type in std/collections/deque.yoop",
    "href": "std.html#std%2Fcollections%2Fdeque.yoop",
-   "text": "export type Deque<T> implements Disposable propagates<disposable>"
-  },
-  {
-   "title": "dequeClear",
-   "where": "function in std/collections/deque.yoop",
-   "href": "std.html#std%2Fcollections%2Fdeque.yoop",
-   "text": "export function dequeClear<T>(ref d: Deque<T>): void"
-  },
-  {
-   "title": "dequeGet",
-   "where": "function in std/collections/deque.yoop",
-   "href": "std.html#std%2Fcollections%2Fdeque.yoop",
-   "text": "export function dequeGet<T>(ref d: Deque<T>, i: usize): Option<T>"
-  },
-  {
-   "title": "dequeLen",
-   "where": "function in std/collections/deque.yoop",
-   "href": "std.html#std%2Fcollections%2Fdeque.yoop",
-   "text": "export function dequeLen<T>(ref d: Deque<T>): usize"
+   "text": "export type Deque<T> implements (Disposable, DoubleEnded<T>) propagates<disposable>"
   },
   {
    "title": "dequeNew",
    "where": "function in std/collections/deque.yoop",
    "href": "std.html#std%2Fcollections%2Fdeque.yoop",
    "text": "export function dequeNew<T>(initial_cap: usize): Deque<T> propagates<disposable>"
-  },
-  {
-   "title": "dequePopBack",
-   "where": "function in std/collections/deque.yoop",
-   "href": "std.html#std%2Fcollections%2Fdeque.yoop",
-   "text": "export function dequePopBack<T>(ref d: Deque<T>): Option<T>"
-  },
-  {
-   "title": "dequePopFront",
-   "where": "function in std/collections/deque.yoop",
-   "href": "std.html#std%2Fcollections%2Fdeque.yoop",
-   "text": "export function dequePopFront<T>(ref d: Deque<T>): Option<T>"
-  },
-  {
-   "title": "dequePushBack",
-   "where": "function in std/collections/deque.yoop",
-   "href": "std.html#std%2Fcollections%2Fdeque.yoop",
-   "text": "export function dequePushBack<T>(ref d: Deque<T>, value: T): void"
-  },
-  {
-   "title": "dequePushFront",
-   "where": "function in std/collections/deque.yoop",
-   "href": "std.html#std%2Fcollections%2Fdeque.yoop",
-   "text": "export function dequePushFront<T>(ref d: Deque<T>, value: T): void"
   },
   {
    "title": "std/collections/map.yoop",
@@ -402,37 +360,13 @@ window.YOOP_DATA.search = {
    "title": "Map",
    "where": "type in std/collections/map.yoop",
    "href": "std.html#std%2Fcollections%2Fmap.yoop",
-   "text": "export type Map<K, V> implements Disposable propagates<disposable>"
-  },
-  {
-   "title": "mapClear",
-   "where": "function in std/collections/map.yoop",
-   "href": "std.html#std%2Fcollections%2Fmap.yoop",
-   "text": "export function mapClear<K, V>(ref m: Map<K, V>): void"
-  },
-  {
-   "title": "mapContainsKey",
-   "where": "function in std/collections/map.yoop",
-   "href": "std.html#std%2Fcollections%2Fmap.yoop",
-   "text": "export function mapContainsKey<K, V>(ref m: Map<K, V>, key: K): bool"
+   "text": "export type Map<K, V> implements (Disposable, Mapping<K, V>) propagates<disposable>"
   },
   {
    "title": "MapEntry",
    "where": "type in std/collections/map.yoop",
    "href": "std.html#std%2Fcollections%2Fmap.yoop",
    "text": "export type MapEntry<K, V>"
-  },
-  {
-   "title": "mapGet",
-   "where": "function in std/collections/map.yoop",
-   "href": "std.html#std%2Fcollections%2Fmap.yoop",
-   "text": "export function mapGet<K, V>(ref m: Map<K, V>, key: K): Option<V>"
-  },
-  {
-   "title": "mapInsert",
-   "where": "function in std/collections/map.yoop",
-   "href": "std.html#std%2Fcollections%2Fmap.yoop",
-   "text": "export function mapInsert<K, V>(ref m: Map<K, V>, key: K, value: V): bool"
   },
   {
    "title": "mapIter",
@@ -447,22 +381,10 @@ window.YOOP_DATA.search = {
    "text": "export type MapIter<K, V> implements Iterable<MapEntry<K, V>>"
   },
   {
-   "title": "mapLen",
-   "where": "function in std/collections/map.yoop",
-   "href": "std.html#std%2Fcollections%2Fmap.yoop",
-   "text": "export function mapLen<K, V>(ref m: Map<K, V>): usize"
-  },
-  {
    "title": "mapNew",
    "where": "function in std/collections/map.yoop",
    "href": "std.html#std%2Fcollections%2Fmap.yoop",
    "text": "export function mapNew<K, V>(initial_cap: usize, ops: KeyOps<K>): Map<K, V> propagates<disposable>"
-  },
-  {
-   "title": "mapRemove",
-   "where": "function in std/collections/map.yoop",
-   "href": "std.html#std%2Fcollections%2Fmap.yoop",
-   "text": "export function mapRemove<K, V>(ref m: Map<K, V>, key: K): bool"
   },
   {
    "title": "stringKeyOps",
@@ -486,37 +408,13 @@ window.YOOP_DATA.search = {
    "title": "Set",
    "where": "type in std/collections/set.yoop",
    "href": "std.html#std%2Fcollections%2Fset.yoop",
-   "text": "export type Set<K> implements Disposable propagates<disposable>"
-  },
-  {
-   "title": "setContains",
-   "where": "function in std/collections/set.yoop",
-   "href": "std.html#std%2Fcollections%2Fset.yoop",
-   "text": "export function setContains<K>(ref s: Set<K>, k: K): bool"
-  },
-  {
-   "title": "setInsert",
-   "where": "function in std/collections/set.yoop",
-   "href": "std.html#std%2Fcollections%2Fset.yoop",
-   "text": "export function setInsert<K>(ref s: Set<K>, k: K): bool"
-  },
-  {
-   "title": "setLen",
-   "where": "function in std/collections/set.yoop",
-   "href": "std.html#std%2Fcollections%2Fset.yoop",
-   "text": "export function setLen<K>(ref s: Set<K>): usize"
+   "text": "export type Set<K> implements (Disposable, Membership<K>) propagates<disposable>"
   },
   {
    "title": "setNew",
    "where": "function in std/collections/set.yoop",
    "href": "std.html#std%2Fcollections%2Fset.yoop",
    "text": "export function setNew<K>(initial_cap: usize, ops: KeyOps<K>): Set<K> propagates<disposable>"
-  },
-  {
-   "title": "setRemove",
-   "where": "function in std/collections/set.yoop",
-   "href": "std.html#std%2Fcollections%2Fset.yoop",
-   "text": "export function setRemove<K>(ref s: Set<K>, k: K): bool"
   },
   {
    "title": "std/core/alloc.yoop",
@@ -1206,19 +1104,13 @@ window.YOOP_DATA.search = {
    "title": "std/core/text.yoop",
    "where": "Standard library",
    "href": "std.html#std%2Fcore%2Ftext.yoop",
-   "text": "the owned, growable string type.\n\nThe division of labour, which everything else here follows from:\n\n  `string` is the BORROWED view. Literals, `view(ref t)`, a slice of a\n  buffer someone else owns. I"
+   "text": "the owned, growable string type.\n\nThe division of labour, which everything else here follows from:\n\n  `string` is the BORROWED view. Literals, `t.view()`, a slice of a\n  buffer someone else owns. It i"
   },
   {
    "title": "byteOffsetOfChar",
    "where": "function in std/core/text.yoop",
    "href": "std.html#std%2Fcore%2Ftext.yoop",
    "text": "export function byteOffsetOfChar(s: string, n: usize): usize"
-  },
-  {
-   "title": "bytes",
-   "where": "function in std/core/text.yoop",
-   "href": "std.html#std%2Fcore%2Ftext.yoop",
-   "text": "export function bytes(t: ref Text): uint8[]"
   },
   {
    "title": "charAt",
@@ -1249,12 +1141,6 @@ window.YOOP_DATA.search = {
    "where": "type in std/core/text.yoop",
    "href": "std.html#std%2Fcore%2Ftext.yoop",
    "text": "export type Chars implements Iterable<uint32>"
-  },
-  {
-   "title": "clear",
-   "where": "function in std/core/text.yoop",
-   "href": "std.html#std%2Fcore%2Ftext.yoop",
-   "text": "export function clear(t: ref Text): void"
   },
   {
    "title": "concat",
@@ -1305,12 +1191,6 @@ window.YOOP_DATA.search = {
    "text": "export function indexOfFrom(s: string, needle: string, start: usize): usize"
   },
   {
-   "title": "isEmpty",
-   "where": "function in std/core/text.yoop",
-   "href": "std.html#std%2Fcore%2Ftext.yoop",
-   "text": "export function isEmpty(t: ref Text): bool"
-  },
-  {
    "title": "join",
    "where": "function in std/core/text.yoop",
    "href": "std.html#std%2Fcore%2Ftext.yoop",
@@ -1341,48 +1221,6 @@ window.YOOP_DATA.search = {
    "text": "export function parseInt(s: string): Result<int64, string>"
   },
   {
-   "title": "push",
-   "where": "function in std/core/text.yoop",
-   "href": "std.html#std%2Fcore%2Ftext.yoop",
-   "text": "export function push(t: ref Text, s: string): void"
-  },
-  {
-   "title": "pushByte",
-   "where": "function in std/core/text.yoop",
-   "href": "std.html#std%2Fcore%2Ftext.yoop",
-   "text": "export function pushByte(t: ref Text, b: uint8): void"
-  },
-  {
-   "title": "pushBytes",
-   "where": "function in std/core/text.yoop",
-   "href": "std.html#std%2Fcore%2Ftext.yoop",
-   "text": "export function pushBytes(t: ref Text, src: uint8[]): void"
-  },
-  {
-   "title": "pushChar",
-   "where": "function in std/core/text.yoop",
-   "href": "std.html#std%2Fcore%2Ftext.yoop",
-   "text": "export function pushChar(t: ref Text, cp: uint32): void"
-  },
-  {
-   "title": "pushInt",
-   "where": "function in std/core/text.yoop",
-   "href": "std.html#std%2Fcore%2Ftext.yoop",
-   "text": "export function pushInt(t: ref Text, v: int64): void"
-  },
-  {
-   "title": "pushText",
-   "where": "function in std/core/text.yoop",
-   "href": "std.html#std%2Fcore%2Ftext.yoop",
-   "text": "export function pushText(t: ref Text, other: ref Text): void"
-  },
-  {
-   "title": "pushUint",
-   "where": "function in std/core/text.yoop",
-   "href": "std.html#std%2Fcore%2Ftext.yoop",
-   "text": "export function pushUint(t: ref Text, v: uint64): void"
-  },
-  {
    "title": "repeat",
    "where": "function in std/core/text.yoop",
    "href": "std.html#std%2Fcore%2Ftext.yoop",
@@ -1399,12 +1237,6 @@ window.YOOP_DATA.search = {
    "where": "function in std/core/text.yoop",
    "href": "std.html#std%2Fcore%2Ftext.yoop",
    "text": "export function replaceChar(s: string, n: usize, repl: string): Text propagates<disposable>"
-  },
-  {
-   "title": "reserve",
-   "where": "function in std/core/text.yoop",
-   "href": "std.html#std%2Fcore%2Ftext.yoop",
-   "text": "export function reserve(t: ref Text, wanted: usize): void"
   },
   {
    "title": "seqLen",
@@ -1434,7 +1266,13 @@ window.YOOP_DATA.search = {
    "title": "Text",
    "where": "type in std/core/text.yoop",
    "href": "std.html#std%2Fcore%2Ftext.yoop",
-   "text": "export type Text implements (Disposable, Display) propagates<disposable>"
+   "text": "export type Text implements (Disposable, Display, TextBuilder) propagates<disposable>"
+  },
+  {
+   "title": "TextBuilder",
+   "where": "trait in std/core/text.yoop",
+   "href": "std.html#std%2Fcore%2Ftext.yoop",
+   "text": "export trait TextBuilder"
   },
   {
    "title": "toLowerAscii",
@@ -1467,18 +1305,6 @@ window.YOOP_DATA.search = {
    "text": "export function trimStart(s: string): Text propagates<disposable>"
   },
   {
-   "title": "truncateBytes",
-   "where": "function in std/core/text.yoop",
-   "href": "std.html#std%2Fcore%2Ftext.yoop",
-   "text": "export function truncateBytes(t: ref Text, newLen: usize): void"
-  },
-  {
-   "title": "view",
-   "where": "function in std/core/text.yoop",
-   "href": "std.html#std%2Fcore%2Ftext.yoop",
-   "text": "export function view(t: ref Text): string"
-  },
-  {
    "title": "std/core/traits.yoop",
    "where": "Standard library",
    "href": "std.html#std%2Fcore%2Ftraits.yoop",
@@ -1491,10 +1317,22 @@ window.YOOP_DATA.search = {
    "text": "export trait Display"
   },
   {
+   "title": "DoubleEnded",
+   "where": "trait in std/core/traits.yoop",
+   "href": "std.html#std%2Fcore%2Ftraits.yoop",
+   "text": "export trait DoubleEnded<T>"
+  },
+  {
    "title": "FlushOutcome",
    "where": "variant in std/core/traits.yoop",
    "href": "std.html#std%2Fcore%2Ftraits.yoop",
    "text": "export variant FlushOutcome"
+  },
+  {
+   "title": "Growable",
+   "where": "trait in std/core/traits.yoop",
+   "href": "std.html#std%2Fcore%2Ftraits.yoop",
+   "text": "export trait Growable<T>"
   },
   {
    "title": "Into",
@@ -1515,6 +1353,18 @@ window.YOOP_DATA.search = {
    "text": "export variant IterStep<T>"
   },
   {
+   "title": "Mapping",
+   "where": "trait in std/core/traits.yoop",
+   "href": "std.html#std%2Fcore%2Ftraits.yoop",
+   "text": "export trait Mapping<K, V>"
+  },
+  {
+   "title": "Membership",
+   "where": "trait in std/core/traits.yoop",
+   "href": "std.html#std%2Fcore%2Ftraits.yoop",
+   "text": "export trait Membership<K>"
+  },
+  {
    "title": "Readable",
    "where": "trait in std/core/traits.yoop",
    "href": "std.html#std%2Fcore%2Ftraits.yoop",
@@ -1525,6 +1375,12 @@ window.YOOP_DATA.search = {
    "where": "vtable in std/core/traits.yoop",
    "href": "std.html#std%2Fcore%2Ftraits.yoop",
    "text": "export vtable Reader for Readable"
+  },
+  {
+   "title": "Sequence",
+   "where": "trait in std/core/traits.yoop",
+   "href": "std.html#std%2Fcore%2Ftraits.yoop",
+   "text": "export trait Sequence<T>"
   },
   {
    "title": "WithContext",
@@ -1572,37 +1428,13 @@ window.YOOP_DATA.search = {
    "title": "Vec",
    "where": "type in std/core/vec.yoop",
    "href": "std.html#std%2Fcore%2Fvec.yoop",
-   "text": "export type Vec<T> implements Disposable propagates<disposable>"
-  },
-  {
-   "title": "vecAsArray",
-   "where": "function in std/core/vec.yoop",
-   "href": "std.html#std%2Fcore%2Fvec.yoop",
-   "text": "export function vecAsArray<T>(v: ref Vec<T>): T[]"
-  },
-  {
-   "title": "vecClear",
-   "where": "function in std/core/vec.yoop",
-   "href": "std.html#std%2Fcore%2Fvec.yoop",
-   "text": "export function vecClear<T>(v: ref Vec<T>): void"
-  },
-  {
-   "title": "vecExtendFrom",
-   "where": "function in std/core/vec.yoop",
-   "href": "std.html#std%2Fcore%2Fvec.yoop",
-   "text": "export function vecExtendFrom<T>(v: ref Vec<T>, src: T[]): void"
+   "text": "export type Vec<T> implements (Disposable, Sequence<T>, Growable<T>) propagates<disposable>"
   },
   {
    "title": "vecFromArray",
    "where": "function in std/core/vec.yoop",
    "href": "std.html#std%2Fcore%2Fvec.yoop",
    "text": "export function vecFromArray<T>(src: T[]): Vec<T> propagates<disposable>"
-  },
-  {
-   "title": "vecGet",
-   "where": "function in std/core/vec.yoop",
-   "href": "std.html#std%2Fcore%2Fvec.yoop",
-   "text": "export function vecGet<T>(v: ref Vec<T>, i: usize): T"
   },
   {
    "title": "vecIter",
@@ -1621,18 +1453,6 @@ window.YOOP_DATA.search = {
    "where": "function in std/core/vec.yoop",
    "href": "std.html#std%2Fcore%2Fvec.yoop",
    "text": "export function vecNew<T>(initial_cap: usize): Vec<T> propagates<disposable>"
-  },
-  {
-   "title": "vecPush",
-   "where": "function in std/core/vec.yoop",
-   "href": "std.html#std%2Fcore%2Fvec.yoop",
-   "text": "export function vecPush<T>(v: ref Vec<T>, value: T): void"
-  },
-  {
-   "title": "vecSet",
-   "where": "function in std/core/vec.yoop",
-   "href": "std.html#std%2Fcore%2Fvec.yoop",
-   "text": "export function vecSet<T>(v: ref Vec<T>, i: usize, value: T): void"
   },
   {
    "title": "std/crypto",
@@ -2113,6 +1933,12 @@ window.YOOP_DATA.search = {
    "where": "function in std/fs.yoop",
    "href": "std.html#std%2Ffs.yoop",
    "text": "export function hasYoopFileNameSuffix(s: string): bool"
+  },
+  {
+   "title": "isAbsolutePath",
+   "where": "function in std/fs.yoop",
+   "href": "std.html#std%2Ffs.yoop",
+   "text": "export function isAbsolutePath(path: string): bool"
   },
   {
    "title": "mkdirP",
@@ -3234,7 +3060,7 @@ window.YOOP_DATA.search = {
    "title": "std/plugin.yoop",
    "where": "Standard library",
    "href": "std.html#std%2Fplugin.yoop",
-   "text": ""
+   "text": "the compiler plugin API, for hooks a build runs under\n--plugin. Interpret-only.\n\nA build run as `yoopiler_boot <entry> --plugin <plugin.yoop>` loads the\nplugin as its own module graph and runs its hoo"
   },
   {
    "title": "astJson",
@@ -3247,6 +3073,12 @@ window.YOOP_DATA.search = {
    "where": "function in std/plugin.yoop",
    "href": "std.html#std%2Fplugin.yoop",
    "text": "export function buildOk(): int32"
+  },
+  {
+   "title": "childAlive",
+   "where": "function in std/plugin.yoop",
+   "href": "std.html#std%2Fplugin.yoop",
+   "text": "export function childAlive(): int32"
   },
   {
    "title": "diagnosticsJson",
@@ -3265,6 +3097,12 @@ window.YOOP_DATA.search = {
    "where": "function in std/plugin.yoop",
    "href": "std.html#std%2Fplugin.yoop",
    "text": "export function ir(): string"
+  },
+  {
+   "title": "killChild",
+   "where": "function in std/plugin.yoop",
+   "href": "std.html#std%2Fplugin.yoop",
+   "text": "export function killChild(): int32"
   },
   {
    "title": "log",
@@ -3289,6 +3127,36 @@ window.YOOP_DATA.search = {
    "where": "function in std/plugin.yoop",
    "href": "std.html#std%2Fplugin.yoop",
    "text": "export function phase(): string"
+  },
+  {
+   "title": "recvLine",
+   "where": "function in std/plugin.yoop",
+   "href": "std.html#std%2Fplugin.yoop",
+   "text": "export function recvLine(): string"
+  },
+  {
+   "title": "sendArtifact",
+   "where": "function in std/plugin.yoop",
+   "href": "std.html#std%2Fplugin.yoop",
+   "text": "export function sendArtifact(kind: string): int32"
+  },
+  {
+   "title": "sendLine",
+   "where": "function in std/plugin.yoop",
+   "href": "std.html#std%2Fplugin.yoop",
+   "text": "export function sendLine(line: string): int32"
+  },
+  {
+   "title": "sleepMs",
+   "where": "function in std/plugin.yoop",
+   "href": "std.html#std%2Fplugin.yoop",
+   "text": "export function sleepMs(ms: int32): int32"
+  },
+  {
+   "title": "spawn",
+   "where": "function in std/plugin.yoop",
+   "href": "std.html#std%2Fplugin.yoop",
+   "text": "export function spawn(cmdline: string): int32"
   },
   {
    "title": "tokens",

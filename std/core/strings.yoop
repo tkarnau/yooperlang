@@ -283,7 +283,7 @@ export function split(
   const separatorBytes = intr.stringAsBytes(separator);
   if (separatorBytes.len > inputBytes.len || separatorBytes.len == 0) {
     // nothing splittable, just use the string
-    vec.vecPush(ref out, input);
+    out.push(input);
     return "";
   }
 
@@ -308,7 +308,7 @@ export function split(
         const entryStringResult = stringFromBytes(entry);
         switch (entryStringResult) {
           case Result.Ok { value: entryString }: {
-            vec.vecPush(ref out, entryString);
+            out.push(entryString);
           }
           case Result.Err { error: e }: {
             return `unable to parse string when recomposing split entry strings: ${e}`;
@@ -327,7 +327,7 @@ export function split(
       const entryStringResult = stringFromBytes(entry);
       switch (entryStringResult) {
         case Result.Ok { value: entryString }: {
-          vec.vecPush(ref out, entryString);
+          out.push(entryString);
         }
         case Result.Err { error: e }: {
           return `unable to parse string when recomposing split entry strings: ${e}`;

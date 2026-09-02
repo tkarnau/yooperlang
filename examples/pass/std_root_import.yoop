@@ -14,10 +14,10 @@ extern "C" from "stdio.h" {
 
 function main(): int32 {
     disposable v: Vec<int32> = vec.vecNew(4);
-    vec.vecPush(ref v, 10);
-    vec.vecPush(ref v, 20);
-    vec.vecPush(ref v, 30);
-    let total: int32 = vec.vecGet(ref v, 0) + vec.vecGet(ref v, 1) + vec.vecGet(ref v, 2);
+    v.push(10);
+    v.push(20);
+    v.push(30);
+    let total: int32 = v.get(0) + v.get(1) + v.get(2);
     printf(`total=${total}\n`);
     return 0;
 }

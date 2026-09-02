@@ -146,7 +146,7 @@ export function parseBlock(ref ps: ParserState): ParsingResult {
   disposable ids: Vec<NodeId> = vec.vecNew(4);
   while (untilClosing(ref ps, TokenTags.RCURLY)) {
     // eat statements and add to body...
-    vec.vecPush(ref ids, parseStatement(ref ps)?);
+    ids.push(parseStatement(ref ps)?);
   }
   // child start nodeId...
   // child count
@@ -303,7 +303,7 @@ function parseSwitchStatement(ref ps: ParserState): ParsingResult {
 
   disposable armIds: Vec<NodeId> = vec.vecNew(4);
   while (untilClosing(ref ps, TokenTags.RCURLY)) {
-    vec.vecPush(ref armIds, parseSwitchArm(ref ps)?);
+    armIds.push(parseSwitchArm(ref ps)?);
   }
   ps.expect(TokenTags.RCURLY)?;
 
@@ -328,9 +328,9 @@ function parseSwitchArm(ref ps: ParserState): ParsingResult {
     disposable patternIds: Vec<NodeId> = vec.vecNew(2);
     while (true) {
       if (peekIsVariantPattern(ref ps)) {
-        vec.vecPush(ref patternIds, parseVariantPattern(ref ps)?);
+        patternIds.push(parseVariantPattern(ref ps)?);
       } else {
-        vec.vecPush(ref patternIds, parseLiteralPattern(ref ps)?);
+        patternIds.push(parseLiteralPattern(ref ps)?);
       }
       if (ps.peek().tag != TokenTags.COMMA) {
         break;

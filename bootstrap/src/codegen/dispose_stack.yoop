@@ -91,7 +91,7 @@ export function disposeStackNew(): DisposeStack propagates<disposable> {
 
 export function disposePushScope(ref d: DisposeStack): void {
   let fresh: Vec<PendingDispose> = vec.vecNew(2);
-  vec.vecPush(ref d.scopes, fresh);
+  d.scopes.push(fresh);
 }
 
 // Drop the innermost scope WITHOUT emitting anything - the caller has already
@@ -100,7 +100,7 @@ export function disposePopScope(ref d: DisposeStack): void {
   if (d.scopes.len == 0) {
     return;
   }
-  let top = vec.vecGet(ref d.scopes, d.scopes.len - 1);
+  let top = d.scopes.get(d.scopes.len - 1);
   top.dispose();
   d.scopes.len -= 1;
 }
@@ -109,9 +109,9 @@ export function disposeRecord(ref d: DisposeStack, entry: PendingDispose): void 
   if (d.scopes.len == 0) {
     return;
   }
-  let top = vec.vecGet(ref d.scopes, d.scopes.len - 1);
-  vec.vecPush(ref top, entry);
-  vec.vecSet(ref d.scopes, d.scopes.len - 1, top);
+  let top = d.scopes.get(d.scopes.len - 1);
+  top.push(entry);
+  d.scopes.set(d.scopes.len - 1, top);
 }
 
 // How many scopes are open. `return` unwinds all of them.
@@ -121,5 +121,5 @@ export function disposeScopeDepth(ref d: DisposeStack): usize {
 
 // The pending disposals of scope `i`, innermost last.
 export function disposeScopeAt(ref d: DisposeStack, i: usize): Vec<PendingDispose> propagates<disposable> {
-  return vec.vecGet(ref d.scopes, i);
+  return d.scopes.get(i);
 }

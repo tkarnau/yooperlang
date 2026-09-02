@@ -68,7 +68,7 @@ export function parseKindDecl(ref ps: ParserState): Result<NodeId, ParsingError>
   ps.expect(TokenTags.LCURLY)?;
   disposable ids: Vec<NodeId> = vec.vecNew(4);
   while (untilClosing(ref ps, TokenTags.RCURLY)) {
-    vec.vecPush(ref ids, parseKindClause(ref ps)?);
+    ids.push(parseKindClause(ref ps)?);
   }
   ps.expect(TokenTags.RCURLY)?;
 
@@ -87,7 +87,7 @@ function parseKindParams(ref ps: ParserState): Result<NodeId, ParsingError> {
 
   disposable ids: Vec<NodeId> = vec.vecNew(2);
   while (untilClosing(ref ps, TokenTags.RPAREN)) {
-    vec.vecPush(ref ids, parseFunctionParam(ref ps)?);
+    ids.push(parseFunctionParam(ref ps)?);
     if (ps.peek().tag == TokenTags.COMMA) {
       ps.advance()?;
     }
@@ -126,7 +126,7 @@ function parseKindComposition(ref ps: ParserState, node: ASTNode): Result<NodeId
     if (tag == TokenTags.LCURLY) {
       ps.advance()?;
       while (untilClosing(ref ps, TokenTags.RCURLY)) {
-        vec.vecPush(ref ids, parseKindClause(ref ps)?);
+        ids.push(parseKindClause(ref ps)?);
       }
       ps.expect(TokenTags.RCURLY)?;
       continue;
@@ -135,7 +135,7 @@ function parseKindComposition(ref ps: ParserState, node: ASTNode): Result<NodeId
       let operand = ps.buildSourcedNode(ASTNodeKind.KIND_CLAUSE);
       operand.name = COMPOSE_CLAUSE;
       operand.strId = internString(ref ps, parseIdentAsName(ref ps)?);
-      vec.vecPush(ref ids, ps.pushNode(operand));
+      ids.push(ps.pushNode(operand));
       continue;
     }
     // `(b & c) & d` - a GROUPING, and the language has no such thing. There is
@@ -233,7 +233,7 @@ function parseKindClause(ref ps: ParserState): Result<NodeId, ParsingError> {
     if (tag != TokenTags.COMMA) {
       let word = ps.buildSourcedNode(ASTNodeKind.KIND_CLAUSE_WORD);
       word.name = peekText(ref ps);
-      vec.vecPush(ref words, ps.pushNode(word));
+      words.push(ps.pushNode(word));
     }
     ps.advance()?;
   }
@@ -249,7 +249,7 @@ function parseKindClauseBody(ref ps: ParserState): Result<NodeId, ParsingError> 
   ps.expect(TokenTags.LCURLY)?;
   disposable ids: Vec<NodeId> = vec.vecNew(2);
   while (untilClosing(ref ps, TokenTags.RCURLY)) {
-    vec.vecPush(ref ids, parseKindSubClause(ref ps)?);
+    ids.push(parseKindSubClause(ref ps)?);
   }
   ps.expect(TokenTags.RCURLY)?;
   return Result.Ok { value: ps.buildListNode(ref ids, loc) };
@@ -276,7 +276,7 @@ function parseKindSubClause(ref ps: ParserState): Result<NodeId, ParsingError> {
     if (tag != TokenTags.COMMA) {
       let word = ps.buildSourcedNode(ASTNodeKind.KIND_CLAUSE_WORD);
       word.name = peekText(ref ps);
-      vec.vecPush(ref words, ps.pushNode(word));
+      words.push(ps.pushNode(word));
     }
     ps.advance()?;
   }

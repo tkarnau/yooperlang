@@ -103,8 +103,8 @@ export function codegenProgram(
 
   let i: usize = 0;
   while (i < graph.modules.len) {
-    const m = vec.vecGet(ref graph.modules, i);
-    let tm = vec.vecGet(ref prog.modules, i);
+    const m = graph.modules.get(i);
+    let tm = prog.modules.get(i);
     emitModule(ref e, ref prog, ref tm, m)?;
     i += 1;
   }
@@ -157,9 +157,9 @@ function emitModule(ref e: Emitter, ref prog: Program, ref tm: TypedModule, m: M
     // One DIFile and DICompileUnit per SOURCE FILE rather than per module: a
     // directory module is several files, and a debugger resolves a frame to the
     // file it was written in.
-    const absPath = vec.vecGet(ref m.files, f).absPath;
+    const absPath = m.files.get(f).absPath;
     e.dbgFile = beginDebugModule(ref e.debug, debugPathDir(absPath), debugPathFile(absPath));
-    emitFile(ref e, ref prog, ref tm, m, vec.vecGet(ref m.files, f).root, f)?;
+    emitFile(ref e, ref prog, ref tm, m, m.files.get(f).root, f)?;
     f += 1;
   }
   return EmitResult.Ok;
@@ -288,7 +288,7 @@ function emitMethodRun(
       // coroutine; `pausableMethods` is the union of the two, so it is the TASK
       // half that is asked about here. Asked at this level because only the
       // caller has the member's NodeId.
-      if (map.mapContainsKey(ref tm.taskMethods, uint64(memberId))) {
+      if (tm.taskMethods.containsKey(uint64(memberId))) {
         return unsupportedHere(
           "a `task` method - its call site is a SPAWN onto the scheduler, which needs the task handle struct and the runtime's submit/wait ABI",
           member.name
@@ -484,7 +484,7 @@ function emitFunction(
     // thread calls, which unpacks the arguments out of the handle and starts
     // the coroutine. Emitted here rather than in emitFile because it is a
     // property of this declaration and needs the same Cx - see task_thunk.yoop.
-    if (!isMethod && map.mapContainsKey(ref tm.taskNames, declNode.name)) {
+    if (!isMethod && tm.taskNames.containsKey(declNode.name)) {
       return emitTaskThunk(ref cx, declNode);
     }
     return EmitResult.Ok;
@@ -543,7 +543,7 @@ function collectParams(ref cx: Cx, declNode: ASTNode, ref params: Vec<ParamInfo>
     const paramNode = nodeAt(cx.ast, paramId);
     // `ty` is what the SIGNATURE says (a `ref` parameter is `ptr`);
     // `pointeeTy` is what it points at, which is what the body loads and stores.
-    vec.vecPush(ref params, {
+    params.push({
       name: paramNode.name,
       ty: typeOf(ref cx, paramId),
       isRef: isRefAt(ref cx, paramId),
@@ -564,7 +564,7 @@ function collectParams(ref cx: Cx, declNode: ASTNode, ref params: Vec<ParamInfo>
 function emitParamPrologue(ref cx: Cx, ref params: Vec<ParamInfo>): void {
   let i: usize = 0;
   while (i < params.len) {
-    const p = vec.vecGet(ref params, i);
+    const p = params.get(i);
     // A `ref` parameter arrives as a pointer to the caller's object; that
     // pointer is the slot, so there is no alloca and no spill. Every read and
     // write in the body then lands on the caller's storage, which is what a
@@ -596,11 +596,11 @@ function emitParamPrologue(ref cx: Cx, ref params: Vec<ParamInfo>): void {
 function emitModuleGlobals(ref e: Emitter, ref prog: Program, ref graph: ModuleGraph): void {
   let i: usize = 0;
   while (i < graph.modules.len) {
-    const m = vec.vecGet(ref graph.modules, i);
-    let tm = vec.vecGet(ref prog.modules, i);
+    const m = graph.modules.get(i);
+    let tm = prog.modules.get(i);
     let f: usize = 0;
     while (f < m.files.len) {
-      emitFileGlobals(ref e, ref prog, ref tm, ref m.ast, vec.vecGet(ref m.files, f).root, f);
+      emitFileGlobals(ref e, ref prog, ref tm, ref m.ast, m.files.get(f).root, f);
       f += 1;
     }
     i += 1;
@@ -667,7 +667,7 @@ function emitOneModuleGlobal(
 // The integer a baked global rides on. Its own lookup rather than one that also
 // hands back the type, because only this one caller wants it.
 function moduleGlobalIntValue(ref prog: Program, ref tm: TypedModule, name: string): int64 {
-  switch (map.mapGet(ref tm.names, name)) {
+  switch (tm.names.get(name)) {
     case Option.None: { return 0; }
     case Option.Some { value: symId }: {
       switch (symbolAt(ref prog, symId)) {

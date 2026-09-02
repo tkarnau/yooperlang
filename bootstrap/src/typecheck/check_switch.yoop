@@ -59,7 +59,7 @@ function checkSwitch(ref cx: Cx, stmt: ASTNode): void {
   }
   let c: usize = 0;
   while (c < caseCount) {
-    vec.vecPush(ref covered, false);
+    covered.push(false);
     c += 1;
   }
 
@@ -108,7 +108,7 @@ function checkSwitch(ref cx: Cx, stmt: ASTNode): void {
     // Exhaustive OR defaulted, and unlike a variant BOTH is allowed - the
     // reference accepts a default beside both cases, and a bool has so few
     // values that a redundant default is not worth a diagnostic.
-    if (!sawDefault && !(vec.vecGet(ref covered, 0) && vec.vecGet(ref covered, 1))) {
+    if (!sawDefault && !(covered.get(0) && covered.get(1))) {
       reportError(
         cx.prog,
         "switch over bool is not exhaustive - add 'default' or list both true and false",
@@ -158,14 +158,14 @@ function checkVariantArm(
     }
     const ordinal = checkVariantPattern(ref cx, patternId, scrutType);
     if (ordinal >= 0 && usize(ordinal) < covered.len) {
-      if (vec.vecGet(ref covered, usize(ordinal))) {
+      if (covered.get(usize(ordinal))) {
         reportError(
           cx.prog,
           `case "${nodeAt(cx.ast, patternId).name}" is matched twice in this switch`,
           nodeAt(cx.ast, patternId).sourceLoc
         );
       }
-      vec.vecSet(ref covered, usize(ordinal), true);
+      covered.set(usize(ordinal), true);
     }
     i += 1;
   }
@@ -185,7 +185,7 @@ function checkExhaustive(
   let firstMissing: usize = 0;
   let i: usize = 0;
   while (i < covered.len) {
-    if (!vec.vecGet(ref covered, i)) {
+    if (!covered.get(i)) {
       if (missing == 0) {
         firstMissing = i;
       }
@@ -239,15 +239,15 @@ function checkBoolArm(
       continue;
     }
     const slot: usize = usize(pattern.intVal);
-    if (vec.vecGet(ref covered, slot)) {
+    if (covered.get(slot)) {
       if (slot == 1) {
         reportError(cx.prog, "duplicate case value true", pattern.sourceLoc);
       } else {
         reportError(cx.prog, "duplicate case value false", pattern.sourceLoc);
       }
     }
-    vec.vecSet(ref covered, slot, true);
-    vec.vecSet(ref cx.tm.resolvedTypes, patternId, scrutType);
+    covered.set(slot, true);
+    cx.tm.resolvedTypes.set(patternId, scrutType);
     i += 1;
   }
 }
@@ -283,7 +283,7 @@ function checkArmPatterns(ref cx: Cx, arm: ASTNode, scrutType: TypeId): void {
       i += 1;
       continue;
     }
-    vec.vecSet(ref cx.tm.resolvedTypes, patternId, scrutType);
+    cx.tm.resolvedTypes.set(patternId, scrutType);
     i += 1;
   }
 }

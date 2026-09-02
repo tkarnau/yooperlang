@@ -99,7 +99,7 @@ type Candidate {
 export function reportUnhandledDisposables(ref prog: Program, ref tm: TypedModule, m: Module): void {
   let f: usize = 0;
   while (f < m.files.len) {
-    const sf = vec.vecGet(ref m.files, f);
+    const sf = m.files.get(f);
     // Announce the file, the way every pass that iterates `m.files` does.
     // Without it each warning here is stamped with whatever `currentFile` pass
     // D happened to finish on - the module's LAST file - so a warning about
@@ -134,7 +134,7 @@ function checkBodyForUnhandled(ref prog: Program, ref tm: TypedModule, ref ast: 
 
   let i: usize = 0;
   while (i < candidates.len) {
-    const c = vec.vecGet(ref candidates, i);
+    const c = candidates.get(i);
     if (!c.handled) {
       const decl = nodeAt(ref ast, c.binding);
       if (c.marker != 0) {
@@ -184,12 +184,12 @@ function collectCandidates(
     const declared = resolvedTypeOfNode(ref tm, nodeId);
     const kindName = propagatedKindOf(ref prog, declared);
     if (kindName.len > 0 && !declaresKind(ref ast, node, kindName)) {
-      vec.vecPush(ref out, {
+      out.push({
         binding: nodeId, name: node.name, kindName: kindName, marker: 0, handled: false
       });
     }
     if (ownedBit != 0 && bindingCarries(ref tm, nodeId, ownedBit)) {
-      vec.vecPush(ref out, {
+      out.push({
         binding: nodeId, name: node.name, kindName: OWNED_KIND, marker: ownedBit, handled: false
       });
     }
@@ -201,7 +201,7 @@ function collectCandidates(
 // An unknown set carries nothing here: the permissive reading everywhere else
 // means "satisfies every bound", and for a warning that becomes "say nothing".
 function bindingCarries(ref tm: TypedModule, declId: NodeId, bit: uint64): bool {
-  switch (map.mapGet(ref tm.bindingMarkers, uint64(declId))) {
+  switch (tm.bindingMarkers.get(uint64(declId))) {
     case Option.Some { value: m }: { return m.known && (m.conf & bit) != 0; }
     case Option.None: { return false; }
   }
@@ -251,13 +251,13 @@ function declaresKind(ref ast: AST, node: ASTNode, kindName: string): bool {
 function markDischarged(ref tm: TypedModule, ref candidates: Vec<Candidate>): void {
   let d: usize = 0;
   while (d < tm.discharges.len) {
-    const entry = vec.vecGet(ref tm.discharges, d);
+    const entry = tm.discharges.get(d);
     let i: usize = 0;
     while (i < candidates.len) {
-      let c = vec.vecGet(ref candidates, i);
+      let c = candidates.get(i);
       if (c.binding == entry.binding) {
         c.handled = true;
-        vec.vecSet(ref candidates, i, c);
+        candidates.set(i, c);
       }
       i = i + 1;
     }
@@ -338,10 +338,10 @@ function noteUse(ref tm: TypedModule, ref ast: AST, exprId: NodeId, ref candidat
   }
   let i: usize = 0;
   while (i < candidates.len) {
-    let c = vec.vecGet(ref candidates, i);
+    let c = candidates.get(i);
     if (str.stringEq(c.name, expr.name) && !(c.marker != 0 && slotOnlyReads(ref tm, exprId, c.marker))) {
       c.handled = true;
-      vec.vecSet(ref candidates, i, c);
+      candidates.set(i, c);
     }
     i = i + 1;
   }
@@ -352,7 +352,7 @@ function noteUse(ref tm: TypedModule, ref ast: AST, exprId: NodeId, ref candidat
 // An argument with no stamp, or an unknown slot, answers false: nothing
 // established what the callee does, so the pass counts it as a handoff.
 function slotOnlyReads(ref tm: TypedModule, exprId: NodeId, bit: uint64): bool {
-  switch (map.mapGet(ref tm.argSlots, uint64(exprId))) {
+  switch (tm.argSlots.get(uint64(exprId))) {
     case Option.Some { value: slot }: { return slot.known && (slot.conf & bit) == 0; }
     case Option.None: { return false; }
   }
@@ -363,5 +363,5 @@ function resolvedTypeOfNode(ref tm: TypedModule, nodeId: NodeId): TypeId {
   if (nodeId >= tm.resolvedTypes.len) {
     return TYPE_ERROR_ID;
   }
-  return vec.vecGet(ref tm.resolvedTypes, nodeId);
+  return tm.resolvedTypes.get(nodeId);
 }

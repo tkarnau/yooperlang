@@ -84,8 +84,8 @@ async drainRequest(ref s: TcpStream): void {
         switch (await Readable.read(ref s, ref window)) {
             case Result.Ok { value: n }: {
                 if (n <= 0) { return; }
-                vec.vecExtendFrom(ref buf, intr.arraySlice(window, 0, usize(n)));
-                let view: uint8[] = vec.vecAsArray(ref buf);
+                buf.extendFrom(intr.arraySlice(window, 0, usize(n)));
+                let view: uint8[] = buf.asArray();
                 if (bytes.bytesIndexOfSeq(view, ['\r', '\n', '\r', '\n']) != view.len) {
                     return;
                 }
@@ -213,13 +213,13 @@ async postChunked(): void {
                 if (n <= 0) {
                     reading = false;
                 } else {
-                    vec.vecExtendFrom(ref buf, intr.arraySlice(window, 0, usize(n)));
+                    buf.extendFrom(intr.arraySlice(window, 0, usize(n)));
                 }
             }
             case Result.Err { error: _e }: { reading = false; }
         }
     }
-    let text: string = intr.stringFromBytesUnchecked(vec.vecAsArray(ref buf));
+    let text: string = intr.stringFromBytesUnchecked(buf.asArray());
     let at: usize = str.stringIndexOf(text, "got:");
     if (at < text.len) {
         printf(`request ok  "${str.sliceFrom(text, at)}"\n`);

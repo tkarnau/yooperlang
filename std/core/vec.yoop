@@ -4,22 +4,27 @@
 // user code build collections out of. Owns a heap-allocated backing buffer
 // and grows on demand. Carries `propagates<disposable>` so the underlying
 // memory cannot be silently dropped - the user must pick auto-cleanup
-// (`disposable v: Vec<T> = vecNew(8);`), manual `Disposable.dispose`, or
+// (`disposable v: Vec<T> = vec.vecNew(8);`), manual `v.dispose()`, or
 // transfer-up via return.
 //
-// Allocation behavior per call (per the intrinsics-index naming convention):
-//   * `vecNew`       -> fresh heap allocation
-//   * `vecPush`      -> may reallocate (when len == cap)
-//   * `vec_pop`       -> in place; no allocation
-//   * `vecGet/_set`  -> in place; no allocation
-//   * `vecClear`     -> in place; capacity unchanged, no allocation
-//   * `vecAsArray`  -> borrowing view valid until the next mutation
+// The operations are the `Sequence<T>` and `Growable<T>` contracts from
+// std/core/traits.yoop, called through the value: `v.push(x)`, `v.get(i)`,
+// `v.asArray()`. A bounded generic takes any growable sequence the same way,
+// which is what lets another backing strategy stand in for this one.
+//
+// Allocation behavior per operation (per the intrinsics-index naming
+// convention):
+//   * `vecNew`        -> fresh heap allocation
+//   * `push`          -> may reallocate (when len == cap)
+//   * `get` / `set`   -> in place; no allocation
+//   * `clear`         -> in place; capacity unchanged, no allocation
+//   * `asArray`       -> borrowing view valid until the next mutation
 //   * `dispose`       -> frees the backing buffer
 
 import { Disposable, disposable } from "./kinds.yoop";
 import * as intr from "./intrinsics.yoop";
 import { Allocator, currentAllocator, pushAllocator, popAllocator } from "./alloc.yoop";
-import { Iterable, IterStep } from "./traits.yoop";
+import { Iterable, IterStep, Sequence, Growable } from "./traits.yoop";
 
 // `Vec<T>` is container-owned: it remembers the allocator it was built with
 // (whatever was current at `vecNew`) and routes every later grow and the
@@ -27,7 +32,7 @@ import { Iterable, IterStep } from "./traits.yoop";
 // when those happen. So a Vec built inside an arena scope frees into the arena
 // (a no-op; the region reclaims in bulk), and a malloc Vec stays malloc-backed
 // even if it grows while an arena is installed.
-export type Vec<T> implements Disposable propagates<disposable> {
+export type Vec<T> implements (Disposable, Sequence<T>, Growable<T>) propagates<disposable> {
     data: T[],
     len: usize,
     cap: usize,
@@ -40,6 +45,95 @@ export type Vec<T> implements Disposable propagates<disposable> {
             self.cap = 0;
         }
     }
+
+    // ----- Sequence<T> ---------------------------------------------------
+
+    // Reset length to zero. Capacity unchanged; backing buffer is retained so
+    // subsequent pushes don't reallocate immediately.
+    function clear(ref self): void {
+        self.len = 0;
+    }
+
+    function isEmpty(ref self): bool {
+        return self.len == 0;
+    }
+
+    // Read `v[i]`. Traps via the underlying array indexing if i >= len -
+    // matches the existing yoop array-indexing convention (no bounds check;
+    // caller's responsibility).
+    function get(ref self, i: usize): T {
+        return self.data[i];
+    }
+
+    // Write `v[i] = value`. Same OOB convention as `get`.
+    function set(ref self, i: usize, value: T): void {
+        self.data[i] = value;
+    }
+
+    // Borrowing view of the populated prefix as a regular yoop array. The view
+    // is valid until the next mutation (push/clear/dispose) - the underlying
+    // fat-pointer may dangle if `push` reallocates.
+    function asArray(ref self): T[] {
+        return intr.arraySlice(self.data, 0, self.len);
+    }
+
+    // ----- Growable<T> ---------------------------------------------------
+
+    // Append `value`, growing the backing buffer if necessary (doubling
+    // strategy). MAY REALLOCATE when len == cap - callers holding views from
+    // `asArray` should re-fetch after a push.
+    function push(ref self, value: T): void {
+        if (self.len >= self.cap) {
+            let new_cap: usize = self.cap * 2;
+            if (new_cap == 0) { new_cap = 4; }
+            // Grow through the Vec's own allocator, not whatever is ambient now.
+            let prev: Allocator = pushAllocator(self.alloc);
+            let new_data: T[] = intr.ctxAlloc(new_cap);
+            let i: usize = 0;
+            while (i < self.len) {
+                new_data[i] = self.data[i];
+                i = i + 1;
+            }
+            if (self.cap > 0) {
+                intr.ctxFree(self.data);
+            }
+            popAllocator(prev);
+            self.data = new_data;
+            self.cap = new_cap;
+        }
+        self.data[self.len] = value;
+        self.len = self.len + 1;
+    }
+
+    // Append every element of `src`, growing the backing buffer at most once
+    // (to exactly `len + src.len` when a grow is needed). This is the bulk
+    // append the byte-shuffling paths want: O(n) copies but a single
+    // allocation, versus `push` in a loop which reallocates O(log n) times.
+    // MAY REALLOCATE - callers holding views from `asArray` should re-fetch.
+    function extendFrom(ref self, src: T[]): void {
+        let needed: usize = self.len + src.len;
+        if (needed > self.cap) {
+            let prev: Allocator = pushAllocator(self.alloc);
+            let new_data: T[] = intr.ctxAlloc(needed);
+            let i: usize = 0;
+            while (i < self.len) {
+                new_data[i] = self.data[i];
+                i = i + 1;
+            }
+            if (self.cap > 0) {
+                intr.ctxFree(self.data);
+            }
+            popAllocator(prev);
+            self.data = new_data;
+            self.cap = needed;
+        }
+        let j: usize = 0;
+        while (j < src.len) {
+            self.data[self.len + j] = src[j];
+            j = j + 1;
+        }
+        self.len = needed;
+    }
 }
 
 // Construct a fresh Vec with `initial_cap` capacity. Captures the current
@@ -48,87 +142,6 @@ export type Vec<T> implements Disposable propagates<disposable> {
 export function vecNew<T>(initial_cap: usize): Vec<T> propagates<disposable> {
     let a: Allocator = currentAllocator();
     return { data: intr.ctxAlloc(initial_cap), len: 0, cap: initial_cap, alloc: a };
-}
-
-// Append `value`, growing the backing buffer if necessary (doubling
-// strategy). MAY REALLOCATE when len == cap - callers holding views from
-// `vecAsArray` should re-fetch after a push.
-export function vecPush<T>(v: ref Vec<T>, value: T): void {
-    if (v.len >= v.cap) {
-        let new_cap: usize = v.cap * 2;
-        if (new_cap == 0) { new_cap = 4; }
-        // Grow through the Vec's own allocator, not whatever is ambient now.
-        let prev: Allocator = pushAllocator(v.alloc);
-        let new_data: T[] = intr.ctxAlloc(new_cap);
-        let i: usize = 0;
-        while (i < v.len) {
-            new_data[i] = v.data[i];
-            i = i + 1;
-        }
-        if (v.cap > 0) {
-            intr.ctxFree(v.data);
-        }
-        popAllocator(prev);
-        v.data = new_data;
-        v.cap = new_cap;
-    }
-    v.data[v.len] = value;
-    v.len = v.len + 1;
-}
-
-// Read `v[i]`. Traps via the underlying array indexing if i >= v.len -
-// matches the existing yoop array-indexing convention (no bounds check;
-// caller's responsibility).
-export function vecGet<T>(v: ref Vec<T>, i: usize): T {
-    return v.data[i];
-}
-
-// Write `v[i] = value`. Same OOB convention as vecGet.
-export function vecSet<T>(v: ref Vec<T>, i: usize, value: T): void {
-    v.data[i] = value;
-}
-
-// Reset length to zero. Capacity unchanged; backing buffer is retained so
-// subsequent pushes don't reallocate immediately.
-export function vecClear<T>(v: ref Vec<T>): void {
-    v.len = 0;
-}
-
-// Borrowing view of the populated prefix as a regular yoop array. The view
-// is valid until the next mutation (push/clear/dispose) - the underlying
-// fat-pointer may dangle if vecPush reallocates.
-export function vecAsArray<T>(v: ref Vec<T>): T[] {
-    return intr.arraySlice(v.data, 0, v.len);
-}
-
-// Append every element of `src` to `v`, growing the backing buffer at most
-// once (to exactly `v.len + src.len` when a grow is needed). This is the
-// bulk-append the byte-shuffling paths want: O(n) copies but a single
-// allocation, versus `vecPush` in a loop which reallocates O(log n) times.
-// MAY REALLOCATE - callers holding views from `vecAsArray` should re-fetch.
-export function vecExtendFrom<T>(v: ref Vec<T>, src: T[]): void {
-    let needed: usize = v.len + src.len;
-    if (needed > v.cap) {
-        let prev: Allocator = pushAllocator(v.alloc);
-        let new_data: T[] = intr.ctxAlloc(needed);
-        let i: usize = 0;
-        while (i < v.len) {
-            new_data[i] = v.data[i];
-            i = i + 1;
-        }
-        if (v.cap > 0) {
-            intr.ctxFree(v.data);
-        }
-        popAllocator(prev);
-        v.data = new_data;
-        v.cap = needed;
-    }
-    let j: usize = 0;
-    while (j < src.len) {
-        v.data[v.len + j] = src[j];
-        j = j + 1;
-    }
-    v.len = needed;
 }
 
 // Build a fresh Vec holding a copy of `src` (capacity == src.len, so no
@@ -155,9 +168,9 @@ export function vecFromArray<T>(src: T[]): Vec<T> propagates<disposable> {
 //
 // Like `MapIter`, the iterator holds a BORROWING view of the backing buffer:
 // the `T[]` fat pointer is a copy, the heap data is shared. Any mutation that
-// can reallocate (`vecPush` at capacity, `vecExtendFrom`, `dispose`)
-// invalidates it and leaves the view dangling - keep the iterator scoped
-// tightly around its loop and re-fetch after mutating.
+// can reallocate (`push` at capacity, `extendFrom`, `dispose`) invalidates it
+// and leaves the view dangling - keep the iterator scoped tightly around its
+// loop and re-fetch after mutating.
 export type VecIter<T> implements Iterable<T> {
     data: T[],
     len: usize,
