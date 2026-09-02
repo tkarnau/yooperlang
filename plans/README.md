@@ -16,3 +16,10 @@ language itself, read [../SPEC.md](../SPEC.md). For the compiler, read
 [../bootstrap/README.md](../bootstrap/README.md).
 
 In flight: [removing_node.md](removing_node.md).
+
+Findings, not yet work: [security_findings.md](security_findings.md) is a
+security review of the language, runtime, std and toolchain as they stand. It
+proposes nothing; the slices of work it leads to will get their own documents.
+[simplification_findings.md](simplification_findings.md) is the same shape for
+the language surface: where the vocabulary, the spec and the corpus disagree,
+and what could go or merge. It also proposes nothing.

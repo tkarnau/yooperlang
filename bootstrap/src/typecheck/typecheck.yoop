@@ -39,6 +39,12 @@ export function typecheckProgram(ref graph: ModuleGraph): Program propagates<dis
   // which is what lets all four passes run in one walk per module rather than
   // four walks over the graph, and what makes pass B a lookup rather than a
   // second fixpoint.
+  // Pass D is handed the graph's OWN module, not a copy: it appends nodes to
+  // the arena (a dotted method call is rewritten into the qualified shape, see
+  // check_method.yoop), and an append into a copy's Vec header is lost when
+  // the copy is - or worse, reallocates a buffer the graph still points at.
+  // The view is stable because nothing adds a module while bodies are checked.
+  let mods: Module[] = vec.vecAsArray(ref graph.modules);
   let i: usize = 0;
   while (i < graph.modules.len) {
     const m = vec.vecGet(ref graph.modules, i);
@@ -50,7 +56,7 @@ export function typecheckProgram(ref graph: ModuleGraph): Program propagates<dis
     passARegisterShells(ref program, ref tm, m, i, i == graph.entryIndex);
     passBWireImports(ref program, ref tm, m);
     passCFillShells(ref program, ref tm, m, i);
-    passDCheckBodies(ref program, ref tm, m);
+    passDCheckBodies(ref program, ref tm, ref mods[i]);
     vec.vecPush(ref program.modules, tm);
     i += 1;
   }

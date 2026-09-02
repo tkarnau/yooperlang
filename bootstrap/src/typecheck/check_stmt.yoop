@@ -13,6 +13,7 @@ module typecheck;
 // exhaustiveness).
 
 import * as vec from "std/core/vec.yoop";
+import * as map from "std/collections/map.yoop";
 import { disposable } from "std/core/kinds.yoop";
 import { ASTNode, ASTNodeKind, NodeId, childAt, nodeAt, kindName } from "../ast";
 import { Option } from "std/core/types.yoop";
@@ -212,7 +213,7 @@ function checkVarDeclInner(ref cx: Cx, stmt: ASTNode, stmtId: NodeId): void {
     if (declared == TYPE_ERROR_ID) {
       reportError(cx.prog, `"${stmt.name}" needs either a type annotation or an initializer`, stmt.sourceLoc);
     }
-    bindLocal(ref cx, stmt, declared);
+    bindLocal(ref cx, stmt, stmtId, declared);
     vec.vecSet(ref cx.tm.resolvedTypes, stmtId, declared);
     return;
   }
@@ -233,7 +234,7 @@ function checkVarDeclInner(ref cx: Cx, stmt: ASTNode, stmtId: NodeId): void {
   const bind = taskBindOf(cx.prog, cx.ast, stmt, declared, initType);
   if (bind == TaskBind.IMMEDIATE) {
     checkTaskSpawnBinding(ref cx, stmt, bind);
-    bindLocal(ref cx, stmt, declared);
+    bindLocal(ref cx, stmt, stmtId, declared);
     vec.vecSet(ref cx.tm.resolvedTypes, stmtId, declared);
     return;
   }
@@ -256,7 +257,7 @@ function checkVarDeclInner(ref cx: Cx, stmt: ASTNode, stmtId: NodeId): void {
     // thing that can honor the clause.
     checkTaskSpawnBinding(ref cx, stmt, bind);
   }
-  bindLocal(ref cx, stmt, finalType);
+  bindLocal(ref cx, stmt, stmtId, finalType);
   vec.vecSet(ref cx.tm.resolvedTypes, stmtId, finalType);
 }
 
@@ -352,7 +353,7 @@ function checkDisposableBinding(ref cx: Cx, stmt: ASTNode, typeId: TypeId): void
   }
 }
 
-function bindLocal(ref cx: Cx, stmt: ASTNode, typeId: TypeId): void {
+function bindLocal(ref cx: Cx, stmt: ASTNode, stmtId: NodeId, typeId: TypeId): void {
   const mutable = stmt.kind == ASTNodeKind.LET_DECL;
   // A kind stating `mustNotEscape scope` bounds THIS binding, so the bound is
   // recorded on the scope entry rather than derived from the type later - the
@@ -373,11 +374,19 @@ function bindLocal(ref cx: Cx, stmt: ASTNode, typeId: TypeId): void {
   // is no declared type for the value to have been narrowed to. The reference
   // reads a missing annotation as an empty set instead, which loses the marker
   // on `let out = stringConcat(a, b)`; inheriting is right in both directions.
+  //
+  // The same set is stamped onto the module by the decl's node id, because the
+  // scope entry dies with the body and unhandled.yoop reads it afterwards.
   if (stmt.childA != 0) {
-    scopeSetMarkers(cx.scope, stmt.name, bindingMarkersOf(ref cx, stmt));
+    recordBindingMarkers(ref cx, stmt, stmtId, bindingMarkersOf(ref cx, stmt));
   } else if (stmt.childB != 0) {
-    scopeSetMarkers(cx.scope, stmt.name, exprMarkers(ref cx, stmt.childB));
+    recordBindingMarkers(ref cx, stmt, stmtId, exprMarkers(ref cx, stmt.childB));
   }
+}
+
+function recordBindingMarkers(ref cx: Cx, stmt: ASTNode, stmtId: NodeId, m: MarkerSet): void {
+  scopeSetMarkers(cx.scope, stmt.name, m);
+  map.mapInsert(ref cx.tm.bindingMarkers, uint64(stmtId), m);
 }
 
 // `ephemeral arenaScope(N) { ... }` - an anonymous region.

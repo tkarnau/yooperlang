@@ -351,3 +351,23 @@ function findUnder(ref ast: AST, rootId: NodeId, kind: ASTNodeKind, name: string
   }
   return 0;
 }
+
+// The dotted spelling is the qualified one after pass D rewrites it, so a
+// `c.close()` by hand answers the obligation exactly as `Closer.close(ref c)`
+// does. Asserted separately because a double close is what the rewrite would
+// cost if it were not.
+suite function aDottedManualCallAnswersTheObligation(): void {
+  let p = probe(
+    `${DECLS}function useIt(): void { tracked c: Res = open(1); c.close(); }`,
+    "useIt", "c"
+  );
+
+  let test theory: Case = t.asserts("the source checks clean") {
+    theory.isSuccessful = p.diagnostics == 0;
+    theory.detail = `reported ${p.diagnostics} diagnostic(s): ${p.detail}`;
+  }
+  let test theory: Case = t.asserts("the closing brace owes nothing after a dotted manual call") {
+    theory.isSuccessful = p.atBrace;
+    theory.detail = "a hand-written c.close() left the brace still owing one";
+  }
+}

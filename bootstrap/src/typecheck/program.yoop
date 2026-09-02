@@ -141,6 +141,16 @@ export type TypedModule propagates<disposable> {
   // by `uint64(nodeId)`; absent means "unknown", which every bound accepts.
   // See typecheck/markers.yoop.
   valueMarkers: Map<uint64, MarkerSet>,
+  // What a `let` / `const` BINDING was established to carry, keyed by the
+  // decl's `uint64(nodeId)`: the same set `bindLocal` writes onto the scope
+  // entry, kept here because the scope is gone by the time unhandled.yoop asks
+  // which bindings carry `owned` and drop it. Absent means "unknown".
+  bindingMarkers: Map<uint64, MarkerSet>,
+  // The SLOT each call argument flowed into, keyed by the argument node's
+  // `uint64(nodeId)` and stamped by `checkCallMarkers` when the callee had a
+  // signature in the table. Absent means the slot is unknown - a method, a
+  // generic, `printf` - which unhandled.yoop reads as "may have taken it".
+  argSlots: Map<uint64, MarkerSet>,
   resolvedTypes: Vec<TypeId>,     // dense decoration, indexed by NodeId (0 = none / infer-later)
   // (exit site, binding) pairs saying "this binding's scope-end call was
   // already made by hand on every path reaching that exit". Codegen skips the
@@ -535,6 +545,8 @@ export function initTypedModule(moduleId: string): TypedModule propagates<dispos
   let intrinsicNames: Map<string, bool> = map.mapNew(0, map.stringKeyOps());
   let calleeReceiver: Map<uint64, TypeId> = map.mapNew(0, map.uint64KeyOps());
   let valueMarkers: Map<uint64, MarkerSet> = map.mapNew(0, map.uint64KeyOps());
+  let bindingMarkers: Map<uint64, MarkerSet> = map.mapNew(0, map.uint64KeyOps());
+  let argSlots: Map<uint64, MarkerSet> = map.mapNew(0, map.uint64KeyOps());
   return {
     moduleId: moduleId,
     names: names,
@@ -559,6 +571,8 @@ export function initTypedModule(moduleId: string): TypedModule propagates<dispos
     calleeInstance: calleeInstance,
     calleeReceiver: calleeReceiver,
     valueMarkers: valueMarkers,
+    bindingMarkers: bindingMarkers,
+    argSlots: argSlots,
     resolvedTypes: vec.vecNew(0),
     discharges: vec.vecNew(0),
     allowsUnsafe: false,

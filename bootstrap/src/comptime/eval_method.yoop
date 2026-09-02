@@ -36,6 +36,14 @@ export function evalQualifiedCall(
   // value - so it carries no resolved type at all, exactly as `Shape.Empty`'s
   // base does. The symbol is what says which of the four shapes this is.
   const symId = lookupOwnName(cx.tm, baseNode.name);
+  // `r.area()` was rewritten by pass D into `Shape.area(ref r)` with the trait's
+  // name in the base - a name this module never imported, when the trait was
+  // declared elsewhere. Pass D's own decoration says it is a trait call, so
+  // that is believed before the name is.
+  if (symId == SYMBOL_NONE_ID && (map.mapContainsKey(ref cx.tm.calleeReceiver, uint64(exprId))
+      || map.mapContainsKey(ref cx.tm.vtableSlots, uint64(exprId)))) {
+    return dispatchTraitCall(ref cx, expr, exprId);
+  }
   if (symId == SYMBOL_NONE_ID) {
     return Result.Err { error: comptimeError(
       `"${baseNode.name}" is not a name the comptime evaluator can reach`, expr.sourceLoc

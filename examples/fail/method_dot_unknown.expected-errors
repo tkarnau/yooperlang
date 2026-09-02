@@ -1,0 +1,3 @@
+# Illegal: `r.volume()` names a method no trait Rect implements declares. The
+# diagnostic lands on the member, and names the type and the method.
+5:12: no method "volume"

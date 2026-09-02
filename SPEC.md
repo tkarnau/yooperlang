@@ -522,6 +522,28 @@ type Channel implements (Disposable, Iterable<Message>) {
 }
 ```
 
+### Calling a method
+
+Two spellings, and they are one call:
+
+```js
+Shape.area(ref r);      // trait-qualified: the trait names the method
+r.area();               // through the receiver: the receiver's type names the trait
+```
+
+The dotted form borrows the receiver. `r.area()` is exactly `Shape.area(ref r)`,
+so the receiver has to be something with an address - a binding, a field path
+(`self.items.dispose()`), an element (`xs[i].scale(2)`) - and `f().area()` is
+refused the way `ref f()` is. A `ref` parameter is re-borrowed with no second
+`ref`. The receiver may be a struct, a variant, a value enum, a vtable value
+(dispatching through its slot) or a bounded type parameter (dispatching through
+its bound). An async method is awaited the same way: `await r.read(ref buf)`.
+
+A type's methods are keyed by name alone, so the only ambiguity possible is a
+type parameter with two bounds that both declare the method; that one is
+refused, and the trait-qualified form says which. Bare `area(ref r)` is never
+legal.
+
 ### Trait bounds on generics
 
 ```js
@@ -1489,7 +1511,11 @@ export "C" function on_tick(ms: int32): int32 { return ms + 1; }
 ```
 
 - `extern "C" from "..."` reads like `import … from …` and positions C interop as a peer of module imports.
-- `extern "C" from library "..."` links against a named library (emits `-lNAME`).
+- `extern "C" from library "..."` links against a named library (emits `-lNAME`,
+  or `-framework NAME` for the `framework:NAME` spelling on Apple). Because the
+  name goes on the linker's command line, it is checked at the declaration: only
+  letters, digits, `_`, `.`, `+` and `-`, and it may not begin with `-`. Anything
+  else is a compile error at the block.
 - `export "C" function …` emits a function with the C ABI and an unmangled symbol.
 - `extern "Rust" from ...` / `extern "Zig" from ...` - syntax reserved.
 
@@ -1891,7 +1917,7 @@ What this example demonstrates:
 ## 17. Open questions
 
 1. **What `provides` may wrap into.** Mostly settled. `provides Name` means the call-site result type of a function carrying the kind becomes `Name<DeclaredReturn>` - `task f(): T` yields `Task<T>` where it is called - and it is now derived from the clause, so a user kind declaring `pausable; provides Task;` gets a real coroutine and a real task handle (§6 "Clause behavior comes from the clause, not the kind's name"). What remains open is the *range* of `Name`: it resolves only to `Task` today. Letting it name an arbitrary user generic needs an answer for how the wrap and unwrap happen - `Task<T>` is not just a type, it carries a worker pool, `wait`, and cancellation, so a kind that wrapped into a plain `MyBox<T>` would mint a value with no way to get the `T` back out. That is what the `provides … intercepts { … }` sketch was reaching for: a companion clause naming the wrap/unwrap pair, so a code-transforming kind stays visibly different from a constraining one. Related and smaller: `refcounted` dispatches its named retain/release only for a `Task<T>` receiver; generalizing it to any type implementing the required trait would make it a true sibling of `mustCall`.
-2. **Trait method resolution.** Methods live on `type … implements Trait` blocks. Call syntax is **trait-qualified**: `Disposable.dispose(ref x)` - the trait name must be in scope at the call site. (Bare-form `dispose(ref x)` and dotted form `x.dispose()` are both rejected. Trait method names live in the trait's namespace and may freely coincide with module-level free-function names or with method names from other traits implemented by the same type, because every call site is unambiguously qualified.)
+2. **Trait method resolution.** Settled: `Disposable.dispose(ref x)` and `x.dispose()` are one call (section 5, "Calling a method"). A trait method name may still coincide with a module-level free function, because bare `dispose(ref x)` is never a method call. What remains open is whether a type may ever own two methods of one name from two traits; today it cannot, which is what makes the dotted form unambiguous.
 3. **String ↔ cstr.** UTF-8 immutable `string` is TypeScript-adjacent; C expects null-terminated bytes. Options: implicit cstr view, explicit conversion, or two types.
 4. **Array length & FFI.** `xs.len` intrinsic means fat pointers; worth a separate `c_array<T>` for ABI-exact interop.
 5. **`ref` lifetimes.** Minimum rule: a `ref` cannot outlive the stack frame it names. Beyond that, `mustNotEscape` covers the rest.

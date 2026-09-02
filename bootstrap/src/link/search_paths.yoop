@@ -32,7 +32,6 @@ module link;
 import * as fs from "std/fs.yoop";
 import * as env from "std/env.yoop";
 import * as str from "std/core/strings.yoop";
-import { Text }, * as text from "std/core/text.yoop";
 import { Vec }, * as vec from "std/core/vec.yoop";
 import { disposable } from "std/core/kinds.yoop";
 
@@ -40,19 +39,20 @@ import { disposable } from "std/core/kinds.yoop";
 const LIB_PATH_VAR: string = "YOOP_LIB_PATH";
 const INCLUDE_PATH_VAR: string = "YOOP_INCLUDE_PATH";
 
-// Appends every `-L<dir>` and `-I<dir>` this machine has, in search order.
+// Appends every `-L<dir>` and `-I<dir>` this machine has, in search order,
+// one argv element each.
 //
 // A directory that does not exist is never named: an `-L` at a missing path is
 // harmless to clang but it is noise in a command line a user may have to read,
 // and the existence probe is what makes one candidate list work on three
 // platforms.
-export function pushSearchPaths(ref cmd: Text): void {
+export function pushSearchPaths(ref args: Vec<string>): void {
   disposable libs: Vec<string> = vec.vecNew(8);
   disposable includes: Vec<string> = vec.vecNew(8);
   collectSearchPaths(ref libs, ref includes);
 
-  pushEachExisting(ref cmd, ref libs, " -L");
-  pushEachExisting(ref cmd, ref includes, " -I");
+  pushEachExisting(ref args, ref libs, "-L");
+  pushEachExisting(ref args, ref includes, "-I");
 }
 
 // The candidates, in order, before any of them is checked for existence. Split
@@ -136,20 +136,23 @@ function pathListSeparator(raw: string): string {
   return ":";
 }
 
-// Every directory in `dirs` that exists, each behind `flag`, deduped.
+// Every directory in `dirs` that exists, each as one `<flag><dir>` argument,
+// deduped. Joined rather than split into two arguments because that is the
+// spelling clang documents for `-L` and `-I`, and because a directory with a
+// space in its name is then still exactly one argument - there is no shell to
+// split it.
 //
 // The dedupe is not cosmetic: `/usr/local` and `/usr/local/opt/openssl` both
 // resolve to `/usr/local/lib` on a machine with no keg, and a command line
 // naming one directory six times is one a reader stops reading.
-function pushEachExisting(ref cmd: Text, ref dirs: Vec<string>, flag: string): void {
+function pushEachExisting(ref args: Vec<string>, ref dirs: Vec<string>, flag: string): void {
   disposable seen: Vec<string> = vec.vecNew(8);
   let i: usize = 0;
   while (i < dirs.len) {
     const dir = vec.vecGet(ref dirs, i);
     if (fs.exists(dir) && !containsString(ref seen, dir)) {
       vec.vecPush(ref seen, dir);
-      text.push(ref cmd, flag);
-      text.push(ref cmd, `"${dir}"`);
+      vec.vecPush(ref args, `${flag}${dir}`);
     }
     i += 1;
   }

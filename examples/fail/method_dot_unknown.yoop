@@ -1,0 +1,6 @@
+trait Shape { function area(ref self): int32; }
+type Rect implements Shape { w: int32, function area(ref self): int32 { return self.w; } }
+function main(): int32 {
+  let r: Rect = { w: 1 };
+  return r.volume();
+}

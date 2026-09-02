@@ -1,0 +1,81 @@
+module typecheck;
+
+// What `extern "C" from library "NAME"` may name.
+//
+// The name is copied out of the source file and onto the linker's command
+// line, as `-lNAME` or `-framework NAME`. That is the one place a string from a
+// program becomes an ARGUMENT to another program, so it is checked here, at the
+// declaration, with a location to point at - not at link time, where the only
+// message available is whatever clang says about a library it cannot find.
+//
+// The link step runs clang from an argv array with no shell in between
+// (link/clang.yoop), so a name like `m; rm -rf ~` is already one harmless
+// argument by the time it gets there. This check is the second layer, and it
+// closes what an argv array cannot: a name beginning with `-` is a FLAG to the
+// linker, not a library, and `-framework -Wl,-rpath,/x` would be read as one.
+// It also turns "ld: library not found for -lm;" into a message at the line
+// that wrote it.
+//
+// The character set is what a library or framework is actually called:
+// letters, digits, `_`, `.`, `+` and `-` (`stdc++`, `openssl@3` is a PATH not
+// a name, `SDL2_image`, `libfoo.so.1` spelled without the `lib` and the `.so`).
+// Everything else - a slash, a space, a quote, a `;` - names nothing the
+// linker could find and is refused by name.
+
+import * as intr from "std/core/intrinsics.yoop";
+import * as str from "std/core/strings.yoop";
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { AST, ASTNode } from "../ast";
+import { TokenTags } from "../lex";
+
+// `framework:OpenGL` is the one prefixed spelling: the name after the colon is
+// checked by the same rule. Mirrors FRAMEWORK_PREFIX in link/clang.yoop, which
+// is what lowers it.
+export const FRAMEWORK_PREFIX: string = "framework:";
+
+// "" when `name` is a plausible library name, otherwise the reason it is not,
+// worded for the person who wrote the declaration.
+export function linkNameProblem(name: string): string {
+  const raw = intr.stringAsBytes(name);
+  let start: usize = 0;
+  let what: string = "library";
+  if (str.stringStartsWith(name, FRAMEWORK_PREFIX)) {
+    start = FRAMEWORK_PREFIX.len;
+    what = "framework";
+  }
+  if (raw.len == start) {
+    return `\`from library "${name}"\` names no ${what} - the name is empty`;
+  }
+  if (raw[start] == '-') {
+    return `${what} name "${name}" begins with '-', which the linker would read as a flag rather than a name`;
+  }
+  let i: usize = start;
+  while (i < raw.len) {
+    if (!isLinkNameByte(raw[i])) {
+      return `${what} name "${name}" is not a name the linker could look up - only letters, digits, '_', '.', '+' and '-' are allowed`;
+    }
+    i += 1;
+  }
+  return "";
+}
+
+// Pass A's hook: an `EXTERN_BLOCK` written in the `from library` form has its
+// name checked, and a bad one is a diagnostic at the block. The header form
+// (`from "stdio.h"`) is documentation that reaches no command line, so it is
+// not checked - a header name may legitimately carry a slash.
+export function checkExternLinkName(ref prog: Program, declNode: ASTNode, ref ast: AST): void {
+  if (declNode.operator != TokenTags.LIBRARY) {
+    return;
+  }
+  const problem = linkNameProblem(vec.vecGet(ref ast.strings, declNode.strId));
+  if (problem.len > 0) {
+    reportError(ref prog, problem, declNode.sourceLoc);
+  }
+}
+
+function isLinkNameByte(c: uint8): bool {
+  if (c >= 'a' && c <= 'z') { return true; }
+  if (c >= 'A' && c <= 'Z') { return true; }
+  if (c >= '0' && c <= '9') { return true; }
+  return c == '_' || c == '.' || c == '+' || c == '-';
+}

