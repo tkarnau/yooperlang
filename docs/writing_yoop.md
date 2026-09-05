@@ -223,9 +223,10 @@ pointer compare and works because identical literals are interned.
   Build one with `vec.vecNew(n)` or `vec.vecFromArray(xs)`; everything else is a
   method called through the value: `v.push(x)`, `v.get(i)`, `v.set(i, x)`,
   `v.clear()`, `v.asArray()`, `v.extendFrom(xs)`, and `vec.vecIter(ref v)` for
-  `for x in`. The methods are the `Sequence<T>` and `Growable<T>` contracts in
-  [../std/core/traits.yoop](../std/core/traits.yoop), so a generic bounded by
-  them takes any implementation, not only `Vec`. `Map`, `Set` and `Deque`
+  `for x in`. The methods are the `Growable<T>` contract in
+  [../std/core/traits.yoop](../std/core/traits.yoop) (a chain over
+  `Sequence<T>` and `Collection`), so a generic bounded by it takes any
+  implementation, not only `Vec`. `Map`, `Set` and `Deque`
   follow the same shape (`Mapping`, `Membership`, `DoubleEnded`), and `Text`
   is a `TextBuilder` (`t.push(s)`, `t.pushUint(n)`, `t.view()`).
 - A length is a field where the container stores one (`v.len`, `m.len`,

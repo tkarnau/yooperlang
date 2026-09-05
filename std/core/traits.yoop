@@ -147,37 +147,38 @@ export trait WithContext<T> {
 // another backing strategy (an arena-owned vector, a fixed-capacity one) is
 // a second implementer, not a second API.
 //
-// The traits are FLAT for now. `Growable<T>` should extend `Sequence<T>`, and
-// both a common `Collection<T>` carrying `clear` / `isEmpty`; the compiler
-// supports a generic parent in `extends` as of this tree, but the seed that
-// builds std does not yet, so the shared methods are repeated per trait and
-// `Vec<T>` implements `(Sequence<T>, Growable<T>)` until the seed is raised.
-// A caller is unaffected either way: `v.push(x)` names no trait.
+// The traits form a chain, and a type names only the outermost one it
+// satisfies: `Vec<T> implements Growable<T>` owes everything `Sequence<T>`
+// and `Collection` declare as well, and a bound on `Growable<T>` reaches all
+// of it. `Collection` is not generic: nothing in it mentions the element
+// type, and a map has no single element type to name.
 //
 // A length is a FIELD (`v.len`) on every std container that stores one, so
 // the contracts do not declare it; `Set<K>` has no such field and declares
 // `len` as a method instead.
 
-// An indexable sequence: read and write by position, and a borrowed view of
-// the populated part as a plain array.
-export trait Sequence<T> {
+// The part every container shares.
+export trait Collection {
     function clear(ref self): void;
     function isEmpty(ref self): bool;
+}
+
+// An indexable sequence: read and write by position, and a borrowed view of
+// the populated part as a plain array.
+export trait Sequence<T> extends Collection {
     function get(ref self, i: usize): T;
     function set(ref self, i: usize, value: T): void;
     function asArray(ref self): T[];
 }
 
 // A sequence that grows at the end.
-export trait Growable<T> {
+export trait Growable<T> extends Sequence<T> {
     function push(ref self, value: T): void;
     function extendFrom(ref self, items: T[]): void;
 }
 
 // A key-to-value association. `insert` reports whether it OVERWROTE.
-export trait Mapping<K, V> {
-    function clear(ref self): void;
-    function isEmpty(ref self): bool;
+export trait Mapping<K, V> extends Collection {
     function insert(ref self, key: K, value: V): bool;
     function get(ref self, key: K): Option<V>;
     function containsKey(ref self, key: K): bool;
@@ -185,9 +186,7 @@ export trait Mapping<K, V> {
 }
 
 // A set of keys. `insert` reports whether the key was ALREADY present.
-export trait Membership<K> {
-    function clear(ref self): void;
-    function isEmpty(ref self): bool;
+export trait Membership<K> extends Collection {
     function len(ref self): usize;
     function insert(ref self, key: K): bool;
     function contains(ref self, key: K): bool;
@@ -195,9 +194,7 @@ export trait Membership<K> {
 }
 
 // A queue open at both ends. `get` is by logical position from the front.
-export trait DoubleEnded<T> {
-    function clear(ref self): void;
-    function isEmpty(ref self): bool;
+export trait DoubleEnded<T> extends Collection {
     function pushBack(ref self, value: T): void;
     function pushFront(ref self, value: T): void;
     function popFront(ref self): Option<T>;

@@ -1272,7 +1272,7 @@ window.YOOP_DATA.search = {
    "title": "TextBuilder",
    "where": "trait in std/core/text.yoop",
    "href": "std.html#std%2Fcore%2Ftext.yoop",
-   "text": "export trait TextBuilder"
+   "text": "export trait TextBuilder extends Collection"
   },
   {
    "title": "toLowerAscii",
@@ -1311,6 +1311,12 @@ window.YOOP_DATA.search = {
    "text": "foundational traits used across std modules.\n\nThe staple Readable / Writable / Display traits that every downstream\nmodule either implements or takes as input. Disposable\nis intentionally NOT defined "
   },
   {
+   "title": "Collection",
+   "where": "trait in std/core/traits.yoop",
+   "href": "std.html#std%2Fcore%2Ftraits.yoop",
+   "text": "export trait Collection"
+  },
+  {
    "title": "Display",
    "where": "trait in std/core/traits.yoop",
    "href": "std.html#std%2Fcore%2Ftraits.yoop",
@@ -1320,7 +1326,7 @@ window.YOOP_DATA.search = {
    "title": "DoubleEnded",
    "where": "trait in std/core/traits.yoop",
    "href": "std.html#std%2Fcore%2Ftraits.yoop",
-   "text": "export trait DoubleEnded<T>"
+   "text": "export trait DoubleEnded<T> extends Collection"
   },
   {
    "title": "FlushOutcome",
@@ -1332,7 +1338,7 @@ window.YOOP_DATA.search = {
    "title": "Growable",
    "where": "trait in std/core/traits.yoop",
    "href": "std.html#std%2Fcore%2Ftraits.yoop",
-   "text": "export trait Growable<T>"
+   "text": "export trait Growable<T> extends Sequence<T>"
   },
   {
    "title": "Into",
@@ -1356,13 +1362,13 @@ window.YOOP_DATA.search = {
    "title": "Mapping",
    "where": "trait in std/core/traits.yoop",
    "href": "std.html#std%2Fcore%2Ftraits.yoop",
-   "text": "export trait Mapping<K, V>"
+   "text": "export trait Mapping<K, V> extends Collection"
   },
   {
    "title": "Membership",
    "where": "trait in std/core/traits.yoop",
    "href": "std.html#std%2Fcore%2Ftraits.yoop",
-   "text": "export trait Membership<K>"
+   "text": "export trait Membership<K> extends Collection"
   },
   {
    "title": "Readable",
@@ -1380,7 +1386,7 @@ window.YOOP_DATA.search = {
    "title": "Sequence",
    "where": "trait in std/core/traits.yoop",
    "href": "std.html#std%2Fcore%2Ftraits.yoop",
-   "text": "export trait Sequence<T>"
+   "text": "export trait Sequence<T> extends Collection"
   },
   {
    "title": "WithContext",
@@ -1428,7 +1434,7 @@ window.YOOP_DATA.search = {
    "title": "Vec",
    "where": "type in std/core/vec.yoop",
    "href": "std.html#std%2Fcore%2Fvec.yoop",
-   "text": "export type Vec<T> implements (Disposable, Sequence<T>, Growable<T>) propagates<disposable>"
+   "text": "export type Vec<T> implements (Disposable, Growable<T>) propagates<disposable>"
   },
   {
    "title": "vecFromArray",

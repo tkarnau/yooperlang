@@ -1742,7 +1742,7 @@ Naming convention conveys allocation cost at the call site:
 ### `std/core/vec.yoop` - growable vector
 
 ```js
-type Vec<T> implements (Disposable, Sequence<T>, Growable<T>) propagates<disposable> {
+type Vec<T> implements (Disposable, Growable<T>) propagates<disposable> {
     data: T[],
     len: usize,
     cap: usize,
@@ -1759,9 +1759,10 @@ v.asArray(): T[]                  // view; valid until next mutation
 v.extendFrom(items: T[]): void    // MAY REALLOCATE
 ```
 
-The operations are methods declared by the `Sequence<T>` and `Growable<T>`
-traits in `std/core/traits.yoop`, so a generic bounded by them takes any
-implementation of the contract; `Vec` is the std one. Construction stays a
+The operations are methods declared by the `Growable<T>` trait in
+`std/core/traits.yoop` and its parents `Sequence<T>` and `Collection`, so a
+generic bounded by `Growable<T>` takes any implementation of the contract;
+`Vec` is the std one. Construction stays a
 free function because there is no receiver yet. `Map`, `Set` and `Deque`
 follow the same shape (`Mapping<K, V>`, `Membership<K>`, `DoubleEnded<T>`),
 and `Text` is a `TextBuilder`.

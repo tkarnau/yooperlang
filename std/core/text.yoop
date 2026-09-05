@@ -31,7 +31,7 @@
 // std/core/strings.yoop API is all byte offsets and none of them say so.
 
 import { Disposable, disposable } from "./kinds.yoop";
-import { Display, Iterable, IterStep } from "./traits.yoop";
+import { Display, Iterable, IterStep, Collection } from "./traits.yoop";
 import { Result } from "./types.yoop";
 import * as intr from "./intrinsics.yoop";
 import { Allocator, currentAllocator, pushAllocator, popAllocator } from "./alloc.yoop";
@@ -44,7 +44,7 @@ import { Allocator, currentAllocator, pushAllocator, popAllocator } from "./allo
 // What a text builder can do, as a contract rather than a set of free
 // functions: `t.push("x")`, `t.pushUint(n)`, `t.view()`. See the container
 // contracts in std/core/traits.yoop for why the operations live on a trait.
-export trait TextBuilder {
+export trait TextBuilder extends Collection {
     function reserve(ref self, wanted: usize): void;
     function pushBytes(ref self, src: uint8[]): void;
     function push(ref self, s: string): void;
@@ -53,11 +53,9 @@ export trait TextBuilder {
     function pushInt(ref self, v: int64): void;
     function pushChar(ref self, cp: uint32): void;
     function pushText(ref self, other: ref Text): void;
-    function clear(ref self): void;
     function truncateBytes(ref self, newLen: usize): void;
     function view(ref self): string;
     function bytes(ref self): uint8[];
-    function isEmpty(ref self): bool;
 }
 
 export type Text implements (Disposable, Display, TextBuilder) propagates<disposable> {

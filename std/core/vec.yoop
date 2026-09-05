@@ -7,10 +7,11 @@
 // (`disposable v: Vec<T> = vec.vecNew(8);`), manual `v.dispose()`, or
 // transfer-up via return.
 //
-// The operations are the `Sequence<T>` and `Growable<T>` contracts from
-// std/core/traits.yoop, called through the value: `v.push(x)`, `v.get(i)`,
-// `v.asArray()`. A bounded generic takes any growable sequence the same way,
-// which is what lets another backing strategy stand in for this one.
+// The operations are the `Growable<T>` contract from std/core/traits.yoop
+// (which extends `Sequence<T>` and `Collection`), called through the value:
+// `v.push(x)`, `v.get(i)`, `v.asArray()`. A bounded generic takes any growable
+// sequence the same way, which is what lets another backing strategy stand in
+// for this one.
 //
 // Allocation behavior per operation (per the intrinsics-index naming
 // convention):
@@ -24,7 +25,7 @@
 import { Disposable, disposable } from "./kinds.yoop";
 import * as intr from "./intrinsics.yoop";
 import { Allocator, currentAllocator, pushAllocator, popAllocator } from "./alloc.yoop";
-import { Iterable, IterStep, Sequence, Growable } from "./traits.yoop";
+import { Iterable, IterStep, Growable } from "./traits.yoop";
 
 // `Vec<T>` is container-owned: it remembers the allocator it was built with
 // (whatever was current at `vecNew`) and routes every later grow and the
@@ -32,7 +33,7 @@ import { Iterable, IterStep, Sequence, Growable } from "./traits.yoop";
 // when those happen. So a Vec built inside an arena scope frees into the arena
 // (a no-op; the region reclaims in bulk), and a malloc Vec stays malloc-backed
 // even if it grows while an arena is installed.
-export type Vec<T> implements (Disposable, Sequence<T>, Growable<T>) propagates<disposable> {
+export type Vec<T> implements (Disposable, Growable<T>) propagates<disposable> {
     data: T[],
     len: usize,
     cap: usize,
@@ -46,7 +47,7 @@ export type Vec<T> implements (Disposable, Sequence<T>, Growable<T>) propagates<
         }
     }
 
-    // ----- Sequence<T> ---------------------------------------------------
+    // ----- Collection, Sequence<T> --------------------------------------
 
     // Reset length to zero. Capacity unchanged; backing buffer is retained so
     // subsequent pushes don't reallocate immediately.

@@ -36,8 +36,8 @@ import { fileURLToPath } from "node:url";
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 // The release that can compile this tree. See the note above before changing it.
-export const SEED_TAG = "v0.3.1";
-export const SEED_VERSION = "0.3.1";
+export const SEED_TAG = "v0.4.0";
+export const SEED_VERSION = "0.4.0";
 
 const EXE = process.platform === "win32" ? ".exe" : "";
 

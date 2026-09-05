@@ -279,7 +279,7 @@ the owned, growable string type.
 
 Exports:
 
-- `TextBuilder` - trait
+- `Collection` - trait TextBuilder extends
 - `implements` - type Text
 - `make` - function
 - `fromString` - function
@@ -329,6 +329,7 @@ Exports:
 - `Iterable` - trait
 - `Into` - trait
 - `WithContext` - trait
+- `Collection` - trait
 - `Sequence` - trait
 - `Growable` - trait
 - `Mapping` - trait

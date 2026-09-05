@@ -23,12 +23,6 @@ import { disposable } from "std/core/kinds.yoop";
 import { Result } from "std/core/types.yoop";
 import { AST, isTestModuleProgram } from "../ast";
 import { parse } from "../parse";
-// `TextBuilder` is named here only so the SEED can build this file: a dotted call
-// handed straight to a generic (`vecFromArray(src.bytes())`) is checked
-// twice by the v0.3.1 checker, and its second look resolves the trait by name.
-// This tree's checker records the trait instead. Remove once the seed is
-// raised past that fix.
-import { TextBuilder } from "std/core/text.yoop";
 
 export type TestPlan propagates<disposable> {
   isTestRun: bool,           // false means "compile this the ordinary way"

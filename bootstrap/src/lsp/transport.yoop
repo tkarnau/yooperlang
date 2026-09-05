@@ -25,12 +25,6 @@ import { Vec }, * as vec from "std/core/vec.yoop";
 import { Text }, * as text from "std/core/text.yoop";
 import { Disposable, disposable } from "std/core/kinds.yoop";
 import * as intr from "std/core/intrinsics.yoop";
-// `Sequence` is named here only so the SEED can build this file: a dotted call
-// handed straight to a generic (`quickSort(scan.asArray(), ...)`) is checked
-// twice by the v0.3.1 checker, and its second look resolves the trait by name.
-// This tree's checker records the trait instead. Remove once the seed is
-// raised past that fix.
-import { Sequence } from "std/core/traits.yoop";
 
 extern "C" from "unistd.h" {
   function read(fd: c_int, buf: unsafe_ptr<uint8>, count: c_size_t): c_ssize_t;

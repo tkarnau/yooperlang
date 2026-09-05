@@ -16,12 +16,6 @@ import { Map }, * as map from "std/collections/map.yoop";
 import { Disposable, disposable } from "std/core/kinds.yoop";
 import { Diagnostic, SourceLocation, errorAt, warningAt } from "../diagnostics";
 import { NodeId } from "../ast";
-// `Sequence` is named here only so the SEED can build this file: a dotted call
-// handed straight to a generic (`quickSort(scan.asArray(), ...)`) is checked
-// twice by the v0.3.1 checker, and its second look resolves the trait by name.
-// This tree's checker records the trait instead. Remove once the seed is
-// raised past that fix.
-import { Sequence } from "std/core/traits.yoop";
 
 // One entry of TypedModule.importedFrom. Both halves are needed to name the
 // symbol an imported call lands on: `import { tag as mathTag }` binds

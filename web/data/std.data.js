@@ -1315,7 +1315,7 @@ window.YOOP_DATA.std = {
      "doc": "Byte offset at which codepoint `n` starts, or `s.len` if there are fewer\nthan n + 1 codepoints. This is the bridge between the two coordinate\nsystems and is what makes a byte-offset API safe to use on real text.",
      "shape": null,
      "file": "std/core/text.yoop",
-     "line": 342
+     "line": 340
     },
     {
      "name": "charAt",
@@ -1324,7 +1324,7 @@ window.YOOP_DATA.std = {
      "doc": "Codepoint number `n`, or 0 past the end. O(n); prefer `chars` for a walk.",
      "shape": null,
      "file": "std/core/text.yoop",
-     "line": 394
+     "line": 392
     },
     {
      "name": "charAtByte",
@@ -1333,7 +1333,7 @@ window.YOOP_DATA.std = {
      "doc": "Decode the codepoint starting at BYTE offset `at`. Returns U+FFFD for a\nmalformed or truncated sequence, so it always makes progress.",
      "shape": null,
      "file": "std/core/text.yoop",
-     "line": 383
+     "line": 381
     },
     {
      "name": "charCount",
@@ -1342,7 +1342,7 @@ window.YOOP_DATA.std = {
      "doc": "Number of codepoints in `s`. O(n) - it walks. Stops early on a malformed\nbyte rather than reporting a count it cannot justify.",
      "shape": null,
      "file": "std/core/text.yoop",
-     "line": 326
+     "line": 324
     },
     {
      "name": "chars",
@@ -1351,7 +1351,7 @@ window.YOOP_DATA.std = {
      "doc": "",
      "shape": null,
      "file": "std/core/text.yoop",
-     "line": 419
+     "line": 417
     },
     {
      "name": "Chars",
@@ -1360,7 +1360,7 @@ window.YOOP_DATA.std = {
      "doc": "An iterator over the codepoints of a borrowed string, so `for c in\ntext.chars(s)` works. Holds a borrowing view: the string must outlive it.",
      "shape": "export type Chars implements Iterable<uint32> {\n    buf: uint8[],\n    i: usize,\n\n    function next(ref self): IterStep<uint32> {\n        if (self.i >= self.buf.len) {\n            return IterStep.Done;\n        }\n        let w: usize = seqLen(self.buf[self.i]);\n        if (w == 0 || self.i + w > self.buf.len) {\n            self.i = self.buf.len;\n            return IterStep.Yield { value: 65533 };\n        }\n        let cp: uint32 = decodeAt(self.buf, self.i, w);\n        self.i = self.i + w;\n        return IterStep.Yield { value: cp };\n    }\n}",
      "file": "std/core/text.yoop",
-     "line": 400
+     "line": 398
     },
     {
      "name": "concat",
@@ -1369,7 +1369,7 @@ window.YOOP_DATA.std = {
      "doc": "",
      "shape": null,
      "file": "std/core/text.yoop",
-     "line": 494
+     "line": 492
     },
     {
      "name": "contains",
@@ -1378,7 +1378,7 @@ window.YOOP_DATA.std = {
      "doc": "",
      "shape": null,
      "file": "std/core/text.yoop",
-     "line": 476
+     "line": 474
     },
     {
      "name": "endsWith",
@@ -1387,7 +1387,7 @@ window.YOOP_DATA.std = {
      "doc": "",
      "shape": null,
      "file": "std/core/text.yoop",
-     "line": 437
+     "line": 435
     },
     {
      "name": "equals",
@@ -1396,7 +1396,7 @@ window.YOOP_DATA.std = {
      "doc": "",
      "shape": null,
      "file": "std/core/text.yoop",
-     "line": 480
+     "line": 478
     },
     {
      "name": "fromBytes",
@@ -1405,7 +1405,7 @@ window.YOOP_DATA.std = {
      "doc": "Copy a byte buffer into fresh owned storage. The bytes are NOT validated as\nUTF-8; use strings.stringFromBytes first if the source is untrusted.",
      "shape": null,
      "file": "std/core/text.yoop",
-     "line": 279
+     "line": 277
     },
     {
      "name": "fromString",
@@ -1414,7 +1414,7 @@ window.YOOP_DATA.std = {
      "doc": "Copy a borrowed string into fresh owned storage.",
      "shape": null,
      "file": "std/core/text.yoop",
-     "line": 270
+     "line": 268
     },
     {
      "name": "indexOf",
@@ -1423,7 +1423,7 @@ window.YOOP_DATA.std = {
      "doc": "",
      "shape": null,
      "file": "std/core/text.yoop",
-     "line": 472
+     "line": 470
     },
     {
      "name": "indexOfFrom",
@@ -1432,7 +1432,7 @@ window.YOOP_DATA.std = {
      "doc": "First BYTE offset of `needle` at or after `start`, or `s.len` if absent.\nAn empty needle matches at `start`, mirroring the usual convention.\n(`from` is a keyword in extern blocks, so the parameter cannot use it.)",
      "shape": null,
      "file": "std/core/text.yoop",
-     "line": 453
+     "line": 451
     },
     {
      "name": "join",
@@ -1441,7 +1441,7 @@ window.YOOP_DATA.std = {
      "doc": "",
      "shape": null,
      "file": "std/core/text.yoop",
-     "line": 503
+     "line": 501
     },
     {
      "name": "make",
@@ -1450,7 +1450,7 @@ window.YOOP_DATA.std = {
      "doc": "A Text with room for `capHint` bytes of content. Allocates capHint + 1 so\nthe nul always has a home. `make(0)` still allocates one byte, which keeps\nevery other function free of a \"has it been allocated yet\" branch.",
      "shape": null,
      "file": "std/core/text.yoop",
-     "line": 261
+     "line": 259
     },
     {
      "name": "padEnd",
@@ -1459,7 +1459,7 @@ window.YOOP_DATA.std = {
      "doc": "",
      "shape": null,
      "file": "std/core/text.yoop",
-     "line": 660
+     "line": 658
     },
     {
      "name": "padStart",
@@ -1468,7 +1468,7 @@ window.YOOP_DATA.std = {
      "doc": "Pad to at least `width` BYTES. A longer input is copied unchanged, and an\nempty fill is a no-op rather than a hang.",
      "shape": null,
      "file": "std/core/text.yoop",
-     "line": 651
+     "line": 649
     },
     {
      "name": "parseInt",
@@ -1477,7 +1477,7 @@ window.YOOP_DATA.std = {
      "doc": "Decimal integer with an optional leading sign. Rejects an empty string,\nstray characters, and anything that is not a digit - no partial parses.",
      "shape": null,
      "file": "std/core/text.yoop",
-     "line": 673
+     "line": 671
     },
     {
      "name": "repeat",
@@ -1486,7 +1486,7 @@ window.YOOP_DATA.std = {
      "doc": "",
      "shape": null,
      "file": "std/core/text.yoop",
-     "line": 514
+     "line": 512
     },
     {
      "name": "replaceAll",
@@ -1495,7 +1495,7 @@ window.YOOP_DATA.std = {
      "doc": "Every occurrence of `needle` replaced by `repl`. An empty needle returns a\ncopy rather than looping forever.",
      "shape": null,
      "file": "std/core/text.yoop",
-     "line": 584
+     "line": 582
     },
     {
      "name": "replaceChar",
@@ -1504,7 +1504,7 @@ window.YOOP_DATA.std = {
      "doc": "Replace codepoint `n` with `repl`. The shape that motivated this module:\npoking one byte only works for ASCII, so the general case rebuilds.",
      "shape": null,
      "file": "std/core/text.yoop",
-     "line": 633
+     "line": 631
     },
     {
      "name": "seqLen",
@@ -1513,7 +1513,7 @@ window.YOOP_DATA.std = {
      "doc": "Byte length of the UTF-8 sequence starting with `first`, or 0 if `first` is\nnot a legal start byte. The same table stringFromBytes validates against,\nexported because every caller doing manual UTF-8 work needs it.\n\nA nonzero result does NOT mean the sequence is valid — overlong 3- and 4-byte\nforms and surrogates are only detectable once the continuation bytes are known.",
      "shape": null,
      "file": "std/core/text.yoop",
-     "line": 315
+     "line": 313
     },
     {
      "name": "startsWith",
@@ -1522,7 +1522,7 @@ window.YOOP_DATA.std = {
      "doc": "",
      "shape": null,
      "file": "std/core/text.yoop",
-     "line": 425
+     "line": 423
     },
     {
      "name": "subBytes",
@@ -1531,7 +1531,7 @@ window.YOOP_DATA.std = {
      "doc": "Sub-range in BYTE offsets, clamped to the string. Errors if either bound\nsplits a multi-byte codepoint - the byte offsets are yours to get right,\nand silently producing invalid UTF-8 is worse than saying so.",
      "shape": null,
      "file": "std/core/text.yoop",
-     "line": 607
+     "line": 605
     },
     {
      "name": "subChars",
@@ -1540,7 +1540,7 @@ window.YOOP_DATA.std = {
      "doc": "Sub-range in CODEPOINTS. Always lands on boundaries, so it cannot fail.",
      "shape": null,
      "file": "std/core/text.yoop",
-     "line": 623
+     "line": 621
     },
     {
      "name": "Text",
@@ -1549,14 +1549,14 @@ window.YOOP_DATA.std = {
      "doc": "",
      "shape": "export type Text implements (Disposable, Display, TextBuilder) propagates<disposable> {\n    data: uint8[],\n    len: usize,\n    cap: usize,\n    alloc: Allocator,\n\n    // Display, so a Text interpolates directly: `${greeting}` rather than\n    // `${text.view(ref greeting)}`. This hands back a BORROW rather than a\n    // fresh string, which is sound here because template lowering copies the\n    // bytes into the concatenated result while the Text is still alive - and\n    // it means interpolating a Text costs nothing beyond that copy.\n    function toString(ref self): string {\n        return self.view();\n    }\n\n    function dispose(ref self): void {\n        if (self.cap > 0) {\n            let prev: Allocator = pushAllocator(self.alloc);\n            intr.ctxFree(self.data);\n            popAllocator(prev);\n            self.cap = 0;\n            self.len = 0;\n        }\n    }\n\n    // ----- TextBuilder ---------------------------------------------------\n\n    // Ensure room for `wanted` bytes of CONTENT (the nul is accounted for on top).\n    // Grows by doubling, like Vec, so repeated appends stay amortized O(1).\n    function reserve(ref self, wanted: usize): void {\n        let need: usize = wanted + 1;\n        if (self.cap >= need) { return; }\n        let newCap: usize = self.cap * 2;\n        if (newCap < 8) { newCap = 8; }\n        while (newCap < need) { newCap = newCap * 2; }\n\n        // Grow through this Text's own allocator, not whatever is ambient now.\n        let prev: Allocator = pushAllocator(self.alloc);\n        let fresh: uint8[] = intr.ctxAlloc(newCap);\n        let i: usize = 0;\n        while (i < self.len) {\n            fresh[i] = self.data[i];\n            i = i + 1;\n        }\n        if (self.cap > 0) {\n            intr.ctxFree(self.data);\n        }\n        popAllocator(prev);\n        fresh[self.len] = 0;\n        self.data = fresh;\n        self.cap = newCap;\n    }\n\n    function pushBytes(ref self, src: uint8[]): void {\n        self.reserve(self.len + src.len);\n        let i: usize = 0;\n        while (i < src.len) {\n            self.data[self.len + i] = src[i];\n            i = i + 1;\n        }\n        self.len = self.len + src.len;\n  // ...",
      "file": "std/core/text.yoop",
-     "line": 63
+     "line": 61
     },
     {
      "name": "TextBuilder",
      "kind": "trait",
-     "signature": "export trait TextBuilder",
+     "signature": "export trait TextBuilder extends Collection",
      "doc": "Like `Vec<T>`, `Text` is container-owned: it remembers the allocator that\nwas current when it was built and routes every later grow and the final\nfree back through that same one, whatever is ambient at the time. A Text\nbuilt inside an arena scope frees into the arena; a malloc-backed one stays\nmalloc-backed even if it grows while an arena is installed.\nWhat a text builder can do, as a contract rather than a set of free\nfunctions: `t.push(\"x\")`, `t.pushUint(n)`, `t.view()`. See the container\ncontracts in std/core/traits.yoop for why the operations live on a trait.",
-     "shape": "export trait TextBuilder {\n    function reserve(ref self, wanted: usize): void;\n    function pushBytes(ref self, src: uint8[]): void;\n    function push(ref self, s: string): void;\n    function pushByte(ref self, b: uint8): void;\n    function pushUint(ref self, v: uint64): void;\n    function pushInt(ref self, v: int64): void;\n    function pushChar(ref self, cp: uint32): void;\n    function pushText(ref self, other: ref Text): void;\n    function clear(ref self): void;\n    function truncateBytes(ref self, newLen: usize): void;\n    function view(ref self): string;\n    function bytes(ref self): uint8[];\n    function isEmpty(ref self): bool;\n}",
+     "shape": "export trait TextBuilder extends Collection {\n    function reserve(ref self, wanted: usize): void;\n    function pushBytes(ref self, src: uint8[]): void;\n    function push(ref self, s: string): void;\n    function pushByte(ref self, b: uint8): void;\n    function pushUint(ref self, v: uint64): void;\n    function pushInt(ref self, v: int64): void;\n    function pushChar(ref self, cp: uint32): void;\n    function pushText(ref self, other: ref Text): void;\n    function truncateBytes(ref self, newLen: usize): void;\n    function view(ref self): string;\n    function bytes(ref self): uint8[];\n}",
      "file": "std/core/text.yoop",
      "line": 47
     },
@@ -1567,7 +1567,7 @@ window.YOOP_DATA.std = {
      "doc": "ASCII-only case mapping. Bytes >= 128 are copied through untouched, which\nis why the names say ascii: real Unicode case folding is locale-dependent\nand can change a string's length.",
      "shape": null,
      "file": "std/core/text.yoop",
-     "line": 528
+     "line": 526
     },
     {
      "name": "toUpperAscii",
@@ -1576,7 +1576,7 @@ window.YOOP_DATA.std = {
      "doc": "",
      "shape": null,
      "file": "std/core/text.yoop",
-     "line": 541
+     "line": 539
     },
     {
      "name": "trim",
@@ -1585,7 +1585,7 @@ window.YOOP_DATA.std = {
      "doc": "",
      "shape": null,
      "file": "std/core/text.yoop",
-     "line": 559
+     "line": 557
     },
     {
      "name": "trimEnd",
@@ -1594,7 +1594,7 @@ window.YOOP_DATA.std = {
      "doc": "",
      "shape": null,
      "file": "std/core/text.yoop",
-     "line": 575
+     "line": 573
     },
     {
      "name": "trimStart",
@@ -1603,7 +1603,7 @@ window.YOOP_DATA.std = {
      "doc": "",
      "shape": null,
      "file": "std/core/text.yoop",
-     "line": 568
+     "line": 566
     }
    ]
   },
@@ -1618,6 +1618,15 @@ window.YOOP_DATA.std = {
    "doc": "foundational traits used across std modules.\n\nThe staple Readable / Writable / Display traits that every downstream\nmodule either implements or takes as input. Disposable\nis intentionally NOT defined here - it lives in std/core/kinds.yoop\nalongside the disposable kind that requires it.",
    "exports": [
     {
+     "name": "Collection",
+     "kind": "trait",
+     "signature": "export trait Collection",
+     "doc": "The part every container shares.",
+     "shape": "export trait Collection {\n    function clear(ref self): void;\n    function isEmpty(ref self): bool;\n}",
+     "file": "std/core/traits.yoop",
+     "line": 161
+    },
+    {
      "name": "Display",
      "kind": "trait",
      "signature": "export trait Display",
@@ -1629,11 +1638,11 @@ window.YOOP_DATA.std = {
     {
      "name": "DoubleEnded",
      "kind": "trait",
-     "signature": "export trait DoubleEnded<T>",
+     "signature": "export trait DoubleEnded<T> extends Collection",
      "doc": "A queue open at both ends. `get` is by logical position from the front.",
-     "shape": "export trait DoubleEnded<T> {\n    function clear(ref self): void;\n    function isEmpty(ref self): bool;\n    function pushBack(ref self, value: T): void;\n    function pushFront(ref self, value: T): void;\n    function popFront(ref self): Option<T>;\n    function popBack(ref self): Option<T>;\n    function get(ref self, i: usize): Option<T>;\n}",
+     "shape": "export trait DoubleEnded<T> extends Collection {\n    function pushBack(ref self, value: T): void;\n    function pushFront(ref self, value: T): void;\n    function popFront(ref self): Option<T>;\n    function popBack(ref self): Option<T>;\n    function get(ref self, i: usize): Option<T>;\n}",
      "file": "std/core/traits.yoop",
-     "line": 198
+     "line": 197
     },
     {
      "name": "FlushOutcome",
@@ -1647,11 +1656,11 @@ window.YOOP_DATA.std = {
     {
      "name": "Growable",
      "kind": "trait",
-     "signature": "export trait Growable<T>",
+     "signature": "export trait Growable<T> extends Sequence<T>",
      "doc": "A sequence that grows at the end.",
-     "shape": "export trait Growable<T> {\n    function push(ref self, value: T): void;\n    function extendFrom(ref self, items: T[]): void;\n}",
+     "shape": "export trait Growable<T> extends Sequence<T> {\n    function push(ref self, value: T): void;\n    function extendFrom(ref self, items: T[]): void;\n}",
      "file": "std/core/traits.yoop",
-     "line": 172
+     "line": 175
     },
     {
      "name": "Into",
@@ -1683,20 +1692,20 @@ window.YOOP_DATA.std = {
     {
      "name": "Mapping",
      "kind": "trait",
-     "signature": "export trait Mapping<K, V>",
+     "signature": "export trait Mapping<K, V> extends Collection",
      "doc": "A key-to-value association. `insert` reports whether it OVERWROTE.",
-     "shape": "export trait Mapping<K, V> {\n    function clear(ref self): void;\n    function isEmpty(ref self): bool;\n    function insert(ref self, key: K, value: V): bool;\n    function get(ref self, key: K): Option<V>;\n    function containsKey(ref self, key: K): bool;\n    function remove(ref self, key: K): bool;\n}",
+     "shape": "export trait Mapping<K, V> extends Collection {\n    function insert(ref self, key: K, value: V): bool;\n    function get(ref self, key: K): Option<V>;\n    function containsKey(ref self, key: K): bool;\n    function remove(ref self, key: K): bool;\n}",
      "file": "std/core/traits.yoop",
-     "line": 178
+     "line": 181
     },
     {
      "name": "Membership",
      "kind": "trait",
-     "signature": "export trait Membership<K>",
+     "signature": "export trait Membership<K> extends Collection",
      "doc": "A set of keys. `insert` reports whether the key was ALREADY present.",
-     "shape": "export trait Membership<K> {\n    function clear(ref self): void;\n    function isEmpty(ref self): bool;\n    function len(ref self): usize;\n    function insert(ref self, key: K): bool;\n    function contains(ref self, key: K): bool;\n    function remove(ref self, key: K): bool;\n}",
+     "shape": "export trait Membership<K> extends Collection {\n    function len(ref self): usize;\n    function insert(ref self, key: K): bool;\n    function contains(ref self, key: K): bool;\n    function remove(ref self, key: K): bool;\n}",
      "file": "std/core/traits.yoop",
-     "line": 188
+     "line": 189
     },
     {
      "name": "Readable",
@@ -1719,11 +1728,11 @@ window.YOOP_DATA.std = {
     {
      "name": "Sequence",
      "kind": "trait",
-     "signature": "export trait Sequence<T>",
+     "signature": "export trait Sequence<T> extends Collection",
      "doc": "An indexable sequence: read and write by position, and a borrowed view of\nthe populated part as a plain array.",
-     "shape": "export trait Sequence<T> {\n    function clear(ref self): void;\n    function isEmpty(ref self): bool;\n    function get(ref self, i: usize): T;\n    function set(ref self, i: usize, value: T): void;\n    function asArray(ref self): T[];\n}",
+     "shape": "export trait Sequence<T> extends Collection {\n    function get(ref self, i: usize): T;\n    function set(ref self, i: usize, value: T): void;\n    function asArray(ref self): T[];\n}",
      "file": "std/core/traits.yoop",
-     "line": 163
+     "line": 168
     },
     {
      "name": "WithContext",
@@ -1792,16 +1801,16 @@ window.YOOP_DATA.std = {
    "files": [
     "std/core/vec.yoop"
    ],
-   "doc": "growable vector type.\n\n`Vec<T>` is the blessed growable-array primitive that std modules and\nuser code build collections out of. Owns a heap-allocated backing buffer\nand grows on demand. Carries `propagates<disposable>` so the underlying\nmemory cannot be silently dropped - the user must pick auto-cleanup\n(`disposable v: Vec<T> = vec.vecNew(8);`), manual `v.dispose()`, or\ntransfer-up via return.\n\nThe operations are the `Sequence<T>` and `Growable<T>` contracts from\nstd/core/traits.yoop, called through the value: `v.push(x)`, `v.get(i)`,\n`v.asArray()`. A bounded generic takes any growable sequence the same way,\nwhich is what lets another backing strategy stand in for this one.\n\nAllocation behavior per operation (per the intrinsics-index naming\nconvention):\n  * `vecNew`        -> fresh heap allocation\n  * `push`          -> may reallocate (when len == cap)\n  * `get` / `set`   -> in place; no allocation\n  * `clear`         -> in place; capacity unchanged, no allocation\n  * `asArray`       -> borrowing view valid until the next mutation\n  * `dispose`       -> frees the backing buffer",
+   "doc": "growable vector type.\n\n`Vec<T>` is the blessed growable-array primitive that std modules and\nuser code build collections out of. Owns a heap-allocated backing buffer\nand grows on demand. Carries `propagates<disposable>` so the underlying\nmemory cannot be silently dropped - the user must pick auto-cleanup\n(`disposable v: Vec<T> = vec.vecNew(8);`), manual `v.dispose()`, or\ntransfer-up via return.\n\nThe operations are the `Growable<T>` contract from std/core/traits.yoop\n(which extends `Sequence<T>` and `Collection`), called through the value:\n`v.push(x)`, `v.get(i)`, `v.asArray()`. A bounded generic takes any growable\nsequence the same way, which is what lets another backing strategy stand in\nfor this one.\n\nAllocation behavior per operation (per the intrinsics-index naming\nconvention):\n  * `vecNew`        -> fresh heap allocation\n  * `push`          -> may reallocate (when len == cap)\n  * `get` / `set`   -> in place; no allocation\n  * `clear`         -> in place; capacity unchanged, no allocation\n  * `asArray`       -> borrowing view valid until the next mutation\n  * `dispose`       -> frees the backing buffer",
    "exports": [
     {
      "name": "Vec",
      "kind": "type",
-     "signature": "export type Vec<T> implements (Disposable, Sequence<T>, Growable<T>) propagates<disposable>",
+     "signature": "export type Vec<T> implements (Disposable, Growable<T>) propagates<disposable>",
      "doc": "`Vec<T>` is container-owned: it remembers the allocator it was built with\n(whatever was current at `vecNew`) and routes every later grow and the\nfinal free back through that same allocator, regardless of what is current\nwhen those happen. So a Vec built inside an arena scope frees into the arena\n(a no-op; the region reclaims in bulk), and a malloc Vec stays malloc-backed\neven if it grows while an arena is installed.",
-     "shape": "export type Vec<T> implements (Disposable, Sequence<T>, Growable<T>) propagates<disposable> {\n    data: T[],\n    len: usize,\n    cap: usize,\n    alloc: Allocator,\n    function dispose(ref self): void {\n        if (self.cap > 0) {\n            let prev: Allocator = pushAllocator(self.alloc);\n            intr.ctxFree(self.data);\n            popAllocator(prev);\n            self.cap = 0;\n        }\n    }\n\n    // ----- Sequence<T> ---------------------------------------------------\n\n    // Reset length to zero. Capacity unchanged; backing buffer is retained so\n    // subsequent pushes don't reallocate immediately.\n    function clear(ref self): void {\n        self.len = 0;\n    }\n\n    function isEmpty(ref self): bool {\n        return self.len == 0;\n    }\n\n    // Read `v[i]`. Traps via the underlying array indexing if i >= len -\n    // matches the existing yoop array-indexing convention (no bounds check;\n    // caller's responsibility).\n    function get(ref self, i: usize): T {\n        return self.data[i];\n    }\n\n    // Write `v[i] = value`. Same OOB convention as `get`.\n    function set(ref self, i: usize, value: T): void {\n        self.data[i] = value;\n    }\n\n    // Borrowing view of the populated prefix as a regular yoop array. The view\n    // is valid until the next mutation (push/clear/dispose) - the underlying\n    // fat-pointer may dangle if `push` reallocates.\n    function asArray(ref self): T[] {\n        return intr.arraySlice(self.data, 0, self.len);\n    }\n\n    // ----- Growable<T> ---------------------------------------------------\n\n    // Append `value`, growing the backing buffer if necessary (doubling\n    // strategy). MAY REALLOCATE when len == cap - callers holding views from\n    // `asArray` should re-fetch after a push.\n    function push(ref self, value: T): void {\n        if (self.len >= self.cap) {\n            let new_cap: usize = self.cap * 2;\n            if (new_cap == 0) { new_cap = 4; }\n            // Grow through the Vec's own allocator, not whatever is ambient now.\n            let prev: Allocator = pushAllocator(self.alloc);\n            let new_data: T[] = intr.ctxAlloc(new_cap);\n            let i: usize = 0;\n            while (i < self.len) {\n                new_data[i] = self.data[i];\n                i = i + 1;\n  // ...",
+     "shape": "export type Vec<T> implements (Disposable, Growable<T>) propagates<disposable> {\n    data: T[],\n    len: usize,\n    cap: usize,\n    alloc: Allocator,\n    function dispose(ref self): void {\n        if (self.cap > 0) {\n            let prev: Allocator = pushAllocator(self.alloc);\n            intr.ctxFree(self.data);\n            popAllocator(prev);\n            self.cap = 0;\n        }\n    }\n\n    // ----- Collection, Sequence<T> --------------------------------------\n\n    // Reset length to zero. Capacity unchanged; backing buffer is retained so\n    // subsequent pushes don't reallocate immediately.\n    function clear(ref self): void {\n        self.len = 0;\n    }\n\n    function isEmpty(ref self): bool {\n        return self.len == 0;\n    }\n\n    // Read `v[i]`. Traps via the underlying array indexing if i >= len -\n    // matches the existing yoop array-indexing convention (no bounds check;\n    // caller's responsibility).\n    function get(ref self, i: usize): T {\n        return self.data[i];\n    }\n\n    // Write `v[i] = value`. Same OOB convention as `get`.\n    function set(ref self, i: usize, value: T): void {\n        self.data[i] = value;\n    }\n\n    // Borrowing view of the populated prefix as a regular yoop array. The view\n    // is valid until the next mutation (push/clear/dispose) - the underlying\n    // fat-pointer may dangle if `push` reallocates.\n    function asArray(ref self): T[] {\n        return intr.arraySlice(self.data, 0, self.len);\n    }\n\n    // ----- Growable<T> ---------------------------------------------------\n\n    // Append `value`, growing the backing buffer if necessary (doubling\n    // strategy). MAY REALLOCATE when len == cap - callers holding views from\n    // `asArray` should re-fetch after a push.\n    function push(ref self, value: T): void {\n        if (self.len >= self.cap) {\n            let new_cap: usize = self.cap * 2;\n            if (new_cap == 0) { new_cap = 4; }\n            // Grow through the Vec's own allocator, not whatever is ambient now.\n            let prev: Allocator = pushAllocator(self.alloc);\n            let new_data: T[] = intr.ctxAlloc(new_cap);\n            let i: usize = 0;\n            while (i < self.len) {\n                new_data[i] = self.data[i];\n                i = i + 1;\n  // ...",
      "file": "std/core/vec.yoop",
-     "line": 35
+     "line": 36
     },
     {
      "name": "vecFromArray",
@@ -1810,7 +1819,7 @@ window.YOOP_DATA.std = {
      "doc": "Build a fresh Vec holding a copy of `src` (capacity == src.len, so no\nspare). Like `vecNew` it allocates once and carries the disposable\nobligation to the caller. `src` is unmodified - the bytes are copied, not\naliased - so passing a borrowing view (stringAsBytes, arraySlice) is\nsafe.",
      "shape": null,
      "file": "std/core/vec.yoop",
-     "line": 152
+     "line": 153
     },
     {
      "name": "vecIter",
@@ -1819,7 +1828,7 @@ window.YOOP_DATA.std = {
      "doc": "Build a `VecIter<T>` over the populated prefix of `v`, for `for ... in`.\nThe iterator yields `T` values via the `Iterable<T>` trait.",
      "shape": null,
      "file": "std/core/vec.yoop",
-     "line": 191
+     "line": 192
     },
     {
      "name": "VecIter",
@@ -1828,7 +1837,7 @@ window.YOOP_DATA.std = {
      "doc": "`VecIter<T>` walks the populated prefix (indices 0 .. len-1) in order, so\n`for x in vecIter(ref v)` replaces the index-plumbing while-loop that\nreading a Vec otherwise requires.\n\nLike `MapIter`, the iterator holds a BORROWING view of the backing buffer:\nthe `T[]` fat pointer is a copy, the heap data is shared. Any mutation that\ncan reallocate (`push` at capacity, `extendFrom`, `dispose`) invalidates it\nand leaves the view dangling - keep the iterator scoped tightly around its\nloop and re-fetch after mutating.",
      "shape": "export type VecIter<T> implements Iterable<T> {\n    data: T[],\n    len: usize,\n    i: usize,\n\n    function next(ref self): IterStep<T> {\n        if (self.i >= self.len) {\n            return IterStep.Done;\n        }\n        let cur: usize = self.i;\n        self.i = self.i + 1;\n        return IterStep.Yield { value: self.data[cur] };\n    }\n}",
      "file": "std/core/vec.yoop",
-     "line": 174
+     "line": 175
     },
     {
      "name": "vecNew",
@@ -1837,7 +1846,7 @@ window.YOOP_DATA.std = {
      "doc": "Construct a fresh Vec with `initial_cap` capacity. Captures the current\nallocator. Caller must discharge the disposable obligation (auto-cleanup,\nmanual dispose, or transfer up).",
      "shape": null,
      "file": "std/core/vec.yoop",
-     "line": 142
+     "line": 143
     }
    ]
   },
@@ -5069,6 +5078,6 @@ window.YOOP_DATA.std = {
  ],
  "counts": {
   "modules": 33,
-  "exports": 510
+  "exports": 511
  }
 };
