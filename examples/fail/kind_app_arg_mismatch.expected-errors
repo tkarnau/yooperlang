@@ -1,3 +1,0 @@
-# Illegal: `aligned` declares one parameter, and the prefix on `v` supplies no
-# argument - so whatever the parameter feeds has no value.
-15:5: takes 1 argument(s)

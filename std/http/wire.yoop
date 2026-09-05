@@ -101,7 +101,7 @@ function trimOws(raw: uint8[]): uint8[] {
     while (end > start && (raw[end - 1] == ' ' || raw[end - 1] == '\t')) {
         end = end - 1;
     }
-    return bytes.bytesSlice(raw, start, end);
+    return raw[start..end];
 }
 
 function asString(raw: uint8[]): string {
@@ -138,10 +138,10 @@ function readHeaderLines(
     let end: usize = headEnd + 2;
     let pos: usize = start;
     while (pos < end) {
-        let rest: uint8[] = bytes.bytesSlice(buf, pos, end);
+        let rest: uint8[] = buf[pos..end];
         let lineLen: usize = bytes.bytesIndexOf(rest, '\r');
         if (lineLen == rest.len) { break; }
-        let line: uint8[] = bytes.bytesSlice(rest, 0, lineLen);
+        let line: uint8[] = rest[0..lineLen];
 
         // A leading space or tab means an obs-fold continuation line. RFC 9112
         // says a server must reject those (they are a request-smuggling
@@ -155,14 +155,14 @@ function readHeaderLines(
             return Result.Err { error: errBadRequest("header line has no \":\"") };
         }
         // No space is allowed between the field name and the colon.
-        let nameBytes: uint8[] = bytes.bytesSlice(line, 0, colon);
+        let nameBytes: uint8[] = line[0..colon];
         if (nameBytes.len == 0) {
             return Result.Err { error: errBadRequest("header line has an empty field name") };
         }
         if (nameBytes[nameBytes.len - 1] == ' ' || nameBytes[nameBytes.len - 1] == '\t') {
             return Result.Err { error: errBadRequest("whitespace between header name and \":\"") };
         }
-        let valueBytes: uint8[] = trimOws(bytes.bytesSlice(line, colon + 1, line.len));
+        let valueBytes: uint8[] = trimOws(line[colon + 1..line.len]);
 
         let name: string = asString(nameBytes);
         let value: string = asString(valueBytes);
@@ -284,14 +284,14 @@ function findCrlf(buf: uint8[], pos: usize): usize {
 // which are legal and ignored) or to the CRLF.
 function parseChunkSize(line: uint8[]): Result<usize, HttpError> {
     let end: usize = bytes.bytesIndexOf(line, ';');
-    let digits: uint8[] = bytes.bytesSlice(line, 0, end);
+    let digits: uint8[] = line[0..end];
 
     // Trailing whitespace before the `;` or CRLF is tolerated; leading is not,
     // since that would make the size line indistinguishable from a folded
     // continuation.
     let n: usize = digits.len;
     while (n > 0 && (digits[n - 1] == ' ' || digits[n - 1] == '\t')) { n = n - 1; }
-    digits = bytes.bytesSlice(digits, 0, n);
+    digits = digits[0..n];
 
     if (digits.len == 0) {
         return Result.Err { error: errBadRequest("chunk size line has no size") };
@@ -354,7 +354,7 @@ function chunkedFeed(
             // A non-empty trailer line: skipped, but its shape is still
             // checked, because a line with no colon here means the framing is
             // wrong rather than that a field is uninteresting.
-            let line: uint8[] = bytes.bytesSlice(buf, r.cursor, lineAt);
+            let line: uint8[] = buf[r.cursor..lineAt];
             if (line[0] == ' ' || line[0] == '\t') {
                 return Result.Err { error: errBadRequest("obsolete line folding in chunked trailer") };
             }
@@ -378,7 +378,7 @@ function chunkedFeed(
             }
             return Result.Ok { value: false };
         }
-        let size: usize = parseChunkSize(bytes.bytesSlice(buf, r.cursor, sizeEnd))?;
+        let size: usize = parseChunkSize(buf[r.cursor..sizeEnd])?;
         let dataAt: usize = sizeEnd + 2;
 
         if (size == 0) {
@@ -407,7 +407,7 @@ function chunkedFeed(
             return Result.Err { error: errBadRequest("chunk data is not followed by CRLF") };
         }
 
-        out.extendFrom(bytes.bytesSlice(buf, dataAt, dataAt + size));
+        out.extendFrom(buf[dataAt..dataAt + size]);
         r.decoded = r.decoded + size;
         r.cursor = dataAt + size + 2;
     }

@@ -235,7 +235,6 @@ function registerFileShells(
           requiresTrait: clauseArgument(ref m.ast, declNode, REQUIRES_CLAUSE),
           ownsBlock: hasClause(ref m.ast, declNode, OWNS_BLOCK_CLAUSE),
           noEscape: hasClause(ref m.ast, declNode, MUST_NOT_ESCAPE_CLAUSE),
-          alignWord: kindAlignWordOf(ref m.ast, declNode),
           // Handed out by `registerKind` below, which is the one place that
           // can: the bit is a property of the REGISTRY, not of the declaration.
           markerBit: 0,
@@ -589,20 +588,6 @@ function mergeComposedKinds(
         }
         info.ownsBlock = info.ownsBlock || operand.ownsBlock;
         info.noEscape = info.noEscape || operand.noEscape;
-        // ALIGNMENT is the one clause a composition cannot union. Every other
-        // one adds an obligation, and holding two at once is coherent; two
-        // alignments are two different addresses for the same value, so a
-        // composition demanding both is a name for nothing.
-        if (info.alignWord.len == 0) {
-          info.alignWord = operand.alignWord;
-        } else if (operand.alignWord.len != 0 &&
-                   !str.stringEq(info.alignWord, operand.alignWord)) {
-          reportError(
-            ref prog,
-            `kind "${declNode.name}" composes operands that demand different alignments, "${info.alignWord}" and "${operand.alignWord}" - one value cannot sit at both`,
-            clause.sourceLoc
-          );
-        }
         // Sites INTERSECT where every other clause unions: a composition
         // carries all of its operands' obligations, so it may only be written
         // somewhere every operand may be. The first SITED operand seeds the
@@ -667,7 +652,6 @@ function isKnownIntrinsic(name: string): bool {
     str.stringEq(name, "stringAsBytes") ||
     str.stringEq(name, "stringFromBytesUnchecked") ||
     str.stringEq(name, "bytesAsStringUnchecked") ||
-    str.stringEq(name, "arraySlice") ||
     // The SUSPEND PRIMITIVE. `await intr.suspendNow()` parks the enclosing
     // coroutine right there and hands the worker thread back; it is an
     // intrinsic because it lowers to a bare `llvm.coro.suspend` and there is no

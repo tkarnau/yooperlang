@@ -128,7 +128,7 @@ function elementLlvmType(ref cx: Cx, exprId: NodeId): string {
 //   %base = getelementptr i32, ptr %data, i64 %a
 //   %len  = sub i64 %b, %a
 //
-// The same three instructions the `arraySlice` intrinsic emits, because it is
+// One extractvalue, one gep and one subtract - a borrowing VIEW, because it is
 // the same operation - this is the syntax for it. An omitted start is 0 and an
 // omitted end is the base's own length, which is the one thing the syntax
 // cannot say and codegen already has.

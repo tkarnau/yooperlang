@@ -551,15 +551,12 @@ export kind pooled {
               <tr><td><code>ownsBlock</code></td><td>The binding may take a trailing block that narrows its scope; without one the compiler synthesizes it at the tail of the enclosing scope, LIFO.</td></tr>
               <tr><td><code>mustCall fn beforeScopeEnd</code></td><td>The named method must run before the binding's scope exits. If you already called it by hand on every path, no second call is injected.</td></tr>
               <tr><td><code>mustNotEscape scope</code></td><td>Cannot be returned or stored outside its scope. Enforced, and also what lets the compiler keep the binding in a stack slot.</td></tr>
-              <tr><td><code>mustNotShare acrossThreads</code></td><td>Cannot flow into a task spawn. Rejected statically at every task-call argument site.</td></tr>
               <tr><td><code>conferred</code> / <code>restrictive</code></td><td>Makes this a marker kind: a static tag with no obligation and no codegen. See below.</td></tr>
               <tr><td><code>clearedBy m</code> / <code>appliedBy m</code></td><td>Names the trait method authorized to strip (restrictive) or grant (conferred) the marker.</td></tr>
               <tr><td><code>signature (p: T) =&gt; R</code></td><td>The shape every function carrying this kind must have. Required on a collected function kind.</td></tr>
               <tr><td><code>enumerable as "table"</code></td><td>Names the table a consumer asks the compiler for. This is the entire compiler contribution to the test harness.</td></tr>
               <tr><td><code>layout { ... }</code></td><td>Memory layout contract (alignment, ABI marker).</td></tr>
               <tr><td><code>propagates&lt;K&gt;</code></td><td>Documents that values of the type own a resource. Advisory: see below.</td></tr>
-              <tr><td><code>forbids X...</code></td><td>Categories a function may not touch.</td></tr>
-              <tr><td class="muted"><code>restricts iteration</code>, <code>contains&lt;K&gt;</code>, <code>mustCall ... beforeAny</code></td><td class="muted">Reserved; rejected with a "not yet supported" error.</td></tr>
             </tbody>
           </table>
         </div>

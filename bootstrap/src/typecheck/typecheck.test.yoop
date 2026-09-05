@@ -2656,7 +2656,7 @@ suite function asyncnessIsPartOfASignature(): void {
 // ----- intrinsics ------------------------------------------------------------
 
 suite function intrinsicExternsAreTheirOwnThing(): void {
-  const block = "extern \"intrinsic\" from \"compiler\" { function stringAsBytes(s: string): uint8[]; function arraySlice<T>(xs: T[], start: usize, end: usize): T[]; } ";
+  const block = "extern \"intrinsic\" from \"compiler\" { function stringAsBytes(s: string): uint8[]; function heapAlloc<T>(n: usize): T[]; } ";
 
   let ok = checkSource(`${block}function main(): int { const b: uint8[] = stringAsBytes("hi"); return int(b.len); }`);
   let test theory: Case = t.asserts("an intrinsic call checks against its declared signature") {
@@ -2680,16 +2680,16 @@ suite function intrinsicExternsAreTheirOwnThing(): void {
 
   // A generic intrinsic goes through the SAME inference every generic function
   // uses - `T` comes from the argument, and the result is the substituted type.
-  let generic = checkSource(`${block}function main(): int { const xs: int32[] = [1, 2, 3]; const part: int32[] = arraySlice(xs, 0, 2); return int(part.len); }`);
+  let generic = checkSource(`${block}function main(): int { const xs: int32[] = [1, 2, 3]; const part: int32[] = heapAlloc(2); return int(part.len); }`);
   let test theory: Case = t.asserts("a generic intrinsic infers its type argument") {
     theory.isSuccessful = generic.diagnostics.len == 0;
     theory.detail = `reported ${generic.diagnostics.len}: ${firstDiagnostic(ref generic)}`;
   }
 
-  let wrongElem = checkSource(`${block}function main(): int { const xs: int32[] = [1, 2, 3]; const part: uint8[] = arraySlice(xs, 0, 2); return 0; }`);
+  let wrongElem = checkSource(`${block}function main(): int { const xs: int32[] = [1, 2, 3]; const part: int32[] = heapAlloc(xs.len); const b: uint8 = part[0]; return 0; }`);
   let test theory: Case = t.asserts("and the inferred element type is enforced") {
     theory.isSuccessful = wrongElem.diagnostics.len > 0;
-    theory.detail = "assigning an int32[] slice to a uint8[] produced no diagnostic";
+    theory.detail = "assigning an int32 element to a uint8 produced no diagnostic";
   }
 
   // An intrinsic is implicitly exported - the block is the declaration, so
@@ -5796,8 +5796,8 @@ suite function kindDeclarationsWithContradictoryClausesAreRefused(): void {
 
   // The positive control, and the reason it comes first: every rule below is a
   // refusal, so a check that is merely too eager would pass all of them.
-  let legal = checkSource(`kind marker { appliesTo binding parameter field return; forbids io globalState; mustNotEscape scope; }${MAIN}`);
-  let test theory: Case = t.asserts("a kind naming several sites and both effect categories checks clean") {
+  let legal = checkSource(`kind marker { appliesTo binding parameter field return; mustNotEscape scope; }${MAIN}`);
+  let test theory: Case = t.asserts("a kind naming several sites checks clean") {
     theory.isSuccessful = legal.diagnostics.len == 0;
     theory.detail = `a well-formed kind reported: ${firstDiagnostic(ref legal)}`;
   }
@@ -5822,18 +5822,6 @@ suite function kindDeclarationsWithContradictoryClausesAreRefused(): void {
     theory.detail = `wanted the mixed-site refusal, got: ${firstDiagnostic(ref bothSorts)}`;
   }
 
-  let noCategory = checkSource(`kind k { appliesTo binding; forbids; }${MAIN}`);
-  let test theory: Case = t.asserts("forbids naming no category is refused") {
-    theory.isSuccessful = diagnosticsMention(ref noCategory, "forbids on kind \"k\" names no category");
-    theory.detail = `wanted the empty-forbids refusal, got: ${firstDiagnostic(ref noCategory)}`;
-  }
-
-  let badCategory = checkSource(`kind k { appliesTo binding; forbids memory; }${MAIN}`);
-  let test theory: Case = t.asserts("an effect category the compiler does not have is refused") {
-    theory.isSuccessful = diagnosticsMention(ref badCategory, "forbids \"memory\", which is not an effect category");
-    theory.detail = `wanted the unknown-category refusal, got: ${firstDiagnostic(ref badCategory)}`;
-  }
-
   let escapeFunction = checkSource(`kind k { appliesTo binding; mustNotEscape function; }${MAIN}`);
   let test theory: Case = t.asserts("mustNotEscape bounded by anything but a scope is refused") {
     theory.isSuccessful = diagnosticsMention(ref escapeFunction, "bounds mustNotEscape by something other than \"scope\"");
@@ -5844,22 +5832,6 @@ suite function kindDeclarationsWithContradictoryClausesAreRefused(): void {
   let test theory: Case = t.asserts("two mustNotEscape clauses on one kind are refused") {
     theory.isSuccessful = diagnosticsMention(ref escapeTwice, "states mustNotEscape twice");
     theory.detail = `wanted the duplicate-clause refusal, got: ${firstDiagnostic(ref escapeTwice)}`;
-  }
-
-  // A kind argument only ever reaches a layout clause, so a string parameter
-  // has nowhere to be used.
-  let stringParam = checkSource(`kind aligned(n: string) { appliesTo binding; }${MAIN}`);
-  let test theory: Case = t.asserts("a kind parameter that is not a compile-time number is refused") {
-    theory.isSuccessful = diagnosticsMention(ref stringParam, "is not a compile-time number");
-    theory.detail = `wanted the parameter-type refusal, got: ${firstDiagnostic(ref stringParam)}`;
-  }
-
-  let noArgument = checkSource(
-    "kind aligned(n: usize) { appliesTo binding; }\ntype V { a: int32, }\nfunction main(): int32 { aligned v: V = { a: 1 }; return v.a; }"
-  );
-  let test theory: Case = t.asserts("a parameterized kind applied with no arguments is refused") {
-    theory.isSuccessful = diagnosticsMention(ref noArgument, "takes 1 argument(s), and the prefix on \"v\" supplies none");
-    theory.detail = `wanted the missing-argument refusal, got: ${firstDiagnostic(ref noArgument)}`;
   }
 
   // An inline operand has no name, so there is nowhere it could be written and
@@ -6726,16 +6698,16 @@ suite function aKindClauseThisCompilerDoesNotKnowIsRefused(): void {
     theory.detail = `wanted an unknown-clause refusal, got: ${firstDiagnostic(ref unknown)}`;
   }
 
-  // A word this compiler records but acts on nowhere still belongs to the
-  // language, so refusing it would turn a missing rule into a refused program.
-  let deferred = checkSource(`kind k { appliesTo binding; mustNotShare; }${MAIN}`);
-  let test theory: Case = t.asserts("a recorded-but-unenforced clause word is allowed") {
-    theory.isSuccessful = deferred.diagnostics.len == 0;
-    theory.detail = `a deferred clause word reported: ${firstDiagnostic(ref deferred)}`;
+  // `mustNotShare` used to be recorded and acted on nowhere. A clause that
+  // reads like a rule and enforces nothing is the case this check exists for.
+  let retired = checkSource(`kind k { appliesTo binding; mustNotShare acrossThreads; }${MAIN}`);
+  let test theory: Case = t.asserts("a clause word nothing enforces is refused, not recorded") {
+    theory.isSuccessful = diagnosticsMention(ref retired, "which is not a kind clause this compiler knows");
+    theory.detail = `wanted an unknown-clause refusal, got: ${firstDiagnostic(ref retired)}`;
   }
 }
 
-suite function aLayoutBodyStatesAbiOrAlign(): void {
+suite function aLayoutBodyStatesAbi(): void {
   const MAIN: string = "\nfunction main(): int32 { return 0; }";
 
   let legal = checkSource(`kind cLayout { appliesTo type; layout { abi "C"; }; }${MAIN}`);
@@ -6753,27 +6725,14 @@ suite function aLayoutBodyStatesAbiOrAlign(): void {
   }
 
   let unknownSub = checkSource(`kind packed { appliesTo type; layout { packing tight; }; }${MAIN}`);
+  let align = checkSource(`kind a32 { appliesTo type; layout { align 32; }; }${MAIN}`);
+  let test theory: Case = t.asserts("`align` is refused too - nothing emits it") {
+    theory.isSuccessful = diagnosticsMention(ref align, "layout sub-clause \"align\"");
+    theory.detail = `wanted an align refusal, got: ${firstDiagnostic(ref align)}`;
+  }
   let test theory: Case = t.asserts("a layout sub-clause this compiler does not implement is refused") {
     theory.isSuccessful = diagnosticsMention(ref unknownSub, "layout sub-clause \"packing\"");
     theory.detail = `wanted a sub-clause refusal, got: ${firstDiagnostic(ref unknownSub)}`;
-  }
-
-  // Alignment is the one clause a composition cannot union: two alignments are
-  // two different addresses for one value.
-  let clash = checkSource(
-    `kind a32 { appliesTo binding; layout { align 32; }; }\nkind a64 { appliesTo binding; layout { align 64; }; }\nkind bad = a32 & a64;${MAIN}`
-  );
-  let test theory: Case = t.asserts("a composition of two different alignments is refused") {
-    theory.isSuccessful = diagnosticsMention(ref clash, "demand different alignments");
-    theory.detail = `wanted an alignment contradiction, got: ${firstDiagnostic(ref clash)}`;
-  }
-
-  let agree = checkSource(
-    `kind a32 { appliesTo binding; layout { align 32; }; }\nkind b32 { appliesTo binding; layout { align 32; }; }\nkind ok = a32 & b32;${MAIN}`
-  );
-  let test theory: Case = t.asserts("a composition of two matching alignments checks clean") {
-    theory.isSuccessful = agree.diagnostics.len == 0;
-    theory.detail = `matching alignments reported: ${firstDiagnostic(ref agree)}`;
   }
 }
 

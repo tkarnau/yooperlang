@@ -240,7 +240,7 @@ function is_ws(c: uint8): bool {
 }
 
 function bytes_to_string(buf: uint8[], start: usize, end: usize): string {
-    let slice: uint8[] = bytes.bytesSlice(buf, start, end);
+    let slice: uint8[] = buf[start..end];
     return intr.stringFromBytesUnchecked(slice);
 }
 
@@ -892,7 +892,7 @@ function strip_int_suffix(s: string): string {
         if (!is_suf) { break; }
         end = end - 1;
     }
-    let view: uint8[] = bytes.bytesSlice(bs, 0, end);
+    let view: uint8[] = bs[0..end];
     return intr.stringFromBytesUnchecked(view);
 }
 
@@ -984,7 +984,7 @@ function parse_macro_line(line: uint8[]): MacroConst {
         pos = pos + 1;
     }
     if (pos == name_start) { return empty; }
-    let name_bytes: uint8[] = bytes.bytesSlice(line, name_start, pos);
+    let name_bytes: uint8[] = line[name_start..pos];
     let name: string = intr.stringFromBytesUnchecked(name_bytes);
     // Function-like? `(` immediately after name.
     if (pos < line.len && line[pos] == 40) {     // '('
@@ -993,7 +993,7 @@ function parse_macro_line(line: uint8[]): MacroConst {
     // Skip exactly one space.
     if (pos < line.len && line[pos] == 32) { pos = pos + 1; }
     // VALUE runs to EOL.
-    let val_bytes: uint8[] = bytes.bytesSlice(line, pos, line.len);
+    let val_bytes: uint8[] = line[pos..line.len];
     let value: string = intr.stringFromBytesUnchecked(val_bytes);
     let cls: NumericClass = classify_numeric(value);
     if (cls.yoop_type.len == 0) {
@@ -1016,7 +1016,7 @@ function scan_macros(src: uint8[], prefix: string): Vec<MacroConst> propagates<d
         while (line_end < src.len && src[line_end] != 10) {
             line_end = line_end + 1;
         }
-        let line: uint8[] = bytes.bytesSlice(src, pos, line_end);
+        let line: uint8[] = src[pos..line_end];
         let m: MacroConst = parse_macro_line(line);
         if (m.yoop_type.len > 0) {
             if (macro_name_keeps(m.name)) {

@@ -243,7 +243,7 @@ export type Text implements (Disposable, Display, TextBuilder) propagates<dispos
 
     // Borrow the contents as bytes, excluding the nul.
     function bytes(ref self): uint8[] {
-        return intr.arraySlice(self.data, 0, self.len);
+        return self.data[0..self.len];
     }
 
     function isEmpty(ref self): bool {
@@ -560,21 +560,21 @@ export function trim(s: string): Text propagates<disposable> {
     while (start < src.len && isSpaceByte(src[start])) { start = start + 1; }
     let end: usize = src.len;
     while (end > start && isSpaceByte(src[end - 1])) { end = end - 1; }
-    return fromBytes(intr.arraySlice(src, start, end));
+    return fromBytes(src[start..end]);
 }
 
 export function trimStart(s: string): Text propagates<disposable> {
     let src: uint8[] = intr.stringAsBytes(s);
     let start: usize = 0;
     while (start < src.len && isSpaceByte(src[start])) { start = start + 1; }
-    return fromBytes(intr.arraySlice(src, start, src.len));
+    return fromBytes(src[start..src.len]);
 }
 
 export function trimEnd(s: string): Text propagates<disposable> {
     let src: uint8[] = intr.stringAsBytes(s);
     let end: usize = src.len;
     while (end > 0 && isSpaceByte(src[end - 1])) { end = end - 1; }
-    return fromBytes(intr.arraySlice(src, 0, end));
+    return fromBytes(src[0..end]);
 }
 
 // Every occurrence of `needle` replaced by `repl`. An empty needle returns a
@@ -589,10 +589,10 @@ export function replaceAll(s: string, needle: string, repl: string): Text propag
     while (i < src.len) {
         let at: usize = indexOfFrom(s, needle, i);
         if (at >= src.len) {
-            t.pushBytes(intr.arraySlice(src, i, src.len));
+            t.pushBytes(src[i..src.len]);
             return t;
         }
-        t.pushBytes(intr.arraySlice(src, i, at));
+        t.pushBytes(src[i..at]);
         t.pushBytes(rep);
         i = at + nee.len;
     }
@@ -614,7 +614,7 @@ export function subBytes(s: string, start: usize, end: usize): Result<Text, stri
     if (hi > 0 && hi < src.len && src[hi] >= 128 && src[hi] < 192) {
         return Result.Err { error: "text.subBytes: end splits a codepoint" };
     }
-    return Result.Ok { value: fromBytes(intr.arraySlice(src, lo, hi)) };
+    return Result.Ok { value: fromBytes(src[lo..hi]) };
 }
 
 // Sub-range in CODEPOINTS. Always lands on boundaries, so it cannot fail.
@@ -623,7 +623,7 @@ export function subChars(s: string, startChar: usize, endChar: usize): Text prop
     let hi: usize = byteOffsetOfChar(s, endChar);
     if (hi < lo) { hi = lo; }
     let src: uint8[] = intr.stringAsBytes(s);
-    return fromBytes(intr.arraySlice(src, lo, hi));
+    return fromBytes(src[lo..hi]);
 }
 
 // Replace codepoint `n` with `repl`. The shape that motivated this module:
@@ -638,9 +638,9 @@ export function replaceChar(s: string, n: usize, repl: string): Text propagates<
     }
     let w: usize = seqLen(src[start]);
     if (w == 0) { w = 1; }
-    t.pushBytes(intr.arraySlice(src, 0, start));
+    t.pushBytes(src[0..start]);
     t.push(repl);
-    t.pushBytes(intr.arraySlice(src, start + w, src.len));
+    t.pushBytes(src[start + w..src.len]);
     return t;
 }
 

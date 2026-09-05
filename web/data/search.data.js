@@ -651,12 +651,6 @@ window.YOOP_DATA.search = {
    "text": "export function bytesParseInt(buf: uint8[]): Result<BytesParsed, string>"
   },
   {
-   "title": "bytesSlice",
-   "where": "function in std/core/bytes.yoop",
-   "href": "std.html#std%2Fcore%2Fbytes.yoop",
-   "text": "export function bytesSlice(buf: uint8[], start: usize, end: usize): uint8[]"
-  },
-  {
    "title": "bytesStartsWith",
    "where": "function in std/core/bytes.yoop",
    "href": "std.html#std%2Fcore%2Fbytes.yoop",

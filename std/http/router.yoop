@@ -64,26 +64,26 @@ export function matchPath(pattern: string, path: string, ref out: Params): bool 
 
         let pEnd: usize = pi;
         while (pEnd < p.len && p[pEnd] != '/') { pEnd = pEnd + 1; }
-        let pseg: uint8[] = bytes.bytesSlice(p, pi, pEnd);
+        let pseg: uint8[] = p[pi..pEnd];
 
         // `*` swallows the rest, including nothing at all.
         if (pseg[0] == '*') {
             paramsAdd(ref out, "rest", intr.stringFromBytesUnchecked(
-                bytes.bytesSlice(s, si, s.len)));
+                s[si..s.len]));
             return true;
         }
 
         if (si >= s.len) { return false; }
         let sEnd: usize = si;
         while (sEnd < s.len && s[sEnd] != '/') { sEnd = sEnd + 1; }
-        let sseg: uint8[] = bytes.bytesSlice(s, si, sEnd);
+        let sseg: uint8[] = s[si..sEnd];
 
         if (pseg[0] == ':') {
             // An empty capture would let "/todos/" match "/todos/:id" with an
             // empty id, which is never what the handler wants.
             if (sseg.len == 0) { return false; }
             paramsAdd(ref out,
-                intr.stringFromBytesUnchecked(bytes.bytesSlice(pseg, 1, pseg.len)),
+                intr.stringFromBytesUnchecked(pseg[1..pseg.len]),
                 intr.stringFromBytesUnchecked(sseg));
         } else if (!bytes.bytesEq(pseg, sseg)) {
             return false;

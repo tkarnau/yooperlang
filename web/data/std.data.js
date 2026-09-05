@@ -503,7 +503,7 @@ window.YOOP_DATA.std = {
      "kind": "type",
      "signature": "export type Bytes implements Disposable propagates<disposable>",
      "doc": "`Bytes` is the canonical owned, heap-backed byte buffer. A bare `uint8[]`\nis a *borrowing* fat-pointer view with no ownership, so an API that wants\nto hand back bytes the caller can keep has to wrap them in something that\nimplements Disposable. `Bytes` is that wrapper - lighter than a full\n`Vec<uint8>` (no push / capacity-doubling machinery), for the common\n\"here are N owned bytes\" return shape (file reads, response bodies).\n\n  * `data` is the owned allocation. Its fat-pointer length is the\n    allocation size (kept intact so heapFree / --track-heap stay paired\n    with the original heapAlloc).\n  * `len`  is the number of valid bytes, which may be < data.len when the\n    buffer was handed over from a Vec that still had spare capacity.\n\nCarries propagates<disposable>: the caller picks auto-cleanup\n(`disposable b: Bytes = ...`), manual `Disposable.dispose`, or transfer-up\nvia return - same contract as Vec.",
-     "shape": "export type Bytes implements Disposable propagates<disposable> {\n    data: uint8[],\n    len:  usize,\n    function dispose(ref self): void {\n        if (self.data.len > 0) {\n            intr.heapFree(self.data);\n            // Reslice to an empty view so a second dispose is a no-op (the\n            // pointer dangles but is never dereferenced).\n            self.data = intr.arraySlice(self.data, 0, 0);\n            self.len = 0;\n        }\n    }\n}",
+     "shape": "export type Bytes implements Disposable propagates<disposable> {\n    data: uint8[],\n    len:  usize,\n    function dispose(ref self): void {\n        if (self.data.len > 0) {\n            intr.heapFree(self.data);\n            // Reslice to an empty view so a second dispose is a no-op (the\n            // pointer dangles but is never dereferenced).\n            self.data = self.data[0..0];\n            self.len = 0;\n        }\n    }\n}",
      "file": "std/core/bytes.yoop",
      "line": 35
     },
@@ -514,7 +514,7 @@ window.YOOP_DATA.std = {
      "doc": "Copy buf into a fresh heap-allocated uint8[]. Caller owns the result and\nis responsible for freeing it (via heapFree) - though typical use is to\nhand it off to stringFromBytesUnchecked which retains the bytes.",
      "shape": null,
      "file": "std/core/bytes.yoop",
-     "line": 199
+     "line": 192
     },
     {
      "name": "bytesEq",
@@ -586,7 +586,7 @@ window.YOOP_DATA.std = {
      "doc": "Parse a decimal ASCII integer at the start of `buf`. Stops at the first\nnon-digit. The `Ok` payload holds the parsed value plus how many bytes\nwere consumed. `Err` is returned if no leading digits were found.\n\nOverflow is not detected (the multiplication wraps in int64); a defense\nagainst pathological inputs is the caller's responsibility today.",
      "shape": "export type BytesParsed { value: int64, consumed: usize }",
      "file": "std/core/bytes.yoop",
-     "line": 215
+     "line": 208
     },
     {
      "name": "bytesParseInt",
@@ -595,16 +595,7 @@ window.YOOP_DATA.std = {
      "doc": "",
      "shape": null,
      "file": "std/core/bytes.yoop",
-     "line": 217
-    },
-    {
-     "name": "bytesSlice",
-     "kind": "function",
-     "signature": "export function bytesSlice(buf: uint8[], start: usize, end: usize): uint8[]",
-     "doc": "Borrowing sub-slice [start, end). Zero-copy view backed by the same\nstorage as `buf`. The caller is responsible for keeping `buf` alive as\nlong as the slice is used.",
-     "shape": null,
-     "file": "std/core/bytes.yoop",
-     "line": 192
+     "line": 210
     },
     {
      "name": "bytesStartsWith",
@@ -1168,7 +1159,7 @@ window.YOOP_DATA.std = {
      "doc": "",
      "shape": null,
      "file": "std/core/strings.yoop",
-     "line": 83
+     "line": 82
     },
     {
      "name": "padEnd",
@@ -1177,7 +1168,7 @@ window.YOOP_DATA.std = {
      "doc": "",
      "shape": null,
      "file": "std/core/strings.yoop",
-     "line": 226
+     "line": 225
     },
     {
      "name": "padStart",
@@ -1186,7 +1177,7 @@ window.YOOP_DATA.std = {
      "doc": "Pad `s` with `fill` until it is at least `width` BYTES long. Byte length,\nnot display width - fine for the ASCII columns of a table, wrong for text\nthat may hold multi-byte codepoints. An empty `fill` is a no-op rather\nthan a hang.\n\nThe result is ALWAYS fresh storage, including when `s` is already wide\nenough. Returning `s` itself in that case would make the result borrowed on\none path and owned on the other, so a caller that freed it would be right\nhalf the time. `owned` is what makes that shape impossible to write by\naccident.\n\nIt sizes the result up front and allocates once, rather than concatenating\nin a loop and abandoning one string per repetition.\n\nPrefer `text.padStart` in std/core/text.yoop, which returns a `Text` that\ncleans itself up.",
      "shape": null,
      "file": "std/core/strings.yoop",
-     "line": 207
+     "line": 206
     },
     {
      "name": "sliceFrom",
@@ -1195,7 +1186,7 @@ window.YOOP_DATA.std = {
      "doc": "Sub-string from `start` to the end, in BYTE offsets. Freshly allocated on\nBOTH paths. Handing back the literal \"\" on the failure path would make\nfreeability depend on the data, and a caller that freed it would abort\nwhenever the slice happened to fail.\n\nBoth paths reach `owned` by passthrough: the Ok arm's `v` inherits it from\n`Result<owned string, string>`'s first type argument, and the Err arm\nallocates. Neither mints it, so no transition authority is involved.",
      "shape": null,
      "file": "std/core/strings.yoop",
-     "line": 253
+     "line": 252
     },
     {
      "name": "split",
@@ -1204,7 +1195,7 @@ window.YOOP_DATA.std = {
      "doc": "",
      "shape": null,
      "file": "std/core/strings.yoop",
-     "line": 276
+     "line": 275
     },
     {
      "name": "strFree",
@@ -1213,7 +1204,7 @@ window.YOOP_DATA.std = {
      "doc": "Release a string's storage. The `owned` parameter is the whole point: a\nstring literal lives in read-only memory and freeing one is a SIGABRT, not\na diagnostic, so this refuses anything that cannot prove it was allocated.\n\n    strFree(stringConcat(\"a\", \"b\"));   // ok\n    strFree(\"a literal\");               // compile error\n\nThis does NOT make freeing safe in general - it is provenance, not\nownership. Nothing here prevents a double free or a use after free, and\nthe storage is released through raw `free` regardless of which allocator\nproduced it. For storage you intend to release, reach for `Text` in\nstd/core/text.yoop, which carries its allocator and disposes itself.",
      "shape": null,
      "file": "std/core/strings.yoop",
-     "line": 272
+     "line": 271
     },
     {
      "name": "stringConcat",
@@ -1222,7 +1213,7 @@ window.YOOP_DATA.std = {
      "doc": "Concat two strings into one fresh heap-allocated string.",
      "shape": null,
      "file": "std/core/strings.yoop",
-     "line": 133
+     "line": 132
     },
     {
      "name": "stringConcatAll",
@@ -1231,7 +1222,7 @@ window.YOOP_DATA.std = {
      "doc": "Concat N strings into one fresh heap-allocated string. One allocation\ntotal (sum the lengths, then alloc + copy). Takes an ordinary string[],\nsince there are no `...string` variadic parameters.",
      "shape": null,
      "file": "std/core/strings.yoop",
-     "line": 156
+     "line": 155
     },
     {
      "name": "stringEq",
@@ -1240,7 +1231,7 @@ window.YOOP_DATA.std = {
      "doc": "String equality. Byte-wise comparison of the underlying UTF-8.",
      "shape": null,
      "file": "std/core/strings.yoop",
-     "line": 64
+     "line": 63
     },
     {
      "name": "stringEqIgnoreAsciiCase",
@@ -1249,7 +1240,7 @@ window.YOOP_DATA.std = {
      "doc": "ASCII-only case-insensitive equality. Non-ASCII bytes compare exactly.",
      "shape": null,
      "file": "std/core/strings.yoop",
-     "line": 69
+     "line": 68
     },
     {
      "name": "stringFromBytes",
@@ -1258,7 +1249,7 @@ window.YOOP_DATA.std = {
      "doc": "Fresh-string construction from a UTF-8 byte buffer. Validates the bytes\nare well-formed UTF-8 (per RFC 3629, with the 4-byte-max cap). On invalid\ninput, returns `Err` with a diagnostic.",
      "shape": null,
      "file": "std/core/strings.yoop",
-     "line": 29
+     "line": 28
     },
     {
      "name": "stringHash",
@@ -1267,7 +1258,7 @@ window.YOOP_DATA.std = {
      "doc": "FNV-1a hash of the underlying UTF-8 bytes. Stable across runs but not\ncryptographically secure - meant for hash-table keying, not crypto.\nEmpty string hashes to the FNV offset basis (14695981039346656037).",
      "shape": null,
      "file": "std/core/strings.yoop",
-     "line": 119
+     "line": 118
     },
     {
      "name": "stringIndexOf",
@@ -1276,7 +1267,7 @@ window.YOOP_DATA.std = {
      "doc": "First byte-offset of `needle` in `s`, or `s.len` if not found.",
      "shape": null,
      "file": "std/core/strings.yoop",
-     "line": 79
+     "line": 78
     },
     {
      "name": "stringSlice",
@@ -1285,7 +1276,7 @@ window.YOOP_DATA.std = {
      "doc": "Sub-string in BYTE offsets. Allocates a fresh string. Errors if `start`\nor `end` would split a multi-byte UTF-8 codepoint (verified by checking\nthat neither lands on a continuation byte 0x80-0xBF, except at the\nboundaries where there's nothing to split).",
      "shape": null,
      "file": "std/core/strings.yoop",
-     "line": 92
+     "line": 91
     },
     {
      "name": "stringStartsWith",
@@ -1294,7 +1285,7 @@ window.YOOP_DATA.std = {
      "doc": "True iff `s` starts with `prefix`.",
      "shape": null,
      "file": "std/core/strings.yoop",
-     "line": 74
+     "line": 73
     }
    ]
   },
@@ -1808,7 +1799,7 @@ window.YOOP_DATA.std = {
      "kind": "type",
      "signature": "export type Vec<T> implements (Disposable, Growable<T>) propagates<disposable>",
      "doc": "`Vec<T>` is container-owned: it remembers the allocator it was built with\n(whatever was current at `vecNew`) and routes every later grow and the\nfinal free back through that same allocator, regardless of what is current\nwhen those happen. So a Vec built inside an arena scope frees into the arena\n(a no-op; the region reclaims in bulk), and a malloc Vec stays malloc-backed\neven if it grows while an arena is installed.",
-     "shape": "export type Vec<T> implements (Disposable, Growable<T>) propagates<disposable> {\n    data: T[],\n    len: usize,\n    cap: usize,\n    alloc: Allocator,\n    function dispose(ref self): void {\n        if (self.cap > 0) {\n            let prev: Allocator = pushAllocator(self.alloc);\n            intr.ctxFree(self.data);\n            popAllocator(prev);\n            self.cap = 0;\n        }\n    }\n\n    // ----- Collection, Sequence<T> --------------------------------------\n\n    // Reset length to zero. Capacity unchanged; backing buffer is retained so\n    // subsequent pushes don't reallocate immediately.\n    function clear(ref self): void {\n        self.len = 0;\n    }\n\n    function isEmpty(ref self): bool {\n        return self.len == 0;\n    }\n\n    // Read `v[i]`. Traps via the underlying array indexing if i >= len -\n    // matches the existing yoop array-indexing convention (no bounds check;\n    // caller's responsibility).\n    function get(ref self, i: usize): T {\n        return self.data[i];\n    }\n\n    // Write `v[i] = value`. Same OOB convention as `get`.\n    function set(ref self, i: usize, value: T): void {\n        self.data[i] = value;\n    }\n\n    // Borrowing view of the populated prefix as a regular yoop array. The view\n    // is valid until the next mutation (push/clear/dispose) - the underlying\n    // fat-pointer may dangle if `push` reallocates.\n    function asArray(ref self): T[] {\n        return intr.arraySlice(self.data, 0, self.len);\n    }\n\n    // ----- Growable<T> ---------------------------------------------------\n\n    // Append `value`, growing the backing buffer if necessary (doubling\n    // strategy). MAY REALLOCATE when len == cap - callers holding views from\n    // `asArray` should re-fetch after a push.\n    function push(ref self, value: T): void {\n        if (self.len >= self.cap) {\n            let new_cap: usize = self.cap * 2;\n            if (new_cap == 0) { new_cap = 4; }\n            // Grow through the Vec's own allocator, not whatever is ambient now.\n            let prev: Allocator = pushAllocator(self.alloc);\n            let new_data: T[] = intr.ctxAlloc(new_cap);\n            let i: usize = 0;\n            while (i < self.len) {\n                new_data[i] = self.data[i];\n                i = i + 1;\n  // ...",
+     "shape": "export type Vec<T> implements (Disposable, Growable<T>) propagates<disposable> {\n    data: T[],\n    len: usize,\n    cap: usize,\n    alloc: Allocator,\n    function dispose(ref self): void {\n        if (self.cap > 0) {\n            let prev: Allocator = pushAllocator(self.alloc);\n            intr.ctxFree(self.data);\n            popAllocator(prev);\n            self.cap = 0;\n        }\n    }\n\n    // ----- Collection, Sequence<T> --------------------------------------\n\n    // Reset length to zero. Capacity unchanged; backing buffer is retained so\n    // subsequent pushes don't reallocate immediately.\n    function clear(ref self): void {\n        self.len = 0;\n    }\n\n    function isEmpty(ref self): bool {\n        return self.len == 0;\n    }\n\n    // Read `v[i]`. Traps via the underlying array indexing if i >= len -\n    // matches the existing yoop array-indexing convention (no bounds check;\n    // caller's responsibility).\n    function get(ref self, i: usize): T {\n        return self.data[i];\n    }\n\n    // Write `v[i] = value`. Same OOB convention as `get`.\n    function set(ref self, i: usize, value: T): void {\n        self.data[i] = value;\n    }\n\n    // Borrowing view of the populated prefix as a regular yoop array. The view\n    // is valid until the next mutation (push/clear/dispose) - the underlying\n    // fat-pointer may dangle if `push` reallocates.\n    function asArray(ref self): T[] {\n        return self.data[0..self.len];\n    }\n\n    // ----- Growable<T> ---------------------------------------------------\n\n    // Append `value`, growing the backing buffer if necessary (doubling\n    // strategy). MAY REALLOCATE when len == cap - callers holding views from\n    // `asArray` should re-fetch after a push.\n    function push(ref self, value: T): void {\n        if (self.len >= self.cap) {\n            let new_cap: usize = self.cap * 2;\n            if (new_cap == 0) { new_cap = 4; }\n            // Grow through the Vec's own allocator, not whatever is ambient now.\n            let prev: Allocator = pushAllocator(self.alloc);\n            let new_data: T[] = intr.ctxAlloc(new_cap);\n            let i: usize = 0;\n            while (i < self.len) {\n                new_data[i] = self.data[i];\n                i = i + 1;\n  // ...",
      "file": "std/core/vec.yoop",
      "line": 36
     },
@@ -5024,7 +5015,7 @@ window.YOOP_DATA.std = {
      "kind": "type",
      "signature": "export type TlsStream implements (Disposable, Readable, Writable) propagates<disposable>",
      "doc": "A TLS session over a TCP connection.\n\nImplements `Readable` and `Writable`, which is the entire point: every\nconsumer that takes a `Reader`/`Writer` - all of std/http - accepts one\nwith no change.\n\nOwns three things and disposes them in order: the OpenSSL session, the two\nstaging buffers, and the socket.",
-     "shape": "export type TlsStream implements (Disposable, Readable, Writable) propagates<disposable> {\n    conn:   TcpStream,\n    // The OpenSSL side, as opaque handles. Only ffi.yoop can see inside them,\n    // which is what keeps this file free of `import.unsafe;`.\n    ssl:    TlsSession,\n    ctx:    TlsCtx,\n    // Ciphertext staging. `out` carries wbio -> socket, `in` carries\n    // socket -> rbio. Separate buffers because a handshake step can want both\n    // in the same iteration.\n    outBuf: Bytes,\n    inBuf:  Bytes,\n    closed: bool,\n\n    function dispose(ref self): void {\n        if (!self.closed) {\n            self.closed = true;\n            // Best-effort close_notify. Whatever it produced is dropped rather\n            // than sent: dispose is not async, and a peer that never sees the\n            // alert simply sees the TCP close instead - which is what a\n            // non-graceful shutdown looks like and is not an error.\n            let _rc: int32 = shutdown(ref self.ssl);\n        }\n        sessionFree(ref self.ssl);\n        ctxFree(ref self.ctx);\n        self.outBuf.dispose();\n        self.inBuf.dispose();\n        self.conn.dispose();\n    }\n\n    // Plaintext out of the session. Same signature as TcpStream's, which is\n    // what lets the two be used interchangeably behind a `Reader`.\n    async read(ref self, ref buf: uint8[]): Result<c_ssize_t, string> {\n        while (true) {\n            let n: int64 = readPlain(ref self.ssl, ref buf);\n            if (n >= 0) { return Result.Ok { value: c_ssize_t(n) }; }\n\n            let status: int32 = int32(n);\n            if (status == TLS_CLOSED) { return Result.Ok { value: c_ssize_t(0) }; }\n            if (status == TLS_ERROR) {\n                return Result.Err { error: `tls read: ${lastError()}` };\n            }\n            // WANT_READ or WANT_WRITE: turn the crank and try again. A\n            // renegotiation or a post-handshake message can make a READ want\n            // to WRITE, which is why both land here.\n            let e: string = await pump(ref self, status);\n            if (e.len > 0) { return Result.Err { error: e }; }\n        }\n    }\n\n    // Plaintext into the session. Loops until the whole buffer is accepted:\n    // `Writable.write` may report a short write, but every caller in std/http\n    // hands over a complete message, so absorbing it here is what keeps them\n    // from each needing their own loop.\n    async write(ref self, ref buf: uint8[]): Result<c_ssize_t, string> {\n        let sent: usize = 0;\n        while (sent < buf.len) {\n            let slice: uint8[] = intr.arraySlice(buf, sent, buf.len);\n            let n: int64 = writePlain(ref self.ssl, slice);\n            if (n >= 0) {\n                sent = sent + usize(n);\n                // The ciphertext is in wbio; it has to reach the socket before\n  // ...",
+     "shape": "export type TlsStream implements (Disposable, Readable, Writable) propagates<disposable> {\n    conn:   TcpStream,\n    // The OpenSSL side, as opaque handles. Only ffi.yoop can see inside them,\n    // which is what keeps this file free of `import.unsafe;`.\n    ssl:    TlsSession,\n    ctx:    TlsCtx,\n    // Ciphertext staging. `out` carries wbio -> socket, `in` carries\n    // socket -> rbio. Separate buffers because a handshake step can want both\n    // in the same iteration.\n    outBuf: Bytes,\n    inBuf:  Bytes,\n    closed: bool,\n\n    function dispose(ref self): void {\n        if (!self.closed) {\n            self.closed = true;\n            // Best-effort close_notify. Whatever it produced is dropped rather\n            // than sent: dispose is not async, and a peer that never sees the\n            // alert simply sees the TCP close instead - which is what a\n            // non-graceful shutdown looks like and is not an error.\n            let _rc: int32 = shutdown(ref self.ssl);\n        }\n        sessionFree(ref self.ssl);\n        ctxFree(ref self.ctx);\n        self.outBuf.dispose();\n        self.inBuf.dispose();\n        self.conn.dispose();\n    }\n\n    // Plaintext out of the session. Same signature as TcpStream's, which is\n    // what lets the two be used interchangeably behind a `Reader`.\n    async read(ref self, ref buf: uint8[]): Result<c_ssize_t, string> {\n        while (true) {\n            let n: int64 = readPlain(ref self.ssl, ref buf);\n            if (n >= 0) { return Result.Ok { value: c_ssize_t(n) }; }\n\n            let status: int32 = int32(n);\n            if (status == TLS_CLOSED) { return Result.Ok { value: c_ssize_t(0) }; }\n            if (status == TLS_ERROR) {\n                return Result.Err { error: `tls read: ${lastError()}` };\n            }\n            // WANT_READ or WANT_WRITE: turn the crank and try again. A\n            // renegotiation or a post-handshake message can make a READ want\n            // to WRITE, which is why both land here.\n            let e: string = await pump(ref self, status);\n            if (e.len > 0) { return Result.Err { error: e }; }\n        }\n    }\n\n    // Plaintext into the session. Loops until the whole buffer is accepted:\n    // `Writable.write` may report a short write, but every caller in std/http\n    // hands over a complete message, so absorbing it here is what keeps them\n    // from each needing their own loop.\n    async write(ref self, ref buf: uint8[]): Result<c_ssize_t, string> {\n        let sent: usize = 0;\n        while (sent < buf.len) {\n            let slice: uint8[] = buf[sent..buf.len];\n            let n: int64 = writePlain(ref self.ssl, slice);\n            if (n >= 0) {\n                sent = sent + usize(n);\n                // The ciphertext is in wbio; it has to reach the socket before\n  // ...",
      "file": "std/tls/stream.yoop",
      "line": 71
     },
@@ -5078,6 +5069,6 @@ window.YOOP_DATA.std = {
  ],
  "counts": {
   "modules": 33,
-  "exports": 511
+  "exports": 510
  }
 };

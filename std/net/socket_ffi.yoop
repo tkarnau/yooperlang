@@ -298,7 +298,7 @@ function ffiSendAll(fd: c_int, buf: uint8[]): Result<c_ssize_t, string> {
     let total: usize = 0;
     let nullCt: RawCancel = { p: null };
     while (total < buf.len) {
-        let chunk: uint8[] = intr.arraySlice(buf, total, buf.len);
+        let chunk: uint8[] = buf[total..buf.len];
         let code: int32 = IO_READY;
         let n: c_ssize_t = yoop_iop_wait(fd, chunk.ptr, chunk.len, OP_SEND, nullCt.p, 0, &code);
         if (n < 0) {
@@ -411,7 +411,7 @@ export async ffiRecvAsync(fd: c_int, buf: uint8[]): IoResult {
 export async ffiSendAllAsync(fd: c_int, buf: uint8[]): IoResult {
     let total: usize = 0;
     while (total < buf.len) {
-        let chunk: uint8[] = intr.arraySlice(buf, total, buf.len);
+        let chunk: uint8[] = buf[total..buf.len];
         let n: c_ssize_t = yoop_iop_send_begin(fd, chunk.ptr, chunk.len);
         if (n == IOP_PENDING) {
             await conc.suspendNow();
@@ -522,7 +522,7 @@ function ffiRecvCt(fd: c_int, buf: uint8[], ct: RawCancel, deadlineNs: uint64): 
 function ffiSendAllCt(fd: c_int, buf: uint8[], ct: RawCancel, deadlineNs: uint64): IoResult {
     let total: usize = 0;
     while (total < buf.len) {
-        let chunk: uint8[] = intr.arraySlice(buf, total, buf.len);
+        let chunk: uint8[] = buf[total..buf.len];
         let code: int32 = IO_READY;
         let n: c_ssize_t = yoop_iop_wait(fd, chunk.ptr, chunk.len, OP_SEND, ct.p, deadlineNs, &code);
         if (code != IO_READY) {

@@ -1,7 +1,7 @@
 // Parse an HTTP/1.1 request line into method, path, and version using only
 // std/core/bytes + std/core/strings - no `import.unsafe;`.
 
-import { bytesIndexOf, bytesSlice } from "../../../std/core/bytes.yoop";
+import { bytesIndexOf } from "../../../std/core/bytes.yoop";
 import { stringFromBytes } from "../../../std/core/strings.yoop";
 import { Result } from "../../../std/core/types.yoop";
 
@@ -32,16 +32,16 @@ function parse_request_line(buf: uint8[]): RequestLine {
         return empty_request_line("parse_request_line: missing method separator");
     }
     // Search for the second space after s1.
-    let after_first: uint8[] = bytesSlice(buf, s1 + 1, cr);
+    let after_first: uint8[] = buf[s1 + 1..cr];
     let s2_rel: usize = bytesIndexOf(after_first, 32);
     if (s2_rel == after_first.len) {
         return empty_request_line("parse_request_line: missing path/version separator");
     }
     let s2: usize = s1 + 1 + s2_rel;
     // Slice + convert.
-    let method_bytes: uint8[] = bytesSlice(buf, 0, s1);
-    let path_bytes: uint8[] = bytesSlice(buf, s1 + 1, s2);
-    let version_bytes: uint8[] = bytesSlice(buf, s2 + 1, cr);
+    let method_bytes: uint8[] = buf[0..s1];
+    let path_bytes: uint8[] = buf[s1 + 1..s2];
+    let version_bytes: uint8[] = buf[s2 + 1..cr];
 
     let method_r: Result<string, string> = stringFromBytes(method_bytes);
     let method_val: string = "";

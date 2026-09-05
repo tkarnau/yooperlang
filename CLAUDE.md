@@ -181,7 +181,7 @@ check on a change, and say so when you do.
 
 ## Run / test
 
-- `npm test` - every Node-driven suite. 507 tests, about two minutes. Needs
+- `npm test` - every Node-driven suite. 502 tests, about two minutes. Needs
   `clang` and a seed.
 - `npm run test:unit` - fast, needs no seed: the C runtime's own tests, the std
   index check, and the stage comparison the fixpoint is decided by. The last of
@@ -194,7 +194,7 @@ check on a change, and say so when you do.
   This is what says whether a program WORKS, and it is the only thing in the
   tree that can catch a MISCOMPILE. It can do that only because the
   expectations were derived by READING each program - see the rule above.
-- `npm run test:fail` - the DIAGNOSTIC corpus, 79 tests: every fixture under
+- `npm run test:fail` - the DIAGNOSTIC corpus, 74 tests: every fixture under
   `examples/fail/` carrying a hand-written `.expected-errors`, each line of
   which is a `<line>:<column>: <substring>` the compiler has to report.
 - `npm run test:lsp` - the language server, driven over a real pipe the way an
@@ -287,7 +287,7 @@ check on a change, and say so when you do.
   emits; SKIPS when neither is on PATH). `YOOP_SLICE_CONCURRENCY`,
   `YOOP_PASS_CONCURRENCY` and `YOOP_FAIL_CONCURRENCY` override how many fixtures
   those suites run at once.
-- Every Yoop unit test at once, 1523 of them, in ONE build of the graph:
+- Every Yoop unit test at once, 1516 of them, in ONE build of the graph:
 
       YOOP_STD_ROOT=$PWD/std YOOP_RUNTIME_ROOT=$PWD/runtime \
         $(node scripts/seed.mjs) --test bootstrap/src

@@ -44,8 +44,8 @@ suite function scanTableIsSortedLongestFirst(): void {
   }
   let test theory: Case = t.asserts("the keyword table is built whole") {
     disposable tables: lex.LexTables = lex.lexTablesNew();
-    theory.isSuccessful = tables.keywords.len == 44;
-    theory.detail = `the keyword table has ${tables.keywords.len} entries, wanted 44 - a dropped push is a word that silently lexes as an IDENT`;
+    theory.isSuccessful = tables.keywords.len == 40;
+    theory.detail = `the keyword table has ${tables.keywords.len} entries, wanted 40 - a dropped push is a word that silently lexes as an IDENT`;
   }
   let test theory: Case = t.asserts("`...` lexes as one DOTDOTDOT and not three DOTs") {
     theory.isSuccessful = tagRunIs("...", "DOTDOTDOT EOF");

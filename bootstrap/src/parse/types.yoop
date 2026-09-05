@@ -225,24 +225,13 @@ export function parseTypeDecl(ref ps: ParserState): Result<NodeId, ParsingError>
         after.tag == TokenTags.LCURLY ||
         after.tag == TokenTags.EQ
       ) {
-        node.childB = consumeKindPrefixWithArgs(ref ps)?;
+        node.childB = consumeKindPrefix(ref ps)?;
       }
     }
   }
-  // The clauses between the kind prefix and the body. `implements` is real now;
-  // `propagates` / `contains` are still refused BY NAME rather than allowed to
-  // fall through to the body parse and produce a confusing "expected {".
+  // The clauses between the kind prefix and the body.
   node.childD = parseImplementsClause(ref ps)?;
   node.childF = parsePropagatesClause(ref ps)?;
-  // `contains` is the sibling clause and appears nowhere in the tree, so it
-  // stays refused BY NAME rather than parsed on speculation.
-  if (peekIsWord(ref ps, "contains")) {
-    return Result.Err { error: SelfLexing.createParsingError(
-      ref ps,
-      `"${peekText(ref ps)}" clauses on a type decl are not supported by the bootstrap parser yet`,
-      peekLengthUsize(ref ps),
-    )};
-  }
 
   // Transparent alias: `type Name = <annotation>;`
   if (ps.peek().tag == TokenTags.EQ) {

@@ -6,11 +6,6 @@ trait Disposable {
     function dispose(ref self): void;
 }
 
-kind aligned(n: usize) {
-    appliesTo type binding;
-    layout { align n; };
-}
-
 kind disposable_base {
     appliesTo binding;
     requires Disposable;
@@ -22,7 +17,7 @@ kind noescape { appliesTo binding; mustNotEscape scope; }
 
 kind scoped_alt = disposable_base & noescape;
 
-type Vec4 aligned(32) implements Disposable {
+type Vec4 implements Disposable {
     x: float32, y: float32, z: float32, w: float32,
     function dispose(ref self): void {
         printf(`bye vec4\n`);

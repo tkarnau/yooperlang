@@ -23,7 +23,7 @@ import * as intr from "../core/intrinsics.yoop";
 // Fresh string from a byte range. `stringFromBytesUnchecked` copies, so
 // the result does not borrow `raw`.
 function sliceStr(raw: uint8[], start: usize, end: usize): string {
-    return intr.stringFromBytesUnchecked(bytes.bytesSlice(raw, start, end));
+    return intr.stringFromBytesUnchecked(raw[start..end]);
 }
 
 // Hex digit value, or -1. Written against characters rather than the decimal
@@ -65,7 +65,7 @@ export type TargetParts {
 export function splitTarget(target: string): TargetParts {
     let raw: uint8[] = intr.stringAsBytes(target);
     let end: usize = bytes.bytesIndexOf(raw, '#');
-    let q: usize = bytes.bytesIndexOf(bytes.bytesSlice(raw, 0, end), '?');
+    let q: usize = bytes.bytesIndexOf(raw[0..end], '?');
     if (q == end) {
         return { path: sliceStr(raw, 0, end), queryString: "" };
     }
@@ -188,12 +188,12 @@ export function parseUrlEncoded(s: string, ref out: Params): Result<usize, HttpE
     let count: usize = 0;
     let start: usize = 0;
     while (start <= raw.len) {
-        let rest: uint8[] = bytes.bytesSlice(raw, start, raw.len);
+        let rest: uint8[] = raw[start..raw.len];
         let rel: usize = bytes.bytesIndexOf(rest, '&');
         let end: usize = start + rel;
 
         if (end > start) {
-            let pair: uint8[] = bytes.bytesSlice(raw, start, end);
+            let pair: uint8[] = raw[start..end];
             let eq: usize = bytes.bytesIndexOf(pair, '=');
             let nameRaw: string = sliceStr(pair, 0, eq);
             let valueRaw: string = "";
@@ -239,7 +239,7 @@ export function pathSegments(path: string, ref out: Vec<string>): Result<usize, 
     let count: usize = 0;
     let start: usize = 0;
     while (start <= raw.len) {
-        let rest: uint8[] = bytes.bytesSlice(raw, start, raw.len);
+        let rest: uint8[] = raw[start..raw.len];
         let rel: usize = bytes.bytesIndexOf(rest, '/');
         let end: usize = start + rel;
         if (end > start) {

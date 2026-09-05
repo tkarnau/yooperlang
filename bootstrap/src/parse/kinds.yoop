@@ -10,38 +10,9 @@ import { NodeId, ASTNodeKind } from "../ast";
 import { TokenTags } from "../lex";
 import { ParsingError } from "../diagnostics";
 
-// `c_layout` or `aligned(16)` sitting after a type's name.
-//
-// One identifier, optionally followed by an argument list. The arguments are
-// CONSUMED and not recorded: nothing enforces kinds, so an argument has nothing
-// to be checked against, and recording an expression nobody reads would be a
-// slot to keep correct for no benefit.
-export function consumeKindPrefixWithArgs(ref ps: ParserState): Result<NodeId, ParsingError> {
+// `c_layout` sitting after a type's name: one identifier naming a kind.
+export function consumeKindPrefix(ref ps: ParserState): Result<NodeId, ParsingError> {
   let node = ps.buildSourcedNode(ASTNodeKind.KIND_PREFIX);
   node.name = parseIdentAsName(ref ps)?;
-
-  if (ps.peek().tag != TokenTags.LPAREN) {
-    return Result.Ok { value: ps.pushNode(node) };
-  }
-
-  // Nesting-aware, so `aligned(sizeOf(T))` closes on its own paren.
-  ps.advance()?;
-  let depth: usize = 1;
-  while (depth > 0) {
-    const tag = ps.peek().tag;
-    if (tag == TokenTags.EOF) {
-      return Result.Err { error: SelfLexing.createParsingError(
-        ref ps,
-        `unterminated argument list on kind "${node.name}"`,
-        peekLengthUsize(ref ps),
-      )};
-    }
-    if (tag == TokenTags.LPAREN) {
-      depth += 1;
-    } else if (tag == TokenTags.RPAREN) {
-      depth -= 1;
-    }
-    ps.advance()?;
-  }
   return Result.Ok { value: ps.pushNode(node) };
 }

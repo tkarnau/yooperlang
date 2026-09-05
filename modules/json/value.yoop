@@ -362,7 +362,7 @@ export function memberInt(ref d: JsonDoc, obj: JsonId, key: string, dflt: int64)
 export function asBytes(ref d: JsonDoc, id: JsonId): uint8[] {
   const n = nodeAt(ref d, id);
   if (n.kind != JsonKind.STRING || n.strId == 0 || n.strId >= d.strings.len) {
-    return intr.arraySlice(intr.stringAsBytes(""), 0, 0);
+    return (intr.stringAsBytes(""))[0..0];
   }
   let t: Text = d.strings.get(n.strId);
   return t.bytes();

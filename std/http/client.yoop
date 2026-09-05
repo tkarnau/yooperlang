@@ -196,7 +196,7 @@ async readResponseHead(
         if (n == 0) {
             return Result.Err { error: errIo("peer closed before the response head was complete") };
         }
-        buf.extendFrom(intr.arraySlice(window, 0, n));
+        buf.extendFrom(window[0..n]);
         let at: usize = findHeadEnd(buf.asArray());
         if (at != buf.len) { return Result.Ok { value: at }; }
         if (buf.len > c.maxHeadBytes) {
@@ -327,7 +327,7 @@ async readRest(
     // Under Content-Length the bytes that came in with the head ARE body.
     let seen: uint8[] = buf.asArray();
     if (seen.len > head.bodyStart) {
-        body.extendFrom(intr.arraySlice(seen, head.bodyStart, seen.len));
+        body.extendFrom(seen[head.bodyStart..seen.len]);
     }
 
     let want: usize = 0;
@@ -356,7 +356,7 @@ async readRest(
             }
             break;
         }
-        body.extendFrom(intr.arraySlice(window, 0, n));
+        body.extendFrom(window[0..n]);
         if (body.len > c.maxResponseBytes) {
             return Result.Err {
                 error: httpError(payloadTooLarge(),
@@ -412,7 +412,7 @@ async readChunkedRest(
                 error: errIo("peer closed before the chunked body was complete"),
             };
         }
-        buf.extendFrom(intr.arraySlice(window, 0, n));
+        buf.extendFrom(window[0..n]);
     }
 }
 

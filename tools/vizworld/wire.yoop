@@ -63,7 +63,7 @@ export function wirePump(ref w: Wire): void {
     if (n < 0) {
       return;
     }
-    w.buf.extendFrom(intr.arraySlice(w.scratch.data, 0, usize(n)));
+    w.buf.extendFrom(w.scratch.data[0..usize(n)]);
     if (usize(n) < w.scratch.cap) {
       return;
     }
@@ -82,7 +82,7 @@ export function wireTakeLine(ref w: Wire, ref out: Text): bool {
   while (i < w.buf.len) {
     if (bytes[i] == 10) {
       out.clear();
-      out.pushBytes(intr.arraySlice(bytes, w.pos, i));
+      out.pushBytes(bytes[w.pos..i]);
       w.pos = i + 1;
       compact(ref w);
       return true;
@@ -100,7 +100,7 @@ export function wireTakeBlob(ref w: Wire, n: usize, ref out: Vec<uint8>): bool {
   }
   out.clear();
   out.extendFrom(
-    intr.arraySlice(w.buf.asArray(), w.pos, w.pos + n));
+    w.buf.asArray()[w.pos..w.pos + n]);
   w.pos += n + 1;
   compact(ref w);
   return true;
@@ -127,7 +127,7 @@ function compact(ref w: Wire): void {
   }
   disposable tail: Vec<uint8> = vec.vecNew(w.buf.len - w.pos);
   tail.extendFrom(
-    intr.arraySlice(w.buf.asArray(), w.pos, w.buf.len));
+    w.buf.asArray()[w.pos..w.buf.len]);
   w.buf.clear();
   w.buf.extendFrom(tail.asArray());
   w.pos = 0;

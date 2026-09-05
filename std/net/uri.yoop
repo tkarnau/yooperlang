@@ -28,7 +28,7 @@ import { Result } from "../core/types.yoop";
 import { stringEqIgnoreAsciiCase, stringIndexOf } from "../core/strings.yoop";
 import * as intr from "../core/intrinsics.yoop";
 import {
-    bytesIndexOf, bytesSlice, bytesIndexOfSeq, bytesParseInt,
+    bytesIndexOf, bytesIndexOfSeq, bytesParseInt,
     BytesParsed,
 } from "../core/bytes.yoop";
 
@@ -63,7 +63,7 @@ export function parseUri(url: string): Result<Uri, string> {
     if (scheme_end == 0) {
         return Result.Err { error: "parseUri: empty scheme" };
     }
-    let scheme_bytes: uint8[] = bytesSlice(buf, 0, scheme_end);
+    let scheme_bytes: uint8[] = buf[0..scheme_end];
     let scheme_str:   string  = intr.stringFromBytesUnchecked(scheme_bytes);
 
     // -- authority + path --------------------------------------------------
@@ -71,15 +71,15 @@ export function parseUri(url: string): Result<Uri, string> {
     if (auth_start > buf.len) {
         return Result.Err { error: "parseUri: truncated after \"://\"" };
     }
-    let rest: uint8[] = bytesSlice(buf, auth_start, buf.len);
+    let rest: uint8[] = buf[auth_start..buf.len];
 
     // Split authority from path-and-query. The first `/` AFTER the
     // authority terminates it; an authority with no path implies "/".
     let path_rel: usize = bytesIndexOf(rest, 47);    // '/'
-    let auth_bytes: uint8[] = bytesSlice(rest, 0, path_rel);
+    let auth_bytes: uint8[] = rest[0..path_rel];
     let target_str: string = "/";
     if (path_rel != rest.len) {
-        let target_bytes: uint8[] = bytesSlice(rest, path_rel, rest.len);
+        let target_bytes: uint8[] = rest[path_rel..rest.len];
         target_str = intr.stringFromBytesUnchecked(target_bytes);
     }
     if (auth_bytes.len == 0) {
@@ -95,14 +95,14 @@ export function parseUri(url: string): Result<Uri, string> {
         if (rbr == auth_bytes.len) {
             return Result.Err { error: "parseUri: missing \"]\" in IPv6 authority" };
         }
-        let host_bytes: uint8[] = bytesSlice(auth_bytes, 1, rbr);
+        let host_bytes: uint8[] = auth_bytes[1..rbr];
         host_str = intr.stringFromBytesUnchecked(host_bytes);
         let after_br: usize = rbr + 1;
         if (after_br < auth_bytes.len) {
             if (auth_bytes[after_br] != 58) {    // ':'
                 return Result.Err { error: "parseUri: unexpected char after IPv6 \"]\"" };
             }
-            let port_bytes: uint8[] = bytesSlice(auth_bytes, after_br + 1, auth_bytes.len);
+            let port_bytes: uint8[] = auth_bytes[after_br + 1..auth_bytes.len];
             let pp: Result<BytesParsed, string> = bytesParseInt(port_bytes);
             switch (pp) {
                 case Result.Ok { value: bp }: {
@@ -116,10 +116,10 @@ export function parseUri(url: string): Result<Uri, string> {
         }
     } else {
         let colon: usize = bytesIndexOf(auth_bytes, 58);   // ':'
-        let host_bytes: uint8[] = bytesSlice(auth_bytes, 0, colon);
+        let host_bytes: uint8[] = auth_bytes[0..colon];
         host_str = intr.stringFromBytesUnchecked(host_bytes);
         if (colon != auth_bytes.len) {
-            let port_bytes: uint8[] = bytesSlice(auth_bytes, colon + 1, auth_bytes.len);
+            let port_bytes: uint8[] = auth_bytes[colon + 1..auth_bytes.len];
             let pp: Result<BytesParsed, string> = bytesParseInt(port_bytes);
             switch (pp) {
                 case Result.Ok { value: bp }: {

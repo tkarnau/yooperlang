@@ -119,7 +119,7 @@ export function mkdirP(full_path: string): string {
     let i: usize = 1;
     while (i < bytes.len) {
         if (bytes[i] == 47 || bytes[i] == 92) {  // forward slash or backslash, see dirName
-            let prefix_view: uint8[] = intr.arraySlice(bytes, 0, i);
+            let prefix_view: uint8[] = bytes[0..i];
             let prefix: string = intr.stringFromBytesUnchecked(prefix_view);
             let _r: c_int = yoop_io_mkdir(prefix);
         }

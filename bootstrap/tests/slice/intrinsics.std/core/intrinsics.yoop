@@ -12,5 +12,4 @@ extern "intrinsic" from "compiler" {
     function stringAsBytes(s: string): uint8[];
     function stringFromBytesUnchecked(buf: uint8[]): string;
     function bytesAsStringUnchecked(buf: uint8[]): string;
-    function arraySlice<T>(xs: T[], start: usize, end: usize): T[];
 }

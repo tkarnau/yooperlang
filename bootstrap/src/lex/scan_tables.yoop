@@ -72,7 +72,7 @@ export type LexTables implements Disposable propagates<disposable> {
 //
 // Cheap enough to do per FILE and that is how it is used: `parseInto`,
 // `moduleHeaderName`, `tokenize` and `dumpTokens` each own one for the length
-// of their walk. It is 41 + 44 vector pushes and one 41-element quicksort, so
+// of their walk. It is 41 + 40 vector pushes and one 41-element quicksort, so
 // well under a microsecond next to reading the file it is about to lex.
 export function lexTablesNew(): LexTables propagates<disposable> {
   let scan: Vec<SortedTokenDefinition> = vec.vecNew(48);
@@ -177,10 +177,6 @@ function fillKeywordList(ref out: Vec<KeywordDefinition>): void {
   out.push({ str: "ownsBlock",      tag: TokenTags.OWNSBLOCK });
   out.push({ str: "beforeScopeEnd", tag: TokenTags.BEFORESCOPEEND });
   out.push({ str: "mustNotEscape",  tag: TokenTags.MUSTNOTESCAPE });
-  out.push({ str: "mustNotShare",   tag: TokenTags.MUSTNOTSHARE });
-  out.push({ str: "forbids",        tag: TokenTags.FORBIDS });
-  out.push({ str: "acrossScopes",   tag: TokenTags.ACROSSSCOPES });
-  out.push({ str: "globalState",    tag: TokenTags.GLOBALSTATE });
   out.push({ str: "wait",           tag: TokenTags.WAIT });
   out.push({ str: "switch",         tag: TokenTags.SWITCH });
   out.push({ str: "case",           tag: TokenTags.CASE });

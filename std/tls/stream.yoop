@@ -124,7 +124,7 @@ export type TlsStream implements (Disposable, Readable, Writable) propagates<dis
     async write(ref self, ref buf: uint8[]): Result<c_ssize_t, string> {
         let sent: usize = 0;
         while (sent < buf.len) {
-            let slice: uint8[] = intr.arraySlice(buf, sent, buf.len);
+            let slice: uint8[] = buf[sent..buf.len];
             let n: int64 = writePlain(ref self.ssl, slice);
             if (n >= 0) {
                 sent = sent + usize(n);
@@ -167,7 +167,7 @@ async flushOut(ref s: TlsStream): string {
     while (true) {
         let n: int64 = pull(ref s.ssl, ref window);
         if (n <= 0) { return ""; }
-        let outView: uint8[] = intr.arraySlice(window, 0, usize(n));
+        let outView: uint8[] = window[0..usize(n)];
         switch (await s.conn.write(ref outView)) {
             case Result.Ok { value: _w }: { }
             case Result.Err { error: e }: { return `tls send: ${e}`; }

@@ -100,7 +100,7 @@ export function lexNext(ref tables: LexTables, ref src: uint8[], pos: usize): Re
     }
 
     // need to figure out how to do substring from bytes array in this language
-    const scanAheadSlice = bytes.bytesSlice(src, p, p + tokenScanObj.str.len);
+    const scanAheadSlice = src[p..p + tokenScanObj.str.len];
     const tokenBytes = intr.stringAsBytes(tokenScanObj.str);
     if (bytes.bytesEq(scanAheadSlice, tokenBytes)) {
       res.token.tag = tokenScanObj.tag;

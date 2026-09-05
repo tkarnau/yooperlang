@@ -84,7 +84,7 @@ async drainRequest(ref s: TcpStream): void {
         switch (await Readable.read(ref s, ref window)) {
             case Result.Ok { value: n }: {
                 if (n <= 0) { return; }
-                buf.extendFrom(intr.arraySlice(window, 0, usize(n)));
+                buf.extendFrom(window[0..usize(n)]);
                 let view: uint8[] = buf.asArray();
                 if (bytes.bytesIndexOfSeq(view, ['\r', '\n', '\r', '\n']) != view.len) {
                     return;
@@ -213,7 +213,7 @@ async postChunked(): void {
                 if (n <= 0) {
                     reading = false;
                 } else {
-                    buf.extendFrom(intr.arraySlice(window, 0, usize(n)));
+                    buf.extendFrom(window[0..usize(n)]);
                 }
             }
             case Result.Err { error: _e }: { reading = false; }

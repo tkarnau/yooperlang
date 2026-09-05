@@ -27,11 +27,7 @@ export function peekText(ref ps: ParserState): string {
     return "";
   }
   const src = ps.src;
-  const textResult = str.stringFromBytes(bytes.bytesSlice(
-    src,
-    tok.start,
-    tok.start + usize(tok.length)
-  ));
+  const textResult = str.stringFromBytes(src[tok.start..tok.start + usize(tok.length)]);
   switch (textResult) {
     case Result.Err { error: e }: { return ""; }
     case Result.Ok { value: text }: { return text; }
@@ -50,7 +46,7 @@ export function peekAheadText(ref ps: ParserState, n: usize): string {
         return "";
       }
       const src = ps.src;
-      switch (str.stringFromBytes(bytes.bytesSlice(src, tok.start, tok.start + usize(tok.length)))) {
+      switch (str.stringFromBytes(src[tok.start..tok.start + usize(tok.length)])) {
         case Result.Err { error: e2 }: { return ""; }
         case Result.Ok { value: text }: { return text; }
       }
@@ -91,8 +87,7 @@ function isKeywordTag(tag: TokenTags): bool {
          TokenTags.MUSTCALL, TokenTags.OWNSBLOCK, TokenTags.BEFORESCOPEEND: {
       return true;
     }
-    case TokenTags.MUSTNOTESCAPE, TokenTags.MUSTNOTSHARE, TokenTags.FORBIDS,
-         TokenTags.ACROSSSCOPES, TokenTags.GLOBALSTATE, TokenTags.WAIT,
+    case TokenTags.MUSTNOTESCAPE, TokenTags.WAIT,
          TokenTags.AWAIT, TokenTags.SWITCH, TokenTags.CASE, TokenTags.DEFAULT,
          TokenTags.ENUM, TokenTags.VARIANT, TokenTags.UNION, TokenTags.NULL: {
       return true;
@@ -161,11 +156,7 @@ export function parseIdentAsName(ref pState: ParserState): Result<string, Parsin
   }
   const identToken = pState.expect(TokenTags.IDENT)?;
   const src = pState.src;
-  const nameResult = str.stringFromBytes(bytes.bytesSlice(
-    src,
-    identToken.start,
-    identToken.start + usize(identToken.length)
-  ));
+  const nameResult = str.stringFromBytes(src[identToken.start..identToken.start + usize(identToken.length)]);
 
   switch (nameResult) {
     case Result.Err { error: e }: {

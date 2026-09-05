@@ -105,7 +105,7 @@ function firstLine(s: string): string {
     let b: uint8[] = intr.stringAsBytes(s);
     let end: usize = 0;
     while (end < b.len && b[end] != '\r') { end = end + 1; }
-    return intr.stringFromBytesUnchecked(intr.arraySlice(b, 0, end));
+    return intr.stringFromBytesUnchecked(b[0..end]);
 }
 
 // Everything past the blank line that ends the head.
@@ -113,7 +113,7 @@ function afterHead(s: string): string {
     let b: uint8[] = intr.stringAsBytes(s);
     for (let i: usize = 0; i + 3 < b.len; i += 1) {
         if (b[i] == '\r' && b[i + 1] == '\n' && b[i + 2] == '\r' && b[i + 3] == '\n') {
-            return intr.stringFromBytesUnchecked(intr.arraySlice(b, i + 4, b.len));
+            return intr.stringFromBytesUnchecked(b[i + 4..b.len]);
         }
     }
     return "";

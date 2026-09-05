@@ -14,7 +14,6 @@ import {
     bytesEqIgnoreAsciiCase,
     bytesStartsWith,
     bytesIndexOfSeq,
-    bytesSlice,
     lastIndexOfSeq,
 } from "./bytes.yoop";
 
@@ -109,7 +108,7 @@ export function stringSlice(s: string, start: usize, end: usize): Result<owned s
             return Result.Err { error: "stringSlice: end is mid-codepoint" };
         }
     }
-    let view: uint8[] = bytesSlice(bytes, start, end);
+    let view: uint8[] = bytes[start..end];
     return Result.Ok { value: intr.stringFromBytesUnchecked(view) };
 }
 

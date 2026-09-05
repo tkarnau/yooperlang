@@ -21,7 +21,7 @@ Yooperlang separates three ideas that other languages tend to conflate:
 | Layer | Role | Attached to | Example |
 |---|---|---|---|
 | **Trait** | Capability - operations a value supports | Types | `Disposable`, `Task<T>`, `Iterable<T>` |
-| **Kind** | Usage contract - scoping, lifecycle, iteration, sharing rules | Bindings, parameters, fields, functions, regions | `disposable`, `ephemeral`, `scoped`, `pooled`, `batchable(n)` |
+| **Kind** | Usage contract - scoping, lifecycle, ownership, concurrency | Bindings, parameters, fields, functions, regions | `disposable`, `ephemeral`, `joined`, `pooled`, `owned` |
 | **Type** | Concrete data shape | Variables, fields | `int`, `FileHandle`, `Point` |
 
 A **type** says *what the value is*. A **trait** says *what the value can do*. A
@@ -145,8 +145,8 @@ import * as log from "std/log.yoop";
 ### Intrinsics live in `std/core/intrinsics.yoop`
 
 The compiler-recognized intrinsics - `heapAlloc<T>`, `heapFree<T>`,
-`stringAsBytes`, `stringFromBytesUnchecked`, `arraySlice<T>` - are
-declared inside an `extern "intrinsic" from "compiler" { ... }` block in
+`ctxAlloc<T>`, `ctxFree<T>`, `stringAsBytes`, `stringFromBytesUnchecked`,
+`bytesAsStringUnchecked`, `suspendNow` - are declared inside an `extern "intrinsic" from "compiler" { ... }` block in
 [std/core/intrinsics.yoop](std/core/intrinsics.yoop). They are not in scope
 by default; import the module to use them:
 
@@ -319,10 +319,10 @@ let zs: Point[] = [{x:1,y:2}];
 
 Length is intrinsic: `xs.len`. Arrays are fat pointers (ptr + len).
 
-### Generic / opaque handles
+### Generic types
 
 ```js
-let h: file<string>;
+let b: Box<int32>;
 ```
 
 User-defined generic types carry a type-parameter list after the declaration
@@ -339,12 +339,14 @@ log_int(p);                    // auto-deref read -> 42
 ```
 
 `ref` is visible at formation and at passing; usage is transparent. No null, no
-arithmetic. The `unsafe_ptr` kind (see §12) is the escape hatch for C-style pointers.
+arithmetic. The `unsafe_ptr<T>` type (see §12) is the escape hatch for C-style pointers.
 
 ### Nullability
 
-There is no null. Absence is modeled with a validity field, an `optional` kind, or a
-predicate built-in on foreign handles (e.g. `file_is_null(h)`).
+There is no null. Absence is a value: `Option<T>` from
+[std/core/types.yoop](std/core/types.yoop), or a variant of your own with an
+empty case. `unsafe_ptr<T>` (section 12) is the one nullable type, and it is
+gated.
 
 ---
 
@@ -356,14 +358,13 @@ let y: int32 = 3;
 const z: int32 = 42;                // immutable binding
 
 let disposable f: FileHandle = open("x.txt") { ... }   // disposable owns a block
-let scoped result = fetch(url);
+let joined result = fetch(url);
 let pooled h      = fetch(url);
-let (disposable throughput_capped(4)) buf: Bytes = recv() { ... }
 ```
 
 - `let` - mutable
 - `const` - immutable binding
-- Kind prefixes go **between `let` / `const` and the name**. Parentheses group multiple kinds.
+- A kind prefix goes **between `let` / `const` and the name**.
 - Type annotations are required without an initializer; optional when the initializer is unambiguous.
 
 ### `let` / `const` is optional when a kind prefix is present
@@ -374,7 +375,7 @@ when you need mutability.
 
 ```js
 disposable input = open_input(path) { ... }        // implicitly const
-scoped result    = fetch(url);                     // implicitly const
+joined result    = fetch(url);                     // implicitly const
 pooled h         = fetch(url);                     // implicitly const
 
 let disposable input = open_input(path) { ... }    // explicit let for mutability
@@ -388,7 +389,7 @@ explicit `let` is the opt-in, and it comes with the obligation to dispose the ol
 value before overwriting it:
 
 ```js
-let disposable s: Text = text_from("a");
+let disposable s: Text = text.fromString("a");
 let next: Text = replace(ref s, "a", "b");
 s.dispose();      // the outgoing value, by hand
 s = next;
@@ -473,26 +474,6 @@ is still constructed and disposed; you simply cannot name it. `ephemeral`
 (`std/core/kinds.yoop`) is the standard-library region kind; define your own for other
 ambient guards.
 
-### Destructuring (sugar)
-
-Destructuring is **surface sugar**, not a codegen primitive. The callee always returns
-a plain struct; the compiler rewrites destructuring into field reads:
-
-```js
-const { value, err } = fetch_sync("x");
-
-// compiler rewrites to:
-const _tmp  = fetch_sync("x");
-const value = _tmp.value;
-const err   = _tmp.err;
-```
-
-This keeps the syntax readable at the call site without introducing multiple-return
-ABIs or special codegen. `err` observation is still enforced - the type system
-requires the `err` field of an error-carrying struct to be read before scope exit.
-
----
-
 ## 5. Traits
 
 A **trait** is a set of operations a type must provide. It's the capability layer.
@@ -504,22 +485,21 @@ trait Disposable {
     function dispose(ref self): void;
 }
 
-trait Task<T> {
-    function wait(ref self): { value: T, err: string };
-    function abandon(ref self): void;
-}
-
 trait Iterable<T> {
-    function next(ref self): { value: T, done: bool };
+    function next(ref self): IterStep<T>;      // Yield { value: T } or Done
 }
 
-trait BatchIterable<T> extends Iterable<T> {
-    function next_batch(ref self, n: usize): T[];
+trait Sequence<T> extends Collection {
+    function get(ref self, i: usize): T;
+    function set(ref self, i: usize, value: T): void;
+    function asArray(ref self): T[];
 }
 ```
 
 - `self` is always a `ref` (no hidden aliasing).
-- `extends` chains traits - a `BatchIterable<T>` is also an `Iterable<T>`.
+- `extends` chains traits, generic parents included: a `Sequence<T>` is also a
+  `Collection`, a type implementing the child owes the parent's methods, and a
+  bound on the child reaches them.
 - Traits never carry state.
 
 ### Implementing a trait on a type
@@ -586,8 +566,7 @@ time.
 backing a trait: a struct of `{ ctx, methodPtr1, methodPtr2, ... }` whose
 slots match the trait's methods. The compiler owns the ctx slot; the
 user names the method slots and writes their function-pointer types using
-the `(p: T) => R` form (the **only** place `=>` is currently legal - see
-"function value types in type position" below).
+the `(p: T) => R` form (see "function value types in type position" below).
 
 ```js
 trait Readable {
@@ -690,7 +669,7 @@ kind disposable {
 // The three below are the real declarations from std/core/kinds.yoop.
 // The concurrency kinds are not compiler keywords - they are ordinary kind
 // decls, and the compiler checks that std declares them with the clauses it
-// consults. See "Clauses you can use vs. clauses that describe a builtin".
+// consults. See "Clause behavior comes from the clause, not the kind's name".
 
 kind pooled {
     appliesTo binding parameter field;
@@ -711,30 +690,22 @@ kind task {
     provides Task;                           // the CALL SITE yields Task<ReturnType>
 }
 
-kind batchable(n: usize) {
-    requires BatchIterable;
-    restricts iteration {
-        allow batched { max n; };
-    };
+kind c_layout {
+    appliesTo type;
+    layout { abi "C"; };                     // the struct mirrors a C struct
 }
 
-kind simd_aligned {
-    appliesTo type binding;
-    layout {
-        align 32;
-    };
-    restricts iteration {
-        allow sequential;
-        allow simd { width 8; };
-        forbid parallel;
-    };
+kind owned {
+    appliesTo binding parameter field return;
+    conferred;                               // a marker: provenance, no obligation
 }
 ```
 
 Every clause is a `;`-terminated statement of the form `keyword arg...` or
 `keyword arg... { sub-clauses }`. There are no parens, no method chains,
-and no colons in clause syntax - clause types are a closed set the compiler
-owns, and the grammar reflects that.
+and no colons in clause syntax - clause words are a closed set the compiler
+owns, listed below, and a word outside it is refused at the declaration. A
+kind takes no value parameters.
 
 Multiple `requires` are written as separate clauses
 (`requires Disposable; requires Closable;`), not as a list.
@@ -743,7 +714,7 @@ Multiple `requires` are written as separate clauses
 
 | Clause | Meaning |
 |---|---|
-| `appliesTo X...` | One or more of `binding`, `parameter`, `field`, `function`, `type`, or the standalone `region`. Default: any value-site. |
+| `appliesTo X...` | One or more of `binding`, `parameter`, `field`, `return`, `function`, `type`, or the standalone `region`. |
 | `appliesTo region` | The kind governs a lexical region, not a named value: used only in the anonymous block form (`KIND EXPR { ... }` / `KIND EXPR;`), with no binding. Requires `ownsBlock`; mutually exclusive with the value sites above. See §4 "Region kinds". |
 | `requires Trait` | Values of this kind must implement the named trait. Repeat to require multiple. |
 | `provides Name` | Rewrites the **call-site result type** of a function carrying the kind: the body returns `T`, the call evaluates to `Name<T>`. Requires `appliesTo function`. `Name` resolves only to `Task` today. |
@@ -751,21 +722,17 @@ Multiple `requires` are written as separate clauses
 | `refcounted retain release` | Names the two methods of the required trait the compiler calls to bump and drop a reference. Dispatched for a `Task<T>` receiver; on any other receiver use `mustCall`. |
 | `signature (p: T) => R` | The shape every function carrying this kind must have. Required on a *collected* function kind. |
 | `enumerable as "table"` | Names the table a consumer asks the compiler for (e.g. `suite` is `enumerable as "suites"`). Required on a *collected* function kind. |
-| `conferred` / `restrictive` | Makes this a **marker kind** - a static type-level tag with no obligation and no codegen. See §6 "Marker kinds". |
+| `conferred` / `restrictive` | Makes this a **marker kind** - a static type-level tag with no obligation and no codegen. |
 | `clearedBy m` / `appliedBy m` | Names the method of the `requires` trait authorized to strip (`restrictive`) or grant (`conferred`) the marker. |
-| `ownsBlock` | Binding may take a trailing `{ ... }` that narrows its scope. Without one, compiler synthesizes an implicit block at the tail of the enclosing scope; multiple such bindings nest in reverse declaration order (LIFO). |
-| `mustCall fn beforeScopeEnd` | Fn must run before the binding's scope exits - an explicit block if present, otherwise the enclosing scope. |
-| `mustCall fn beforeAny` | *(reserved - not implemented.)* Fn must run before any other method. |
-| `mustCall { a; b; } beforeScopeEnd` | *(reserved - not implemented.)* At least one of these must run. |
-| `mustCall fn afterAny` | *(reserved - not implemented.)* Fn must run after every other method. |
-| `mustNotShare acrossScopes` | Cannot cross into a concurrent task. |
-| `mustNotShare acrossThreads` | Cannot flow into a `task` spawn. Statically rejected at every task-call argument site. |
-| `mustNotEscape scope` | Cannot be returned or stored outside its scope. |
-| `autoJoin beforeScopeEnd` | *(Not a clause.)* Writing it is an error with a fix-it; `joined` in std/core/kinds.yoop spells the same obligation `mustCall join beforeScopeEnd`. |
-| `restricts iteration { ... }` | *(Reserved - not implemented.)* Which `for*` forms are legal on this value. Writing it is a "not yet supported" error. |
-| `layout { ... }` | Memory layout contract (align, packing, SoA/AoS). |
-| `propagates<K>` / `contains<K>` | How containers surface or absorb another kind's constraints. |
-| `forbids X...` | Categories a function may not touch (`io`, `globalState`, …). |
+| `ownsBlock` | Binding may take a trailing `{ ... }` that narrows its scope. Without one, the compiler synthesizes an implicit block at the tail of the enclosing scope; multiple such bindings nest in reverse declaration order (LIFO). |
+| `mustCall fn beforeScopeEnd` | Fn must run before the binding's scope exits - an explicit block if present, otherwise the enclosing scope. The compiler inserts the call on every exit path unless the body already made it. |
+| `mustNotEscape scope` | Cannot be returned or stored outside its scope. Also what lets the compiler keep the binding in a stack slot. |
+| `layout { abi "C"; }` | The type mirrors a C struct. `"C"` is the only ABI, and the compiler's natural layout (declaration order, natural alignment) already matches it; the clause records the intent. |
+
+That is the whole vocabulary. Two clauses are not in this table because they
+are not clauses of a kind: `propagates<K>` goes on a type or a function
+signature (section 6, "Containment and propagation"), and composition with
+`&` builds a kind out of others (section 6, "Composition").
 
 **Cleanup on early return from `?`.** Any `mustCall` obligation that's live at the
 point a `?` triggers an early return must be satisfied before the return actually
@@ -848,11 +815,11 @@ Kind prefixes sit wherever the kind's `appliesTo` permits:
 let disposable f: FileHandle = open("x.txt");
 
 // on a parameter
-function drain(batchable(4) events: Event[]): void { ... }
+function strFree(s: owned string): void { ... }
 
 // on a type field (declares the field carries the kind's constraints)
-type Session {
-    conn: disposable net<Bytes>,
+type Job {
+    work: pooled Task<int32>,
 }
 
 // on a function declaration - replaces the `function` keyword
@@ -862,7 +829,7 @@ task fetch(url: string): Bytes { ... }
 ### Composition
 
 ```js
-kind slow_batch = throughput_capped(8) & mustNotEscape;
+kind tracked = disposable_base & noescape;
 ```
 
 Operands can also be inline `{ ... }` bodies - anonymous bags of clauses
@@ -870,60 +837,47 @@ for tacking a single restriction onto a composition without declaring a
 named kind for it:
 
 ```js
-kind scoped_alt = disposable_base & { mustNotEscape scope; };
+kind guarded = disposable_base & { mustNotEscape scope; };
 ```
 
 An inline body may contain any kind clause except `appliesTo` (the
 composition's `appliesTo` is the intersection of its named operands; inline
 operands inherit it). Inline bodies must contain at least one clause.
 
-Contradictory compositions are compile errors (`align: 32` & `align: 64`,
-`allow parallel` & `mustNotShare acrossScopes`, …).
+A composition carries every operand's obligations, so it may only be written
+where every operand may be: its `appliesTo` is the intersection. An operand
+nothing declares is an error.
 
-### Containment and propagation
+### Propagation
 
-When a struct embeds a field whose type or kind carries rules, the struct must declare intent:
-
-```js
-type RenderPass propagates<gpu_buffer> { buf: GpuBuffer; }   // callers inherit rules
-type RenderPass contains<gpu_buffer>   { buf: GpuBuffer; }   // struct absorbs them
-```
-
-`contains<K>` is reserved and not implemented. A function that breaks the propagates chain (creates a value of a propagating type, satisfies its rules locally, and returns it without re-declaring `propagates<K>`) is implicitly a "contains" boundary - the caller sees a value with no outstanding obligation.
-
-Functions propagate the same way:
+A type whose fields own resources says so, and the compiler reads it:
 
 ```js
-function make_pass(scene: Scene): RenderPass propagates<gpu_buffer>;
+type Emitter propagates<disposable> { globals: Text, body: Text, count: usize }
 ```
 
-**`propagates<K>` is a "must handle, or hand off" contract.** A value of a type that declares `propagates<K>` cannot be silently discarded. The user has exactly three legal ways to discharge the obligation:
+`propagates<disposable>` on a **type** has teeth. A binding of that type
+prefixed with the kind (`disposable e: Emitter = ...`) is cleaned up at scope
+end by calling the kind's method on every field whose own type supplies it
+(`Text` here), in reverse declaration order; a field that supplies nothing is
+skipped. A type declaring the clause with no such field is refused, and so is
+a field whose type propagates the kind but has no method to call.
 
-1. **Auto-cleanup via the kind keyword.** Bind the value with the kind prefix and the compiler injects the cleanup at scope end:
+On a **function signature** the clause is documentation:
 
-   ```js
-   disposable arr: DynArray<int32> = new_dynarray(4);
-   // compiler inserts: Disposable.dispose(ref arr) before scope end
-   ```
+```js
+function build(n: usize): Result<Text, string> propagates<disposable> {
+    let out: Text = text.make(n);
+    return Result.Ok { value: out };     // the caller owns `out` now
+}
+```
 
-2. **Manual discharge.** Bind with plain `let`/`const` and call the cleanup method directly before the binding goes out of scope:
-
-   ```js
-   let arr: DynArray<int32> = new_dynarray(4);
-   use(arr);
-   arr.dispose();   // satisfies the obligation
-   ```
-
-3. **Transfer to the caller.** Bind with plain `let`/`const` and `return` it from a function whose return type also declares `propagates<K>`:
-
-   ```js
-   function new_dynarray<T>(n: usize): DynArray<T> propagates<disposable> {
-       let a: DynArray<T> = { ... };
-       return a;   // obligation flows to caller
-   }
-   ```
-
-Failing to choose one of the three is a compile error: a binding whose obligation is unsatisfied at scope end, or a function that returns a propagating value without declaring `propagates<K>`, both fail to typecheck. The kind keyword on a binding is opt-in convenience for case (1); it does not change what `propagates<K>` on the type means.
+It says the result carries an obligation the caller has to discharge, and
+nothing checks that the caller does. Ownership is advisory: a binding picks
+auto-cleanup (the kind prefix), a manual `x.dispose()`, or a transfer by
+return or by value, and a binding that does none of them is a leak, not an
+error. `--warn-disposable` reports the leaks it can see; the writing guide's
+section 4 says what it cannot.
 
 ---
 
@@ -953,9 +907,7 @@ one kind prefix is present:
 task fetch(url: string): Bytes { ... }              // idiomatic
 task function fetch(url: string): Bytes { ... }     // explicit; equivalent
 
-task disposable open_remote(url: string): RemoteHandle { ... }   // multiple kinds
-pure add(a: int32, b: int32): int32 { ... }
-pure task compute(x: int32): Result { ... }
+suite function addsNumbers(): void { ... }         // beside the keyword is legal too
 ```
 
 The parser sees a run of identifiers; each must name a kind whose
@@ -1003,7 +955,7 @@ This section describes only the language surface.
 | Binding form | When `wait` is forced | Lifetime / storage |
 |---|---|---|
 | `let x = f()` (no kind) | Immediately - the next statement sees the value. | Stack-allocated handle; spawn + wait inline. |
-| `let joined d = f()` | At the enclosing scope's `}` (`autoJoin`); also on first read of `d` if earlier. | Stack-allocated; bounded by scope. |
+| `let joined d = f()` | At the enclosing scope's `}`, by the kind's `mustCall join beforeScopeEnd`; also on first read of `d` if earlier. | Stack-allocated; bounded by scope. |
 | `let pooled h = f()` | Never automatically - you call `wait h` yourself. | Heap-allocated, atomically refcounted. |
 
 Allocation details and the refcount lifecycle are in
@@ -1039,8 +991,8 @@ function main(): void {
 | `cancel(h)` | External cancellation primitive. Sets the handle's cancel byte and broadcasts so any `waitUntil` parked on `h` wakes immediately and observes `WaitResult.Cancelled`. The task body itself is not cooperative - it keeps running to natural completion; the caller has simply chosen to stop observing the result. In-body cancellation is a cancellation token the body polls, from [std/core/cancel/](std/core/cancel/), not a property of the handle. |
 
 `wait` is a keyword-level operation, not a method on `Task<T>`, so the compiler can
-account for it during flow analysis (in particular, the `joined` kind's `autoJoin`
-clause is implemented by inserting a synthetic `wait` at scope exit, and the
+account for it during flow analysis (in particular, the `joined` kind's
+`mustCall join beforeScopeEnd` is implemented by inserting a synthetic `wait` at scope exit, and the
 compiler must recognize the operator to detect when an explicit user `wait` makes
 the synthetic insertion redundant).
 
@@ -1099,16 +1051,10 @@ The semantics that user code can rely on:
 
 ## 9. Loops
 
-Two loop keywords, both reserved for iteration - no extra keywords per strategy.
-Iteration *strategy* is expressed as a **trait method call on the collection** in the
-RHS of `in`. This keeps the `for … in` slot recognizable as a loop while letting kinds
-and traits extend the strategy set.
-
-> **Status.** The `for ITEM in EXPR { ... }` form works over arrays and over any
-> type implementing `Iterable<T>`, which is what `a..b` ranges, `Vec`, and `Map`
-> ride on. The remaining trait-driven strategy slots below (`BatchIterable`,
-> `SimdIterable`, `ParIterable`) are reserved and not implemented; the only
-> strategy is the sequential walk.
+Two loop keywords, `while` and `for`, and `for` has two shapes: a C-style
+counter, and `for ITEM in EXPR` over an array or over any type implementing
+`Iterable<T>`, which is what `a..b` ranges, `vec.vecIter(ref v)` and
+`map.mapIter(ref m)` hand back.
 
 ```js
 // C-style numeric counter. The counter may be declared in the head, in which
@@ -1119,12 +1065,14 @@ for (i = 0; i < n; i = i + 1) { ... }        // counter declared before the loop
 // Over an index space, via a range value (see "Ranges" below)
 for i in 0..n { ... }
 
-// Iteration over a collection - strategy comes from a trait method
-for item  in xs                    { ... }   // default, from Iterable
-for chunk in xs.batched(4)         { ... }   // chunk: T[] - from BatchIterable
-for v     in xs.simd(8)            { ... }   // v is a SIMD lane - from SimdIterable
-for item  in xs.parallel()         { ... }   // each iter a concurrent task - from ParIterable
+// Over the elements of an array, or of anything Iterable
+for item in xs { ... }
+for entry in map.mapIter(ref m) { ... }
 ```
+
+The loop variable is a **copy** of the element. Writing to it changes nothing
+in the collection; mutate by index (`xs[i] = ...`) or through a method on the
+container.
 
 ### The C-style counter
 
@@ -1176,56 +1124,21 @@ for i in rows { ... }              // walks again from 0
 Bounds cannot be chained (`a..b..c` is an error). Inside brackets `..` keeps its
 existing slice meaning (`xs[i..j]`) and never builds a range.
 
-The body's bound variable's **type** tells you the mode: a `T[]` binding means you're
-iterating in chunks; a parallel iterator's body runs under concurrent-task rules
-automatically. No new keyword per strategy - the method name *is* the strategy, and
-it's checked against the collection's kind and the iterator trait it returns.
-
-### Iteration traits
+### The iteration trait
 
 ```js
+variant IterStep<T> { Yield { value: T }, Done }
+
 trait Iterable<T> {
-    function next(ref self): { value: T, done: bool };
-}
-
-trait BatchIterable<T> extends Iterable<T> {
-    function batched(ref self, n: usize): Iterable<T[]>;
-}
-
-trait SimdIterable<T> extends Iterable<T> {
-    function simd(ref self, width: usize): Iterable<T>;    // body runs in SIMD context
-}
-
-trait ParIterable<T> extends Iterable<T> {
-    function parallel(ref self): Iterable<T>;              // body runs under `scoped`-like rules
+    function next(ref self): IterStep<T>;
 }
 ```
 
-User-defined strategies (reversed walks, windowed iterators, priority order) drop into
-the same shape: add a trait method that returns an `Iterable<U>` and it is legal as the
-RHS of `for … in`.
-
-### When is a strategy legal?
-
-- The collection's type must implement the trait the method lives on.
-- The collection's kind must not forbid the resulting iteration mode (e.g. a
-  `mustNotShare acrossScopes` kind forbids `.parallel()`; a non-scalar layout kind
-  forbids `.simd(n)`).
-- The body binding's kind (if any) is checked against the iterator's element rules.
-
-### Intent-revealing body context
-
-For strategies that change the body's execution context (parallel, SIMD), the body
-**inherits the iterator's body kind automatically** - inside `for item in xs.parallel()`,
-shared-mutable writes to captured state are a compile error because the body is treated
-as if it were inside `let scoped … = …`. No new keyword; the type-and-kind system does
-the work.
-
-If you want additional rules on the body, the binding can take its own kind prefix:
-
-```js
-for scoped item in xs.parallel() { ... }   // make scoped-like rules explicit
-```
+A `for ... in` over an `Iterable<T>` calls `next` until it answers `Done`. The
+element type is what `Yield` carries. A container is not its own iterator -
+`next` needs a cursor - so `Vec` and `Map` hand out a small iterator value
+(`VecIter`, `MapIter`) that borrows their storage and is invalidated by any
+mutation that can reallocate.
 
 ---
 
@@ -1483,14 +1396,14 @@ bind, and the form is rejected - use a `switch`.
 ### Interaction with concurrency kinds
 
 `?` inspects the discriminant of its argument - which means it needs the result
-to exist. That constrains how it composes with `scoped` / `pooled` bindings:
+to exist. That constrains how it composes with `joined` / `pooled` bindings:
 
 ```js
 // Synchronous binding - result is available immediately
 const bytes = fetch(url)?;                  // OK
 
-// Scoped binding - task hasn't joined yet at this statement
-let scoped r = fetch(url)?;                 // compile error
+// Joined binding - task hasn't joined yet at this statement
+let joined r = fetch(url)?;                 // compile error
 
 // Pooled binding - task handle, not a result
 let pooled h = fetch(url)?;                 // compile error
@@ -1583,8 +1496,7 @@ unconstrained position is a typecheck error.
 
 Without `import.unsafe;`, `unsafe_ptr<T>` is not in scope and any mention of it
 is a typecheck error. Pointers do not participate in kind containment: a struct
-holding `unsafe_ptr<T>` does not inherit kind obligations from `T`. `unsafe_ptr`
-is also rejected inside `pure` functions.
+holding `unsafe_ptr<T>` does not inherit kind obligations from `T`.
 
 ### C-portable integer aliases
 
@@ -1676,12 +1588,15 @@ does not surface any pointer values.
 
 ### Memory (heap allocation)
 
-Two compiler-recognized generic functions are available globally - no
-import required, no `import.unsafe;` required, no extern decl required:
+Four compiler-recognized generic intrinsics, reached through
+`import * as intr from "std/core/intrinsics.yoop"` and not gated by
+`import.unsafe;`:
 
 ```js
-heapAlloc<T>(n: usize): T[]    // malloc n * sizeof(T); fat-pointer view
-heapFree<T>(a: T[]): void      // free the underlying data pointer
+intr.heapAlloc<T>(n: usize): T[]    // malloc n * sizeof(T); fat-pointer view
+intr.heapFree<T>(a: T[]): void      // free the underlying data pointer
+intr.ctxAlloc<T>(n: usize): T[]     // the same, through the CURRENT allocator
+intr.ctxFree<T>(a: T[]): void       // and back into it
 ```
 
 `heapAlloc<T>` returns a fresh heap-backed `T[]`. The element type `T` is
@@ -1696,16 +1611,11 @@ behavior. The yoop type system does not check either invariant - typical
 usage is through a `Disposable + propagates<disposable>` wrapper (see
 `Vec<T>` in `std/core/vec.yoop`) that ties the free to scope exit.
 
-These functions live in the `$builtin` namespace and are registered into
-every module's generic-function table, so call-site inference handles
-them uniformly with other generics.
-
 ### Bytes, strings, and the conversion bridges
 
-Two compiler-recognized functions bridge yoop's `string` and `uint8[]`
-representations. Both are global (no import needed) and not gated by
-`import.unsafe;` - they produce values entirely inside yoop's type
-system:
+Three compiler-recognized intrinsics bridge yoop's `string` and `uint8[]`
+representations, from the same module and not gated by `import.unsafe;` -
+they produce values entirely inside yoop's type system:
 
 ```js
 stringAsBytes(s: string): uint8[]
@@ -1717,27 +1627,29 @@ stringFromBytesUnchecked(buf: uint8[]): string
     // Does NOT validate UTF-8 - callers asserting UTF-8 should reach for
     // the validating wrapper `stringFromBytes` in std/core/strings.yoop.
 
-arraySlice<T>(xs: T[], start: usize, end: usize): T[]
-    // Zero-copy fat-pointer view {xs.ptr + start, end - start}. Caller
-    // responsible for keeping `xs` alive as long as the slice is used.
+bytesAsStringUnchecked(buf: uint8[]): string
+    // Zero-copy: the bytes must already end in a NUL the caller wrote.
 ```
+
+A sub-array is the slice syntax, `xs[a..b]`, `xs[a..]`, `xs[..b]`, `xs[..]`:
+a zero-copy view over the same storage, valid as long as `xs` is.
 
 Higher-level operations are pure-yoop wrappers in the `std/core/` modules:
 
 - **`std/core/bytes.yoop`** - `bytesEq`, `bytesIndexOf`,
   `bytesIndexOfSeq`, `bytesStartsWith`,
-  `bytesEqIgnoreAsciiCase`, `bytesSlice`, `bytesCopy`,
-  `bytesParseInt`.
+  `bytesEqIgnoreAsciiCase`, `bytesCopy`, `bytesParseInt`.
 - **`std/core/strings.yoop`** - `stringEq`, `stringEqIgnoreAsciiCase`,
   `stringStartsWith`, `stringIndexOf`, `stringSlice`,
   `stringConcat`, `stringConcatAll`, plus the validating
   `stringFromBytes` wrapper that returns `StringFromBytes { value, err }`.
 
-Naming convention conveys allocation cost at the call site:
-
-- **`_as_*`, `_slice`** - borrowing views, no allocation.
-- **`_new`, `_copy`, `_from_*`, `_concat`, `_concat_all`** - fresh heap
-  allocations. Caller owns the returned storage.
+Naming conveys allocation cost at the call site: `...AsBytes`, `...View`
+and the slice syntax are borrowing views with no allocation; `...New`,
+`...Copy`, `...From...`, `...Concat` and every `Text`-returning builder are
+fresh allocations the caller owns. `stringSlice` and `sliceFrom` in
+`std/core/strings.yoop` are the exception the name does not admit: they COPY,
+because a `string` has to end in a NUL.
 
 ### `std/core/vec.yoop` - growable vector
 
@@ -1803,30 +1715,30 @@ the backing buffer doubles, and any prior `asArray` view dangles.
 
 ## 14. Reserved keywords
 
+The forty words the lexer reserves, which is the list in
+[bootstrap/src/lex/scan_tables.yoop](bootstrap/src/lex/scan_tables.yoop):
+
 ```
-abi             appliesTo        autoJoin         bool
-break           c_int            c_long           c_short
-c_size_t        c_ssize_t        c_uint           c_ulong
-c_ushort        char             const            contains
-continue        else             errno            export
-extern           false
-float32         float64          for              forbids
-from            function         if               implements
-import          in               int8             int16
-int32           int64            isize            joined
-kind            layout           let              mustCall
-mustNotEscape   mustNotShare     null             pooled
-propagates      provides         pure             ref
-requires        restricts        return           scoped
-string          task             Task             trait
-true            type             uint8            uint16
-uint32          uint64           uintptr          unsafe_ptr
-usize           void             wait             while
-int             float
+appliesTo      as             await          beforeScopeEnd break
+case           const          continue       default        else
+enum           export         extends        extern         false
+for            from           function       if             implements
+import         in             kind           let            mustCall
+mustNotEscape  null           ownsBlock      ref            return
+self           switch         trait          true           type
+union          variant        vtable         wait           while
 ```
 
-int is 32 bit signed int
-float is 32 bit float
+`_` lexes as the discard. Everything else that reads like a keyword is an
+ordinary identifier the parser recognizes by position: the primitive type
+names (`int32`, `usize`, `float64`, `string`, `bool`, `void`, and the `c_*`
+aliases), `Task`, `unsafe_ptr`, `errno`, `module`, `library`, the kind
+prefixes (`task`, `async`, `joined`, `pooled`, `disposable`, `ephemeral`,
+`owned`, `suite`, `test`), and the kind-clause vocabulary (`requires`,
+`provides`, `pausable`, `refcounted`, `signature`, `enumerable`, `conferred`,
+`restrictive`, `clearedBy`, `appliedBy`, `layout`, `abi`, `propagates`,
+`region`, `binding`, `parameter`, `field`, `scope`). Each of those is usable
+as a name anywhere its syntactic position does not claim it.
 
 Identifiers: `[A-Za-z_][A-Za-z0-9_]*`. Naming convention: types, traits,
 variants / enums / unions, vtables, type parameters, and `variant` case names
@@ -1836,95 +1748,94 @@ declarations are `SCREAMING_SNAKE`. `snake_case` is reserved for file and folder
 names - it is not used in identifiers (the underscore remains legal in the
 grammar above). See CLAUDE.md "Naming and file conventions".
 
-Contextual keywords (reserved only in their syntactic positions): `in`, `layout`,
-`restricts`, `provides`, `requires`, `appliesTo`, `ownsBlock`, `mustCall`,
-`mustNotShare`, `mustNotEscape`, `autoJoin`, `forbids`, `propagates`,
-`contains`, `from`, `library`, `as`. Inside kind-clause bodies, the timing
-modifiers `beforeScopeEnd`, `beforeAny`, `afterAny`, the axis identifiers
-`scope`, `acrossScopes`, `acrossThreads`, and the `appliesTo` site identifiers
-`binding`, `parameter`, `field` are also contextual.
-
 ---
 
 ## 15. End-to-end example
 
-```ts
-// main.yoop
+This program is [examples/pass/spec_end_to_end.yoop](examples/pass/spec_end_to_end.yoop),
+and the corpus checks that it prints what its `.expected` file says, so this
+section cannot drift from the compiler.
 
-import { Stats, scan } from "./scan.yoop";
+```js
+import * as intr from "std/core/intrinsics.yoop";
+import * as text from "std/core/text.yoop";
+import { Text } from "std/core/text.yoop";
+import { Result } from "std/core/types.yoop";
 
 extern "C" from "stdio.h" {
-    function printf(fmt: string, ...): int;
-    function fprintf(stream: ref FILE, fmt: string, ...): int;
-    type FILE;
-    const stderr: ref FILE;
+    function printf(fmt: string, ...): int32;
 }
 
-trait Disposable {
-    function dispose(ref self): void;
-}
+type Stats { upper: int32, lower: int32 }
 
-kind disposable {
-    requires Disposable;
-    ownsBlock;
-    mustCall dispose beforeScopeEnd;
-}
-
-type Input implements Disposable {
-    handle: file<string>,
-    function dispose(ref self): void {
-        file_close(self.handle);
+// Errors are values: a fallible function returns a Result, and `?` propagates
+// the Err arm with a context string prefixed.
+function scan(src: string): Result<Stats, string> {
+    if (src.len == 0) {
+        return Result.Err { error: "empty input" };
     }
+    let upper: int32 = 0;
+    let lower: int32 = 0;
+    for ch in intr.stringAsBytes(src) {
+        if (ch >= 'A' && ch <= 'Z') { upper = upper + 1; }
+        if (ch >= 'a' && ch <= 'z') { lower = lower + 1; }
+    }
+    return Result.Ok { value: { upper: upper, lower: lower } };
 }
 
-type OpenResult { input: Input,   err: string }
-type Readout    { bytes: Bytes,   err: string }
-type Report     { stats: Stats,   err: string }
-
-task open_input(path: string): OpenResult { ... }
-task read_all(ref input: Input): Readout { ... }
-
-// `disposable` is a block-owning kind. The binding's scope is the trailing `{ ... }`.
-// `dispose(input)` is inserted at the block's end on every exit path:
-// fall-through, `?` propagation, or `return`.
-task analyze(path: string): Report {
-    disposable input = open_input(path)? "opening input" {
-        const bytes = read_all(ref input)? "reading bytes";
-        const stats = scan(bytes)?          "scanning";
-        return { stats: stats, err: "" };
-    }
-    // `input` is not in scope here
+// A task: every call is a spawn, and the caller decides when to join. The
+// Text it hands back is owned by the caller, which the signature says with
+// `propagates<disposable>`.
+task render(src: string): Result<Text, string> propagates<disposable> {
+    const stats = scan(src)? "scanning";
+    let out: Text = text.make(32);
+    out.push("upper=");
+    out.pushInt(int64(stats.upper));
+    out.push(" lower=");
+    out.pushInt(int64(stats.lower));
+    return Result.Ok { value: out };
 }
 
-// Top-level handles errors explicitly - main returns void, so `?` isn't available.
-function main(): void {
-    const { stats, err } = analyze("data.txt");
-    if (err) {
-        fprintf(stderr, "analyze failed: %s\n", err);
-        return;
-    }
-    printf("upper=%d lower=%d\n", stats.upper, stats.lower);
-}
+function main(): int32 {
+    pooled h = render("Hello World");
+    const rendered: Result<Text, string> = wait h;
+    // `? e { ... }` handles the failure here instead of propagating it, which
+    // is what a `main` that returns a plain int needs.
+    disposable line: Text = rendered? e {
+        printf("render failed: %s\n", e);
+        return 1;
+    };
+    printf("%s\n", line.view());
 
-// Top-level handles errors explicitly - main returns void, so `?` isn't available here.
-function main(): void {
-    const { stats, err } = analyze("data.txt");
-    if (err) {
-        fprintf(stderr, "analyze failed: %s\n", err);
-        return;
+    pooled bad = render("");
+    const failed: Result<Text, string> = wait bad;
+    switch (failed) {
+        case Result.Ok { value: t }: { printf("unexpected success\n"); return 1; }
+        case Result.Err { error: e }: { printf("error: %s\n", e); }
     }
-    printf("upper=%d lower=%d\n", stats.upper, stats.lower);
+    return 0;
 }
 ```
 
-What this example demonstrates:
+It prints:
 
-- **Block-owning `disposable`** - the kind's block is the input's lifetime, lexically visible. `dispose(input)` runs at the block's `}` regardless of how it exits.
-- **`?` propagation with cleanup** - each `?` inside the block propagates the error *after* the compiler inserts `dispose(input)`.
-- **Dropped `const`** - `disposable input = …` has no `const` keyword; the kind prefix makes it implicitly `const`. Symmetric with `task fetch(...)` dropping `function`.
-- **Context attachment** - `? "msg"` prefixes the propagated error with a human-readable tag.
-- **Boundary handling** - `main` returns `void`, so `?` is unavailable; errors are consumed via destructure + `if (err)`.
-- **Destructuring as sugar** - `const { stats, err } = analyze(...)` compiles to a temp + two field reads, same codegen as hand-written field access.
+```text
+upper=2 lower=8
+error: scanning: empty input
+```
+
+What it demonstrates:
+
+- **Errors as values** - `scan` returns a `Result`, `?` propagates the `Err`
+  arm with `"scanning"` prefixed, and `? e { ... }` handles a failure in a
+  `main` that is not itself fallible.
+- **A task is a spawn** - `render(...)` hands back a `Task`, `pooled` keeps
+  the handle, `wait` joins it.
+- **Ownership** - `render` says `propagates<disposable>` because the `Text`
+  it returns is the caller's to clean up; `disposable line` is that cleanup,
+  injected at the closing brace on every path.
+- **Methods through the value** - `out.push(...)`, `line.view()`: one static
+  call each, resolved by the receiver's type.
 
 ---
 
@@ -1933,10 +1844,9 @@ What this example demonstrates:
 - **Classes, inheritance, methods attached to bare types.** Traits + free functions only.
 - **Garbage collection.** Lifetimes through `mustCall`, `mustNotEscape`, and `dispose`.
 - **Implicit conversions.** Explicit casts only.
-- **Exceptions.** Errors are values; `?? throw` is sugar.
-- **Built-in `async` / `await` keywords.** `async` is a kind declared in std (§6), not something the compiler defines; only the `await` operator itself is the compiler's.
-- **Per-strategy loop keywords.** One `for … in` slot; the strategy is a trait method call (`xs.batched(4)`, `xs.parallel()`).
-- **Multiple-return-value ABI.** Destructuring is compile-time sugar over a returned struct.
+- **Exceptions.** Errors are values; `?` is the only propagation, and it is visible at every site.
+- **Built-in `async` and `task` keywords.** Both are kinds declared in std (§6); the compiler owns only the two operators, `await` and `wait`.
+- **Multiple return values.** A function returns one value; a struct or a variant is how it returns several.
 - **A package manager.** No manifest, fetch, registry, or version resolution.
   Relative paths, the `std/` root, and the program-owned `modules/` root cover
   using third-party code; populating `modules/` is the developer's job.
@@ -1950,5 +1860,3 @@ What this example demonstrates:
 3. **String ↔ cstr.** UTF-8 immutable `string` is TypeScript-adjacent; C expects null-terminated bytes. Options: implicit cstr view, explicit conversion, or two types.
 4. **Array length & FFI.** `xs.len` intrinsic means fat pointers; worth a separate `c_array<T>` for ABI-exact interop.
 5. **`ref` lifetimes.** Minimum rule: a `ref` cannot outlive the stack frame it names. Beyond that, `mustNotEscape` covers the rest.
-6. **Multiple trait impls per type.** `type T implements (A, B)` - confirm grouping syntax.
-7. **Kind parameters vs. trait generics.** `batchable(n: usize)` takes a value parameter; traits take type parameters. Keep them distinct or unify?

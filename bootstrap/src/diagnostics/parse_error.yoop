@@ -42,7 +42,7 @@ export type ParsingError implements Display {
     }
 
     let codestr: string = "";
-    const codestrRes = str.stringFromBytes(bytes.bytesSlice(srcRef, lowerBound, upperBound));
+    const codestrRes = str.stringFromBytes(srcRef[lowerBound..upperBound]);
     switch (codestrRes) {
       case Result.Err { error: e }: {
         codestr = e;

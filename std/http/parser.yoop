@@ -72,7 +72,7 @@ function requireHeadEnd(buf: uint8[], what: string): Result<usize, HttpError> {
 
 // End offset of the first line (the request line or the status line).
 function firstLineEnd(buf: uint8[], headEnd: usize, what: string): Result<usize, HttpError> {
-    let head: uint8[] = bytes.bytesSlice(buf, 0, headEnd);
+    let head: uint8[] = buf[0..headEnd];
     let cr: usize = bytes.bytesIndexOf(head, '\r');
     if (cr == head.len) {
         return Result.Err { error: errBadRequest(`${what} line is not CRLF terminated`) };
@@ -125,18 +125,18 @@ export function parseRequestHead(buf: uint8[]): Result<ParsedRequest, HttpError>
     let lineEnd: usize = firstLineEnd(buf, headEnd, "request")?;
 
     // request-line = method SP request-target SP HTTP-version
-    let line: uint8[] = bytes.bytesSlice(buf, 0, lineEnd);
+    let line: uint8[] = buf[0..lineEnd];
     let sp1: usize = bytes.bytesIndexOf(line, ' ');
     if (sp1 == line.len) {
         return Result.Err { error: errBadRequest("request line has no space after the method") };
     }
-    let afterMethod: uint8[] = bytes.bytesSlice(line, sp1 + 1, line.len);
+    let afterMethod: uint8[] = line[sp1 + 1..line.len];
     let sp2: usize = bytes.bytesIndexOf(afterMethod, ' ');
     if (sp2 == afterMethod.len) {
         return Result.Err { error: errBadRequest("request line has no space after the target") };
     }
 
-    let methodBytes: uint8[] = bytes.bytesSlice(line, 0, sp1);
+    let methodBytes: uint8[] = line[0..sp1];
     let method: HttpMethod = HttpMethod.Get;
     switch (methodFromBytes(methodBytes)) {
         case Option.Some { value: m }: { method = m; }
@@ -146,11 +146,11 @@ export function parseRequestHead(buf: uint8[]): Result<ParsedRequest, HttpError>
         }
     }
 
-    let targetBytes: uint8[] = bytes.bytesSlice(afterMethod, 0, sp2);
+    let targetBytes: uint8[] = afterMethod[0..sp2];
     if (targetBytes.len == 0) {
         return Result.Err { error: errBadRequest("request line has an empty target") };
     }
-    let version: string = checkVersion(bytes.bytesSlice(afterMethod, sp2 + 1, afterMethod.len))?;
+    let version: string = checkVersion(afterMethod[sp2 + 1..afterMethod.len])?;
 
     let req: Request = requestNew(method, intr.stringFromBytesUnchecked(targetBytes));
     req.version = version;
@@ -178,16 +178,16 @@ export function parseResponseHead(buf: uint8[]): Result<ParsedResponse, HttpErro
     let lineEnd: usize = firstLineEnd(buf, headEnd, "status")?;
 
     // status-line = HTTP-version SP status-code SP [ reason-phrase ]
-    let line: uint8[] = bytes.bytesSlice(buf, 0, lineEnd);
+    let line: uint8[] = buf[0..lineEnd];
     let sp1: usize = bytes.bytesIndexOf(line, ' ');
     if (sp1 == line.len) {
         return Result.Err { error: errBadRequest("status line has no space after the version") };
     }
-    let _version: string = checkVersion(bytes.bytesSlice(line, 0, sp1))?;
+    let _version: string = checkVersion(line[0..sp1])?;
 
-    let afterVersion: uint8[] = bytes.bytesSlice(line, sp1 + 1, line.len);
+    let afterVersion: uint8[] = line[sp1 + 1..line.len];
     let sp2: usize = bytes.bytesIndexOf(afterVersion, ' ');
-    let codeBytes: uint8[] = bytes.bytesSlice(afterVersion, 0, sp2);
+    let codeBytes: uint8[] = afterVersion[0..sp2];
     let code: int32 = 0;
     switch (bytes.bytesParseInt(codeBytes)) {
         case Result.Ok { value: bp }: {

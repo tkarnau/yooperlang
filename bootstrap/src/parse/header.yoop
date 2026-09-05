@@ -76,11 +76,7 @@ function tokenText(ref src: uint8[], lexed: LexedVal): string {
   if (lexed.token.length <= 0) {
     return "";
   }
-  switch (str.stringFromBytes(bytes.bytesSlice(
-    src,
-    lexed.token.start,
-    lexed.token.start + usize(lexed.token.length)
-  ))) {
+  switch (str.stringFromBytes(src[lexed.token.start..lexed.token.start + usize(lexed.token.length)])) {
     case Result.Ok { value: text }: { return text; }
     case Result.Err { error: e }: { return ""; }
   }

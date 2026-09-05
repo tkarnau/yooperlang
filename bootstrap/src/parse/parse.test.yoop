@@ -1174,12 +1174,6 @@ suite function kindDeclarationsRecordTheirClauses(): void {
     theory.detail = `the third clause is "${third.name}", wanted "mustCall"`;
   }
 
-  let params = parseOk("kind aligned(n: usize) { appliesTo binding; }");
-  let test theory: Case = t.asserts("a parameterized kind keeps its parameter list") {
-    theory.isSuccessful = topLevel(ref params, 0).childA != 0;
-    theory.detail = "`kind aligned(n: usize)` recorded no parameter list";
-  }
-
   // A clause body can be a braced block, so a clause ends at the `;` at DEPTH
   // ZERO. Stopping at the first `;` leaves a stray `}` that surfaces much later
   // as "unexpected token at top level".
@@ -1196,12 +1190,6 @@ suite function kindDeclarationsRecordTheirClauses(): void {
     const decl = topLevel(ref onType, 0);
     theory.isSuccessful = decl.kind == ASTNodeKind.TYPE_DECL && decl.childB != 0 && decl.childCount == 1;
     theory.detail = `the decl is ${decl.kind} with kind slot ${decl.childB} and ${decl.childCount} field(s)`;
-  }
-
-  let withArgs = parseOk("type Buf aligned(16) { x: int, }");
-  let test theory: Case = t.asserts("a kind's arguments are consumed, not left to confuse the body") {
-    theory.isSuccessful = topLevel(ref withArgs, 0).childCount == 1;
-    theory.detail = `the decl recorded ${topLevel(ref withArgs, 0).childCount} field(s), wanted 1`;
   }
 
   let composed = parseOk("kind scoped = disposable_base & noescape;\nfunction f(): int { return 1; }");
@@ -1223,12 +1211,12 @@ suite function kindDeclarationsRecordTheirClauses(): void {
   // A layout body holds SUB-CLAUSES, not loose words: `abi "C"` is a leading
   // word plus its own argument, the same shape the outer level has. Recorded
   // that way so a rule can tell which argument belongs to which sub-clause.
-  let layout = parseOk("kind c_layout { appliesTo type; layout { abi \"C\"; align 8; }; }");
+  let layout = parseOk("kind c_layout { appliesTo type; layout { abi \"C\"; }; }");
   let test theory: Case = t.asserts("a layout body is recorded as sub-clauses on the clause") {
     const clause = nodeAt(ref layout, childAt(ref layout, topLevel(ref layout, 0), 1));
     const body = nodeAt(ref layout, clause.childA);
-    theory.isSuccessful = clause.childA != 0 && body.childCount == 2;
-    theory.detail = `the layout body recorded ${body.childCount} sub-clause(s), wanted 2`;
+    theory.isSuccessful = clause.childA != 0 && body.childCount == 1;
+    theory.detail = `the layout body recorded ${body.childCount} sub-clause(s), wanted 1`;
   }
   let test theory: Case = t.asserts("a sub-clause keeps its argument's source spelling, quotes included") {
     const clause = nodeAt(ref layout, childAt(ref layout, topLevel(ref layout, 0), 1));

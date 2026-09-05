@@ -75,7 +75,7 @@ export type Vec<T> implements (Disposable, Growable<T>) propagates<disposable> {
     // is valid until the next mutation (push/clear/dispose) - the underlying
     // fat-pointer may dangle if `push` reallocates.
     function asArray(ref self): T[] {
-        return intr.arraySlice(self.data, 0, self.len);
+        return self.data[0..self.len];
     }
 
     // ----- Growable<T> ---------------------------------------------------

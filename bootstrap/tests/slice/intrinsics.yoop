@@ -28,7 +28,7 @@ function main(): int {
   printf("bytes len=%llu first=%d last=%d\n", b.len, b[0], b[4]);
 
   // A borrowing view over those same bytes - one gep and one subtract.
-  const mid: uint8[] = intr.arraySlice(b, 1, 4);
+  const mid: uint8[] = b[1..4];
   printf("slice len=%llu %d %d %d\n", mid.len, mid[0], mid[1], mid[2]);
 
   // Generic over the element type, so the byte count is a multiplication the

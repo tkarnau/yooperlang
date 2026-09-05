@@ -40,7 +40,7 @@ export type Bytes implements Disposable propagates<disposable> {
             intr.heapFree(self.data);
             // Reslice to an empty view so a second dispose is a no-op (the
             // pointer dangles but is never dereferenced).
-            self.data = intr.arraySlice(self.data, 0, 0);
+            self.data = self.data[0..0];
             self.len = 0;
         }
     }
@@ -49,7 +49,7 @@ export type Bytes implements Disposable propagates<disposable> {
 // Borrowing view of the valid prefix as a regular uint8[]. Valid until the
 // Bytes is disposed; the caller must keep the Bytes alive while using it.
 export function bytesToArray(b: ref Bytes): uint8[] {
-    return intr.arraySlice(b.data, 0, b.len);
+    return b.data[0..b.len];
 }
 
 // Copy `src` into a fresh owned allocation (capacity == src.len, no spare).
@@ -184,13 +184,6 @@ export function bytesEqIgnoreAsciiCase(a: uint8[], b: uint8[]): bool {
         i = i + 1;
     }
     return true;
-}
-
-// Borrowing sub-slice [start, end). Zero-copy view backed by the same
-// storage as `buf`. The caller is responsible for keeping `buf` alive as
-// long as the slice is used.
-export function bytesSlice(buf: uint8[], start: usize, end: usize): uint8[] {
-    return intr.arraySlice(buf, start, end);
 }
 
 // Copy buf into a fresh heap-allocated uint8[]. Caller owns the result and

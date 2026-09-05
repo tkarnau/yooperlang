@@ -423,8 +423,8 @@ yet", "unsupported extern ABI" - rather than mis-compiled.
     it MEANS something: see PROPAGATED DISPOSAL below.
   * char literals - `'a'`, `'\n'`, `'\''` - in expressions and switch patterns
   * `extern "intrinsic" from "compiler" { ... }` - operations the COMPILER
-    implements. Thirteen are lowered: `stringAsBytes`,
-    `bytesAsStringUnchecked`, `stringFromBytesUnchecked`, `arraySlice`,
+    implements. Twelve are lowered: `stringAsBytes`,
+    `bytesAsStringUnchecked`, `stringFromBytesUnchecked`,
     `heapAlloc`, `heapFree`, `ctxAlloc`, `ctxFree`, `suspendNow`, and the four
     `Task<T>` ones - `waitUntil`, `cancel`, `armComplete`, `isDone`. The generic
     ones infer their type argument through the same path every generic function
@@ -1944,9 +1944,7 @@ The rules the layers lean on, each easy to break and each expensive when it is:
   `and`, `or` and `xor` are bit-for-bit and never do.
 - **A slice BORROWS; it does not copy.** `xs[a..b]` is a data pointer and a
   length over the base's own storage, which is why writing through one is
-  visible in the base - and why nothing keeps the base alive. Same three
-  instructions the `arraySlice` intrinsic emits, because it is the same
-  operation with syntax on it.
+  visible in the base - and why nothing keeps the base alive.
 - **An omitted slice bound is 0, not a synthesized literal.** "To the end" is
   the base's own length, and codegen is the only layer that has it.
 - **An index and a slice open the same way**, so the index expression is parsed

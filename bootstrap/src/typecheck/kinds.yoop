@@ -108,9 +108,7 @@ export function checkKindDecl(
   checkClauseVocabulary(ref prog, ref ast, declNode);
   checkAppliesToClauses(ref prog, ref ast, declNode);
   checkSiteCombination(ref prog, declNode, info);
-  checkForbidsClauses(ref prog, ref ast, declNode);
   checkEscapeClauses(ref prog, ref ast, declNode);
-  checkParamTypes(ref prog, ref ast, declNode);
   checkLayoutClauses(ref prog, ref ast, declNode);
   checkMarkerClauses(ref prog, ref ast, declNode, info);
   if (declNode.flagA) {
@@ -126,10 +124,10 @@ export function checkKindDecl(
 // reads like a real restriction and enforces nothing, which is worse than not
 // parsing - so it is named here rather than recorded and forgotten.
 //
-// A word this compiler RECORDS but does not yet act on (`mustNotShare`,
-// `signature`, `enumerable`, `layout`) still belongs on the list: those are
-// declared in the tree today, and refusing them would turn a missing rule into
-// a refused program.
+// Every word on the list is one some pass reads. A word the compiler would
+// only record is not on it: `mustNotShare` and `forbids` were, once, and a
+// clause that reads like a rule and enforces nothing is exactly what this
+// check exists to refuse.
 function checkClauseVocabulary(ref prog: Program, ref ast: AST, declNode: ASTNode): void {
   let i: usize = 0;
   while (i < declNode.childCount) {
@@ -150,9 +148,7 @@ function isKnownClauseWord(word: string): bool {
     str.stringEq(word, REQUIRES_CLAUSE) ||
     str.stringEq(word, MUST_CALL_CLAUSE) ||
     str.stringEq(word, MUST_NOT_ESCAPE_CLAUSE) ||
-    str.stringEq(word, MUST_NOT_SHARE_CLAUSE) ||
     str.stringEq(word, OWNS_BLOCK_CLAUSE) ||
-    str.stringEq(word, FORBIDS_CLAUSE) ||
     str.stringEq(word, LAYOUT_CLAUSE) ||
     str.stringEq(word, PAUSABLE_CLAUSE) ||
     str.stringEq(word, PROVIDES_CLAUSE) ||
@@ -217,40 +213,6 @@ function checkSiteCombination(ref prog: Program, declNode: ASTNode, info: KindIn
   );
 }
 
-// `forbids` names EFFECT categories, and the compiler has two of them. A
-// category it cannot name is a promise nothing will keep, so it is refused
-// rather than ignored - unlike an appliesTo site, the whole vocabulary is this
-// compiler's.
-function checkForbidsClauses(ref prog: Program, ref ast: AST, declNode: ASTNode): void {
-  let i: usize = 0;
-  while (i < declNode.childCount) {
-    const clause = nodeAt(ref ast, childAt(ref ast, declNode, i));
-    if (!str.stringEq(clause.name, FORBIDS_CLAUSE)) {
-      i += 1;
-      continue;
-    }
-    if (clause.childCount == 0) {
-      reportError(
-        ref prog,
-        `forbids on kind "${declNode.name}" names no category - the categories are "io" and "globalState"`,
-        clause.sourceLoc
-      );
-    }
-    let w: usize = 0;
-    while (w < clause.childCount) {
-      const word = nodeAt(ref ast, childAt(ref ast, clause, w));
-      if (!str.stringEq(word.name, FORBIDS_IO) && !str.stringEq(word.name, FORBIDS_GLOBAL_STATE)) {
-        reportError(
-          ref prog,
-          `kind "${declNode.name}" forbids "${word.name}", which is not an effect category - the categories are "io" and "globalState"`,
-          word.sourceLoc
-        );
-      }
-      w += 1;
-    }
-    i += 1;
-  }
-}
 
 // `mustNotEscape` bounds a value by a SCOPE, and that is the only bound the
 // compiler can enforce: a scope has a closing brace to place the check at.
@@ -414,38 +376,9 @@ function clauseNamed(ref ast: AST, declNode: ASTNode, word: string): NodeId {
 // `kind aligned(n: usize)` - a parameter is a compile-time NUMBER, because the
 // only thing a kind argument reaches is a layout clause. A `string` parameter
 // has nowhere to be used.
-function checkParamTypes(ref prog: Program, ref ast: AST, declNode: ASTNode): void {
-  if (declNode.childA == 0) {
-    return;
-  }
-  const params = nodeAt(ref ast, declNode.childA);
-  let i: usize = 0;
-  while (i < params.childCount) {
-    const param = nodeAt(ref ast, childAt(ref ast, params, i));
-    if (param.childA == 0) {
-      i += 1;
-      continue;
-    }
-    const annot = nodeAt(ref ast, param.childA);
-    if (annot.kind != ASTNodeKind.TYPE_ANNOTATION_TYPE_NAME || !isKindParamType(annot.name)) {
-      reportError(
-        ref prog,
-        `parameter "${param.name}" of kind "${declNode.name}" is not a compile-time number - a kind parameter is usize, int32 or uint32`,
-        param.sourceLoc
-      );
-    }
-    i += 1;
-  }
-}
 
-function isKindParamType(name: string): bool {
-  return str.stringEq(name, "usize") ||
-    str.stringEq(name, "int32") ||
-    str.stringEq(name, "uint32");
-}
-
-// `layout { abi "C"; align 32; };` - the two sub-clauses a layout body may
-// state, and what each of them may say.
+// `layout { abi "C"; };` - the one sub-clause a layout body may state, and
+// what it may say.
 //
 // `abi` names a CALLING and LAYOUT convention, and this compiler lays a type
 // out one way: C's. A body naming another one reads as a promise to match a
@@ -478,13 +411,10 @@ function checkLayoutSubClause(
   declNode: ASTNode,
   sub: ASTNode
 ): void {
-  if (str.stringEq(sub.name, LAYOUT_ALIGN)) {
-    return;   // a number or a kind parameter; checkParamTypes owns the latter
-  }
   if (!str.stringEq(sub.name, LAYOUT_ABI)) {
     reportError(
       ref prog,
-      `kind "${declNode.name}" states layout sub-clause "${sub.name}", which this compiler does not implement - a layout body states "abi" or "align"`,
+      `kind "${declNode.name}" states layout sub-clause "${sub.name}", which this compiler does not implement - a layout body states "abi"`,
       sub.sourceLoc
     );
     return;
@@ -507,29 +437,6 @@ function checkLayoutSubClause(
   }
 }
 
-// The word a decl's `layout { align W; }` states, or "". Read for the
-// composition contradiction below, which compares two operands' answers - the
-// word rather than a number, because `align n` on a parameterized kind has no
-// number to read and still has to compare equal to itself.
-export function kindAlignWordOf(ref ast: AST, declNode: ASTNode): string {
-  let i: usize = 0;
-  while (i < declNode.childCount) {
-    const clause = nodeAt(ref ast, childAt(ref ast, declNode, i));
-    if (str.stringEq(clause.name, LAYOUT_CLAUSE) && clause.childA != 0) {
-      const body = nodeAt(ref ast, clause.childA);
-      let b: usize = 0;
-      while (b < body.childCount) {
-        const sub = nodeAt(ref ast, childAt(ref ast, body, b));
-        if (str.stringEq(sub.name, LAYOUT_ALIGN) && sub.childCount == 1) {
-          return nodeAt(ref ast, childAt(ref ast, sub, 0)).name;
-        }
-        b += 1;
-      }
-    }
-    i += 1;
-  }
-  return "";
-}
 
 // The two rules that are about the COMPOSITION rather than about a clause.
 //
@@ -686,19 +593,14 @@ function anyRequiredTraitDeclares(ref prog: Program, ref required: Vec<TypeId>, 
 
 // ----- the clause words this file matches on ---------------------------------
 
-const FORBIDS_CLAUSE: string = "forbids";
-const FORBIDS_IO: string = "io";
-const FORBIDS_GLOBAL_STATE: string = "globalState";
 const MUST_NOT_ESCAPE_CLAUSE: string = "mustNotEscape";
 const ESCAPE_SCOPE: string = "scope";
 const REQUIRES_CLAUSE: string = "requires";
 // The clearance clauses. `conferred` and `restrictive` are the two marker
 // polarities; `appliedBy` and `clearedBy` name the trait method authorized to
 // mint the capability or to shed the hazard. See checkMarkerClauses.
-const MUST_NOT_SHARE_CLAUSE: string = "mustNotShare";
 const LAYOUT_CLAUSE: string = "layout";
 const LAYOUT_ABI: string = "abi";
-const LAYOUT_ALIGN: string = "align";
 // The marker's SOURCE spelling, quotes included - see parseKindSubClause.
 const LAYOUT_ABI_C: string = "\"C\"";
 const SIGNATURE_CLAUSE: string = "signature";

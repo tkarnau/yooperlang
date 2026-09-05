@@ -66,7 +66,7 @@ async roundTrip(ref s: TlsStream): string {
                 if (n <= 0) {
                     reading = false;
                 } else {
-                    acc.extendFrom(intr.arraySlice(window, 0, usize(n)));
+                    acc.extendFrom(window[0..usize(n)]);
                 }
             }
             case Result.Err { error: e }: { return `read: ${e}`; }
@@ -82,7 +82,7 @@ async roundTrip(ref s: TlsStream): string {
         }
     }
     if (at == 0) { return "no body"; }
-    return intr.stringFromBytesUnchecked(intr.arraySlice(b, at, b.len));
+    return intr.stringFromBytesUnchecked(b[at..b.len]);
 }
 
 async attempt(label: string, port: int32, host: string, ref cfg: TlsConfig, doRequest: bool): void {

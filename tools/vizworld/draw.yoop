@@ -663,7 +663,7 @@ function pushTail(ref out: Text, s2: string, keep: usize): void {
   if (bytes.len > keep) {
     start = bytes.len - keep;
   }
-  out.pushBytes(intr.arraySlice(bytes, start, bytes.len));
+  out.pushBytes(bytes[start..bytes.len]);
 }
 
 function diagLeaks(ref s: Scene): usize {

@@ -17,7 +17,6 @@ module codegen;
 
     stringAsBytes             one strlen, no copy      - a string IS the bytes
     bytesAsStringUnchecked    one extractvalue         - the inverse, no copy
-    arraySlice                one gep and one sub      - a borrowing view
     heapFree                  one free
     heapAlloc                 one mul and one malloc
     stringFromBytesUnchecked  malloc + memcpy + NUL    - the one that copies
@@ -84,9 +83,6 @@ export function emitIntrinsicCall(
   }
   if (str.stringEq(expr.name, "heapFree")) {
     return emitHeapFree(ref cx, expr, ref out);
-  }
-  if (str.stringEq(expr.name, "arraySlice")) {
-    return emitArraySlice(ref cx, expr, exprId, ref out);
   }
   // The allocator-context pair. Identical in shape to heapAlloc/heapFree, and
   // different in exactly one way: the bytes come from the CURRENT allocator, so
@@ -276,35 +272,6 @@ function recordFree(ref cx: Cx, expr: ASTNode, descriptor: Operand): void {
     Operand.Imm { value: uint64(elementSizeOfArg(ref cx, expr, 0)) }
   );
   emitDiagRecordFree(ref cx, Operand.Temp { id: bytes });
-}
-
-// `arraySlice(xs, start, end)` - a borrowing view, no copy.
-//
-//   %base = getelementptr <elem>, ptr %data, i64 %start
-//   %len  = sub i64 %end, %start
-//
-// Out-of-range is the caller's problem, the same as an index read: the language
-// does not specify a bounds check and adding one here would diverge.
-function emitArraySlice(ref cx: Cx, expr: ASTNode, exprId: NodeId, ref out: Operand): EmitResult {
-  let xs: Operand = Operand.None;
-  let start: Operand = Operand.None;
-  let end: Operand = Operand.None;
-  emitIntrinsicArg(ref cx, expr, 0, ref xs)?;
-  emitIntrinsicArg(ref cx, expr, 1, ref start)?;
-  emitIntrinsicArg(ref cx, expr, 2, ref end)?;
-
-  const data = freshTemp(cx.e);
-  emitExtractValue(ref cx, data, ARRAY_DESCRIPTOR, xs, 0);
-  const base = freshTemp(cx.e);
-  emitGepElem(
-    ref cx, base, elementLlvmTypeOfResult(ref cx, exprId),
-    Operand.Temp { id: data }, "i64", start
-  );
-  const len = freshTemp(cx.e);
-  emitBinOp(ref cx, len, "sub", "i64", end, start);
-
-  out = buildDescriptor(ref cx, Operand.Temp { id: base }, Operand.Temp { id: len });
-  return EmitResult.Ok;
 }
 
 // ----- shared shapes ---------------------------------------------------------

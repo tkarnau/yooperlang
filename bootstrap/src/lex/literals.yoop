@@ -312,7 +312,7 @@ function lexIdentifierOrKeyword(ref tables: LexTables, src: uint8[], pos: usize)
   res.nextPos = end;
   res.token.length = int32(len);
 
-  const byteSubstr = bytes.bytesSlice(src, pos, end);
+  const byteSubstr = src[pos..end];
   let str: string = "";
   switch (strings.stringFromBytes(byteSubstr)) {
     case Result.Err { error: e }: {

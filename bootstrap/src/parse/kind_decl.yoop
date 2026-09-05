@@ -49,14 +49,12 @@ export function atKindDecl(ref ps: ParserState): bool {
 // `kind NAME { clause; ... }` or `kind NAME = a & b;`
 //
 //   name              the kind's name
-//   childA            parameter list-node (0 = none), for `kind aligned(n: usize)`
 //   flagA             true for the `= a & b` COMPOSITION form
 //   own childIds run  the KIND_CLAUSE nodes
 export function parseKindDecl(ref ps: ParserState): Result<NodeId, ParsingError> {
   ps.advance()?;                    // the contextual `kind`
   let node = ps.buildSourcedNode(ASTNodeKind.KIND_DECL);
   node.name = parseIdentAsName(ref ps)?;
-  node.childA = parseKindParams(ref ps)?;
 
   // `kind scoped_alt = disposable_base & noescape;` - a COMPOSITION. Recorded
   // as a name with no clauses of its own, which is all an unenforced kind
@@ -76,25 +74,6 @@ export function parseKindDecl(ref ps: ParserState): Result<NodeId, ParsingError>
   return Result.Ok { value: ps.pushNode(node) };
 }
 
-// `(n: usize, ...)` after a kind's name. The same parameter parser a function
-// uses, because they are the same thing: a name and an annotation.
-function parseKindParams(ref ps: ParserState): Result<NodeId, ParsingError> {
-  if (ps.peek().tag != TokenTags.LPAREN) {
-    return Result.Ok { value: 0 };
-  }
-  ps.advance()?;
-  const loc = posToSourceLocation(ps.src, ps.pos, 1);
-
-  disposable ids: Vec<NodeId> = vec.vecNew(2);
-  while (untilClosing(ref ps, TokenTags.RPAREN)) {
-    ids.push(parseFunctionParam(ref ps)?);
-    if (ps.peek().tag == TokenTags.COMMA) {
-      ps.advance()?;
-    }
-  }
-  ps.expect(TokenTags.RPAREN)?;
-  return Result.Ok { value: ps.buildListNode(ref ids, loc) };
-}
 
 // `kind scoped_alt = disposable_base & { mustNotEscape scope; };` - a
 // COMPOSITION: the composed kind is every operand's clauses at once.

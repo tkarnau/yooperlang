@@ -432,7 +432,6 @@ export type KindInfo {
   // still has to compare equal to itself. One reader: the composition
   // contradiction in `mergeComposedKinds`, where two operands each demanding a
   // different alignment of the same value cannot both be honored.
-  alignWord: string,
 }
 
 // Announce which file the pass is about to walk. Every pass that iterates

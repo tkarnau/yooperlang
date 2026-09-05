@@ -168,7 +168,7 @@ async readRequestHead(
             if (buf.len == 0) { return Result.Ok { value: Option.None }; }
             return Result.Err { error: errBadRequest("connection closed mid-head") };
         }
-        buf.extendFrom(intr.arraySlice(window, 0, n));
+        buf.extendFrom(window[0..n]);
 
         let at: usize = findHeadEnd(buf.asArray());
         if (at != buf.len) { return Result.Ok { value: Option.Some { value: at } }; }
@@ -207,7 +207,7 @@ async readBody(
         if (n == 0) {
             return Result.Err { error: errBadRequest("connection closed mid-body") };
         }
-        buf.extendFrom(intr.arraySlice(window, 0, n));
+        buf.extendFrom(window[0..n]);
     }
     return Result.Ok { value: need };
 }
@@ -241,7 +241,7 @@ async readChunkedBody(
         if (n == 0) {
             return Result.Err { error: errBadRequest("connection closed mid-chunk") };
         }
-        buf.extendFrom(intr.arraySlice(window, 0, n));
+        buf.extendFrom(window[0..n]);
     }
 }
 
@@ -253,7 +253,7 @@ function compact(ref buf: Vec<uint8>, n: usize): void {
         return;
     }
     let view: uint8[] = buf.asArray();
-    disposable tail: Bytes = bytes.bytesFromArray(intr.arraySlice(view, n, view.len));
+    disposable tail: Bytes = bytes.bytesFromArray(view[n..view.len]);
     buf.clear();
     buf.extendFrom(bytes.bytesToArray(ref tail));
 }
@@ -361,7 +361,7 @@ async exchange(
         // The read above may have grown (and moved) the buffer, so the body
         // view has to be taken after it, not before.
         let view: uint8[] = buf.asArray();
-        pr.request.body = intr.arraySlice(view, pr.bodyStart, pr.bodyStart + need);
+        pr.request.body = view[pr.bodyStart..pr.bodyStart + need];
         meta.consumed = pr.bodyStart + need;
     }
 

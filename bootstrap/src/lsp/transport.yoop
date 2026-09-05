@@ -131,7 +131,7 @@ export function readFrame(ref r: FrameReader, ref out: Vec<uint8>): FrameStatus 
       if (r.buf.len >= need) {
         out.clear();
         out.extendFrom(
-          intr.arraySlice(r.buf.asArray(), scan.headerEnd, need));
+          r.buf.asArray()[scan.headerEnd..need]);
         r.pos = need;
         compact(ref r);
         return FrameStatus.MESSAGE;
@@ -159,7 +159,7 @@ function fill(ref r: FrameReader): bool {
     r.atEof = true;
     return false;
   }
-  r.buf.extendFrom(intr.arraySlice(r.scratch.data, 0, usize(n)));
+  r.buf.extendFrom(r.scratch.data[0..usize(n)]);
   return true;
 }
 
@@ -177,7 +177,7 @@ function compact(ref r: FrameReader): void {
   }
   disposable tail: Vec<uint8> = vec.vecNew(r.buf.len - r.pos);
   tail.extendFrom(
-    intr.arraySlice(r.buf.asArray(), r.pos, r.buf.len));
+    r.buf.asArray()[r.pos..r.buf.len]);
   r.buf.clear();
   r.buf.extendFrom(tail.asArray());
   r.pos = 0;
@@ -353,7 +353,7 @@ export function writeFrame(fd: int32, body: uint8[]): bool {
 export function writeAll(fd: int32, src: uint8[]): bool {
   let off: usize = 0;
   while (off < src.len) {
-    const n = write(fd, intr.arraySlice(src, off, src.len).ptr, src.len - off);
+    const n = write(fd, src[off..src.len].ptr, src.len - off);
     if (n <= 0) {
       return false;
     }

@@ -1,0 +1,62 @@
+// The end-to-end example from SPEC.md section 15. It is a pass fixture so the
+// spec cannot drift from the compiler: a change that breaks it fails the
+// corpus rather than publishing a program that does not compile.
+
+import * as intr from "std/core/intrinsics.yoop";
+import * as text from "std/core/text.yoop";
+import { Text } from "std/core/text.yoop";
+import { Result } from "std/core/types.yoop";
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+type Stats { upper: int32, lower: int32 }
+
+// Errors are values: a fallible function returns a Result, and `?` propagates
+// the Err arm with a context string prefixed.
+function scan(src: string): Result<Stats, string> {
+    if (src.len == 0) {
+        return Result.Err { error: "empty input" };
+    }
+    let upper: int32 = 0;
+    let lower: int32 = 0;
+    for ch in intr.stringAsBytes(src) {
+        if (ch >= 'A' && ch <= 'Z') { upper = upper + 1; }
+        if (ch >= 'a' && ch <= 'z') { lower = lower + 1; }
+    }
+    return Result.Ok { value: { upper: upper, lower: lower } };
+}
+
+// A task: every call is a spawn, and the caller decides when to join. The
+// Text it hands back is owned by the caller, which the signature says with
+// `propagates<disposable>`.
+task render(src: string): Result<Text, string> propagates<disposable> {
+    const stats = scan(src)? "scanning";
+    let out: Text = text.make(32);
+    out.push("upper=");
+    out.pushInt(int64(stats.upper));
+    out.push(" lower=");
+    out.pushInt(int64(stats.lower));
+    return Result.Ok { value: out };
+}
+
+function main(): int32 {
+    pooled h = render("Hello World");
+    const rendered: Result<Text, string> = wait h;
+    // `? e { ... }` handles the failure here instead of propagating it, which
+    // is what a `main` that returns a plain int needs.
+    disposable line: Text = rendered? e {
+        printf("render failed: %s\n", e);
+        return 1;
+    };
+    printf("%s\n", line.view());
+
+    pooled bad = render("");
+    const failed: Result<Text, string> = wait bad;
+    switch (failed) {
+        case Result.Ok { value: t }: { printf("unexpected success\n"); return 1; }
+        case Result.Err { error: e }: { printf("error: %s\n", e); }
+    }
+    return 0;
+}
